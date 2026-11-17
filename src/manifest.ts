@@ -53,8 +53,13 @@ const FORBIDDEN_ONE_LINE = /[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029]/u;
 const FORBIDDEN_MULTI_LINE = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\p{Cf}\p{Cs}\u2028\u2029]/u;
 /** Any whitespace, for links. */
 const WHITESPACE = /\p{White_Space}/u;
-/** One whitespace character, for trimming. */
-const ONE_SPACE = /^\p{White_Space}$/u;
+/** True for a Unicode White_Space character (all of them are in the Basic Multilingual Plane). */
+function isSpace(c: number): boolean {
+  return (
+    (c >= 0x09 && c <= 0x0d) || c === 0x20 || c === 0x85 || c === 0xa0 || c === 0x1680 ||
+    (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000
+  );
+}
 
 /**
  * Trims Unicode White_Space from both ends, the same set the recorder trims. Unlike
@@ -63,8 +68,8 @@ const ONE_SPACE = /^\p{White_Space}$/u;
 function trimSpace(s: string): string {
   let a = 0;
   let b = s.length;
-  while (a < b && ONE_SPACE.test(s[a])) a++;
-  while (b > a && ONE_SPACE.test(s[b - 1])) b--;
+  while (a < b && isSpace(s.charCodeAt(a))) a++;
+  while (b > a && isSpace(s.charCodeAt(b - 1))) b--;
   return s.slice(a, b);
 }
 
@@ -104,26 +109,34 @@ function get(o: Obj, key: string): unknown {
   return Object.hasOwn(o, key) ? o[key] : undefined;
 }
 
+/** The list's own element at `i`; a hole in a sparse list is refused, never skipped. */
+function element(list: unknown[], i: number, path: string): unknown {
+  if (!Object.hasOwn(list, i)) throw new Bad(`${path}[${i}]`, "is required");
+  return list[i];
+}
+
 function join(path: string, key: string): string {
   return path === "" ? key : `${path}.${key}`;
 }
 
-type TextRule = { min: number; max: number; multiLine?: boolean; keep?: boolean };
+type TextRule = { min: number; max: number; multiLine?: boolean };
 
 /**
  * A string with no control or format characters (a line feed only where `multiLine`),
- * between `min` and `max` code points after trimming. Returns the trimmed text, or the
- * text as sent when `keep` is set (titles and notes, which the recorder does not trim).
+ * between `min` and `max` code points after trimming. Returns the trimmed text, so the
+ * cap bounds what is stored.
  */
 function text(v: unknown, path: string, rule: TextRule): string {
   if (typeof v !== "string") throw new Bad(path, "must be a string");
+  // A code point is at most two UTF-16 units, so even with padding a string longer than
+  // twice the cap cannot be valid; refuse it before doing any other work.
+  if (v.length > rule.max * 2) throw new Bad(path, `must be at most ${rule.max} characters`);
   if ((rule.multiLine ? FORBIDDEN_MULTI_LINE : FORBIDDEN_ONE_LINE).test(v)) throw new Bad(path, "contains a control or format character");
   const trimmed = trimSpace(v);
-  // A code point is at most two UTF-16 units, so a long string is refused without counting.
-  const n = trimmed.length > rule.max * 2 ? Number.POSITIVE_INFINITY : codePoints(trimmed);
+  const n = codePoints(trimmed);
   if (n < rule.min) throw new Bad(path, rule.min === 1 ? "must not be empty" : `must be at least ${rule.min} characters`);
   if (n > rule.max) throw new Bad(path, `must be at most ${rule.max} characters`);
-  return rule.keep ? v : trimmed;
+  return trimmed;
 }
 
 function int(v: unknown, path: string, min: number, max: number): number {
@@ -179,32 +192,41 @@ function isAsciiAlnum(c: number): boolean {
   return (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a);
 }
 
-/** Dot-separated labels of ASCII letters, digits and `-`, then an optional `:` and 1 to 5 digits. */
+function isAsciiLetter(c: number): boolean {
+  return (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a);
+}
+
+/**
+ * At least two dot-separated labels of ASCII letters, digits and `-`, no label starting or
+ * ending with `-`, a last label holding at least one letter (so no bare IP address or
+ * single-label name), then an optional `:` and a port from 1 to 65535 in 1 to 5 digits.
+ */
 function goodAuthority(auth: string): boolean {
   const colon = auth.indexOf(":");
   const host = colon === -1 ? auth : auth.slice(0, colon);
   if (colon !== -1) {
     const port = auth.slice(colon + 1);
     if (port.length < 1 || port.length > 5) return false;
+    let value = 0;
     for (let i = 0; i < port.length; i++) {
       const c = port.charCodeAt(i);
       if (c < 0x30 || c > 0x39) return false;
+      value = value * 10 + (c - 0x30);
+    }
+    if (value < 1 || value > 65535) return false;
+  }
+  const labels = host.split(".");
+  if (labels.length < 2) return false;
+  for (const label of labels) {
+    if (label.length === 0 || label[0] === "-" || label[label.length - 1] === "-") return false;
+    for (let i = 0; i < label.length; i++) {
+      const c = label.charCodeAt(i);
+      if (!isAsciiAlnum(c) && c !== 0x2d) return false;
     }
   }
-  if (host.length === 0) return false;
-  let labelLength = 0;
-  for (let i = 0; i < host.length; i++) {
-    const c = host.charCodeAt(i);
-    if (c === 0x2e) {
-      if (labelLength === 0) return false;
-      labelLength = 0;
-    } else if (isAsciiAlnum(c) || c === 0x2d) {
-      labelLength++;
-    } else {
-      return false;
-    }
-  }
-  return labelLength > 0;
+  const last = labels[labels.length - 1];
+  for (let i = 0; i < last.length; i++) if (isAsciiLetter(last.charCodeAt(i))) return true;
+  return false;
 }
 
 /**
@@ -216,10 +238,11 @@ function goodAuthority(auth: string): boolean {
  */
 export function safeUrl(s: unknown): string | null {
   if (typeof s !== "string") return null;
+  if (s.length > LIMITS.link * 2) return null;
   // Control and format characters are refused before trimming, so none is ever trimmed away.
   if (FORBIDDEN_ONE_LINE.test(s)) return null;
   const t = trimSpace(s);
-  if (t.length > LIMITS.link * 2 || codePoints(t) > LIMITS.link) return null;
+  if (codePoints(t) > LIMITS.link) return null;
   if (WHITESPACE.test(t)) return null;
   if (t.slice(0, 8).toLowerCase() !== "https://") return null;
   const rest = t.slice(8);
@@ -234,6 +257,11 @@ export function safeUrl(s: unknown): string | null {
   return goodAuthority(rest.slice(0, end)) ? "https://" + rest : null;
 }
 
+/**
+ * Obligation for every later task that outputs a link: a link that passes `safeUrl` may
+ * still hold `"`, `<`, `>` and `'` in its path, query or fragment, so it must be escaped
+ * or set as a DOM attribute value, never pasted into HTML or a script as raw text.
+ */
 function link(v: unknown, path: string): Link {
   const o = obj(v, path);
   const label = req(o, "label", path, (x, p) => text(x, p, { min: 1, max: LIMITS.buttonLabel }));
@@ -268,7 +296,7 @@ function size(v: unknown, path: string): number {
   return v;
 }
 
-const noteText = (v: unknown, p: string) => text(v, p, { min: 1, max: LIMITS.noteText, multiLine: true, keep: true });
+const noteText = (v: unknown, p: string) => text(v, p, { min: 1, max: LIMITS.noteText, multiLine: true });
 
 function note(v: unknown, path: string): Note {
   const o = obj(v, path);
@@ -339,7 +367,9 @@ function step(v: unknown, path: string, version: 1 | 2 | 3): ManifestStep {
   out.notes = opt(o, "notes", path, [] as Note[], (x, p) => {
     if (!Array.isArray(x)) throw new Bad(p, "must be a list");
     if (x.length > LIMITS.notesPerStep) throw new Bad(p, `must hold at most ${LIMITS.notesPerStep} notes`);
-    return x.map((n, i) => note(n, `${p}[${i}]`));
+    const out: Note[] = [];
+    for (let i = 0; i < x.length; i++) out.push(note(element(x, i, p), `${p}[${i}]`));
+    return out;
   });
   if (version === 2) return out;
   out.card = nullable(o, "card", path, (x, p) => card(x, p, click));
@@ -401,18 +431,20 @@ function endCard(v: unknown, path: string): EndCard {
 function manifest(json: unknown): Manifest {
   const o = obj(json, "manifest");
   const version = req(o, "version", "", (x, p) => int(x, p, 1, 3)) as 1 | 2 | 3;
-  const generator = req(o, "generator", "", (x, p) => text(x, p, { min: 0, max: LIMITS.generator, keep: true }));
-  const title = req(o, "title", "", (x, p) => text(x, p, { min: 1, max: LIMITS.title, keep: true }));
+  const generator = req(o, "generator", "", (x, p) => text(x, p, { min: 0, max: LIMITS.generator }));
+  const title = req(o, "title", "", (x, p) => text(x, p, { min: 1, max: LIMITS.title }));
   const steps = req(o, "steps", "", (x, p) => {
     if (!Array.isArray(x)) throw new Bad(p, "must be a list");
     if (x.length < 1 || x.length > LIMITS.steps) throw new Bad(p, `must hold 1 to ${LIMITS.steps} steps`);
     const seen = new Set<string>();
-    return x.map((s, i) => {
-      const st = step(s, `${p}[${i}]`, version);
+    const out: ManifestStep[] = [];
+    for (let i = 0; i < x.length; i++) {
+      const st = step(element(x, i, p), `${p}[${i}]`, version);
       if (seen.has(st.image)) throw new Bad(`${p}[${i}].image`, "repeats another step's image");
       seen.add(st.image);
-      return st;
-    });
+      out.push(st);
+    }
+    return out;
   });
 
   let spotlight_dim: number | null = null;

@@ -415,7 +415,11 @@ describe("safeUrl", () => {
     ["hTtPs://tours.example.com", "https://tours.example.com"],
     ["https://tours.example.com:8443/x?y=1#z", "https://tours.example.com:8443/x?y=1#z"],
     ["https://a-b.c1.example?x", "https://a-b.c1.example?x"],
-    ["https://localhost#x", "https://localhost#x"],
+    ["https://a.example:8443/x", "https://a.example:8443/x"],
+    ["https://a.example:1", "https://a.example:1"],
+    ["https://a.example:65535", "https://a.example:65535"],
+    ["https://x-1.a2.example#x", "https://x-1.a2.example#x"],
+    ["https://1a.b2c", "https://1a.b2c"],
     ["https://tours.example.com/\u00e9t\u00e9", "https://tours.example.com/\u00e9t\u00e9"],
     ["https://tours.example.com/a@b", "https://tours.example.com/a@b"],
     ["https://tours.example.com/" + "a".repeat(474), "https://tours.example.com/" + "a".repeat(474)],
@@ -433,6 +437,9 @@ describe("safeUrl", () => {
     "https://tours.ex\u00e4mple.com", "https://[::1]/", "https://127.0.0.1\\@evil.example", "https://tours.example.com\\evil",
     "https://tours.example.com/a\tb", "https://tours.example.com/a\u3000b", "https://tours.example.com/a\u0085b", "https:/tours.example.com", "https:tours.example.com",
     "https://tours.example.com/" + "a".repeat(475),
+    "https://a.example:0", "https://a.example:65536", "https://a.example:99999", "https://-/", "https://127.0.0.1/", "https://localhost/",
+    "https://localhost#x", "https://-a.example", "https://a-.example", "https://a.-example", "https://a.example-", "https://a.123",
+    "https://example", "https://a.example:00000",
   ])("refuses %j", (input) => {
     expect(safeUrl(input)).toBeNull();
   });
@@ -457,5 +464,47 @@ describe("no slow paths", () => {
     expect(refused(withField(v3, "steps[0].card.body", "\n".repeat(100_000) + "\u202e"))).toContain("steps[0].card.body");
     expect(refused(withField(v3, "title", " ".repeat(100_000) + "x".repeat(100_000)))).toContain("title");
     expect(Date.now() - started).toBeLessThan(1000);
+  });
+});
+
+describe("caps bound what is stored", () => {
+  it("refuses a title, note or generator padded far past twice its cap, even with little text", () => {
+    expectRefused(v2, "title", "a" + " ".repeat(250_000));
+    expectRefused(v2, "title", "a" + "\u3000".repeat(250_000));
+    expectRefused(v2, "steps[0].notes[0].text", "\n".repeat(200_000) + "x");
+    expectRefused(v2, "generator", " ".repeat(200_000));
+    expectRefused(v3, "cover.title", "a" + " ".repeat(161));
+    expect(safeUrl("https://a.example" + " ".repeat(1_000))).toBeNull();
+  });
+
+  it("stores the trimmed title, note text and generator", () => {
+    let m = withField(v2, "title", "  My tour \u3000");
+    m = withField(m, "steps[0].notes[0].text", "\n\n Start here \n");
+    m = withField(m, "generator", " mythicshot 1.0 ");
+    const r = ok(m);
+    expect(r.title).toBe("My tour");
+    expect(r.steps[0].notes[0].text).toBe("Start here");
+    expect(r.generator).toBe("mythicshot 1.0");
+  });
+
+  it("padding within twice the cap is trimmed off and accepted", () => {
+    expect(ok(withField(v3, "cover.title", "a" + " ".repeat(159))).cover?.title).toBe("a");
+  });
+});
+
+describe("sparse lists", () => {
+  it("refuses a missing step or note instead of skipping it", () => {
+    const steps = clone(v2).steps;
+    const sparse: unknown[] = [steps[0]];
+    sparse[2] = steps[2];
+    // Built without a JSON round trip, which would turn the holes into nulls.
+    const m = clone(v2);
+    m.steps = sparse;
+    expect(refused(m)).toContain("steps[1]: is required");
+    const notes: unknown[] = [];
+    notes[1] = v2.steps[0].notes[0];
+    const n = clone(v2);
+    n.steps[0].notes = notes;
+    expect(refused(n)).toContain("steps[0].notes[0]: is required");
   });
 });

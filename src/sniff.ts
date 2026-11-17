@@ -87,6 +87,11 @@ export type ImageRule = {
 /**
  * Checks an uploaded image against its caps and against what the manifest declared, using
  * only the file's bytes. The error never contains any of the file's content.
+ *
+ * Obligation for every later task that serves an image: only the header is read here, so a
+ * valid PNG or JPEG header followed by HTML passes. Always serve images with the fixed
+ * Content-Type that matches the checked type (`image/png` or `image/jpeg`, never one taken
+ * from the request) and with `X-Content-Type-Options: nosniff`.
  */
 export function checkImage(data: Uint8Array, rule: ImageRule): { ok: true; info: ImageInfo } | { ok: false; error: string } {
   if (data.length > rule.maxBytes) return { ok: false, error: `image is over ${rule.maxBytes} bytes` };
