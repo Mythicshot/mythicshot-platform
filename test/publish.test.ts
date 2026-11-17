@@ -665,6 +665,76 @@ describe("races", () => {
     }
   });
 
+  it("unpublish landing between a publish's copies and its commit ends published and consistent", async () => {
+    const ctx = await setup();
+    const { deps, a, publicKeys } = ctx;
+    const t = await uploadTour(deps, a.token, v2);
+    await publish(deps, a.token, t.tour_id);
+    // Hold the publish's last copy until a whole unpublish has run.
+    const realPut = deps.pub.put.bind(deps.pub);
+    let puts = 0;
+    let unpublished: Json | null = null;
+    deps.pub.put = async (k, b, m) => {
+      if (++puts === 3) unpublished = await unpublish(deps, a.token, t.tour_id);
+      return realPut(k, b, m);
+    };
+    const r = await publish(deps, a.token, t.tour_id);
+    deps.pub.put = realPut;
+    expect(unpublished!.status).toBe(204);
+    expect(r.status).toBe(200);
+    expect((await tourRow(deps, t.tour_id)).status).toBe("published");
+    expect(await publicKeys()).toHaveLength(3);
+    expect(await count(deps, "public_object")).toBe(0);
+    await expectConsistent(ctx);
+  });
+
+  it("unpublish landing between a publish's commit and its cleanup ends unpublished with nothing public", async () => {
+    const ctx = await setup();
+    const { deps, a, publicKeys } = ctx;
+    const t = await uploadTour(deps, a.token, v2);
+    await publish(deps, a.token, t.tour_id);
+    const realBatch = deps.db.batch.bind(deps.db);
+    let unpublished: Json | null = null;
+    deps.db.batch = async (stmts) => {
+      await realBatch(stmts);
+      if (unpublished === null && stmts[0].sql.includes("INSERT INTO snapshot ")) {
+        deps.db.batch = realBatch;
+        unpublished = await unpublish(deps, a.token, t.tour_id);
+      }
+    };
+    const r = await publish(deps, a.token, t.tour_id);
+    deps.db.batch = realBatch;
+    expect(r.status).toBe(200);
+    expect(unpublished!.status).toBe(204);
+    expect((await tourRow(deps, t.tour_id)).status).toBe("draft");
+    expect(await publicKeys()).toEqual([]);
+    expect(await count(deps, "public_object")).toBe(0);
+    await expectConsistent(ctx);
+  });
+
+  it("publish and unpublish succeed while another request deletes the same images at the same moment", async () => {
+    // The interleaving behind the intermittent failure: a publish's cleanup and an
+    // unpublish both read the same retired images and delete them together. Every delete
+    // here runs twice at once, as if a second request were clearing the same keys.
+    const ctx = await setup();
+    const { deps, a, publicKeys } = ctx;
+    const t = await uploadTour(deps, a.token, v2);
+    await publish(deps, a.token, t.tour_id);
+    const realDelete = deps.pub.delete.bind(deps.pub);
+    let doubled = 0;
+    deps.pub.delete = async (keys) => {
+      if (keys.length > 0) doubled++;
+      await Promise.all([realDelete(keys), realDelete([...keys].reverse())]);
+    };
+    expect((await publish(deps, a.token, t.tour_id)).status).toBe(200); // deletes the replaced images
+    expect((await unpublish(deps, a.token, t.tour_id)).status).toBe(204); // deletes the live ones
+    deps.pub.delete = realDelete;
+    expect(doubled).toBeGreaterThanOrEqual(2);
+    expect(await publicKeys()).toEqual([]);
+    expect(await count(deps, "public_object")).toBe(0);
+    await expectConsistent(ctx);
+  });
+
   it("publish racing a new upload's commit takes the new chapter whole or not at all", async () => {
     const ctx = await setup();
     const { deps, a } = ctx;

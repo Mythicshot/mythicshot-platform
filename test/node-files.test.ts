@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { NodeDb } from "../src/node/db.ts";
-import { NodeFileStore, objectPath } from "../src/node/files.ts";
+import { NodeFileStore, objectPath, unlinkGone } from "../src/node/files.ts";
 import { migrate } from "../src/node/migrate.ts";
 
 const tmp = (p: string) => mkdtemp(join(tmpdir(), `dp-${p}-`));
@@ -74,5 +74,43 @@ describe("node migrate", () => {
     const row = await db.first<{ journal_mode: string }>("PRAGMA journal_mode");
     expect(row!.journal_mode).toBe("wal");
     db.close();
+  });
+
+  it("a delete that finds the file being deleted by another request waits for it and succeeds", async () => {
+    // On Windows, two unlinks of one file at the same moment can fail with EPERM (the file
+    // is "delete pending") instead of ENOENT. Simulated here so the rule is pinned on every OS.
+    const codes = (...c: string[]) => {
+      let i = 0;
+      const calls: number[] = [];
+      const fn = async () => {
+        calls.push(i);
+        const code = c[i++];
+        if (code === "ok") return;
+        throw Object.assign(new Error(code), { code });
+      };
+      return { fn, calls };
+    };
+    const busyThenGone = codes("EPERM", "EPERM", "ENOENT");
+    await expect(unlinkGone("x", busyThenGone.fn)).resolves.toBeUndefined();
+    expect(busyThenGone.calls).toHaveLength(3);
+    const busyThenRemoved = codes("EBUSY", "ok");
+    await expect(unlinkGone("x", busyThenRemoved.fn)).resolves.toBeUndefined();
+    await expect(unlinkGone("x", codes("ENOENT").fn)).resolves.toBeUndefined();
+    // A file that stays locked is a real failure, reported after a bounded wait.
+    await expect(unlinkGone("x", codes(...new Array(30).fill("EACCES")).fn)).rejects.toThrow("EACCES");
+    // Any other error is reported at once.
+    const io = codes("EIO");
+    await expect(unlinkGone("x", io.fn)).rejects.toThrow("EIO");
+    expect(io.calls).toHaveLength(1);
+  });
+
+  it("many deletes of the same keys at once all succeed", async () => {
+    const root = await tmp("files");
+    const store = new NodeFileStore(root);
+    const keys = Array.from({ length: 40 }, (_, i) => `p/${String(i).padStart(32, "0")}.png`);
+    for (const k of keys) await store.put(k, new Uint8Array(1000), { contentType: "image/png" });
+    const results = await Promise.allSettled([store.delete(keys), store.delete(keys), store.delete([...keys].reverse())]);
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled", "fulfilled"]);
+    expect(await store.keys()).toEqual([]);
   });
 });
