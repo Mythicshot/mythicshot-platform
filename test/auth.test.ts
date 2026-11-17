@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { constantTimeEqual, hashToken, newId, newSlug, newToken, requireAuth } from "../src/auth.ts";
-import { createWorkspace } from "../src/workspaces.ts";
-import type { Deps } from "../src/ports.ts";
+import { createWorkspace, workspaceStatements } from "../src/workspaces.ts";
+import { isUniqueViolation, type Deps } from "../src/ports.ts";
 
 function req(authorization?: string): Request {
   const headers = new Headers();
@@ -112,6 +112,30 @@ describe("requireAuth", () => {
     expect(after!.last_used_at).toBe(now);
   });
 
+  it("with touch: false resolves the token without writing last_used_at", async () => {
+    const { deps } = await makeDeps();
+    const { workspaceId, token } = await seedWorkspace(deps, "Acme");
+    const auth = await requireAuth(req("Bearer " + token), deps, { touch: false });
+    expect(auth).toMatchObject({ workspaceId });
+    expect(await deps.db.first("SELECT last_used_at FROM api_token WHERE workspace_id = ?", [workspaceId])).toEqual({
+      last_used_at: null,
+    });
+    // And it still refuses a bad token the same way.
+    const bad = await requireAuth(req("Bearer dp_" + "0".repeat(40)), deps, { touch: false });
+    expect((bad as Response).status).toBe(401);
+    expect(await (bad as Response).text()).toBe(UNAUTHORIZED);
+  });
+
+  it("with touch: true, the default, writes last_used_at", async () => {
+    const { deps } = await makeDeps();
+    deps.now = () => 1_700_000_000_000;
+    const { workspaceId, token } = await seedWorkspace(deps, "Acme");
+    await requireAuth(req("Bearer " + token), deps, { touch: true });
+    expect(await deps.db.first("SELECT last_used_at FROM api_token WHERE workspace_id = ?", [workspaceId])).toEqual({
+      last_used_at: 1_700_000_000_000,
+    });
+  });
+
   it("accepts the scheme in any case", async () => {
     const { deps } = await makeDeps();
     const { workspaceId, token } = await seedWorkspace(deps, "Acme");
@@ -189,6 +213,45 @@ describe("createWorkspace", () => {
     const { deps } = await makeDeps();
     const { workspaceId, token } = await createWorkspace(deps, "Acme", "owner@example.com");
     expect(await requireAuth(req("Bearer " + token), deps)).toMatchObject({ workspaceId });
+  });
+
+  it("stores the email lowercased, and a second workspace with the same email is refused", async () => {
+    const { deps } = await makeDeps();
+    await createWorkspace(deps, "A", "Owner@Example.com");
+    expect(await deps.db.all("SELECT email FROM user")).toEqual([{ email: "owner@example.com" }]);
+    let err: unknown;
+    try {
+      await createWorkspace(deps, "B", "OWNER@example.com");
+    } catch (e) {
+      err = e;
+    }
+    expect(isUniqueViolation(err)).toBe(true);
+    expect(await deps.db.first("SELECT count(*) AS n FROM workspace")).toEqual({ n: 1 });
+  });
+
+  it("workspaceStatements runs in a caller's batch with the caller's own statements", async () => {
+    const { deps } = await makeDeps();
+    const w = await workspaceStatements(deps, "Acme", "owner@example.com");
+    const claim = (workspaceId: string) => ({
+      sql: "INSERT INTO setup (id, workspace_id, completed_at) VALUES (1, ?, ?)",
+      params: [workspaceId, deps.now()],
+    });
+    await deps.db.batch([...w.stmts, claim(w.workspaceId)]);
+    expect(await requireAuth(req("Bearer " + w.token), deps)).toMatchObject({ workspaceId: w.workspaceId });
+
+    // A second claim fails on the one-row setup table, so its workspace is never created.
+    const second = await workspaceStatements(deps, "Other", "other@example.com");
+    let err: unknown;
+    try {
+      await deps.db.batch([...second.stmts, claim(second.workspaceId)]);
+    } catch (e) {
+      err = e;
+    }
+    expect(isUniqueViolation(err)).toBe(true);
+    expect(await deps.db.all("SELECT id FROM workspace")).toEqual([{ id: w.workspaceId }]);
+    expect(await deps.db.first("SELECT count(*) AS n FROM user")).toEqual({ n: 1 });
+    expect(await deps.db.first("SELECT count(*) AS n FROM api_token")).toEqual({ n: 1 });
+    expect(await requireAuth(req("Bearer " + second.token), deps)).toBeInstanceOf(Response);
   });
 
   it("writes nothing when the batch fails", async () => {

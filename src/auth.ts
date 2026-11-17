@@ -61,11 +61,16 @@ function unauthorized(): Response {
 }
 
 /**
- * Resolves `Authorization: Bearer <token>` to the token's workspace, and records when
- * the token was last used. Anything else answers the 401 Response. The token is never
- * logged, stored or put in an error: only its hash reaches the database.
+ * Resolves `Authorization: Bearer <token>` to the token's workspace and, unless
+ * `touch` is false, records when the token was last used. Anything else answers the
+ * 401 Response. The token is never logged, stored or put in an error: only its hash
+ * reaches the database.
  */
-export async function requireAuth(req: Request, deps: Deps): Promise<Auth | Response> {
+export async function requireAuth(
+  req: Request,
+  deps: Deps,
+  opts: { touch?: boolean } = {},
+): Promise<Auth | Response> {
   const header = req.headers.get("authorization") ?? "";
   const sp = header.indexOf(" ");
   const scheme = sp < 0 ? "" : header.slice(0, sp);
@@ -82,10 +87,12 @@ export async function requireAuth(req: Request, deps: Deps): Promise<Auth | Resp
   );
   if (row === null || !constantTimeEqual(row.hash, hash)) return unauthorized();
 
-  await deps.db.run("UPDATE api_token SET last_used_at = ? WHERE id = ? AND workspace_id = ?", [
-    deps.now(),
-    row.id,
-    row.workspace_id,
-  ]);
+  if (opts.touch !== false) {
+    await deps.db.run("UPDATE api_token SET last_used_at = ? WHERE id = ? AND workspace_id = ?", [
+      deps.now(),
+      row.id,
+      row.workspace_id,
+    ]);
+  }
   return { workspaceId: row.workspace_id, tokenId: row.id };
 }

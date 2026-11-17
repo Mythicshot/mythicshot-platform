@@ -11,10 +11,12 @@ CREATE TABLE workspace (
   created_at INTEGER NOT NULL
 ) STRICT;
 
+-- An email is stored lowercased (the CHECK refuses anything else), so the UNIQUE
+-- constraint makes it unique case-insensitively.
 CREATE TABLE user (
   id TEXT PRIMARY KEY NOT NULL,
   workspace_id TEXT NOT NULL REFERENCES workspace (id),
-  email TEXT NOT NULL,
+  email TEXT NOT NULL UNIQUE CHECK (email = lower(email)),
   created_at INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX user_workspace ON user (workspace_id);
@@ -52,29 +54,36 @@ CREATE TABLE chapter (
   tour_id TEXT NOT NULL REFERENCES tour (id),
   title TEXT NOT NULL,
   description TEXT,
-  position INTEGER NOT NULL
+  position INTEGER NOT NULL,
+  -- The target of step's (chapter_id, tour_id) foreign key.
+  UNIQUE (id, tour_id)
 ) STRICT;
 CREATE INDEX chapter_tour ON chapter (tour_id);
 
+-- A step's chapter must belong to the step's own tour, which the composite foreign key
+-- enforces. The click is optional (the last step of a tour has none), but x and y are
+-- set together or not at all.
 CREATE TABLE step (
   id TEXT PRIMARY KEY NOT NULL,
   tour_id TEXT NOT NULL REFERENCES tour (id),
-  chapter_id TEXT REFERENCES chapter (id),
+  chapter_id TEXT NOT NULL,
   position INTEGER NOT NULL,
   image_key TEXT NOT NULL,
   image_type TEXT NOT NULL CHECK (image_type IN ('png', 'jpg')),
   width INTEGER NOT NULL,
   height INTEGER NOT NULL,
   bytes INTEGER NOT NULL,
-  click_x REAL NOT NULL,
-  click_y REAL NOT NULL,
+  click_x REAL,
+  click_y REAL,
   click_size REAL NOT NULL DEFAULT 4,
   caption TEXT,
   spotlight TEXT,
-  notes TEXT NOT NULL DEFAULT '[]'
+  notes TEXT NOT NULL DEFAULT '[]',
+  CHECK ((click_x IS NULL) = (click_y IS NULL)),
+  FOREIGN KEY (chapter_id, tour_id) REFERENCES chapter (id, tour_id)
 ) STRICT;
 CREATE INDEX step_tour ON step (tour_id);
-CREATE INDEX step_chapter ON step (chapter_id);
+CREATE INDEX step_chapter ON step (chapter_id, tour_id);
 
 -- tour_id is null while an upload creates a new tour.
 CREATE TABLE upload (

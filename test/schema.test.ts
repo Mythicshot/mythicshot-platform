@@ -40,6 +40,29 @@ async function insertTour(deps: Deps, id: string, workspaceId: string, slug: str
   );
 }
 
+async function insertChapter(deps: Deps, id: string, tourId: string): Promise<void> {
+  await deps.db.run("INSERT INTO chapter (id, tour_id, title, position) VALUES (?, ?, ?, ?)", [id, tourId, "Chapter", 0]);
+}
+
+/** Inserts a step; `click` is [x, y], with null for either to leave it unset. */
+function insertStep(
+  deps: Deps,
+  id: string,
+  tourId: string,
+  chapterId: string | null,
+  click: [number | null, number | null] = [12.5, 40],
+  imageType = "png",
+): Promise<{ changes: number }> {
+  return deps.db.run(
+    "INSERT INTO step (id, tour_id, chapter_id, position, image_key, image_type, width, height, bytes, click_x, click_y, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]')",
+    [id, tourId, chapterId, 0, "u/step-001.png", imageType, 1280, 720, 2_000_000, click[0], click[1]],
+  );
+}
+
+async function count(deps: Deps, table: string): Promise<number> {
+  return (await deps.db.first<{ n: number }>(`SELECT count(*) AS n FROM ${table}`))!.n;
+}
+
 describe("schema", () => {
   it("has exactly the platform's tables", async () => {
     const { deps } = await makeDeps();
@@ -118,10 +141,8 @@ describe("schema", () => {
     const { deps } = await makeDeps();
     const { workspaceId } = await seedWorkspace(deps, "Acme");
     await insertTour(deps, "tour_1", workspaceId, "abcdefghij");
-    await deps.db.run(
-      "INSERT INTO step (id, tour_id, position, image_key, image_type, width, height, bytes, click_x, click_y, notes) VALUES (?, ?, ?, ?, 'png', ?, ?, ?, ?, ?, '[]')",
-      ["st_1", "tour_1", 0, "u/step-001.png", 1280, 720, 2_000_000, 12.5, 40],
-    );
+    await insertChapter(deps, "ch_1", "tour_1");
+    await insertStep(deps, "st_1", "tour_1", "ch_1");
     const tour = await deps.db.first<{ t: string; created_at: number }>(
       "SELECT typeof(created_at) AS t, created_at FROM tour WHERE id = 'tour_1'",
     );
@@ -148,12 +169,71 @@ describe("schema", () => {
       ),
     );
     await insertTour(deps, "tour_3", workspaceId, "s3");
-    await rejection(
-      deps.db.run(
-        "INSERT INTO step (id, tour_id, position, image_key, image_type, width, height, bytes, click_x, click_y, notes) VALUES (?, ?, 0, 'k.gif', 'gif', 1, 1, 1, 0, 0, '[]')",
-        ["st_1", "tour_3"],
-      ),
+    await insertChapter(deps, "ch_3", "tour_3");
+    await rejection(insertStep(deps, "st_1", "tour_3", "ch_3", [0, 0], "gif"));
+    expect(await count(deps, "step")).toBe(0);
+  });
+
+  it("a step without a click inserts, and a step with only one click coordinate is refused", async () => {
+    const { deps } = await makeDeps();
+    const { workspaceId } = await seedWorkspace(deps, "Acme");
+    await insertTour(deps, "tour_1", workspaceId, "abcdefghij");
+    await insertChapter(deps, "ch_1", "tour_1");
+    await insertStep(deps, "st_last", "tour_1", "ch_1", [null, null]);
+    expect(await deps.db.first("SELECT click_x, click_y FROM step WHERE id = 'st_last'")).toEqual({
+      click_x: null,
+      click_y: null,
+    });
+    await rejection(insertStep(deps, "st_x", "tour_1", "ch_1", [10, null]));
+    await rejection(insertStep(deps, "st_y", "tour_1", "ch_1", [null, 10]));
+    expect(await count(deps, "step")).toBe(1);
+  });
+
+  it("a step needs a chapter, and the chapter must belong to the step's tour", async () => {
+    const { deps } = await makeDeps();
+    const { workspaceId } = await seedWorkspace(deps, "Acme");
+    await insertTour(deps, "tour_1", workspaceId, "aaaaaaaaaa");
+    await insertTour(deps, "tour_2", workspaceId, "bbbbbbbbbb");
+    await insertChapter(deps, "ch_1", "tour_1");
+    await insertChapter(deps, "ch_2", "tour_2");
+    await rejection(insertStep(deps, "st_none", "tour_1", null));
+    await rejection(insertStep(deps, "st_cross", "tour_1", "ch_2"));
+    await rejection(insertStep(deps, "st_missing", "tour_1", "ch_missing"));
+    await insertStep(deps, "st_ok", "tour_1", "ch_1");
+    expect(await deps.db.all("SELECT id FROM step")).toEqual([{ id: "st_ok" }]);
+    // Moving the step to a chapter of another tour is refused too.
+    await rejection(deps.db.run("UPDATE step SET chapter_id = 'ch_2' WHERE id = 'st_ok'"));
+    expect(await deps.db.first("SELECT chapter_id FROM step WHERE id = 'st_ok'")).toEqual({ chapter_id: "ch_1" });
+  });
+
+  it("a user's email is unique, stored lowercased", async () => {
+    const { deps } = await makeDeps();
+    const a = await seedWorkspace(deps, "A");
+    const b = await seedWorkspace(deps, "B");
+    await deps.db.run("INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, ?, ?)", [
+      "usr_1",
+      a.workspaceId,
+      "sam@example.com",
+      NOW,
+    ]);
+    const err = await rejection(
+      deps.db.run("INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, ?, ?)", [
+        "usr_2",
+        b.workspaceId,
+        "sam@example.com",
+        NOW,
+      ]),
     );
-    expect(await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM step")).toEqual({ n: 0 });
+    expect(isUniqueViolation(err)).toBe(true);
+    // Mixed case is never stored, so it cannot slip past the unique index.
+    await rejection(
+      deps.db.run("INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, ?, ?)", [
+        "usr_3",
+        b.workspaceId,
+        "Sam@example.com",
+        NOW,
+      ]),
+    );
+    expect(await deps.db.first("SELECT count(*) AS n FROM user WHERE email = 'sam@example.com'")).toEqual({ n: 1 });
   });
 });
