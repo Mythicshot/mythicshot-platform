@@ -12,6 +12,9 @@ import { migrate } from "./migrate.ts";
 // src/node/entry.ts and dist/node/entry.js both sit two folders below the repo root.
 const MIGRATIONS_DIR = fileURLToPath(new URL("../../migrations/", import.meta.url));
 
+/** How long open requests may run after SIGTERM before their connections are cut. */
+const STOP_GRACE_MS = 5000;
+
 async function main(): Promise<void> {
   const dataDir = process.env.DATA_DIR;
   if (!dataDir) throw new Error("DATA_DIR is not set");
@@ -35,9 +38,32 @@ async function main(): Promise<void> {
   };
 
   const app = createApp(deps);
-  serve({ fetch: app.fetch, port }, (info) => {
+  const server = serve({ fetch: app.fetch, port }, (info) => {
     console.log(`listening on port ${info.port}`);
   });
+
+  // `docker stop` sends SIGTERM, and Node running as PID 1 has no default handler for
+  // it. Stop taking requests, let open ones finish, then close the database so SQLite
+  // checkpoints its WAL into db.sqlite and the file is whole on the volume. If requests
+  // are still open after the grace period they are cut, before Docker's own 10 s kill.
+  let stopping = false;
+  const stop = (signal: string) => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`${signal} received, stopping`);
+    const finish = () => {
+      db.close();
+      console.log("stopped");
+      process.exit(0);
+    };
+    server.close(finish);
+    if ("closeIdleConnections" in server) server.closeIdleConnections();
+    setTimeout(() => {
+      if ("closeAllConnections" in server) server.closeAllConnections();
+    }, STOP_GRACE_MS).unref();
+  };
+  process.on("SIGTERM", () => stop("SIGTERM"));
+  process.on("SIGINT", () => stop("SIGINT"));
 }
 
 main().catch((err: unknown) => {
