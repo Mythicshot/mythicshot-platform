@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Deps } from "./ports.ts";
+import { setupRoutes } from "./setup.ts";
 
 /** The route table and error handling. Routes reach data only through `deps`. */
 export function createApp(deps: Deps): Hono {
@@ -9,6 +10,8 @@ export function createApp(deps: Deps): Hono {
     await deps.db.first("SELECT 1 AS ok");
     return c.json({ ok: true });
   });
+
+  setupRoutes(app, deps);
 
   app.notFound((c) => c.json({ error: "not_found" }, 404));
 

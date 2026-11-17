@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp } from "../app.ts";
 import type { Deps } from "../ports.ts";
+import { setupCodeFromEnv } from "../setup.ts";
 import { NodeDb } from "./db.ts";
 import { NodeFileStore } from "./files.ts";
 import { migrate } from "./migrate.ts";
@@ -28,7 +29,7 @@ async function main(): Promise<void> {
     pub: new NodeFileStore(join(root, "public")),
     config: {
       publicImageBase: process.env.PUBLIC_IMAGE_BASE ?? "",
-      setupCode: process.env.SETUP_CODE ? process.env.SETUP_CODE : null,
+      setupCode: setupCodeFromEnv(process.env.SETUP_CODE),
     },
     now: () => Date.now(),
   };
