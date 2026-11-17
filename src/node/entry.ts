@@ -1,10 +1,10 @@
-import { mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp } from "../app.ts";
 import type { Deps } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
+import { APP_UID, prepareDataDir } from "./datadir.ts";
 import { NodeDb } from "./db.ts";
 import { NodeFileStore } from "./files.ts";
 import { migrate } from "./migrate.ts";
@@ -16,14 +16,23 @@ const MIGRATIONS_DIR = fileURLToPath(new URL("../../migrations/", import.meta.ur
 const STOP_GRACE_MS = 5000;
 
 async function main(): Promise<void> {
+  // Everything the app creates (the database, its WAL, draft and published files) is
+  // readable by the app user only. Set before any file is opened.
+  process.umask(0o077);
   const dataDir = process.env.DATA_DIR;
   if (!dataDir) throw new Error("DATA_DIR is not set");
   const port = Number(process.env.PORT ?? 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT is not a valid port");
 
-  const root = resolve(dataDir);
-  mkdirSync(root, { recursive: true });
-  const db = new NodeDb(join(root, "db.sqlite"));
+  const root = prepareDataDir(dataDir);
+  const dbPath = join(root, "db.sqlite");
+  let db: NodeDb;
+  try {
+    db = new NodeDb(dbPath);
+  } catch {
+    const uid = typeof process.getuid === "function" ? process.getuid() : APP_UID;
+    throw new Error(`cannot open ${dbPath}: it and its folder must be writable by uid ${uid}`);
+  }
   await migrate(db, MIGRATIONS_DIR);
 
   const deps: Deps = {

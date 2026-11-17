@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,5 +64,14 @@ describe("database backup", () => {
   it("backup refuses a missing source database instead of creating one", async () => {
     const root = await mkdtemp(join(tmpdir(), "dp-backup-"));
     expect(() => backupDatabase(join(root, "none.sqlite"), join(root, "copy.sqlite"))).toThrow(/no database/);
+  });
+
+  // File modes are POSIX; deploy/test-container.sh checks them inside the Linux image too.
+  it.skipIf(process.platform === "win32")("the backup copy is readable by its owner only (0600)", async () => {
+    const { root, dbPath, db } = await seeded();
+    db.close();
+    const target = join(root, "private.sqlite");
+    backupDatabase(dbPath, target);
+    expect((await stat(target)).mode & 0o777).toBe(0o600);
   });
 });

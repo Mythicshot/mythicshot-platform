@@ -1,8 +1,10 @@
 # Used only by deploy/test-container.sh, on top of docker-compose.yml: publishes Caddy's
 # HTTPS port on the loopback address alone, on a free high port, instead of 80 and 443
-# on every address. With DOMAIN=localhost Caddy serves a certificate from its own
-# internal authority, so no public certificate is requested.
+# on every address, and swaps in the localhost Caddyfile from deploy/test/caddy, served
+# with a certificate from Caddy's internal authority.
 services:
   caddy:
     ports: !override
       - "127.0.0.1:${TEST_HTTPS_PORT:?}:443"
+    volumes:
+      - ./caddy-test:/etc/caddy:ro

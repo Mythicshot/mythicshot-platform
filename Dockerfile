@@ -4,7 +4,8 @@
 # Every setting, the setup code included, arrives as an environment variable at run
 # time; nothing secret is copied into any layer.
 
-ARG NODE_IMAGE=node:26.13.1-alpine3.24
+# node:26.13.1-alpine3.24, pinned by the digest of its multi-platform index.
+ARG NODE_IMAGE=node@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
 
 # Compile TypeScript to dist/. Install scripts are skipped: the compiler needs none,
 # and the Workers-runtime dev dependencies have no use here.
@@ -22,17 +23,27 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force
 
-# The runner holds only dist/, migrations/, package.json (for "type": "module") and the
-# production node_modules. The wizard's page is served from dist/; a public/ folder is
-# added here once the app has one.
-FROM ${NODE_IMAGE} AS runner
-ENV NODE_ENV=production \
-    DATA_DIR=/data \
-    PORT=3000
-RUN addgroup -S -g 1001 app \
+# The Node runtime without npm, its bundled packages, the C headers or the entrypoint
+# script; nothing uses them at run time. Removing files in a later layer would not
+# shrink the image, so the runner copies this trimmed file system as one layer.
+FROM ${NODE_IMAGE} AS runtime
+RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
+           /usr/local/include /usr/local/bin/docker-entrypoint.sh \
+ && addgroup -S -g 1001 app \
  && adduser -S -D -H -u 1001 -G app -s /sbin/nologin app \
  && mkdir /data \
  && chown 1001:1001 /data
+
+# The runner holds only dist/, migrations/, package.json (for "type": "module") and the
+# production node_modules. The wizard's page is served from dist/; a public/ folder is
+# added here once the app has one.
+FROM scratch AS runner
+COPY --from=runtime / /
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    NODE_VERSION=26.13.1 \
+    NODE_ENV=production \
+    DATA_DIR=/data \
+    PORT=3000
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist

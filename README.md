@@ -44,7 +44,7 @@ The Node entry reads `DATA_DIR` (required), `PORT` (default 3000), `SETUP_CODE` 
 
 ## Run in a container
 
-The image runs the Node target as user 1001, keeps everything it writes in the `/data` volume (`db.sqlite`, `drafts/`, `public/`), applies new migrations on start, reports health from `/healthz` and closes the database cleanly on `docker stop`. Base image: `node:26.13.1-alpine3.24`.
+The image runs the Node target as user 1001, keeps everything it writes in the `/data` volume (`db.sqlite`, `drafts/`, `public/`), applies new migrations on start, reports health from `/healthz` and closes the database cleanly on `docker stop`. Files it creates are readable by that user only (umask 077). The image carries the Node runtime without npm. Base image: `node:26.13.1-alpine3.24`, pinned by digest.
 
 ```sh
 docker build -t demo-platform:dev .
@@ -53,15 +53,15 @@ docker run --rm -e SETUP_CODE=<at least 16 characters> -v demo-data:/data -p 127
 
 The setup code and every other setting are environment variables given at run time; none is built into the image. `.dockerignore` keeps `node_modules`, `.git`, data and env files out of the build context.
 
-`deploy/docker-compose.yml` runs the app behind Caddy (`caddy:2.11.9-alpine`), which ends HTTPS for the domain and is the only service with published ports. Next to it go a `.env` file holding `DOMAIN`, `ACME_EMAIL`, `DATA_DIR` (a host folder owned by id 1001), `APP_IMAGE` and `SETUP_CODE`, and the `caddy/` folder with the Caddyfile. Caddy gets the certificate by itself once the domain's DNS record points at the server and ports 80 and 443 are open.
+`deploy/docker-compose.yml` runs the app behind Caddy (`caddy:2.11.9-alpine`, pinned by digest), which ends HTTPS for the domain, sends a one-week HSTS header and is the only service with published ports. Next to it go a `.env` file holding `DOMAIN`, `ACME_EMAIL`, `DATA_DIR`, `APP_IMAGE` and `SETUP_CODE`, and the `caddy/` folder with the Caddyfile. `DATA_DIR` must already exist and be owned by id 1001: compose refuses a missing folder rather than letting Docker create one owned by root, and the app stops with one line naming the folder if it cannot write there. Both services keep at most three 10 MB log files. Caddy gets the certificate by itself once the domain's DNS record points at the server and ports 80 and 443 are open.
 
 A consistent copy of the database, while the app keeps running:
 
 ```sh
-docker compose exec app node dist/node/backup.js /data/db-copy.sqlite    # refuses to overwrite an existing file
+docker compose exec app node dist/node/backup.js /data/db-copy.sqlite    # mode 600; refuses to overwrite an existing file
 ```
 
-`npm run test:container` (Bash and a local Docker engine) builds the image and checks it end to end: the user, no setup code in the image, health, migrations, the data surviving a new container on the same volume, a clean stop on SIGTERM, the backup command, and the compose stack with Caddy in front on `localhost` with its internal certificate. It publishes ports on 127.0.0.1 only and removes every container, volume and folder it created, keeping the image. Real certificate issuance needs a public domain and is not part of it.
+`npm run test:container` (Bash and a local Docker engine) builds the image and checks it end to end: the user, no setup code in the image, health, migrations, the data surviving a new container on the same volume, a clean stop on SIGTERM, the backup command, file modes, a data folder the app cannot write, the real Caddyfile's HSTS header, log rotation, and the compose stack with Caddy in front on `localhost` with its internal certificate (the test Caddyfile and override are in `deploy/test/`). It publishes ports on 127.0.0.1 only and removes every container, volume and folder it created, keeping the image. Real certificate issuance needs a public domain and is not part of it.
 
 ## Layout
 

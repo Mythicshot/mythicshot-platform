@@ -6,6 +6,9 @@
 }
 
 {$DOMAIN} {
+	# Browsers keep to HTTPS for this host for one week. No subdomains, no preload list.
+	header Strict-Transport-Security "max-age=604800"
+
 	# Caddy passes the Host header through unchanged, which the setup wizard's
 	# same-origin check compares against the page's Origin.
 	reverse_proxy app:3000
