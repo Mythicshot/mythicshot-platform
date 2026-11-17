@@ -3,29 +3,32 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { NodeDb } from "../src/node/db.ts";
-import { NodeFileStore, resolveInside } from "../src/node/files.ts";
+import { NodeFileStore, objectPath } from "../src/node/files.ts";
 import { migrate } from "../src/node/migrate.ts";
 
 const tmp = (p: string) => mkdtemp(join(tmpdir(), `dp-${p}-`));
 
 describe("node file store", () => {
   it("a key that resolves outside the root is refused even when checkKey is bypassed", async () => {
+    // With hashed names no key can name a path outside the root: every key maps to
+    // <root>/<2 hex>/<64 hex>, whatever it contains.
     const root = await tmp("files");
-    for (const k of ["..", "../x", "a/../../x", "/etc/passwd", "C:\\Windows\\x", "a/../..", "."]) {
-      expect(() => resolveInside(root, k)).toThrow("bad key");
+    for (const k of ["..", "../x", "a/../../x", "/etc/passwd", "C:\\Windows\\x", "a/../..", ".", "", "con", "a\0b"]) {
+      const p = objectPath(root, k);
+      expect(p.startsWith(join(root, ""))).toBe(true);
+      expect(p.slice(root.length + 1)).toMatch(/^[0-9a-f]{2}[\\/][0-9a-f]{64}$/);
     }
-    expect(resolveInside(root, "a/b.png")).toBe(join(root, "a", "b.png"));
   });
 
-  it("the meta file cannot be fetched as a key", async () => {
+  it("no file on disk is named after its key, and the sidecar of old is gone", async () => {
     const root = await tmp("files");
     const store = new NodeFileStore(root);
     await store.put("a.png", new Uint8Array([1, 2]), { contentType: "image/png" });
-    expect(await store.get("a.png.meta.json")).toBeNull();
-    await expect(store.put("a.png.meta.json", new Uint8Array([1]), { contentType: "image/png" })).rejects.toThrow("bad key");
-    await expect(store.delete(["a.png.meta.json"])).rejects.toThrow("bad key");
-    expect((await store.get("a.png"))!.size).toBe(2);
-    expect(await store.keys()).toEqual(["a.png"]);
+    const [shard] = await readdir(root);
+    expect(shard).toMatch(/^[0-9a-f]{2}$/);
+    const files = await readdir(join(root, shard!));
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("a write leaves no temporary file behind", async () => {
@@ -33,7 +36,8 @@ describe("node file store", () => {
     const store = new NodeFileStore(root);
     await store.put("d/a.png", new Uint8Array([1]), { contentType: "image/png" });
     await store.put("d/a.png", new Uint8Array([2]), { contentType: "image/png" });
-    expect((await readdir(join(root, "d"))).sort()).toEqual(["a.png", "a.png.meta.json"]);
+    const [shard] = await readdir(root);
+    expect(await readdir(join(root, shard!))).toHaveLength(1);
   });
 });
 

@@ -5,8 +5,20 @@ import { R2FileStore } from "../src/cloudflare/files.ts";
 import type { Config, Deps } from "../src/ports.ts";
 import { counted } from "./counting.ts";
 
-type TestEnv = Env & { TEST_MIGRATIONS: D1Migration[] };
+type TestEnv = Env & { TEST_MIGRATIONS: D1Migration[]; TEST_STORAGE_IS_LOCAL?: unknown };
 const testEnv = env as TestEnv;
+
+/**
+ * reset() drops every table and deletes every object. Pointed at real bindings that
+ * would destroy an install's data, so it runs only when vitest.cloudflare.config.ts
+ * has switched remote bindings off, found no `remote` setting in wrangler.jsonc and
+ * handed over this marker. Anything else, including a missing marker, refuses.
+ */
+function assertLocalStorage(): void {
+  if (testEnv.TEST_STORAGE_IS_LOCAL !== "local-simulated-storage") {
+    throw new Error("refusing to reset storage: the bindings are not known to be the local simulated ones");
+  }
+}
 
 /** Every key in a test bucket. Test-only: app code never lists a bucket. */
 async function listAll(bucket: R2Bucket): Promise<string[]> {
@@ -22,6 +34,7 @@ async function listAll(bucket: R2Bucket): Promise<string[]> {
 
 /** Empties the test database and buckets, then applies the migrations from scratch. */
 async function reset(): Promise<void> {
+  assertLocalStorage();
   for (const bucket of [testEnv.DRAFTS, testEnv.PUB]) {
     const keys = await listAll(bucket);
     for (let i = 0; i < keys.length; i += 1000) await bucket.delete(keys.slice(i, i + 1000));

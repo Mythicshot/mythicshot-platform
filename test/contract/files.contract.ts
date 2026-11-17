@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { FileStore } from "../../src/ports.ts";
+import { type FileStore, MAX_KEY_BYTES } from "../../src/ports.ts";
 
 type Made = { store: FileStore; keys(): Promise<string[]> };
 
@@ -67,5 +67,71 @@ export function fileStoreContract(make: () => Promise<Made>): void {
       await expect(store.delete(["keep.png", key])).rejects.toThrow("bad key");
       expect(await keys()).toEqual(before);
     });
+
+    it("a key can be both an object and a prefix of other keys, in either order", async () => {
+      const { store, keys } = await make();
+      const m = { contentType: "text/plain" };
+      await store.put("a/b", enc("ab"), m);
+      await store.put("a", enc("a"), m);
+      await store.delete(["a/b"]);
+      await store.put("a", enc("a2"), m);
+      await store.put("c", enc("c"), m);
+      await store.put("c/d", enc("cd"), m);
+      await store.put("c/d/e", enc("cde"), m);
+      expect(await text((await store.get("a"))!.body)).toBe("a2");
+      expect(await store.get("a/b")).toBeNull();
+      expect(await text((await store.get("c"))!.body)).toBe("c");
+      expect(await text((await store.get("c/d"))!.body)).toBe("cd");
+      expect(await text((await store.get("c/d/e"))!.body)).toBe("cde");
+      expect((await keys()).sort()).toEqual(["a", "c", "c/d", "c/d/e"]);
+    });
+
+    it("accepts keys that look like internal file names as ordinary keys", async () => {
+      const { store, keys } = await make();
+      const m = { contentType: "text/plain" };
+      await store.put("a.png", enc("img"), m);
+      await store.put("a.png.meta.json", enc("not meta"), m);
+      await store.put("a.png.tmp", enc("not tmp"), m);
+      expect(await text((await store.get("a.png"))!.body)).toBe("img");
+      expect(await text((await store.get("a.png.meta.json"))!.body)).toBe("not meta");
+      expect((await store.get("a.png"))!.contentType).toBe("text/plain");
+      await store.delete(["a.png.meta.json"]);
+      expect(await text((await store.get("a.png"))!.body)).toBe("img");
+      expect((await keys()).sort()).toEqual(["a.png", "a.png.tmp"]);
+    });
+
+    it(`accepts a key of exactly ${MAX_KEY_BYTES} bytes and refuses one byte more`, async () => {
+      const { store, keys } = await make();
+      const atLimit = `${"a".repeat(MAX_KEY_BYTES - 6)}/b.png`;
+      const over = `a${atLimit}`;
+      expect(atLimit.length).toBe(MAX_KEY_BYTES);
+      await store.put(atLimit, enc("x"), { contentType: "image/png" });
+      expect(await text((await store.get(atLimit))!.body)).toBe("x");
+      await expect(store.put(over, enc("y"), { contentType: "image/png" })).rejects.toThrow("bad key");
+      await expect(store.get(over)).rejects.toThrow("bad key");
+      await expect(store.delete([over])).rejects.toThrow("bad key");
+      expect(await keys()).toEqual([atLimit]);
+      await store.delete([atLimit]);
+      expect(await keys()).toEqual([]);
+    });
+
+    it("overlapping puts to one key end with a matching content type and body", async () => {
+      const { store } = await make();
+      for (let round = 0; round < 5; round++) {
+        await Promise.all(
+          Array.from({ length: 8 }, (_, i) =>
+            store.put("race.bin", enc(`body-${i}-${"x".repeat(i * 5000)}`), { contentType: `application/x-${i}`, cacheControl: `c${i}` }),
+          ),
+        );
+        const got = (await store.get("race.bin"))!;
+        const body = await text(got.body);
+        const i = Number(body.split("-")[1]);
+        expect(got.contentType).toBe(`application/x-${i}`);
+        expect(got.cacheControl).toBe(`c${i}`);
+        expect(got.size).toBe(body.length);
+      }
+    });
   });
 }
+
+const enc = (s: string) => new TextEncoder().encode(s);
