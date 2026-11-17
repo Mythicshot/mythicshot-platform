@@ -48,6 +48,8 @@ The Node entry reads `DATA_DIR` (required), `PORT` (default 3000), `SETUP_CODE` 
 |---|---|
 | `src/ports.ts` | `Db`, `FileStore`, `Config`, `Deps` and `checkKey` |
 | `src/app.ts` | `createApp(deps)`: routes and error handling |
+| `src/auth.ts` | API tokens (only their SHA-256 hash is stored), ids, slugs and the request guard |
+| `src/workspaces.ts` | Creating a workspace with its owner and first token |
 | `src/cloudflare/` | D1 and R2 adapters and the Worker entry |
 | `src/node/` | SQLite and folder adapters, migrations, the HTTP server |
 | `migrations/` | SQL migrations, one set for both targets |

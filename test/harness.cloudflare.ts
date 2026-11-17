@@ -3,6 +3,8 @@ import { env } from "cloudflare:workers";
 import { D1Db } from "../src/cloudflare/db.ts";
 import { R2FileStore } from "../src/cloudflare/files.ts";
 import type { Config, Deps } from "../src/ports.ts";
+import { newId } from "../src/auth.ts";
+import { createWorkspace } from "../src/workspaces.ts";
 import { counted } from "./counting.ts";
 
 type TestEnv = Env & { TEST_MIGRATIONS: D1Migration[]; TEST_STORAGE_IS_LOCAL?: unknown };
@@ -68,4 +70,12 @@ export async function makeDeps(config?: Partial<Config>) {
     publicKeys: () => listAll(testEnv.PUB),
     calls: c.calls,
   };
+}
+
+/**
+ * A workspace with its owner and one token, made through createWorkspace. Each owner
+ * gets a fresh address, since an email belongs to one user only.
+ */
+export async function seedWorkspace(deps: Deps, name: string): Promise<{ workspaceId: string; token: string }> {
+  return createWorkspace(deps, name, `owner-${newId("usr").slice(4)}@example.com`);
 }

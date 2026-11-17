@@ -6,6 +6,8 @@ import { NodeDb } from "../src/node/db.ts";
 import { NodeFileStore } from "../src/node/files.ts";
 import { migrate } from "../src/node/migrate.ts";
 import type { Config, Deps } from "../src/ports.ts";
+import { newId } from "../src/auth.ts";
+import { createWorkspace } from "../src/workspaces.ts";
 import { counted } from "./counting.ts";
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url));
@@ -31,4 +33,12 @@ export async function makeDeps(config?: Partial<Config>) {
     publicKeys: () => pub.keys(),
     calls: c.calls,
   };
+}
+
+/**
+ * A workspace with its owner and one token, made through createWorkspace. Each owner
+ * gets a fresh address, since an email belongs to one user only.
+ */
+export async function seedWorkspace(deps: Deps, name: string): Promise<{ workspaceId: string; token: string }> {
+  return createWorkspace(deps, name, `owner-${newId("usr").slice(4)}@example.com`);
 }
