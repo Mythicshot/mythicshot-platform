@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "generator": "mythicshot 0.1.0",
+  "title": "Send an invoice",
+  "steps": [
+    { "image": "step-001.png", "width": 1280, "height": 720, "bytes": 48213, "click": { "x": 50.0, "y": 50.0 }, "t_ms": 750 },
+    { "image": "step-002.png", "width": 1280, "height": 720, "bytes": 51022, "click": { "x": 10.0, "y": 25.0 }, "t_ms": 1750 },
+    { "image": "step-003.jpg", "width": 1280, "height": 720, "bytes": 402117, "click": null, "t_ms": 2000 }
+  ]
+}
