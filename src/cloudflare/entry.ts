@@ -1,5 +1,6 @@
 import { createApp } from "../app.ts";
 import type { Deps } from "../ports.ts";
+import { setupCodeFromEnv } from "../setup.ts";
 import { D1Db } from "./db.ts";
 import { R2FileStore } from "./files.ts";
 
@@ -13,7 +14,7 @@ export function depsFromEnv(env: WorkerEnv): Deps {
     pub: new R2FileStore(env.PUB),
     config: {
       publicImageBase: env.PUBLIC_IMAGE_BASE ?? "",
-      setupCode: env.SETUP_CODE ? env.SETUP_CODE : null,
+      setupCode: setupCodeFromEnv(env.SETUP_CODE),
     },
     now: () => Date.now(),
   };

@@ -2,12 +2,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
 import { hashToken, requireAuth } from "../src/auth.ts";
-import { sameSecret } from "../src/setup.ts";
+import { sameSecret, setupCodeFromEnv } from "../src/setup.ts";
 import type { Deps } from "../src/ports.ts";
 
 const ORIGIN = "https://tours.example.com";
 const CODE = "correct-horse-battery-staple"; // 28 characters
 const NOT_FOUND = '{"error":"not_found"}';
+
+/** Zero-width characters and marks, bidi embeddings, overrides and isolates, line and paragraph separators, the BOM. */
+const HIDDEN_CHARS = [
+  ...[0x200b, 0x200c, 0x200d, 0x200e, 0x200f],
+  ...[0x202a, 0x202b, 0x202c, 0x202d, 0x202e],
+  ...[0x2066, 0x2067, 0x2068, 0x2069],
+  ...[0x2028, 0x2029, 0xfeff],
+].map((c) => String.fromCharCode(c));
 
 type Call = { status: number; text: string; headers: Headers };
 
@@ -99,6 +107,47 @@ describe("when setup is unavailable", () => {
     expect(await counts(deps)).toEqual(EMPTY);
   });
 
+  it.each([
+    ["16 spaces", " ".repeat(16)],
+    ["16 tabs and newlines", "\t\n".repeat(8)],
+    ["15 characters padded with spaces", "  " + "c".repeat(15) + "  "],
+    ["15 characters and a carriage return", "c".repeat(15) + "\r"],
+    ["15 characters spread out by spaces", "c c c c c c c c c c c c c c c"],
+    ["a code with a control character inside", "c".repeat(10) + "\u0000" + "c".repeat(10)],
+  ])("a configured code of %s leaves setup unavailable", async (_label, setupCode) => {
+    const { deps } = await makeDeps({ setupCode });
+    for (const p of everySetupRoute(deps, setupCode)) {
+      const r = await p;
+      expect(r.status).toBe(404);
+      expect(r.text).toBe(NOT_FOUND);
+    }
+    expect(await counts(deps)).toEqual(EMPTY);
+  });
+
+  it("a configured code with a trailing carriage return or spaces is trimmed and still unlocks", async () => {
+    for (const setupCode of [CODE + "\r", CODE + "\r\n", "  " + CODE + "  "]) {
+      const { deps } = await makeDeps({ setupCode });
+      expect((await post(deps, "/setup/check", { code: CODE })).status).toBe(204);
+      expect((await post(deps, "/setup/check", { code: setupCode })).status).toBe(204);
+    }
+  });
+
+  it("the typed code is trimmed the same way before it is compared", async () => {
+    const { deps } = await makeDeps({ setupCode: CODE });
+    for (const typed of [" " + CODE, CODE + " ", "\t" + CODE + "\r\n"]) {
+      expect((await post(deps, "/setup/check", { code: typed })).status).toBe(204);
+    }
+    expect((await post(deps, "/setup/claim", claimBody(CODE + "  "))).status).toBe(201);
+  });
+
+  it("setupCodeFromEnv trims the configured value and treats an empty one as unset", () => {
+    expect(setupCodeFromEnv(undefined)).toBeNull();
+    expect(setupCodeFromEnv("")).toBeNull();
+    expect(setupCodeFromEnv(" \r\n")).toBeNull();
+    expect(setupCodeFromEnv(CODE + "\r")).toBe(CODE);
+    expect(setupCodeFromEnv("  " + CODE + "\n")).toBe(CODE);
+  });
+
   it("a 16-character setup code is enough", async () => {
     const { deps } = await makeDeps({ setupCode: "b".repeat(16) });
     expect((await send(deps, "/setup")).status).toBe(200);
@@ -124,7 +173,7 @@ describe("checking the code", () => {
 
   it("a wrong code is 403 on check and on claim and creates no rows", async () => {
     const { deps } = await makeDeps({ setupCode: CODE });
-    for (const wrong of ["", "wrong", CODE.slice(0, -1), CODE + " ", CODE.toUpperCase()]) {
+    for (const wrong of ["", "  ", "wrong", CODE.slice(0, -1), CODE + "x", "x" + CODE, CODE.toUpperCase()]) {
       const check = await post(deps, "/setup/check", { code: wrong });
       expect(check.status).toBe(403);
       expect(check.text).toBe('{"error":"wrong_code"}');
@@ -139,7 +188,7 @@ describe("checking the code", () => {
 
   it("a missing or non-string code, a non-object body and bad JSON are 400 and create nothing", async () => {
     const { deps } = await makeDeps({ setupCode: CODE });
-    for (const body of [{}, { code: 123 }, { code: null }, [CODE], '"' + CODE + '"', "{not json", "x".repeat(5000)]) {
+    for (const body of [{}, { code: 123 }, { code: null }, [CODE], '"' + CODE + '"', "{not json"]) {
       for (const path of ["/setup/check", "/setup/claim"]) {
         const r = await post(deps, path, body);
         expect(r.status).toBe(400);
@@ -147,6 +196,55 @@ describe("checking the code", () => {
       }
     }
     expect(await counts(deps)).toEqual(EMPTY);
+  });
+});
+
+describe("body size", () => {
+  it("a body over 4096 bytes is 413 on both POST routes and creates nothing", async () => {
+    const { deps } = await makeDeps({ setupCode: CODE });
+    const big = JSON.stringify({ code: CODE, workspace: "w".repeat(5000), email: "owner@example.com" });
+    for (const path of ["/setup/check", "/setup/claim"]) {
+      const r = await post(deps, path, big);
+      expect(r.status).toBe(413);
+      expect(r.text).toBe('{"error":"too_large"}');
+    }
+    expect(await counts(deps)).toEqual(EMPTY);
+  });
+
+  it("a streamed body with no Content-Length stops being read at the cap and is 413", async () => {
+    const { deps } = await makeDeps({ setupCode: CODE });
+    for (const path of ["/setup/check", "/setup/claim"]) {
+      let pulled = 0;
+      const chunk = new TextEncoder().encode('{"code":"' + "x".repeat(1000));
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulled++;
+          if (pulled > 1000) controller.close();
+          else controller.enqueue(chunk);
+        },
+      });
+      const req = new Request(ORIGIN + path, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: ORIGIN },
+        body,
+        duplex: "half",
+      } as RequestInit);
+      expect(req.headers.get("content-length")).toBeNull();
+      const res = await createApp(deps).fetch(req);
+      expect(res.status).toBe(413);
+      expect(await res.text()).toBe('{"error":"too_large"}');
+      // About 1 MB was on offer; only a few chunks past the cap may have been pulled.
+      expect(pulled).toBeLessThan(50);
+    }
+    expect(await counts(deps)).toEqual(EMPTY);
+  });
+
+  it("a body of exactly 4096 bytes is read", async () => {
+    const { deps } = await makeDeps({ setupCode: CODE });
+    const base = JSON.stringify({ code: CODE, pad: "" });
+    const exact = JSON.stringify({ code: CODE, pad: "p".repeat(4096 - base.length) });
+    expect(new TextEncoder().encode(exact).length).toBe(4096);
+    expect((await post(deps, "/setup/check", exact)).status).toBe(204);
   });
 });
 
@@ -303,6 +401,13 @@ describe("claiming the site", () => {
     ["a blank workspace name", claimBody(CODE, "   "), "bad_workspace"],
     ["an 81-character workspace name", claimBody(CODE, "w".repeat(81)), "bad_workspace"],
     ["a workspace name with a control character", claimBody(CODE, "Acme\u0000Tours"), "bad_workspace"],
+    ...HIDDEN_CHARS.flatMap((ch) => {
+      const u = "U+" + ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0");
+      return [
+        ["a workspace name with " + u, claimBody(CODE, "Acme" + ch + "Tours"), "bad_workspace"],
+        ["an email with " + u, claimBody(CODE, "Acme", "own" + ch + "er@example.com"), "bad_email"],
+      ] as [string, unknown, string][];
+    }),
     ["a workspace name that is not a string", { code: CODE, workspace: 5, email: "owner@example.com" }, "bad_workspace"],
     ["an email without @", claimBody(CODE, "Acme", "owner.example.com"), "bad_email"],
     ["an email with two @", claimBody(CODE, "Acme", "a@b@example.com"), "bad_email"],

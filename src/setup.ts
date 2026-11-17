@@ -11,14 +11,58 @@ import { workspaceStatements } from "./workspaces.ts";
 /** The shortest setup code that opens setup. A shorter one leaves setup unavailable. */
 export const MIN_SETUP_CODE_LENGTH = 16;
 
-/** The largest JSON body a setup POST reads. */
-const MAX_BODY_CHARS = 4096;
+/** The largest JSON body a setup POST reads, in bytes. Reading stops there. */
+const MAX_BODY_BYTES = 4096;
 const MAX_CODE_CHARS = 1024;
 const MAX_WORKSPACE_CHARS = 80;
 const MAX_EMAIL_CHARS = 254;
 
 // C0 controls, DEL and C1 controls.
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+
+// The controls, plus characters that are invisible or reorder text: zero-width
+// characters and marks (U+200B to U+200F), bidi embeddings and overrides (U+202A to
+// U+202E), bidi isolates (U+2066 to U+2069), the line and paragraph separators and the BOM.
+const HIDDEN_RANGES: readonly [number, number][] = [
+  [0x0000, 0x001f],
+  [0x007f, 0x009f],
+  [0x200b, 0x200f],
+  [0x2028, 0x2029],
+  [0x202a, 0x202e],
+  [0x2066, 0x2069],
+  [0xfeff, 0xfeff],
+];
+
+/** True when the string holds any character from HIDDEN_RANGES. */
+function hasHidden(s: string): boolean {
+  for (const ch of s) {
+    const c = ch.codePointAt(0) as number;
+    for (const [lo, hi] of HIDDEN_RANGES) if (c >= lo && c <= hi) return true;
+  }
+  return false;
+}
+
+/**
+ * The setup code as read from configuration: trimmed, so a trailing carriage return from
+ * a CRLF env file or stray spaces do not count, and null when nothing is left.
+ */
+export function setupCodeFromEnv(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const code = raw.trim();
+  return code === "" ? null : code;
+}
+
+/**
+ * The configured code, trimmed again in case a caller skipped setupCodeFromEnv, when it
+ * can open setup: at least 16 characters that are not whitespace, and no control
+ * character anywhere. Anything else means setup is unavailable, never open.
+ */
+function usableCode(deps: Deps): string | null {
+  const code = setupCodeFromEnv(deps.config.setupCode);
+  if (code === null || CONTROL.test(code)) return null;
+  if (code.replace(/\s/g, "").length < MIN_SETUP_CODE_LENGTH) return null;
+  return code;
+}
 
 async function sha256(s: string): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
@@ -62,8 +106,7 @@ function notFound(): Response {
 
 /** True when setup can still be claimed: a long enough code is configured and nothing is set up yet. */
 async function setupOpen(deps: Deps): Promise<boolean> {
-  const code = deps.config.setupCode;
-  if (typeof code !== "string" || code.length < MIN_SETUP_CODE_LENGTH) return false;
+  if (usableCode(deps) === null) return false;
   const row = await deps.db.first<{ n: number }>(
     "SELECT (SELECT count(*) FROM setup) + (SELECT count(*) FROM workspace) AS n",
   );
@@ -93,15 +136,44 @@ function sameOrigin(req: Request): boolean {
 
 type Body = Record<string, unknown>;
 
-/** The request's JSON object with a string `code`, or null for anything else. */
-async function readBody(req: Request): Promise<Body | null> {
-  const length = Number(req.headers.get("content-length") ?? "0");
-  if (length > MAX_BODY_CHARS) return null;
-  const text = await req.text();
-  if (text.length > MAX_BODY_CHARS) return null;
+/**
+ * The body's bytes, or "too_large" once more than MAX_BODY_BYTES would be read. A
+ * declared Content-Length over the cap is refused before reading; a body without one is
+ * read only until it passes the cap, and the rest of the stream is cancelled.
+ */
+async function readCapped(req: Request): Promise<Uint8Array | "too_large"> {
+  const declared = req.headers.get("content-length");
+  if (declared !== null && Number(declared) > MAX_BODY_BYTES) return "too_large";
+  if (req.body === null) return new Uint8Array(0);
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_BODY_BYTES) {
+      await reader.cancel().catch(() => {});
+      return "too_large";
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return out;
+}
+
+/** The request's JSON object with a string `code`, "too_large", or null for anything else. */
+async function readBody(req: Request): Promise<Body | "too_large" | null> {
+  const bytes = await readCapped(req);
+  if (bytes === "too_large") return bytes;
   let body: unknown;
   try {
-    body = JSON.parse(text);
+    body = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
   } catch {
     return null;
   }
@@ -115,7 +187,7 @@ async function readBody(req: Request): Promise<Body | null> {
 function workspaceName(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const name = v.trim();
-  if (name.length < 1 || name.length > MAX_WORKSPACE_CHARS || CONTROL.test(name)) return null;
+  if (name.length < 1 || name.length > MAX_WORKSPACE_CHARS || hasHidden(name)) return null;
   return name;
 }
 
@@ -123,7 +195,7 @@ function workspaceName(v: unknown): string | null {
 function ownerEmail(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const email = v.trim();
-  if (email.length > MAX_EMAIL_CHARS || /\s/.test(email) || CONTROL.test(email)) return null;
+  if (email.length > MAX_EMAIL_CHARS || /\s/.test(email) || hasHidden(email)) return null;
   const parts = email.split("@");
   if (parts.length !== 2 || parts[0] === "" || parts[1] === "") return null;
   return email;
@@ -131,14 +203,18 @@ function ownerEmail(v: unknown): string | null {
 
 /**
  * Runs the checks every setup POST shares, in this order: setup open (else 404), same
- * origin (else 403), a readable body (else 400), the right code (else 403).
+ * origin (else 403), a body within the cap (else 413) that reads (else 400), the right
+ * code (else 403).
  */
 async function guardPost(c: Context, deps: Deps): Promise<Body | Response> {
   if (!(await setupOpen(deps))) return notFound();
   if (!sameOrigin(c.req.raw)) return json(403, { error: "cross_origin" });
   const body = await readBody(c.req.raw);
+  if (body === "too_large") return json(413, { error: "too_large" });
   if (body === null) return json(400, { error: "bad_request" });
-  if (!(await sameSecret(body.code as string, deps.config.setupCode as string))) return json(403, { error: "wrong_code" });
+  const code = usableCode(deps);
+  // The typed code is trimmed the same way as the configured one, then compared as typed.
+  if (code === null || !(await sameSecret((body.code as string).trim(), code))) return json(403, { error: "wrong_code" });
   return body;
 }
 

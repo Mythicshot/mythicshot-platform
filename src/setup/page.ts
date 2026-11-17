@@ -331,14 +331,17 @@ export const SETUP_JS = `(function () {
     else fallback();
   }
 
+  // Controls and characters that are invisible or reorder text; the server refuses them too.
+  var HIDDEN = /[\\u0000-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069\\u2028\\u2029\\ufeff]/;
+
   function validName(v) {
     var s = v.trim();
-    return s.length >= 1 && s.length <= 80 && !/[\\u0000-\\u001f\\u007f-\\u009f]/.test(s);
+    return s.length >= 1 && s.length <= 80 && !HIDDEN.test(s);
   }
 
   function validEmail(v) {
     var s = v.trim();
-    if (s.length > 254 || /\\s/.test(s)) return false;
+    if (s.length > 254 || /\\s/.test(s) || HIDDEN.test(s)) return false;
     var parts = s.split("@");
     return parts.length === 2 && parts[0] !== "" && parts[1] !== "";
   }
