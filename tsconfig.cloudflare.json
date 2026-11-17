@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": [
+      "es2023"
+    ],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "types": [
+      "@cloudflare/vitest-plugin/types"
+    ],
+    "paths": {
+      "#harness": [
+        "./test/harness.cloudflare.ts"
+      ]
+    }
+  },
+  "include": [
+    "worker-configuration.d.ts",
+    "src/**/*.ts",
+    "test/**/*.ts"
+  ],
+  "exclude": [
+    "src/node/**",
+    "test/harness.node.ts",
+    "test/node-*.test.ts",
+    "node_modules",
+    "dist"
+  ]
+}

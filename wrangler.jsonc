@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "demo-platform",
+  "main": "src/cloudflare/entry.ts",
+  "compatibility_date": "2026-11-17",
+  // Placeholders: an install sets its own database id and bucket names.
+  // SETUP_CODE is a secret (`wrangler secret put SETUP_CODE`, or .dev.vars locally), never a var.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "demo-platform",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "DRAFTS", "bucket_name": "demo-platform-drafts" },
+    { "binding": "PUB", "bucket_name": "demo-platform-public" }
+  ],
+  "vars": {
+    "PUBLIC_IMAGE_BASE": ""
+  }
+}
