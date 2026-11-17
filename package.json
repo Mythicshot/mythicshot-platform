@@ -1,0 +1,35 @@
+{
+  "name": "demo-platform",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Hosted platform for interactive product tours, on Cloudflare or in a container.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/node/entry.js",
+    "dev": "wrangler dev",
+    "types": "wrangler types",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.cloudflare.json",
+    "test:cf": "vitest run -c vitest.cloudflare.config.ts",
+    "test:node": "vitest run -c vitest.node.config.ts",
+    "test": "npm run test:cf && npm run test:node"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.9",
+    "hono": "4.13.19"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.8.4",
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2",
+    "vitest": "4.1.12",
+    "wrangler": "4.164.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "workerd@1.20261117.1": true
+  }
+}
