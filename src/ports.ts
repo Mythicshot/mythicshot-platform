@@ -95,6 +95,11 @@ export type Config = {
   setupCode: string | null; // null or shorter than 16 characters: setup is off
   /** Open (uncommitted, unexpired) uploads a workspace may have at once. Default 5. */
   maxOpenUploads?: number;
+  /**
+   * How long a published image a re-publish replaced stays served before it is deleted,
+   * so a viewer still on the previous page keeps its images. Default 10 minutes.
+   */
+  retiredGraceMs?: number;
 };
 
 export type Deps = { db: Db; drafts: FileStore; pub: FileStore; config: Config; now: () => number };
