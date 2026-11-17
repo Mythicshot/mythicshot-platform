@@ -53,7 +53,7 @@ describe("app", () => {
 
   it("migrations have run", async () => {
     const { deps } = await makeDeps();
-    expect(await deps.db.all("SELECT * FROM platform_meta")).toEqual([]);
+    expect(await deps.db.all("SELECT * FROM workspace")).toEqual([]);
   });
 });
 
