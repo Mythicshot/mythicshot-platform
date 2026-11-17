@@ -1,0 +1,58 @@
+# The container stack: the app behind Caddy, which ends HTTPS and is the only service
+# with published ports. Run from the folder holding this file, a .env file and the
+# caddy/ folder: docker compose up -d
+#
+# .env (mode 600, never committed) holds DOMAIN, ACME_EMAIL, DATA_DIR (a host folder
+# owned by id 1001), APP_IMAGE and SETUP_CODE.
+
+# Docker's local log files, capped at three files of 10 MB per container.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  app:
+    image: ${APP_IMAGE:?APP_IMAGE is not set in .env}
+    env_file: .env
+    environment:
+      # Paths and port inside the container. These win over the same names in .env,
+      # where DATA_DIR is the folder on the host.
+      DATA_DIR: /data
+      PORT: "3000"
+    volumes:
+      # The data folder must already exist, owned by id 1001. Docker would otherwise
+      # create a missing one owned by root, which the app cannot write to.
+      - type: bind
+        source: ${DATA_DIR:?DATA_DIR is not set in .env}
+        target: /data
+        bind:
+          create_host_path: false
+    # No ports: the app is reached only through caddy on the stack's own network.
+    restart: unless-stopped
+    stop_grace_period: 10s
+    logging: *logging
+
+  caddy:
+    # caddy:2.11.9-alpine, pinned by the digest of its multi-platform index.
+    image: caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      # Read by the Caddyfile as {$DOMAIN} and {$ACME_EMAIL}.
+      DOMAIN: ${DOMAIN:?DOMAIN is not set in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is not set in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      # The folder is mounted, not the single Caddyfile, so edits and reloads apply.
+      - ./caddy:/etc/caddy:ro
+      # Certificates and their keys; must persist, never treat as a cache.
+      - ./caddy-data:/data
+      - ./caddy-config:/config
+    logging: *logging

@@ -1,0 +1,21 @@
+# Keep the build context to source: no dependencies, history, data or secrets.
+node_modules
+**/node_modules
+.git
+dist
+.wrangler
+.data
+data
+**/*.sqlite
+**/*.sqlite-*
+.env
+.env.*
+**/.env
+**/.env.*
+.dev.vars
+.dev.vars.*
+!.env.example
+deploy
+test
+coverage
+*.log
