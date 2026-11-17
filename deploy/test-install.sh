@@ -3,8 +3,8 @@
 # official Debian 13 container and one Debian 12 container (no network, the deploy
 # folder mounted read-only, removed afterwards) and runs this same file inside each as
 # root. Inside, install.sh runs against a temporary root (DP_ROOT) with docker, apt-get,
-# curl, dpkg, dpkg-query, ss, getent and ip replaced by stubs that record what would be
-# run; the tests assert on that record and on the files written.
+# curl, gpg, snap, dpkg, dpkg-query, ss, getent and ip replaced by stubs that record what
+# would be run; the tests assert on that record and on the files written.
 #
 # Not covered here, only on a clean server: real package installation, real
 # certificate issuance and real ports.
@@ -26,7 +26,8 @@ if [ "${1:-}" != "--inside" ]; then
   for image in ${DEBIAN_IMAGES:-debian:13 debian:12}; do
     echo
     echo "######## $image"
-    docker run --rm --network none --user 0 -v "$SRC:/src:ro" "$image" bash /src/test-install.sh --inside || status=1
+    # --init: a real PID 1 that passes Ctrl-C on, so an interrupted run stops.
+    docker run --rm --init --network none --user 0 -v "$SRC:/src:ro" "$image" bash /src/test-install.sh --inside || status=1
   done
   echo
   echo "Docker after:  $(counts)"
@@ -49,6 +50,7 @@ ANSWERS="$DOMAIN
 $EMAIL
 
 "
+DOCKER_FPR=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
 PASSES=0
 FAILS=0
 
@@ -66,6 +68,7 @@ new_sandbox() {
   write_stubs "$T/bin"
   INST="$R/opt/demo-platform"
   DATA="$INST/data"
+  STUB_DATA="$DATA"
 }
 
 write_stubs() {
@@ -75,8 +78,27 @@ write_stubs() {
 printf 'docker %s\n' "$*" >>"$STUB_LOG"
 args=" $* "
 installed() { [ "${STUB_DOCKER_MISSING:-0}" != 1 ] || [ -e "$STUB_STATE/docker-installed" ]; }
-if [[ "$args" == *" compose version "* ]]; then installed || exit 1; echo "Docker Compose version v5.0.0"; exit 0; fi
+if [[ "$args" == " compose version"* ]]; then
+  installed || exit 1
+  if [[ "$args" == *" --short "* ]]; then echo "${STUB_COMPOSE_VERSION:-5.0.0}"; else echo "Docker Compose version v${STUB_COMPOSE_VERSION:-5.0.0}"; fi
+  exit 0
+fi
 installed || { echo "docker: command not found" >&2; exit 127; }
+case "$args" in
+  " info "*)
+    [ "${STUB_DAEMON_DOWN:-0}" != 1 ] || { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
+    echo "Server Version: 29.0.0"; exit 0 ;;
+  " image inspect "*)
+    case "${STUB_IMAGE:-local}" in
+      local) echo 0 ;;
+      pulled) echo 1 ;;
+      missing) [ -e "$STUB_STATE/pulled" ] || { echo "Error: No such image" >&2; exit 1; }; echo 1 ;;
+    esac
+    exit 0 ;;
+  " pull "*)
+    [ "${STUB_PULL_OK:-0}" = 1 ] || { echo "pull access denied" >&2; exit 1; }
+    touch "$STUB_STATE/pulled"; exit 0 ;;
+esac
 case "$args" in
   *" up "*)
     n=$(cat "$STUB_STATE/ups" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$STUB_STATE/ups"
@@ -84,7 +106,9 @@ case "$args" in
     touch "$STUB_STATE/running" ;;
   *" down "*) rm -f "$STUB_STATE/running" ;;
   *" ps -q "*) [ ! -e "$STUB_STATE/running" ] || echo 0123456789ab ;;
+  *" logs "*) echo "app  | stub log line" ;;
   *" exec -T app node dist/node/backup.js "*)
+    [ "${STUB_FAIL_EXEC:-0}" != 1 ] || { echo "service app is not running" >&2; exit 1; }
     target="${*: -1}"; printf 'SQLite format 3 (stub copy)\n' >"$STUB_DATA/${target#/data/}"; chown 1001:1001 "$STUB_DATA/${target#/data/}" ;;
   *" inspect "*) echo healthy ;;
 esac
@@ -93,6 +117,7 @@ EOF
   cat >"$b/apt-get" <<'EOF'
 #!/bin/bash
 printf 'apt-get %s\n' "$*" >>"$STUB_LOG"
+umask >>"$STUB_STATE/apt-umask"
 [[ " $* " != *" docker-ce "* ]] || touch "$STUB_STATE/docker-installed"
 exit 0
 EOF
@@ -103,6 +128,20 @@ out=""; prev=""
 for a in "$@"; do [ "$prev" != "-o" ] || out="$a"; prev="$a"; done
 [ -z "$out" ] || printf -- '-----BEGIN PGP PUBLIC KEY BLOCK-----\nstub\n-----END PGP PUBLIC KEY BLOCK-----\n' >"$out"
 exit 0
+EOF
+  cat >"$b/gpg" <<'EOF'
+#!/bin/bash
+printf 'gpg %s\n' "$*" >>"$STUB_LOG"
+echo "pub:-:4096:1:8D81803C0EBFCD88:1487788586:::-:::scESC::::::23::0:"
+echo "fpr:::::::::${STUB_KEY_FPR:-9DC858229FC7DD38854AE2D88D81803C0EBFCD88}:"
+echo "uid:-::::1487792064::B50C::Docker Release (CE deb) <docker@docker.com>::::::::::0:"
+echo "sub:-:4096:1:7EA0A9C3F273FCD8:1487788586::::::s::::::23:"
+echo "fpr:::::::::D3306A018370199E527AE7997EA0A9C3F273FCD8:"
+EOF
+  cat >"$b/snap" <<'EOF'
+#!/bin/bash
+if [ "${STUB_SNAP_DOCKER:-0}" = 1 ] && [ "$1 ${2:-}" = "list docker" ]; then echo "docker 28.1.1 3221 latest/stable canonical"; exit 0; fi
+exit 1
 EOF
   cat >"$b/dpkg" <<'EOF'
 #!/bin/bash
@@ -117,6 +156,7 @@ exit 1
 EOF
   cat >"$b/ss" <<'EOF'
 #!/bin/bash
+[ "${STUB_SS_FAIL:-0}" != 1 ] || { echo "Cannot open netlink socket: Permission denied" >&2; exit 1; }
 if [ -n "${STUB_PORT_BUSY:-}" ] && [[ "$*" == *"sport = :$STUB_PORT_BUSY"* ]] && [[ "$1" == *t* ]]; then
   echo "LISTEN 0 511 0.0.0.0:$STUB_PORT_BUSY 0.0.0.0:* users:((\"webserver\",pid=4242,fd=6))"
 fi
@@ -130,7 +170,7 @@ EOF
   cat >"$b/ip" <<'EOF'
 #!/bin/bash
 for a in ${STUB_LOCAL_IPS:-203.0.113.10}; do
-  echo "2: eth0    inet $a/24 brd 203.0.113.255 scope global eth0\\       valid_lft forever preferred_lft forever"
+  echo "2: eth0    inet $a/24 brd 203.0.113.255 scope global eth0"
 done
 EOF
   chmod +x "$b"/*
@@ -142,14 +182,14 @@ install_sh() {
   OUT="$T/out"; ERR="$T/err"
   set +e
   printf '%s' "$input" | env PATH="$T/bin:$PATH" DP_ROOT="$R" STUB_LOG="$LOG" STUB_STATE="$STATE" \
-    STUB_DATA="$DATA" bash "$SCRIPT" "$@" >"$OUT" 2>"$ERR"
+    STUB_DATA="$STUB_DATA" bash "$SCRIPT" "$@" >"$OUT" 2>"$ERR"
   RC=$?
   set -e
 }
 
 # Sources install.sh's functions only, against the sandbox root, in the current shell.
 # shellcheck source=deploy/install.sh
-load_functions() { DP_ROOT="$R" DP_SOURCE_ONLY=1 . "$SCRIPT"; set +e; }
+load_functions() { DP_ROOT="$R"; DP_SOURCE_ONLY=1; . "$SCRIPT"; set +e; }
 
 # Every path under the root with its type, mode and owner, and every file's checksum.
 snapshot() {
@@ -158,11 +198,21 @@ snapshot() {
 
 fresh_install() { install_sh "$ANSWERS" install --yes; [ "$RC" = 0 ] || { cat "$OUT" "$ERR"; die "fresh install failed"; }; }
 setup_code() { sed -n 's/^SETUP_CODE=//p' "$INST/.env"; }
+# A fresh install with the data folder at /srv/<name> (answers given), STUB_DATA set.
+install_with_data() {
+  STUB_DATA="$R$1"
+  install_sh "$DOMAIN
+$EMAIL
+$1
+" install --yes
+  [ "$RC" = 0 ] || { cat "$OUT" "$ERR"; die "install with data folder $1 failed"; }
+}
 
 die() { printf '      %s\n' "$*"; exit 1; }
 expect() { local msg="$1"; shift; "$@" || die "$msg"; }
 has() { grep -qF -- "$2" "$1"; }
 hasnt() { ! grep -qF -- "$2" "$1"; }
+no_recursive_chown() { ! grep -qE 'chown[[:space:]]+-[A-Za-z]*R' "$OUT" "$ERR"; }
 
 run_test() {
   local name="$1"
@@ -215,18 +265,37 @@ test_email_validation() {
 test_data_dir_validation() {
   new_sandbox; load_functions
   local p
-  for p in /opt/demo-platform/data /srv/demo-platform /var/lib/demo-platform /mnt/disk1/dp /data; do
+  for p in /opt/demo-platform/data /srv/demo-platform /var/lib/demo-platform /mnt/disk1/dp /home/alex/demo-data /opt/new-dedicated; do
     valid_data_dir "$p" || die "refused good folder $p"
   done
-  for p in "" / relative/x /etc /etc/dp /usr/local/dp /tmp/dp /proc/x /opt /srv /home /var /opt/demo-platform \
-           /opt/demo-platform/backups /opt/demo-platform/caddy-data/x /a/../etc "/a b" "/a;b" /var/lib/docker/volumes/x; do
+  for p in "" / relative/x /etc /etc/dp /usr/local/dp /tmp/dp /proc/x /opt /srv /data /home /home/alex /var /var/lib /var/log \
+           /var/dp /var/log/dp /var/cache/dp /root /root/dp /opt/demo-platform /opt/demo-platform/.env \
+           /opt/demo-platform/docker-compose.yml /opt/demo-platform/backups /opt/demo-platform/other \
+           /opt/demo-platform/caddy-data/x /opt/demo-platform/data/x /a/../etc "/a b" "/a;b" /var/lib/docker/volumes/x; do
     ! valid_data_dir "$p" || die "accepted bad folder '$p'"
   done
 }
 
+test_new_data_dir_must_be_new_or_empty() {
+  new_sandbox; load_functions
+  mkdir -p "$R/opt/other-app" "$R/srv/full" "$R/srv/empty" "$R/srv/real-empty" "$R/etc"
+  echo x >"$R/opt/other-app/config"; echo x >"$R/srv/full/file"; echo x >"$R/srv/afile"
+  ln -s "$R/etc" "$R/srv/to-etc"; ln -s "$R/srv/real-empty" "$R/srv/link-empty"
+  mkdir -p "$INST"; echo x >"$INST/.env"; echo x >"$INST/docker-compose.yml"
+  local p
+  for p in /opt/other-app /srv/full /srv/afile /srv/to-etc /opt/demo-platform/.env /opt/demo-platform/docker-compose.yml; do
+    (check_new_data_dir "$p") >/dev/null 2>&1 && die "accepted existing or unsafe folder $p"
+  done
+  (check_new_data_dir /srv/empty) >/dev/null 2>&1 || die "refused an empty folder"
+  (check_new_data_dir /srv/new/dp) >/dev/null 2>&1 || die "refused a folder that does not exist"
+  [ "$(check_new_data_dir /srv/link-empty 2>/dev/null)" = /srv/real-empty ] || die "a link is not recorded as the resolved folder"
+  [ "$(check_new_data_dir /opt/demo-platform/data 2>/dev/null)" = /opt/demo-platform/data ] || die "refused the default folder"
+  return 0
+}
+
 test_path_guard() {
   new_sandbox; load_functions
-  mkdir -p "$INST" "$R/etc"
+  mkdir -p "$INST" "$R/etc" "$R/srv/dp"
   ln -s /etc "$INST/link"
   local p
   # With no data folder known yet, only the install folder is allowed.
@@ -241,6 +310,9 @@ test_path_guard() {
   for p in "$R/srv" "$R/srv/dp2" "$R/etc/apt/keyrings/other.asc" "$INST/link/shadow"; do
     (guard_path "$p") >/dev/null 2>&1 && die "allowed '$p'"
   done
+  # A data folder that no longer resolves to itself (a parent became a link) is not trusted.
+  mv "$R/srv" "$R/srv-real"; mkdir -p "$R/victim/dp"; ln -s "$R/victim" "$R/srv"
+  (guard_path "$DATA_PATH/x") >/dev/null 2>&1 && die "allowed a path through a linked parent"
   (safe_rm_file "$INST") >/dev/null 2>&1 && die "safe_rm_file removed a folder"
   [ -d "$INST" ] || die "install folder gone"
   return 0
@@ -281,6 +353,11 @@ test_refuses_non_root() {
   expect "message names root" has "$ERR" "needs root"
   expect "log is empty" test ! -s "$LOG"
   expect "nothing written" test ! -e "$R/opt"
+  # Piped into bash, $0 is "bash": the message still names the script.
+  set +e
+  env PATH="$T/bin:$PATH" DP_ROOT="$R" STUB_LOG="$LOG" STUB_STATE="$STATE" bash -s -- install <"$SCRIPT" >"$OUT" 2>"$ERR"
+  set -e
+  expect "piped: names install.sh" has "$ERR" "sudo bash install.sh install"
 }
 
 test_refuses_non_debian() {
@@ -317,6 +394,14 @@ test_busy_port_refused() {
   expect "nothing written" test ! -e "$R/opt"
 }
 
+test_ss_error_is_unknown_not_free() {
+  new_sandbox
+  STUB_SS_FAIL=1 install_sh "$ANSWERS" install --yes
+  expect "install goes on" test "$RC" = 0
+  expect "warns the ports are unknown" has "$ERR" "could not check port 80"
+  expect "does not claim they are free" hasnt "$OUT" "nothing else listens on ports 80 and 443"
+}
+
 test_conflicting_packages_refused() {
   new_sandbox
   STUB_DOCKER_MISSING=1 STUB_CONFLICT="docker.io podman-docker" install_sh "$ANSWERS" install --yes
@@ -325,8 +410,33 @@ test_conflicting_packages_refused() {
   expect "no apt-get run" hasnt "$LOG" "apt-get"
 }
 
+test_docker_snap_refused() {
+  new_sandbox
+  STUB_SNAP_DOCKER=1 install_sh "$ANSWERS" install --yes
+  expect "exit code 1" test "$RC" = 1
+  expect "says snap" has "$ERR" "snap"
+  expect "nothing written" test ! -e "$R/opt"
+}
+
+test_docker_daemon_must_answer() {
+  new_sandbox
+  STUB_DAEMON_DOWN=1 install_sh "$ANSWERS" install --yes
+  expect "exit code 1" test "$RC" = 1
+  expect "names the daemon" has "$ERR" "daemon"
+  expect "nothing written" test ! -e "$R/opt"
+}
+
+test_old_compose_refused() {
+  new_sandbox
+  STUB_COMPOSE_VERSION=2.12.2 install_sh "$ANSWERS" install --yes
+  expect "exit code 1" test "$RC" = 1
+  expect "names the versions" has "$ERR" "2.12.2"
+  expect "nothing written" test ! -e "$R/opt"
+}
+
 test_invalid_answers_are_asked_again() {
   new_sandbox
+  STUB_DATA="$R/srv/dp"
   install_sh "not a domain
 TOURS.Example.COM
 admin@EXAMPLE.com
@@ -347,6 +457,55 @@ worse
   expect "nothing written" test ! -e "$R/opt"
 }
 
+test_existing_folders_refused_as_data() {
+  new_sandbox
+  mkdir -p "$R/var/lib/dpkg" "$R/home/alex/docs" "$R/srv/full"
+  echo keep >"$R/home/alex/docs/thesis"; echo keep >"$R/srv/full/file"
+  install_sh "$DOMAIN
+$EMAIL
+/var/lib
+/home/alex
+/srv/full
+" install --yes
+  expect "three refused folders stop" test "$RC" = 1
+  expect "nothing written" test ! -e "$R/opt"
+  expect "the folders are untouched" test "$(stat -c '%u' "$R/home/alex")" = 0
+  expect "no recursive chown advice" no_recursive_chown
+  new_sandbox
+  mkdir -p "$R/srv/empty"
+  install_with_data /srv/empty
+  expect "an empty folder becomes the data folder, owned by 1001, mode 700" test "$(stat -c '%a %u' "$R/srv/empty")" = "700 1001"
+}
+
+test_rerun_accepts_only_the_recorded_folder() {
+  new_sandbox
+  fresh_install
+  chown 0:0 "$DATA"
+  install_sh "" install
+  expect "a wrongly owned folder is reported" has "$ERR" "owned by id 0"
+  expect "no recursive chown advice" no_recursive_chown
+  sed -i 's|^DATA_DIR=.*|DATA_DIR=/var/lib|' "$INST/.env"
+  install_sh "" install
+  expect "an edited DATA_DIR of /var/lib is refused" test "$RC" = 1
+  sed -i 's|^DATA_DIR=.*|DATA_DIR=/opt/demo-platform/data|' "$INST/.env"
+  mv "$DATA" "$R/elsewhere"; ln -s "$R/elsewhere" "$DATA"
+  install_sh "" install
+  expect "a recorded folder that became a link is refused" test "$RC" = 1
+}
+
+test_image_must_exist_before_anything_is_written() {
+  new_sandbox
+  STUB_IMAGE=missing install_sh "$ANSWERS" install --yes
+  expect "exit code 1" test "$RC" = 1
+  expect "explains loading an image" has "$ERR" "docker load"
+  expect "nothing written" test ! -e "$R/opt"
+  expect "no stack started" hasnt "$LOG" " up "
+  new_sandbox
+  APP_IMAGE=registry.example.com/demo/platform:1.0 STUB_IMAGE=missing STUB_PULL_OK=1 install_sh "$ANSWERS" install --yes
+  expect "a pullable image installs" test "$RC" = 0
+  expect "it was pulled" has "$LOG" "docker pull registry.example.com/demo/platform:1.0"
+}
+
 # ---------------------------------------------------------------- install
 
 test_fresh_install_writes_env_compose_caddyfile() {
@@ -363,12 +522,13 @@ test_fresh_install_writes_env_compose_caddyfile() {
   expect "Caddyfile reads the domain and email" has "$INST/caddy/Caddyfile" '{$DOMAIN}'
   expect "compose file validated before use" grep -q 'docker compose --project-name demo-platform --project-directory .* config --quiet' "$LOG"
   expect "stack started with a health wait" grep -q 'compose .* up -d --pull missing --wait --wait-timeout 120' "$LOG"
+  expect "daemon checked" grep -qx 'docker info' "$LOG"
   expect "Docker present: no apt-get" hasnt "$LOG" "apt-get"
   expect "address printed" has "$OUT" "https://$DOMAIN/setup"
   expect "code printed exactly once" test "$(grep -c -- "$code" "$OUT")" = 1
   expect "code not on stderr" hasnt "$ERR" "$code"
   expect "code never on a stub's command line" hasnt "$LOG" "$code"
-  expect "no temporary files left" test "$(find "$R" -name '.*.new.*' -o -name '.partial.*' | wc -l)" = 0
+  expect "no temporary files left" test "$(find "$R" -name '.*.new.*' -o -name '.partial.*' -o -name '.gnupg.*' | wc -l)" = 0
   expect "DNS warning names the record" has "$ERR" "$DOMAIN.  A     203.0.113.10"
 }
 
@@ -385,6 +545,8 @@ test_second_install_changes_nothing() {
   expect "no question asked" hasnt "$ERR" "Domain name for the platform"
   expect "no backup copies made" test "$(find "$R" -name '*.bak-*' | wc -l)" = 0
   expect "own Caddy holds the ports" has "$OUT" "own Caddy"
+  expect "the code is not printed again" hasnt "$OUT" "$code"
+  expect "says where the code is" has "$OUT" "/opt/demo-platform/.env"
 }
 
 test_docker_is_installed_only_when_missing() {
@@ -393,17 +555,20 @@ test_docker_is_installed_only_when_missing() {
   expect "install succeeds" test "$RC" = 0
   local want got
   want="apt-get update
-apt-get install -y ca-certificates curl
-curl -fsSL https://download.docker.com/linux/debian/gpg -o
+apt-get install -y ca-certificates curl gpg
+curl --proto =https --tlsv1.2 -fsSL https://download.docker.com/linux/debian/gpg -o
 apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
   got="$(grep -E '^(apt-get|curl)' "$LOG" | sed 's/ -o .*/ -o/')"
   expect "the commands from Docker's page, in order" test "$got" = "$want"
+  expect "the key's fingerprint is checked" grep -q '^gpg .*--show-keys' "$LOG"
+  expect "apt-get runs under umask 022" test "$(sort -u "$STATE/apt-umask")" = 0022
   expect "key in place, readable" test "$(stat -c '%a' "$R/etc/apt/keyrings/docker.asc")" = 644
   expect "key is the download" has "$R/etc/apt/keyrings/docker.asc" "BEGIN PGP PUBLIC KEY BLOCK"
   expect "sources file names $CODENAME" grep -qx "Suites: $CODENAME" "$R/etc/apt/sources.list.d/docker.sources"
   expect "sources file arch" grep -qx "Architectures: amd64" "$R/etc/apt/sources.list.d/docker.sources"
   expect "sources file key" grep -qx "Signed-By: /etc/apt/keyrings/docker.asc" "$R/etc/apt/sources.list.d/docker.sources"
+  expect "sources file readable" test "$(stat -c '%a' "$R/etc/apt/sources.list.d/docker.sources")" = 644
   : >"$LOG"
   STUB_DOCKER_MISSING=1 install_sh "" install
   expect "second run succeeds" test "$RC" = 0
@@ -415,6 +580,16 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin do
   expect "a failed move stops the install" test "$RC" != 0
   expect "no Docker packages installed after it" hasnt "$LOG" "docker-ce"
   expect "no .env written after it" test ! -e "$INST/.env"
+}
+
+test_wrong_key_fingerprint_refused() {
+  new_sandbox
+  STUB_DOCKER_MISSING=1 STUB_KEY_FPR=0000000000000000000000000000000000000000 install_sh "$ANSWERS" install --yes
+  expect "exit code 1" test "$RC" = 1
+  expect "names the expected fingerprint" has "$ERR" "$DOCKER_FPR"
+  expect "no key installed" test ! -e "$R/etc/apt/keyrings/docker.asc"
+  expect "no sources file" test ! -e "$R/etc/apt/sources.list.d/docker.sources"
+  expect "no Docker packages installed" hasnt "$LOG" "docker-ce"
 }
 
 test_changed_compose_file_is_backed_up_first() {
@@ -430,14 +605,20 @@ test_changed_compose_file_is_backed_up_first() {
   expect "file is the deploy copy again" cmp -s "$INST/docker-compose.yml" /src/docker-compose.yml
 }
 
-test_a_failed_compose_up_leaves_data_and_env() {
+test_a_failed_fresh_install_removes_what_it_created() {
   new_sandbox
   STUB_FAIL_UP=1 install_sh "$ANSWERS" install --yes
   expect "fresh run fails" test "$RC" != 0
-  expect "says nothing was changed" has "$ERR" "were not changed"
-  expect ".env still there" test -f "$INST/.env"
-  expect "data folder still there" test -d "$DATA"
-  # A working install, a hand edit (the previous working state), then a failed start.
+  expect "shows the app's log" has "$LOG" " logs --tail"
+  expect "takes the half-started stack down" grep -q 'compose .* down' "$LOG"
+  expect ".env removed" test ! -e "$INST/.env"
+  expect "compose file removed" test ! -e "$INST/docker-compose.yml"
+  expect "empty data folder removed" test ! -e "$DATA"
+  expect "says what it removed" has "$ERR" "removed $INST/.env"
+  expect "does not claim .env was unchanged" hasnt "$ERR" "were not changed"
+}
+
+test_a_failed_compose_up_restores_the_previous_setup() {
   new_sandbox
   fresh_install
   echo marker >"$DATA/marker"
@@ -450,17 +631,28 @@ test_a_failed_compose_up_leaves_data_and_env() {
   expect "data marker survives" test "$(cat "$DATA/marker")" = marker
   expect "previous compose file restored" test "$(sha256sum <"$INST/docker-compose.yml")" = "$compose_sum"
   expect "previous setup started again" test "$(grep -c ' up -d' "$LOG")" = 2
+  expect "not taken down" hasnt "$LOG" " down"
 }
 
-test_update_touches_no_files() {
+test_update_backs_up_then_restarts() {
   new_sandbox
   fresh_install
   local before; before="$(snapshot)"
   : >"$LOG"
-  install_sh "" update
+  STUB_IMAGE=pulled install_sh "" update
   expect "update succeeds" test "$RC" = 0
-  expect "no file changed" test "$(snapshot)" = "$before"
-  expect "pull, then up" test "$(grep -oE 'compose .* (pull|up -d)' "$LOG" | grep -oE '(pull|up -d)$' | tr '\n' ' ')" = "pull up -d "
+  expect "pull, backup, then up" test "$(grep -oE 'compose .* (pull|up -d|exec -T app)' "$LOG" | grep -oE '(pull|up -d|exec -T app)$' | tr '\n' ' ')" = "pull exec -T app up -d "
+  expect "a backup archive written" test "$(find "$INST/backups" -name 'demo-platform-*.tar.gz' | wc -l)" = 1
+  expect "only the backup is new" test "$(diff <(printf '%s\n' "$before") <(snapshot) | grep '^>' | grep -vc 'backups/demo-platform-')" = 0
+  : >"$LOG"
+  install_sh "" update
+  expect "local image: update succeeds" test "$RC" = 0
+  expect "local image: only caddy is pulled" grep -q 'compose .* pull caddy$' "$LOG"
+  expect "local image: says so" has "$OUT" "loaded on this server"
+  : >"$LOG"
+  STUB_FAIL_EXEC=1 install_sh "" update
+  expect "a failed backup stops the update" test "$RC" = 1
+  expect "and nothing is restarted" hasnt "$LOG" " up -d"
 }
 
 test_backup_never_removes_older_backups() {
@@ -506,14 +698,14 @@ test_uninstall_keeps_the_data_folder() {
 test_delete_data_needs_the_typed_domain() {
   new_sandbox
   fresh_install
-  echo marker >"$DATA/marker"
+  mkdir -p "$DATA/drafts"; echo marker >"$DATA/drafts/marker"
   install_sh "" backup
   local answer
   for answer in "wrong.example.com" "" "yes" "TOURS.EXAMPLE.COM"; do
     install_sh "$answer
 " uninstall --delete-data --yes
     expect "'$answer' is refused" test "$RC" = 1
-    expect "'$answer' keeps the data" test "$(cat "$DATA/marker")" = marker
+    expect "'$answer' keeps the data" test "$(cat "$DATA/drafts/marker")" = marker
   done
   install_sh "$DOMAIN
 " uninstall --delete-data --yes
@@ -522,6 +714,33 @@ test_delete_data_needs_the_typed_domain() {
   expect ".env kept" test -f "$INST/.env"
   expect "backup kept" test "$(find "$INST/backups" -name '*.tar.gz' | wc -l)" = 1
   expect "install folder kept" test -f "$INST/docker-compose.yml"
+}
+
+test_delete_data_never_follows_a_linked_parent() {
+  new_sandbox
+  mkdir -p "$R/srv"
+  install_with_data /srv/home
+  mkdir -p "$R/srv/home/drafts"
+  # /srv is replaced by a link to another folder that has its own "home".
+  mv "$R/srv" "$R/srv-real"
+  mkdir -p "$R/victim/home"; echo precious >"$R/victim/home/precious"
+  ln -s "$R/victim" "$R/srv"
+  install_sh "$DOMAIN
+" uninstall --delete-data --yes
+  expect "refused" test "$RC" != 0
+  expect "the link's target survives" test "$(cat "$R/victim/home/precious")" = precious
+  expect "the real data folder survives" test -d "$R/srv-real/home/drafts"
+}
+
+test_delete_data_refuses_a_folder_that_is_not_the_platforms() {
+  new_sandbox
+  fresh_install
+  echo "not ours" >"$DATA/notes.txt"
+  install_sh "$DOMAIN
+" uninstall --delete-data --yes
+  expect "refused" test "$RC" != 0
+  expect "names the unexpected entry" has "$ERR" "notes.txt"
+  expect "folder survives" test -f "$DATA/notes.txt"
 }
 
 # ---------------------------------------------------------------- dry run
