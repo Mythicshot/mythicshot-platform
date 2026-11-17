@@ -50,6 +50,28 @@ async function renameWithRetry(from: string, to: string): Promise<void> {
   }
 }
 
+/**
+ * Removes one object file. A file that is already gone is success, as the FileStore
+ * contract says. On Windows, two requests unlinking the same file at the same moment can
+ * see EPERM (the file is "delete pending") instead of ENOENT, and publish and unpublish
+ * may legitimately delete the same retired keys together; so a busy file is retried,
+ * with the same bounded backoff as a rename, until it is gone. A file that stays locked
+ * past that is a real failure and is reported.
+ */
+export async function unlinkGone(path: string, unlinkFn: (p: string) => Promise<void> = unlink): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await unlinkFn(path);
+      return;
+    } catch (err) {
+      const code = errCode(err);
+      if (code === "ENOENT") return;
+      if (attempt >= 20 || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY")) throw err;
+      await new Promise((r) => setTimeout(r, 5 + attempt * 5));
+    }
+  }
+}
+
 function encode(header: Header, body: Uint8Array): Buffer {
   const json = Buffer.from(JSON.stringify(header), "utf8");
   const len = Buffer.alloc(4);
@@ -122,13 +144,7 @@ export class NodeFileStore implements FileStore {
   async delete(keys: string[]): Promise<void> {
     // Check every key before deleting any.
     for (const k of keys) checkKey(k);
-    for (const k of keys) {
-      try {
-        await unlink(objectPath(this.root, k));
-      } catch (err) {
-        if (errCode(err) !== "ENOENT") throw err;
-      }
-    }
+    for (const k of keys) await unlinkGone(objectPath(this.root, k));
   }
 
   /** Every stored key, read from the object headers. For tests and the harness only. */
