@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "generator": "mythicshot 0.2.0",
+  "title": "Send an invoice",
+  "steps": [
+    {
+      "image": "step-001.png", "width": 1280, "height": 720, "bytes": 48213, "click": { "x": 50.0, "y": 50.0 }, "t_ms": 750,
+      "spotlight": { "x": 40.0, "y": 30.0, "w": 25.0, "h": 12.0 },
+      "notes": [{ "kind": "text", "x": 12.5, "y": 8.0, "text": "Start here", "size": 4.17, "color": "#ffffff" }]
+    },
+    {
+      "image": "step-002.png", "width": 1280, "height": 720, "bytes": 51022, "click": { "x": 10.0, "y": 25.0 }, "t_ms": 1750,
+      "spotlight": null,
+      "notes": [{ "kind": "bubble", "x": 55.0, "y": 60.0, "w": 30.0, "h": 15.5, "tail": { "x": 10.0, "y": 25.0 }, "text": "Then pick the customer", "size": 3.33, "color": "#1a1a1a", "fill": "#ffffff" }]
+    },
+    { "image": "step-003.jpg", "width": 1280, "height": 720, "bytes": 402117, "click": null, "t_ms": 2000, "spotlight": null, "notes": [] }
+  ],
+  "spotlight_dim": 60
+}

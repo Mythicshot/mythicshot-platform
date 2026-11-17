@@ -1,0 +1,36 @@
+{
+  "version": 3,
+  "generator": "mythicshot 0.3.0",
+  "title": "Send an invoice",
+  "steps": [
+    {
+      "image": "step-001.png", "width": 1280, "height": 720, "bytes": 48213, "click": { "x": 50.0, "y": 50.0 }, "t_ms": 750,
+      "spotlight": { "x": 40.0, "y": 30.0, "w": 25.0, "h": 12.0 },
+      "notes": [{ "kind": "text", "x": 12.5, "y": 8.0, "text": "Start here", "size": 4.17, "color": "#ffffff" }],
+      "card": { "title": "Unpaid invoices", "body": "One click away.\n**Try it**", "next_label": "Next", "anchor": "hotspot", "point": null, "placement": "auto" },
+      "advance": "anywhere",
+      "zoom": false
+    },
+    {
+      "image": "step-002.png", "width": 1280, "height": 720, "bytes": 51022, "click": { "x": 10.0, "y": 25.0 }, "t_ms": 1750,
+      "spotlight": null,
+      "notes": [{ "kind": "bubble", "x": 55.0, "y": 60.0, "w": 30.0, "h": 15.5, "tail": { "x": 10.0, "y": 25.0 }, "text": "Then pick the customer", "size": 3.33, "color": "#1a1a1a", "fill": "#ffffff" }],
+      "card": { "title": "Here", "body": "", "next_label": "Next", "anchor": "point", "point": { "x": 20.0, "y": 50.0 }, "placement": "right" },
+      "advance": "hotspot",
+      "zoom": null
+    },
+    {
+      "image": "step-003.jpg", "width": 1280, "height": 720, "bytes": 402117, "click": null, "t_ms": 2000, "spotlight": null, "notes": [],
+      "card": { "title": "Done", "body": "", "next_label": "Finish", "anchor": "none", "point": null, "placement": "auto" },
+      "advance": "hotspot",
+      "zoom": null
+    }
+  ],
+  "spotlight_dim": 60,
+  "theme": { "card_style": "dark", "accent": "#5dcaa5", "hotspot": "pulse", "progress_bar": true, "backdrop": "auto", "spotlight_soft": true },
+  "zoom": { "enabled": true, "percent": 118 },
+  "cover": { "title": "Invoicing in a minute", "body": "See how to send your first invoice.", "button": "Start", "logo": "logo.png" },
+  "cta": { "label": "Book a call", "url": "https://tours.example.com/book" },
+  "end": { "text": "That is all it takes.", "primary": { "label": "Start free", "url": "https://tours.example.com/start" }, "secondary": null, "replay": true },
+  "autoplay": { "enabled": false, "seconds": 5 }
+}
