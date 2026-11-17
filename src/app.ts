@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Deps } from "./ports.ts";
+import { publishRoutes } from "./publish.ts";
 import { setupRoutes } from "./setup.ts";
 import { tourRoutes } from "./tours.ts";
 import { uploadRoutes } from "./uploads.ts";
@@ -16,6 +17,7 @@ export function createApp(deps: Deps): Hono {
   setupRoutes(app, deps);
   uploadRoutes(app, deps);
   tourRoutes(app, deps);
+  publishRoutes(app, deps);
 
   app.notFound((c) => c.json({ error: "not_found" }, 404));
 

@@ -46,6 +46,11 @@ const DEFAULT_THEME: Theme = { card_style: "dark", accent: "#5dcaa5", hotspot: "
 const DEFAULT_ZOOM: Zoom = { enabled: true, percent: 118 };
 const DEFAULT_AUTOPLAY: Autoplay = { enabled: false, seconds: 5 };
 
+/** The tour settings a version 1 or 2 tour gets, so it looks as it did: zoom and the progress bar off. Fresh objects on every call. */
+export function legacySettings(): { theme: Theme; zoom: Zoom; autoplay: Autoplay } {
+  return { theme: { ...DEFAULT_THEME, progress_bar: false }, zoom: { ...DEFAULT_ZOOM, enabled: false }, autoplay: { ...DEFAULT_AUTOPLAY } };
+}
+
 // Each pattern is a single character class tested once, so its cost is linear in the input.
 /** Control (Cc), format (Cf, which covers bidi overrides and zero-width characters), lone surrogates, line and paragraph separators. */
 const FORBIDDEN_ONE_LINE = /[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029]/u;
@@ -455,7 +460,8 @@ function manifest(json: unknown): Manifest {
 
   if (version < 3) {
     // Older tours look as they did: no cards or cover, and zoom and the progress bar off.
-    return { version, generator, title, spotlight_dim, theme: { ...DEFAULT_THEME, progress_bar: false }, zoom: { ...DEFAULT_ZOOM, enabled: false }, cover: null, cta: null, end: null, autoplay: { ...DEFAULT_AUTOPLAY }, steps };
+    const legacy = legacySettings();
+    return { version, generator, title, spotlight_dim, theme: legacy.theme, zoom: legacy.zoom, cover: null, cta: null, end: null, autoplay: legacy.autoplay, steps };
   }
   return {
     version,
