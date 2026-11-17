@@ -25,6 +25,7 @@
   "include": [
     "src/**/*.ts",
     "test/**/*.ts",
+    "scripts/**/*.ts",
     "vitest.node.config.ts"
   ],
   "exclude": [

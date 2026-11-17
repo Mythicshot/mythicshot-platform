@@ -5,6 +5,7 @@ import { isUniqueViolation, type Deps } from "../src/ports.ts";
 const TABLES = [
   "api_token",
   "chapter",
+  "public_object",
   "setup",
   "snapshot",
   "snapshot_object",
