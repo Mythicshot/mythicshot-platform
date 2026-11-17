@@ -28,8 +28,11 @@
   ],
   "exclude": [
     "src/node/**",
-    "test/harness.node.ts",
+    "src/player/main.ts",
+    "src/player/vendor/**",
     "test/node-*.test.ts",
+    "scripts/**",
+    "test/harness.node.ts",
     "node_modules",
     "dist"
   ]

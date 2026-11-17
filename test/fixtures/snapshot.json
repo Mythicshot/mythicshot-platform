@@ -1,0 +1,29 @@
+{
+  "title": "Send an invoice",
+  "spotlight_dim": 60,
+  "theme": { "card_style": "dark", "accent": "#5dcaa5", "hotspot": "pulse", "progress_bar": true, "backdrop": "auto", "spotlight_soft": true },
+  "zoom": { "enabled": true, "percent": 118 },
+  "cover": null,
+  "cta": { "label": "Book a call", "url": "https://tours.example.com/book" },
+  "end": { "text": "That is all it takes.", "primary": { "label": "Start free", "url": "https://tours.example.com/start" }, "secondary": null, "replay": true },
+  "autoplay": { "enabled": false, "seconds": 5 },
+  "chapters": [
+    {
+      "title": "Find the invoice",
+      "description": "Where unpaid invoices live.",
+      "steps": [
+        { "id": "st_000000000000000000000001", "image": "p/00000000000000000000000000000001.png", "width": 1280, "height": 720, "click": { "x": 50, "y": 50, "size": 1 }, "caption": null, "spotlight": { "x": 40, "y": 30, "w": 25, "h": 12 }, "notes": [], "card": { "title": "Unpaid invoices", "body": "One click away.\n**Try it**", "next_label": "Next", "anchor": "hotspot", "point": null, "placement": "auto" }, "advance": "hotspot", "zoom": null },
+        { "id": "st_000000000000000000000002", "image": "p/00000000000000000000000000000002.png", "width": 1280, "height": 720, "click": { "x": 10, "y": 25, "size": 1 }, "caption": null, "spotlight": null, "notes": [], "card": null, "advance": "hotspot", "zoom": null },
+        { "id": "st_000000000000000000000003", "image": "p/00000000000000000000000000000003.jpg", "width": 1280, "height": 720, "click": null, "caption": null, "spotlight": null, "notes": [], "card": { "title": "Done", "body": "", "next_label": "Finish", "anchor": "none", "point": null, "placement": "auto" }, "advance": "hotspot", "zoom": null }
+      ]
+    },
+    {
+      "title": "Send it",
+      "description": null,
+      "steps": [
+        { "id": "st_000000000000000000000004", "image": "p/00000000000000000000000000000004.png", "width": 1280, "height": 720, "click": { "x": 98, "y": 50, "size": 1 }, "caption": null, "spotlight": { "x": 90, "y": 40, "w": 10, "h": 20 }, "notes": [], "card": null, "advance": "anywhere", "zoom": null },
+        { "id": "st_000000000000000000000005", "image": "p/00000000000000000000000000000005.png", "width": 1280, "height": 720, "click": { "x": 30, "y": 70, "size": 1 }, "caption": null, "spotlight": null, "notes": [], "card": null, "advance": "hotspot", "zoom": null }
+      ]
+    }
+  ]
+}

@@ -15,6 +15,7 @@
 // itself, so it holds no internal identifier except step ids, and a field added to the
 // snapshot later reaches the public page only when it is added here on purpose.
 import type { Hono } from "hono";
+import { PLAYER_CSS, PLAYER_CSS_ETAG, PLAYER_JS, PLAYER_JS_ETAG } from "./player/assets.ts";
 import type { Deps } from "./ports.ts";
 import type { Snapshot, SnapshotStep } from "./publish.ts";
 
@@ -197,7 +198,21 @@ export function notFoundPage(base: string): Response {
   return new Response(NOT_FOUND_HTML, { status: 404, headers: { ...baseHeaders(base), "cache-control": "no-store" } });
 }
 
+/** The player's files change only with a deploy; a few minutes of caching, then a 304 by ETag. */
+export const PLAYER_FILE_CACHE = "public, max-age=300";
+
+function playerFile(body: string, type: string, etag: string, ifNoneMatch: string | undefined): Response {
+  const headers = { "content-type": type, "cache-control": PLAYER_FILE_CACHE, etag, "x-content-type-options": "nosniff" };
+  if (matchesEtag(ifNoneMatch ?? null, etag)) return new Response(null, { status: 304, headers });
+  return new Response(body, { status: 200, headers });
+}
+
 export function pageRoutes(app: Hono, deps: Deps): void {
+  // The player's script and stylesheet: generated into src/player/assets.ts, so both
+  // targets serve the same bytes with the same headers and no static-file setup.
+  app.get("/player.js", (c) => playerFile(PLAYER_JS, "text/javascript; charset=utf-8", PLAYER_JS_ETAG, c.req.header("if-none-match")));
+  app.get("/player.css", (c) => playerFile(PLAYER_CSS, "text/css; charset=utf-8", PLAYER_CSS_ETAG, c.req.header("if-none-match")));
+
   app.get("/t/:slug", async (c) => {
     const base = deps.config.publicImageBase;
     const raw = c.req.param("slug");
