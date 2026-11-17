@@ -1,0 +1,10 @@
+# Used only by deploy/test-container.sh: the real site block for localhost, served with a
+# certificate from Caddy's internal authority. No HSTS, which is for the real domain
+# only, and no attempt to install the authority into a trust store.
+{
+	skip_install_trust
+}
+
+localhost {
+	reverse_proxy app:3000
+}
