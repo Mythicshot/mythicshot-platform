@@ -27,5 +27,9 @@ ALTER TABLE upload ADD COLUMN closing_at INTEGER;
 
 -- A step's row is written before its object (claiming the step number, so a second send
 -- cannot replace the first) and stored_at after the object is written. Commit needs
--- stored_at on every step.
+-- stored_at on every step. claim is a random token naming the request that holds the
+-- step and claimed_at when it took it: a claim left unfinished for a while (its request
+-- died) may be taken over by a resend, and only the current holder may finish it.
 ALTER TABLE upload_step ADD COLUMN stored_at INTEGER;
+ALTER TABLE upload_step ADD COLUMN claim TEXT;
+ALTER TABLE upload_step ADD COLUMN claimed_at INTEGER;

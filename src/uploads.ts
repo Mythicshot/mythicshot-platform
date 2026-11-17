@@ -13,6 +13,11 @@
 // - A draft key is `u/<upload_id>/step-<NNN>.<ext>` or `u/<upload_id>/logo.<ext>`, so
 //   abort can name every key the upload could have written, even one whose request was
 //   cut off before its row was finished.
+// - A step claim left unfinished for STALE_CLAIM_MS (its request died) may be taken over
+//   by a resend. Each claim carries a random token, and only the current holder may mark
+//   the step stored or release it.
+// - Only an upload that makes a new tour takes a logo; an upload into an existing tour
+//   keeps that tour's logo and refuses one, so no logo object is ever left unrecorded.
 import type { Hono } from "hono";
 import { newId, newSlug, requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
@@ -28,6 +33,12 @@ const SWEEP_LIMIT = 5;
 const CREATE_BODY_BYTES = LIMITS.manifestBytes + 4096;
 /** Attempts at a fresh slug when a new tour's slug collides. */
 const SLUG_ATTEMPTS = 5;
+/** Open uploads per workspace when the config sets no other number. */
+export const DEFAULT_MAX_OPEN_UPLOADS = 5;
+/** Seconds a client refused by the open-upload cap is told to wait. */
+const CAP_RETRY_AFTER_S = 60;
+/** An unfinished step claim older than this may be taken over by a resend. */
+export const STALE_CLAIM_MS = 60_000;
 
 const UPLOAD_ID = /^up_[0-9a-f]{24}$/;
 const TOUR_ID = /^tour_[0-9a-f]{24}$/;
@@ -101,7 +112,20 @@ async function sweep(deps: Deps, workspaceId: string): Promise<void> {
     "SELECT id FROM upload WHERE workspace_id = ? AND created_at < ? ORDER BY created_at LIMIT ?",
     [workspaceId, deps.now() - UPLOAD_MAX_AGE_MS, SWEEP_LIMIT],
   );
-  for (const { id } of stale) await abortUpload(deps, workspaceId, id);
+  for (const { id } of stale) {
+    try {
+      await abortUpload(deps, workspaceId, id);
+    } catch {
+      // The upload stays closed to commits and is tried again by a later sweep. The error
+      // itself is not logged: it could carry anything a back end put in its message.
+      console.error(`sweep: could not remove abandoned upload ${id}; will retry later`);
+    }
+  }
+}
+
+/** A random token naming one request's claim on a step. */
+function claimToken(): string {
+  return newId("up").slice(3);
 }
 
 /** The result of a commit that already happened, found by its chapter, or null. */
@@ -211,12 +235,27 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       return apiError(400, "bad_target", 'target.kind must be "new" or "chapter"');
     }
 
-    await sweep(deps, auth.workspaceId);
+    // Housekeeping only: whatever goes wrong in it, this request carries on.
+    try {
+      await sweep(deps, auth.workspaceId);
+    } catch {
+      console.error("sweep: could not look for abandoned uploads; will retry later");
+    }
 
+    // One statement, so creates at the same moment can never pass the cap together.
     const id = newId("up");
-    await deps.db.run("INSERT INTO upload (id, workspace_id, tour_id, manifest, created_at) VALUES (?, ?, ?, ?, ?)", [
-      id, auth.workspaceId, tourId, JSON.stringify(parsed.manifest), deps.now(),
-    ]);
+    const now = deps.now();
+    const cap = deps.config.maxOpenUploads ?? DEFAULT_MAX_OPEN_UPLOADS;
+    const inserted = await deps.db.run(
+      `INSERT INTO upload (id, workspace_id, tour_id, manifest, created_at) SELECT ?, ?, ?, ?, ?
+        WHERE (SELECT count(*) FROM upload WHERE workspace_id = ? AND closing_at IS NULL AND created_at >= ?) < ?`,
+      [id, auth.workspaceId, tourId, JSON.stringify(parsed.manifest), now, auth.workspaceId, now - UPLOAD_MAX_AGE_MS, cap],
+    );
+    if (inserted.changes === 0) {
+      const res = apiError(429, "too_many_uploads", `this workspace already has ${cap} open uploads; finish or cancel one first`);
+      res.headers.set("retry-after", String(CAP_RETRY_AFTER_S));
+      return res;
+    }
     return json(201, { upload_id: id, steps: parsed.manifest.steps.length });
   });
 
@@ -232,8 +271,14 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     const declared = m.steps[n - 1];
     const type = extOf(declared.image);
 
-    const sent = await deps.db.first("SELECT 1 AS x FROM upload_step WHERE upload_id = ? AND n = ?", [up.id, n]);
-    if (sent !== null) return apiError(409, "already_sent", `step ${n} was already sent`);
+    const alreadySent = () => apiError(409, "already_sent", `step ${n} was already sent`);
+    const isStale = (row: { stored_at: number | null; claimed_at: number | null }) =>
+      row.stored_at === null && (row.claimed_at === null || deps.now() - row.claimed_at >= STALE_CLAIM_MS);
+    const sent = await deps.db.first<{ stored_at: number | null; claimed_at: number | null }>(
+      "SELECT stored_at, claimed_at FROM upload_step WHERE upload_id = ? AND n = ?",
+      [up.id, n],
+    );
+    if (sent !== null && !isStale(sent)) return alreadySent();
 
     const length = c.req.header("content-length");
     if (length !== undefined && Number(length) <= STEP_IMAGE_RULE.maxBytes && Number(length) !== declared.bytes) {
@@ -246,30 +291,51 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     if (!checked.ok) return apiError(400, "bad_image", `step ${n}: ${checked.error}`);
 
     const key = stepKey(up.id, n, type);
-    try {
-      const claim = await deps.db.run(
-        "INSERT INTO upload_step (upload_id, n, image_key, bytes) SELECT id, ?, ?, ? FROM upload WHERE id = ? AND workspace_id = ? AND closing_at IS NULL",
-        [n, key, data.byteLength, up.id, auth.workspaceId],
+    const token = claimToken();
+    const claimedAt = deps.now();
+    const openUpload = "SELECT id FROM upload WHERE id = ? AND workspace_id = ? AND closing_at IS NULL";
+    if (sent === null) {
+      try {
+        const claim = await deps.db.run(
+          `INSERT INTO upload_step (upload_id, n, image_key, bytes, claim, claimed_at) SELECT id, ?, ?, ?, ?, ? FROM upload WHERE id = ? AND workspace_id = ? AND closing_at IS NULL`,
+          [n, key, data.byteLength, token, claimedAt, up.id, auth.workspaceId],
+        );
+        if (claim.changes === 0) return notFound("upload");
+      } catch (err) {
+        if (isUniqueViolation(err)) return alreadySent();
+        throw err;
+      }
+    } else {
+      // Take over a claim whose request died: only while it is still unfinished and stale,
+      // in one statement, so of two resends at most one wins.
+      const takeover = await deps.db.run(
+        `UPDATE upload_step SET claim = ?, claimed_at = ?, image_key = ?, bytes = ?
+          WHERE upload_id = ? AND n = ? AND stored_at IS NULL AND (claimed_at IS NULL OR claimed_at <= ?) AND upload_id IN (${openUpload})`,
+        [token, claimedAt, key, data.byteLength, up.id, n, claimedAt - STALE_CLAIM_MS, up.id, auth.workspaceId],
       );
-      if (claim.changes === 0) return notFound("upload");
-    } catch (err) {
-      if (isUniqueViolation(err)) return apiError(409, "already_sent", `step ${n} was already sent`);
-      throw err;
+      if (takeover.changes === 0) return alreadySent();
     }
     try {
       await deps.drafts.put(key, data, DRAFT_META(type));
     } catch (err) {
-      // Release the claim so the step can be sent again; the key is this claim's alone.
-      await deps.db.run("DELETE FROM upload_step WHERE upload_id = ? AND n = ? AND stored_at IS NULL", [up.id, n]);
-      await deps.drafts.delete([key]).catch(() => {});
+      // Release the claim so the step can be sent again. The object is removed only if the
+      // claim was still this request's: after a takeover the key belongs to the new holder.
+      const released = await deps.db.run("DELETE FROM upload_step WHERE upload_id = ? AND n = ? AND claim = ? AND stored_at IS NULL", [up.id, n, token]);
+      if (released.changes === 1) await deps.drafts.delete([key]).catch(() => {});
       throw err;
     }
     const done = await deps.db.run(
-      "UPDATE upload_step SET stored_at = ? WHERE upload_id = ? AND n = ? AND upload_id IN (SELECT id FROM upload WHERE id = ? AND workspace_id = ? AND closing_at IS NULL)",
-      [deps.now(), up.id, n, up.id, auth.workspaceId],
+      `UPDATE upload_step SET stored_at = ? WHERE upload_id = ? AND n = ? AND claim = ? AND upload_id IN (${openUpload})`,
+      [deps.now(), up.id, n, token, up.id, auth.workspaceId],
     );
     if (done.changes === 0) {
-      // Aborted while the object was written. The unfinished claim kept any commit away, so the object is ours to remove.
+      // Either a resend took the claim over (the key is now its holder's), or the upload
+      // was committed after that holder finished, or it was aborted. Only in the last case
+      // is the object nobody's, and only then is it removed.
+      const holder = await deps.db.first("SELECT 1 AS x FROM upload_step WHERE upload_id = ? AND n = ?", [up.id, n]);
+      if (holder !== null || (await committed(deps, auth, up.id)) !== null) {
+        return apiError(409, "already_sent", `step ${n} was taken over by a later send`);
+      }
       await deps.drafts.delete([key]);
       return notFound("upload");
     }
@@ -283,6 +349,10 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     if (up === null || up.closing_at !== null) return notFound("upload");
     const m = JSON.parse(up.manifest) as Manifest;
     if (!m.cover?.logo) return apiError(404, "not_found", "this upload's manifest names no logo");
+    if (up.tour_id !== null) {
+      await c.req.raw.body?.cancel().catch(() => {});
+      return apiError(409, "logo_not_used", "an upload into an existing tour keeps that tour's logo; do not send one");
+    }
     if (up.logo_key !== null) return apiError(409, "already_sent", "the logo was already sent");
     const type = extOf(m.cover.logo);
 
@@ -335,7 +405,10 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     for (let n = 1; n <= m.steps.length; n++) {
       if (!have.has(n)) return apiError(409, "incomplete", `step ${n} has not been sent`);
     }
-    if (m.cover?.logo && (up.logo_key === null || up.logo_bytes === null)) return apiError(409, "incomplete", "the logo has not been sent");
+    // Only a new tour takes the logo; an upload into an existing tour keeps that tour's.
+    if (up.tour_id === null && m.cover?.logo && (up.logo_key === null || up.logo_bytes === null)) {
+      return apiError(409, "incomplete", "the logo has not been sent");
+    }
 
     const result = { tour_id: up.tour_id ?? "", chapter_id: chapterIdFor(up.id), steps: m.steps.length };
     for (let attempt = 1; ; attempt++) {
@@ -356,8 +429,6 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       }
     }
 
-    // An upload into an existing tour keeps that tour's logo; the one it sent is unused.
-    if (up.tour_id !== null && up.logo_key !== null) await deps.drafts.delete([up.logo_key]);
     return json(201, result);
   });
 

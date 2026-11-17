@@ -93,6 +93,8 @@ export function isUniqueViolation(err: unknown): boolean {
 export type Config = {
   publicImageBase: string; // "" when the app serves published images itself, else an https origin
   setupCode: string | null; // null or shorter than 16 characters: setup is off
+  /** Open (uncommitted, unexpired) uploads a workspace may have at once. Default 5. */
+  maxOpenUploads?: number;
 };
 
 export type Deps = { db: Db; drafts: FileStore; pub: FileStore; config: Config; now: () => number };

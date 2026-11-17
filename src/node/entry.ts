@@ -15,6 +15,15 @@ const MIGRATIONS_DIR = fileURLToPath(new URL("../../migrations/", import.meta.ur
 /** How long open requests may run after SIGTERM before their connections are cut. */
 const STOP_GRACE_MS = 5000;
 
+/**
+ * A client must send all request headers within 15 s and the whole request, body
+ * included, within 60 s, or Node answers 408 and closes the connection. The largest body
+ * is a 2,000,000-byte step image, so 60 s still allows an uplink of about 35 KB/s, while
+ * a slow or stalled client cannot hold a connection open for Node's default five minutes.
+ */
+const HEADERS_TIMEOUT_MS = 15_000;
+const REQUEST_TIMEOUT_MS = 60_000;
+
 async function main(): Promise<void> {
   // Everything the app creates (the database, its WAL, draft and published files) is
   // readable by the app user only. Set before any file is opened.
@@ -47,7 +56,7 @@ async function main(): Promise<void> {
   };
 
   const app = createApp(deps);
-  const server = serve({ fetch: app.fetch, port }, (info) => {
+  const server = serve({ fetch: app.fetch, port, serverOptions: { headersTimeout: HEADERS_TIMEOUT_MS, requestTimeout: REQUEST_TIMEOUT_MS } }, (info) => {
     console.log(`listening on port ${info.port}`);
   });
 

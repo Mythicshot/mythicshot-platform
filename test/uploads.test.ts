@@ -364,12 +364,141 @@ describe("abort and sweep", () => {
 
   it("the sweep takes at most five uploads per create", async () => {
     const { deps, a } = await setup();
+    deps.config.maxOpenUploads = 10;
     let now = 1_800_000_000_000;
     deps.now = () => now;
     for (let i = 0; i < 7; i++) await createUpload(deps, a.token, v2);
     now += 2 * DAY;
     await createUpload(deps, a.token, v2);
     expect(await count(deps, "upload")).toBe(3);
+  });
+
+  it("a sweep that cannot delete never fails the create it rides on, and logs no secret", async () => {
+    const { deps, a, draftKeys } = await setup();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warns = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const old1 = await sendAll(deps, a.token, v2, { kind: "new" }, 1);
+    const old2 = await sendAll(deps, a.token, v2, { kind: "new" }, 2);
+    now += 2 * DAY;
+    const realDelete = deps.drafts.delete.bind(deps.drafts);
+    deps.drafts.delete = async () => {
+      throw new Error("storage down for " + a.token);
+    };
+    const r = await createUpload(deps, a.token, v2);
+    expect(r.status).toBe(201);
+    const logged = [...errors.mock.calls, ...warns.mock.calls].map((c) => c.map(String).join(" "));
+    expect(logged.length).toBeGreaterThanOrEqual(2); // one line per upload it could not remove: it carried on after the first
+    const hash = await hashToken(a.token);
+    for (const line of logged) {
+      expect(line).not.toContain(a.token.slice(3));
+      expect(line).not.toContain(hash);
+    }
+    // The failed uploads keep their rows, closed to commits, and a later create finishes them.
+    expect((await commit(deps, a.token, old1)).status).toBe(404);
+    deps.drafts.delete = realDelete;
+    now += 1000;
+    expect((await createUpload(deps, a.token, v2)).status).toBe(201);
+    const keys = await draftKeys();
+    expect(keys.filter((k) => k.includes(old1) || k.includes(old2))).toEqual([]);
+    expect(await count(deps, "upload")).toBe(2);
+  });
+});
+
+describe("the open-upload cap", () => {
+  it("the sixth open upload is refused with 429 and Retry-After, and an abort frees a place", async () => {
+    const { deps, a, b } = await setup();
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const r = await createUpload(deps, a.token, v2);
+      expect(r.status).toBe(201);
+      ids.push(r.json.upload_id);
+    }
+    const refused = await createUpload(deps, a.token, v2);
+    expect(refused.status).toBe(429);
+    expect(refused.json.error).toBe("too_many_uploads");
+    expect(refused.json.detail).toContain("5");
+    expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(await count(deps, "upload")).toBe(5);
+    // Another workspace has its own places.
+    expect((await createUpload(deps, b.token, v2)).status).toBe(201);
+    expect((await abort(deps, a.token, ids[0])).status).toBe(204);
+    expect((await createUpload(deps, a.token, v2)).status).toBe(201);
+    expect((await createUpload(deps, a.token, v2)).status).toBe(429);
+  });
+
+  it("committed and expired uploads do not count, and the cap comes from the config", async () => {
+    const { deps, a } = await makeDeps({ maxOpenUploads: 2 }).then(async (ctx) => ({ ...ctx, a: await seedWorkspace(ctx.deps, "A") }));
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    await uploadTour(deps, a.token, v2);
+    await uploadTour(deps, a.token, v2);
+    expect((await createUpload(deps, a.token, v2)).status).toBe(201);
+    expect((await createUpload(deps, a.token, v2)).status).toBe(201);
+    expect((await createUpload(deps, a.token, v2)).status).toBe(429);
+    now += DAY + 1000; // both open ones expire and are swept
+    expect((await createUpload(deps, a.token, v2)).status).toBe(201);
+  });
+
+  it("creates at the same moment never pass the cap", async () => {
+    const { deps, a } = await setup();
+    deps.config.maxOpenUploads = 3;
+    const rs = await Promise.all(Array.from({ length: 6 }, () => createUpload(deps, a.token, v2)));
+    expect(rs.filter((r) => r.status === 201)).toHaveLength(3);
+    expect(rs.filter((r) => r.status === 429)).toHaveLength(3);
+    expect(await count(deps, "upload")).toBe(3);
+  });
+});
+
+describe("a step whose request died", () => {
+  it("an unfinished claim answers 409 at first and can be taken over after a minute", async () => {
+    const { deps, a, draftKeys } = await setup();
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await createUpload(deps, a.token, v2)).json.upload_id;
+    // As if the process died after writing the step's row: a claim with no stored_at.
+    await deps.db.run("INSERT INTO upload_step (upload_id, n, image_key, bytes, claim, claimed_at) VALUES (?, 1, ?, ?, ?, ?)", [
+      id, `u/${id}/step-001.png`, v2.steps[0].bytes, "dead-request", now,
+    ]);
+    now += 30_000;
+    expect((await putStep(deps, a.token, id, 1, stepImage(v2.steps[0]))).status).toBe(409);
+    now += 31_000;
+    expect((await putStep(deps, a.token, id, 1, stepImage(v2.steps[0]))).status).toBe(204);
+    expect((await putStep(deps, a.token, id, 1, stepImage(v2.steps[0]))).status).toBe(409); // finished now: never taken over
+    await putStep(deps, a.token, id, 2, stepImage(v2.steps[1]));
+    await putStep(deps, a.token, id, 3, stepImage(v2.steps[2]));
+    expect((await commit(deps, a.token, id)).status).toBe(201);
+    expect(await draftKeys()).toHaveLength(3);
+  });
+
+  it("a slow first writer that finishes after a takeover neither finishes the step nor deletes the object", async () => {
+    const { deps, a, draftKeys } = await setup();
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await createUpload(deps, a.token, v2)).json.upload_id;
+    const realPut = deps.drafts.put.bind(deps.drafts);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    deps.drafts.put = async (key, body, meta) => {
+      if (calls++ === 0) await gate; // the first writer stalls while writing its object
+      return realPut(key, body, meta);
+    };
+    const slow = putStep(deps, a.token, id, 1, stepImage(v2.steps[0], 1));
+    // Wait until the slow writer holds its claim.
+    for (let i = 0; i < 200 && (await count(deps, "upload_step")) === 0; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(await count(deps, "upload_step")).toBe(1);
+    now += 61_000;
+    expect((await putStep(deps, a.token, id, 1, stepImage(v2.steps[0], 2))).status).toBe(204);
+    release();
+    expect((await slow).status).toBe(409);
+    expect(await draftKeys()).toEqual([`u/${id}/step-001.png`]);
+    const row = await deps.db.first<Json>("SELECT stored_at FROM upload_step WHERE upload_id = ? AND n = 1", [id]);
+    expect(row!.stored_at).not.toBeNull();
+    await putStep(deps, a.token, id, 2, stepImage(v2.steps[1]));
+    await putStep(deps, a.token, id, 3, stepImage(v2.steps[2]));
+    expect((await commit(deps, a.token, id)).status).toBe(201);
   });
 });
 
@@ -569,7 +698,39 @@ describe("version 3 settings and the logo", () => {
     expect((await stepRows(deps, done.chapter_id))[2].zoom).toBe(1);
   });
 
-  it("an upload into an existing tour keeps that tour's theme, cover and logo and removes the unused logo object", async () => {
+  it("an upload into an existing tour refuses a logo with 409 and stores no object or row for it", async () => {
+    const { deps, a, draftKeys } = await setup();
+    const first = await uploadTour(deps, a.token, v3);
+    const keysBefore = await draftKeys();
+    const id = (await createUpload(deps, a.token, v3, { kind: "chapter", tour_id: first.tour_id })).json.upload_id;
+    for (let i = 0; i < 3; i++) await putStep(deps, a.token, id, i + 1, stepImage(v3.steps[i]));
+    const r = await putLogo(deps, a.token, id, logoPng());
+    expect(r.status).toBe(409);
+    expect(r.json.error).toBe("logo_not_used");
+    expect(r.json.detail).toContain("existing tour");
+    const row = await deps.db.first<Json>("SELECT logo_key, logo_bytes FROM upload WHERE id = ?", [id]);
+    expect(row).toEqual({ logo_key: null, logo_bytes: null });
+    expect((await draftKeys()).filter((k) => k.includes(id) && k.includes("logo"))).toEqual([]);
+    // The commit needs no logo, and afterwards every draft object is recorded on a row.
+    expect((await commit(deps, a.token, id)).status).toBe(201);
+    const recorded = new Set<string>();
+    for (const s of await deps.db.all<{ image_key: string }>("SELECT image_key FROM step")) recorded.add(s.image_key);
+    for (const t of await deps.db.all<{ logo_key: string | null }>("SELECT logo_key FROM tour")) if (t.logo_key) recorded.add(t.logo_key);
+    const keys = await draftKeys();
+    expect(keys.length).toBe(keysBefore.length + 3);
+    for (const k of keys) expect(recorded.has(k)).toBe(true);
+  });
+
+  it("a new tour's draft objects are all recorded on its rows after commit", async () => {
+    const { deps, a, draftKeys } = await setup();
+    await uploadTour(deps, a.token, v3);
+    const recorded = new Set<string>();
+    for (const s of await deps.db.all<{ image_key: string }>("SELECT image_key FROM step")) recorded.add(s.image_key);
+    for (const t of await deps.db.all<{ logo_key: string | null }>("SELECT logo_key FROM tour")) if (t.logo_key) recorded.add(t.logo_key);
+    expect((await draftKeys()).sort()).toEqual([...recorded].sort());
+  });
+
+  it("an upload into an existing tour keeps that tour's theme, cover and logo", async () => {
     const { deps, a, draftKeys } = await setup();
     const first = await uploadTour(deps, a.token, v3);
     const before = await tourRow(deps, first.tour_id);

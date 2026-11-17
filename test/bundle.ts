@@ -90,7 +90,7 @@ export function logoPng(total = 1000, side = 64): Uint8Array {
   return png(side, side, total);
 }
 
-/** Create, every step image, the logo if the manifest names one; returns the upload id. Does not commit. */
+/** Create, every step image, the logo if the manifest names one and the target is a new tour; returns the upload id. Does not commit. */
 export async function sendAll(deps: Deps, token: string, manifest: Json, target: unknown = { kind: "new" }, fill = 0): Promise<string> {
   const created = await createUpload(deps, token, manifest, target);
   if (created.status !== 201) throw new Error(`create failed: ${created.status} ${created.text}`);
@@ -100,7 +100,7 @@ export async function sendAll(deps: Deps, token: string, manifest: Json, target:
     if (r.status !== 204) throw new Error(`step ${i + 1} failed: ${r.status} ${r.text}`);
   }
   const logo = manifest.cover?.logo;
-  if (logo) {
+  if (logo && (target as Json)?.kind !== "chapter") {
     const r = await putLogo(deps, token, id, logo.endsWith(".png") ? logoPng() : jpeg(64, 64, 1000));
     if (r.status !== 204) throw new Error(`logo failed: ${r.status} ${r.text}`);
   }
