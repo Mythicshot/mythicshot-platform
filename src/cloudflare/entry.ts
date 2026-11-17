@@ -13,6 +13,10 @@ export function depsFromEnv(env: WorkerEnv): Deps {
     drafts: new R2FileStore(env.DRAFTS),
     pub: new R2FileStore(env.PUB),
     config: {
+      // The public bucket serves these images itself, so the app cannot add headers to
+      // them. Its custom domain MUST carry a response-header rule adding
+      // `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`
+      // (see the note in wrangler.jsonc); the Cloudflare runbook and deploy task set it up.
       publicImageBase: env.PUBLIC_IMAGE_BASE ?? "",
       setupCode: setupCodeFromEnv(env.SETUP_CODE),
     },

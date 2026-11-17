@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { hashToken } from "../src/auth.ts";
-import type { Db, Deps, Stmt, Value } from "../src/ports.ts";
-import { PUBLIC_CACHE, STALE_PUBLISH_MS, type Snapshot } from "../src/publish.ts";
+import { isUniqueViolation, type Db, type Deps, type Stmt, type Value } from "../src/ports.ts";
+import { MAX_SNAPSHOT_BYTES, PUBLIC_CACHE, STALE_PUBLISH_MS, type Snapshot } from "../src/publish.ts";
 import { clone, count, fixtures, png, send, uploadTour, type Json } from "./bundle.ts";
 
 const v2 = fixtures.v2 as Json;
@@ -11,8 +11,9 @@ const PUBLIC_KEY = /^p\/[0-9a-f]{32}\.(png|jpg)$/;
 
 type Ctx = Awaited<ReturnType<typeof makeDeps>> & { a: { workspaceId: string; token: string }; b: { workspaceId: string; token: string } };
 
+/** Most tests delete replaced images at once (grace 0); the grace tests set their own. */
 async function setup(config?: Parameters<typeof makeDeps>[0]): Promise<Ctx> {
-  const ctx = await makeDeps(config);
+  const ctx = await makeDeps({ retiredGraceMs: 0, ...config });
   const a = await seedWorkspace(ctx.deps, "Workspace A");
   const b = await seedWorkspace(ctx.deps, "Workspace B");
   return { ...ctx, a, b };
@@ -230,7 +231,6 @@ describe("publish", () => {
     expect(snap).toEqual({
       title: v3.title,
       spotlight_dim: 60,
-      image_base: "",
       theme: v3.theme,
       zoom: v3.zoom,
       cover: { ...v3.cover, logo: expect.stringMatching(/^p\/[0-9a-f]{32}\.png$/) },
@@ -239,7 +239,7 @@ describe("publish", () => {
       autoplay: v3.autoplay,
       chapters: [
         {
-          id: t.chapter_id,
+          id: expect.stringMatching(/^c_[0-9a-f]{24}$/),
           title: v3.title,
           description: null,
           steps: v3.steps.map((s: Json, i: number) => ({
@@ -317,11 +317,67 @@ describe("publish", () => {
     expect(await liveKeys(deps, t.tour_id)).toHaveLength(3); // no logo published
   });
 
-  it("the snapshot stores the public image base from the configuration", async () => {
+  it("the snapshot holds no image base: the page takes the configured one when it renders", async () => {
     const { deps, a } = await setup({ publicImageBase: "https://img.example.net" });
     const t = await uploadTour(deps, a.token, v2);
     await publish(deps, a.token, t.tour_id);
-    expect((await snapshotOf(deps, t.tour_id))!.image_base).toBe("https://img.example.net");
+    const snap = (await snapshotOf(deps, t.tour_id))! as Json;
+    expect(Object.keys(snap)).not.toContain("image_base");
+    expect(JSON.stringify(snap)).not.toContain("img.example.net");
+  });
+
+  it("the snapshot's JSON holds no draft key, upload id or internal id beyond step ids", async () => {
+    const { deps, a } = await setup();
+    const t = await uploadTour(deps, a.token, v3);
+    const more = clone(v3);
+    more.title = "Second chapter";
+    const t2 = await uploadTour(deps, a.token, more, { kind: "chapter", tour_id: t.tour_id }, 4);
+    await publish(deps, a.token, t.tour_id);
+    const text = (await snapshotRow(deps, t.tour_id))!.data as string;
+    const tour = await tourRow(deps, t.tour_id);
+    const secrets = [
+      "u/", "up_", "ch_", "tour_", "ws_", "tok_",
+      t.tour_id, t.tour_id.slice(5), a.workspaceId, a.workspaceId.slice(3),
+      t.chapter_id.slice(3), t2.chapter_id.slice(3), // the upload ids behind the chapters
+      tour.logo_key,
+      ...(await draftSteps(deps, t.tour_id)).map((s) => s.image_key),
+    ];
+    for (const secret of secrets) expect(text, secret).not.toContain(secret);
+    // Step ids are the one internal id the snapshot keeps, for analytics across publishes.
+    const ids = stepsOf(JSON.parse(text)).map((s) => s.id);
+    expect(ids).toEqual((await draftSteps(deps, t.tour_id)).map((s) => s.id));
+  });
+
+  it("chapter ids are the snapshot's own, distinct per chapter and stable across publishes", async () => {
+    const { deps, a } = await setup();
+    const t = await uploadTour(deps, a.token, v2);
+    const more = clone(v2);
+    more.title = "Second chapter";
+    await uploadTour(deps, a.token, more, { kind: "chapter", tour_id: t.tour_id }, 4);
+    await publish(deps, a.token, t.tour_id);
+    const first = (await snapshotOf(deps, t.tour_id))!.chapters.map((c) => c.id);
+    expect(first).toHaveLength(2);
+    expect(first[0]).not.toBe(first[1]);
+    for (const id of first) expect(id).toMatch(/^c_[0-9a-f]{24}$/);
+    await unpublish(deps, a.token, t.tour_id);
+    await publish(deps, a.token, t.tour_id);
+    expect((await snapshotOf(deps, t.tour_id))!.chapters.map((c) => c.id)).toEqual(first);
+  });
+
+  it("a public key can belong to one snapshot only", async () => {
+    const { deps, a } = await setup();
+    const t1 = await uploadTour(deps, a.token, v2);
+    const t2 = await uploadTour(deps, a.token, v2, { kind: "new" }, 2);
+    await publish(deps, a.token, t1.tour_id);
+    const key = (await liveKeys(deps, t1.tour_id))[0];
+    let err: unknown = null;
+    try {
+      await deps.db.run("INSERT INTO snapshot_object (tour_id, image_key) VALUES (?, ?)", [t2.tour_id, key]);
+    } catch (e) {
+      err = e;
+    }
+    expect(isUniqueViolation(err)).toBe(true);
+    expect(await liveKeys(deps, t2.tour_id)).toEqual([]);
   });
 });
 
@@ -733,6 +789,30 @@ describe("limits", () => {
   }, 120_000);
 });
 
+describe("the snapshot size cap", () => {
+  it("a tour whose snapshot would pass MAX_SNAPSHOT_BYTES is refused with 413 and writes nothing", async () => {
+    const ctx = await setup();
+    const { deps, a, publicKeys } = ctx;
+    // Three uploads of about 190 KB of notes each: about 570 KB of snapshot.
+    const heavy = (title: string) => {
+      const m = manyStepManifest(17);
+      m.title = title;
+      for (const st of m.steps) st.notes = Array.from({ length: 20 }, (_, k) => ({ kind: "text", x: 10, y: 10, text: ("Note " + k + " ").padEnd(500, "lorem ipsum "), size: 3, color: "#ffffff" }));
+      return m;
+    };
+    const t = await uploadTour(deps, a.token, heavy("Heavy"));
+    await uploadTour(deps, a.token, heavy("Heavy 2"), { kind: "chapter", tour_id: t.tour_id }, 2);
+    await uploadTour(deps, a.token, heavy("Heavy 3"), { kind: "chapter", tour_id: t.tour_id }, 3);
+    expect(MAX_SNAPSHOT_BYTES).toBe(512_000);
+    const r = await publish(deps, a.token, t.tour_id);
+    expect(r.status).toBe(413);
+    expect(r.json.error).toBe("too_large");
+    expect(await publicKeys()).toEqual([]);
+    expect(await count(deps, "public_object")).toBe(0);
+    expect(await count(deps, "snapshot")).toBe(0);
+  });
+});
+
 describe("the public image route", () => {
   it("serves a published image and nothing else", async () => {
     const { deps, a } = await setup();
@@ -791,5 +871,135 @@ describe("the public image route", () => {
     const r = await send(deps, "GET", "/p/" + key.slice(2));
     expect(r.status).toBe(200);
     expect(r.headers.get("content-type")).toBe("image/png");
+  });
+});
+
+describe("replaced images and the workspace sweep", () => {
+  const T0 = 1_800_000_000_000;
+  const MIN = 60_000;
+
+  /** Default grace (10 minutes) and a clock the test moves. */
+  async function clocked(config?: Parameters<typeof makeDeps>[0]) {
+    const ctx = await makeDeps(config);
+    const a = await seedWorkspace(ctx.deps, "Workspace A");
+    const b = await seedWorkspace(ctx.deps, "Workspace B");
+    let now = T0;
+    ctx.deps.now = () => now;
+    return { ...ctx, a, b, advance: (ms: number) => (now += ms) };
+  }
+
+  const status = async (deps: Deps, key: string) => (await send(deps, "GET", "/p/" + key.slice(2))).status;
+
+  it("a replaced image stays served for the grace period, then stops and is deleted", async () => {
+    const ctx = await clocked();
+    const { deps, a, publicKeys, advance } = ctx;
+    const t = await uploadTour(deps, a.token, v2);
+    const other = await uploadTour(deps, a.token, v2, { kind: "new" }, 3);
+    await publish(deps, a.token, t.tour_id);
+    const old = await liveKeys(deps, t.tour_id);
+    advance(1000);
+    await publish(deps, a.token, t.tour_id);
+    const fresh = await liveKeys(deps, t.tour_id);
+    for (const k of old) {
+      expect(await status(deps, k)).toBe(200);
+      expect(await publicKeys()).toContain(k);
+    }
+    for (const k of fresh) expect(await status(deps, k)).toBe(200);
+    advance(10 * MIN - 1);
+    for (const k of old) expect(await status(deps, k)).toBe(200);
+    advance(2);
+    for (const k of old) expect(await status(deps, k)).toBe(404); // grace over, even before deletion
+    // Any later publish or unpublish in the workspace deletes them.
+    await publish(deps, a.token, other.tour_id);
+    for (const k of old) expect(await publicKeys()).not.toContain(k);
+    for (const k of fresh) expect(await status(deps, k)).toBe(200);
+    expect(await count(deps, "public_object")).toBe(0);
+  });
+
+  it("the grace period comes from the configuration", async () => {
+    const { deps, a, advance } = await clocked({ retiredGraceMs: MIN });
+    const t = await uploadTour(deps, a.token, v2);
+    await publish(deps, a.token, t.tour_id);
+    const old = await liveKeys(deps, t.tour_id);
+    await publish(deps, a.token, t.tour_id);
+    expect(await status(deps, old[0])).toBe(200);
+    advance(MIN + 1);
+    expect(await status(deps, old[0])).toBe(404);
+  });
+
+  it("unpublish is immediate, also for images still in their grace period", async () => {
+    const { deps, a, publicKeys } = await clocked();
+    const t = await uploadTour(deps, a.token, v2);
+    await publish(deps, a.token, t.tour_id);
+    const old = await liveKeys(deps, t.tour_id);
+    await publish(deps, a.token, t.tour_id);
+    const fresh = await liveKeys(deps, t.tour_id);
+    expect((await unpublish(deps, a.token, t.tour_id)).status).toBe(204);
+    expect(await publicKeys()).toEqual([]);
+    for (const k of [...old, ...fresh]) expect(await status(deps, k)).toBe(404);
+    expect(await count(deps, "public_object")).toBe(0);
+  });
+
+  it("a stale pending publish on another tour is swept by any publish or unpublish in the workspace", async () => {
+    const { deps, a, publicKeys, advance } = await clocked();
+    const t = await uploadTour(deps, a.token, v2);
+    const other = await uploadTour(deps, a.token, v2, { kind: "new" }, 3);
+    const dead = "p/" + "e".repeat(32) + ".png";
+    await deps.db.run("INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at) VALUES (?, ?, 'pub_dead', 'pending', ?)", [dead, t.tour_id, T0]);
+    await deps.pub.put(dead, png(1, 1, 40), { contentType: "image/png" });
+    await unpublish(deps, a.token, other.tour_id);
+    expect(await publicKeys()).toContain(dead); // not stale yet
+    advance(STALE_PUBLISH_MS + 1);
+    await unpublish(deps, a.token, other.tour_id);
+    expect(await publicKeys()).not.toContain(dead);
+    expect(await count(deps, "public_object")).toBe(0);
+  });
+
+  it("the sweep is bounded, oldest first, stays in its workspace and never fails its request", async () => {
+    const ctx = await clocked();
+    const { deps, a, b, publicKeys, advance } = ctx;
+    const tours: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const t = await uploadTour(deps, a.token, v2, { kind: "new" }, i + 1);
+      tours.push(t.tour_id);
+    }
+    const bTour = (await uploadTour(deps, b.token, v2, { kind: "new" }, 9)).tour_id;
+    // Each tour gets replaced images, one minute apart, so tours[0]'s are the oldest.
+    const retired: string[][] = [];
+    for (const id of [...tours, bTour]) {
+      const tok = id === bTour ? b.token : a.token;
+      await publish(deps, tok, id);
+      const old = await liveKeys(deps, id);
+      await publish(deps, tok, id);
+      retired.push(old);
+      advance(MIN);
+    }
+    advance(10 * MIN);
+    const fresh = (await uploadTour(deps, a.token, v2, { kind: "new" }, 8)).tour_id;
+    const left = async (i: number) => (await publicKeys()).filter((k) => retired[i].includes(k)).length;
+    await publish(deps, a.token, fresh);
+    // At most SWEEP_TOURS other tours per request, the oldest first.
+    expect(await left(0)).toBe(0);
+    expect(await left(1)).toBe(0);
+    expect(await left(4)).toBe(3);
+    expect(await left(5)).toBe(3); // workspace B's are never touched by A's requests
+    for (let i = 0; i < 3; i++) await publish(deps, a.token, fresh);
+    for (let i = 0; i < 5; i++) expect(await left(i)).toBe(0);
+    expect(await left(5)).toBe(3);
+    // A sweep that cannot delete never fails the request it rides on.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await publish(deps, b.token, bTour); // B's own: retires again, nothing due yet except its old ones
+    advance(11 * MIN);
+    const realDelete = deps.pub.delete.bind(deps.pub);
+    let failures = 0;
+    deps.pub.delete = async (keys) => {
+      if (failures++ === 0) throw new Error("bucket unavailable");
+      return realDelete(keys);
+    };
+    const other = (await uploadTour(deps, b.token, v2, { kind: "new" }, 7)).tour_id;
+    expect((await publish(deps, b.token, other)).status).toBe(200);
+    expect(failures).toBeGreaterThan(0);
+    deps.pub.delete = realDelete;
+    await expectConsistent(ctx as unknown as Ctx);
   });
 });
