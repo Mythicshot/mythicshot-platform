@@ -995,6 +995,162 @@ test_a_signal_before_anything_was_moved_leaves_the_app_alone() {
   expect "no half-made backup folder is left" test -z "$(find "$BACKUPS" -name '*.partial')"
 }
 
+test_a_cut_between_the_packages_and_the_restart_keeps_the_last_good_build() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  # The files and the packages are in place, and then the restart does not happen.
+  STUB_TOUCH_FAIL=1 cpanel_in "$T/new" "" update --yes
+  expect "exit code non-zero" test "$RC" != 0
+  expect "says the app was not restarted" has "$ERR" "the app was not restarted"
+  expect "prints the way back" has "$OUT" "cd '$APP' && [ -d dist.old ] && rm -rf dist && mv dist.old dist"
+  expect "the update is still marked as under way" test -f "$APP/.cpanel-update"
+  expect "the new build is in place" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.2.0"
+  # Running it again must not take the new, unproven build for the last good one.
+  : >"$LOG"
+  cpanel_in "$T/new" "" update --yes
+  expect "the second run succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "says it resumes" has "$OUT" "An earlier update was cut off"
+  expect "dist.old is still the version that ran before" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.1"
+  expect "migrations.old is still the one from before" test "$(cat "$APP/migrations.old/0001_init.sql")" = "-- schema of 0.1.1"
+  expect "the new build is in place" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.2.0"
+  expect "the marker is cleared once the restart was asked for" test ! -e "$APP/.cpanel-update"
+  expect "the app was restarted this time" test "$(grep -c '^touch' "$LOG")" = 1
+}
+
+# A build that exists only as dist.old, with no marker: what work by hand, or an earlier
+# version of this script, can leave. It is the app's only build and must survive.
+test_a_build_that_exists_only_as_dist_old_is_kept_and_backed_up() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  mv "$APP/dist" "$APP/dist.old"
+  mv "$APP/migrations" "$APP/migrations.old"
+  expect "there is no marker" test ! -e "$APP/.cpanel-update"
+  cpanel "" backup
+  expect "backup works (stderr: $(cat "$ERR"))" test "$RC" = 0
+  local b; b="$(only_backup)"
+  expect "the backup's app archive holds the build that was moved aside" test "$(tar -xzOf "$b/app.tgz" dist.old/node/entry.js)" = "// build 0.1.1"
+  expect "and its migrations" test "$(tar -xzOf "$b/app.tgz" migrations.old/0001_init.sql)" = "-- schema of 0.1.1"
+  make_release "$T/new" 0.2.0
+  cpanel_in "$T/new" "" update --yes
+  expect "update succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "it is treated as an update to finish" has "$OUT" "An earlier update was cut off"
+  expect "dist.old is still that build, not deleted" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.1"
+  expect "migrations.old is still there" test "$(cat "$APP/migrations.old/0001_init.sql")" = "-- schema of 0.1.1"
+  expect "the new build is in place" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.2.0"
+  expect "the update's own backup holds that build too" test "$(find "$BACKUPS" -name app.tgz | while IFS= read -r a; do tar -tzf "$a" | grep -cx 'dist.old/node/entry.js' || true; done | tr '\n' ' ')" = "1 1 "
+  expect "the marker is cleared" test ! -e "$APP/.cpanel-update"
+  # A half-made dist beside it is not taken for a build either.
+  rm -rf "$APP/dist"; mkdir -p "$APP/dist/node"; echo "half-made" >"$APP/dist/node/partial.js"
+  make_release "$T/v3" 0.3.0
+  cpanel_in "$T/v3" "" update --yes
+  expect "with a half-made dist: succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "with a half-made dist: dist.old is still the last whole build" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.1"
+  expect "with a half-made dist: the half-made one is gone" test -z "$(find "$APP" -name partial.js)"
+}
+
+# ---------------------------------------------------------------- an install that never finished
+
+test_a_failed_first_install_is_finished_by_update() {
+  new_sandbox
+  STUB_NPM_FAIL=1 cpanel "" install --domain "$DOMAIN" --yes
+  expect "the install fails" test "$RC" != 0
+  expect "says how to finish" has "$ERR" "finish with:"
+  expect "names update" has "$ERR" "cpanel.sh update --yes --app-root apps/tours"
+  expect "does not ask for something that cannot be done yet" hasnt "$ERR" "open the app's address"
+  expect "the install is recorded as not finished" grep -qxF "FINISHED=no" "$APP/.cpanel-install"
+  expect "the data folder is there, without a database" test -d "$DATA" -a ! -e "$DATA/db.sqlite"
+  cpanel "" install --domain "$DOMAIN" --yes
+  expect "install itself is not run twice" has "$ERR" "already holds an install"
+  # The same archive's update finishes the install, although there is nothing to back up.
+  : >"$LOG"
+  cpanel "" update --yes
+  expect "update succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "says there was no database to back up yet" has "$OUT" "there is no database to back up yet"
+  expect "no database tool was called; packages, restart and health were" test "$(calls)" = "npm touch curl "
+  local b; b="$(only_backup)"
+  expect "the backup holds the files and the settings, and no database" test -f "$b/app.tgz" -a -f "$b/tours-config.env" -a ! -e "$b/db.sqlite"
+  expect "the build is in place" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.1.1"
+  expect "the install is now recorded as finished" grep -qxF "FINISHED=yes" "$APP/.cpanel-install"
+  expect "it is recorded once" test "$(grep -c '^FINISHED=' "$APP/.cpanel-install")" = 1
+  expect "the domain is still recorded" grep -qxF "DOMAIN=$DOMAIN" "$APP/.cpanel-install"
+  expect "the setup code is not shown" code_not_shown
+
+  # From now on a missing database is a fault again.
+  make_release "$T/new" 0.2.0
+  local before; before="$(snapshot)"
+  : >"$LOG"
+  cpanel_in "$T/new" "" update --yes
+  expect "a finished install without a database: update stops" test "$RC" != 0
+  expect "says why" has "$ERR" "there is no database at $DATA/db.sqlite"
+  expect "says the install has run before" has "$ERR" "This install has run before"
+  cpanel "" backup
+  expect "a finished install without a database: backup stops" test "$RC" != 0
+  expect "nothing was called" test ! -s "$LOG"
+  expect "nothing was changed" test "$(snapshot)" = "$before"
+}
+
+test_an_install_is_finished_only_when_its_health_check_passed() {
+  new_sandbox
+  fresh_install
+  expect "a healthy install is recorded as finished" grep -qxF "FINISHED=yes" "$APP/.cpanel-install"
+  new_sandbox
+  STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel "" install --domain "$DOMAIN" --yes
+  expect "the install reports the failed check" test "$RC" != 0
+  expect "an install whose check failed is not recorded as finished" grep -qxF "FINISHED=no" "$APP/.cpanel-install"
+  # The certificate was not ready, nobody reached the app, no database was written.
+  make_release "$T/new" 0.2.0
+  STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "an update whose check fails too" test "$RC" != 0
+  expect "still does not record it as finished" grep -qxF "FINISHED=no" "$APP/.cpanel-install"
+  make_release "$T/v3" 0.3.0
+  cpanel_in "$T/v3" "" update --yes
+  expect "an update that passes (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "records it as finished" grep -qxF "FINISHED=yes" "$APP/.cpanel-install"
+  # A database that is there is backed up, finished or not.
+  new_sandbox
+  STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel "" install --domain "$DOMAIN" --yes
+  app_has_run
+  : >"$LOG"
+  cpanel "" backup
+  expect "backup of an unfinished install with a database succeeds" test "$RC" = 0
+  expect "and copies the database" test "$(calls)" = "node "
+}
+
+test_an_install_with_no_record_needs_its_database_unless_the_data_folder_is_empty() {
+  new_sandbox
+  hand_install
+  expect "a hand-made install has no record" test ! -e "$APP/.cpanel-install"
+  # The database is gone but other data is there: this install has run.
+  rm "$DATA/db.sqlite" "$DATA/db.sqlite-wal"
+  local before; before="$(snapshot)"
+  cpanel "" update --yes --domain "$DOMAIN"
+  expect "update stops" test "$RC" != 0
+  expect "says why" has "$ERR" "there is no database at $DATA/db.sqlite"
+  cpanel "" backup
+  expect "backup stops" test "$RC" != 0
+  expect "nothing was called" test ! -s "$LOG"
+  expect "nothing was changed" test "$(snapshot)" = "$before"
+  # A data folder with nothing in it at all: the app never started.
+  rm -rf "$DATA"; mkdir "$DATA"
+  cpanel "" update --yes --domain "$DOMAIN"
+  expect "with an empty data folder the update goes through (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "and says there was no database to back up yet" has "$OUT" "there is no database to back up yet"
+  expect "and records the install as finished" grep -qxF "FINISHED=yes" "$APP/.cpanel-install"
+  # An install made by the script before it kept that record is treated the same way.
+  new_sandbox
+  fresh_install
+  app_has_run
+  grep -v '^FINISHED=' "$APP/.cpanel-install" >"$T/old-state"; cp "$T/old-state" "$APP/.cpanel-install"
+  rm "$DATA/db.sqlite"
+  make_release "$T/new" 0.2.0
+  cpanel_in "$T/new" "" update --yes
+  expect "no record, data but no database: update stops" test "$RC" != 0
+  expect "no record: says why" has "$ERR" "there is no database at $DATA/db.sqlite"
+}
+
 # ---------------------------------------------------------------- the data folder
 
 test_the_data_folder_is_the_one_the_settings_file_names() {

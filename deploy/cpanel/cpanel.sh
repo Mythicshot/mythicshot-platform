@@ -10,7 +10,8 @@
 # Where things go, for the default --app-root apps/tours (always relative to $HOME):
 #   ~/apps/tours             the app: dist/, migrations/, package.json, package-lock.json,
 #                            app.cjs, cpanel.sh, VERSION, and .cpanel-install (the
-#                            domain and Node version; nothing secret)
+#                            domain, the Node version and whether the install
+#                            finished; nothing secret)
 #   ~/apps/tours-data        db.sqlite, drafts/, public/ (install writes this path to
 #                            the settings file; later commands read it from there)
 #   ~/apps/tours-config.env  the settings, DATA_DIR and SETUP_CODE, mode 600. It sits
@@ -36,8 +37,15 @@
 #   migrations.new) and then renames, back to back: the running ones become dist.old and
 #   migrations.old. While that is under way the file .cpanel-update marks it. As long as
 #   the marker is there, dist.old and migrations.old are never removed: running update
-#   again resumes, with them as the way back. An interrupted update (Ctrl-C, a dropped
-#   connection) prints the commands to go back.
+#   again resumes, with them as the way back. The marker goes only when the restart
+#   was asked for. A build that exists only as dist.old counts as such an unfinished
+#   update too. An interrupted update (Ctrl-C, a dropped connection) prints the
+#   commands to go back.
+# - A missing database stops update and backup, with one exception: an app that has
+#   never started. That is an install the state file records as not finished
+#   (FINISHED=no, until a health check passed), or, where the state file says nothing,
+#   a data folder with nothing in it. So a first install that failed part-way is
+#   finished with update, and a backup then says it holds no database.
 # - update never rolls back by itself: when the new version does not answer, it prints
 #   the commands to do so, each safe to paste and to paste twice.
 # - The health check asks https://<domain>/healthz, because shared hosting routes by
@@ -99,6 +107,11 @@ ROLLBACK_BACKUP=""
 ROLLBACK_RESTORE=""
 ROLLBACK_REMOVE=""
 NODE_ENV_UMASK=022
+# Whether the state file records that the install finished: yes, no, or empty when it
+# says nothing (an install made by hand or by an earlier version of this script).
+STATE_FINISHED=""
+# 1 when there is, legitimately, no database to copy yet.
+NO_DATABASE=0
 
 # ---------------------------------------------------------------- messages
 
@@ -276,6 +289,8 @@ read_state() {
     v="$(value_in "$STATE_FILE" NODE)"
     if [[ "$v" =~ ^[1-9][0-9]?$ ]]; then NODE_MAJOR="$v"; fi
   fi
+  v="$(value_in "$STATE_FILE" FINISHED)"
+  case "$v" in yes | no) STATE_FINISHED="$v" ;; esac
 }
 
 set_node_paths() {
@@ -291,6 +306,9 @@ write_state() {
       printf '# Written by cpanel.sh. Nothing secret: the settings are in %s.\n' "$SETTINGS"
       printf 'DOMAIN=%s\n' "$DOMAIN"
       printf 'NODE=%s\n' "$NODE_MAJOR"
+      # FINISHED=yes: an install or an update got as far as a passed health check, so
+      # the app has run and has a database. FINISHED=no: the first install has not.
+      [ -z "$STATE_FINISHED" ] || printf 'FINISHED=%s\n' "$STATE_FINISHED"
     } >"$STATE_FILE.new"
     mv -f -- "$STATE_FILE.new" "$STATE_FILE"
   )
@@ -323,7 +341,16 @@ read_data_dir() {
 require_data() {
   read_data_dir || die "$DATA_PROBLEM, so the data folder is not known; nothing was changed. The file must hold a line DATA_DIR=<the data folder's full path>"
   [ -d "$DATA_DIR" ] || die "the data folder $DATA_DIR, named by DATA_DIR in $SETTINGS, does not exist; nothing was changed"
-  [ -f "$DATA_DIR/db.sqlite" ] || die "there is no database at $DATA_DIR/db.sqlite (DATA_DIR is read from $SETTINGS); nothing was changed. The app writes it the first time it starts: if it never has, open its address once and try again; if it has, DATA_DIR points at the wrong folder"
+  NO_DATABASE=0
+  [ ! -f "$DATA_DIR/db.sqlite" ] || return 0
+  # No database. That is as it should be only for an app that has never started: an
+  # install this script recorded as not finished, or, where nothing is recorded, a
+  # data folder with nothing in it at all.
+  if [ "$STATE_FINISHED" = no ] || { [ -z "$STATE_FINISHED" ] && [ -z "$(ls -A -- "$DATA_DIR" 2>/dev/null)" ]; }; then
+    NO_DATABASE=1
+    return 0
+  fi
+  die "there is no database at $DATA_DIR/db.sqlite (DATA_DIR is read from $SETTINGS); nothing was changed. This install has run before, so it has a database somewhere: DATA_DIR points at the wrong folder, or the database was moved or removed. Put that right, or restore it from a backup, and try again"
 }
 
 # The version in a folder: its VERSION file, or the version line of its package.json
@@ -517,22 +544,34 @@ do_backup() {
   for f in $RELEASE_DIRS $RELEASE_FILES "$STATE_NAME"; do
     if [ -e "$APP_DIR/$f" ]; then members+=("$f"); fi
   done
+  # Where the build exists only as the copy an update moved aside, that copy is the
+  # app's build and goes into the archive.
+  if [ ! -f "$APP_DIR/dist/node/entry.js" ] && [ -e "$APP_DIR/dist.old" ]; then members+=("dist.old"); fi
+  if [ ! -e "$APP_DIR/migrations" ] && [ -e "$APP_DIR/migrations.old" ]; then members+=("migrations.old"); fi
   if [ "$DRY_RUN" = 1 ]; then
-    info "would copy the database $DATA_DIR/db.sqlite with SQLite itself and check the copy; never a plain file copy"
+    if [ "$NO_DATABASE" = 1 ]; then
+      info "there is no database to back up yet: the app has never started"
+    else
+      info "would copy the database $DATA_DIR/db.sqlite with SQLite itself and check the copy; never a plain file copy"
+    fi
     info "would copy $DATA_DIR/drafts and $DATA_DIR/public"
     info "would write app.tgz from $APP_DIR: ${members[*]:-nothing}"
     info "would copy the settings file $SETTINGS (mode 600)"
     LAST_BACKUP="$dest"
     return 0
   fi
-  [ -f "$DATA_DIR/db.sqlite" ] || { warn "there is no database at $DATA_DIR/db.sqlite"; return 1; }
+  if [ "$NO_DATABASE" != 1 ] && [ ! -f "$DATA_DIR/db.sqlite" ]; then warn "there is no database at $DATA_DIR/db.sqlite"; return 1; fi
   mkdir -p -- "$BACKUP_ROOT" || return 1
   PARTIAL_BACKUP="$dest.partial"
   mkdir -- "$PARTIAL_BACKUP" || { PARTIAL_BACKUP=""; return 1; }
   chmod 700 -- "$PARTIAL_BACKUP" || { remove_partial_backup; return 1; }
 
-  info "the database $DATA_DIR/db.sqlite"
-  copy_database "$DATA_DIR/db.sqlite" "$PARTIAL_BACKUP/db.sqlite" || { warn "copying the database failed"; remove_partial_backup; return 1; }
+  if [ "$NO_DATABASE" = 1 ]; then
+    info "there is no database to back up yet: the app has never started, and $DATA_DIR holds no db.sqlite. This backup has no database in it."
+  else
+    info "the database $DATA_DIR/db.sqlite"
+    copy_database "$DATA_DIR/db.sqlite" "$PARTIAL_BACKUP/db.sqlite" || { warn "copying the database failed"; remove_partial_backup; return 1; }
+  fi
   for d in drafts public; do
     if [ -d "$DATA_DIR/$d" ]; then
       info "the $d folder"
@@ -694,11 +733,12 @@ cmd_install() {
     for f in $RELEASE_DIRS; do mv -- "$APP_DIR/$f.new" "$APP_DIR/$f"; done
   fi
   copy_release_files || die "copying the files failed; remove what was copied to $APP_DIR and run install again"
+  STATE_FINISHED=no
   write_state
   say "Settings file and data folder"
   create_settings_and_data
   require_node_env
-  install_packages || die "installing the packages failed. The files are in place; when the cause is fixed, open the app's address once and finish with: $SELF update --yes --app-root $APP_ROOT"
+  install_packages || die "installing the packages failed. The files are in place, so install is not run again: when the cause is fixed, finish with: $SELF update --yes --app-root $APP_ROOT"
   restart_app || die "could not touch the restart file; restart the app in cPanel's \"Setup Node.js App\""
 
   if [ "$DRY_RUN" = 1 ]; then
@@ -708,6 +748,8 @@ cmd_install() {
   fi
   rc=0
   if report_health; then
+    STATE_FINISHED=yes
+    write_state
     say "Installed version $version, and it answers at https://$DOMAIN"
   else
     say "Installed version $version, but the health check did not pass"
@@ -816,10 +858,13 @@ cmd_update() {
   fi
   require_data
   require_node_env
-  if [ -f "$MARKER" ]; then RESUME=1; fi
+  # An update is resumed when its marker is there, and also when the build exists only
+  # as dist.old: something moved it aside and never put a build back.
+  if [ -f "$MARKER" ] || { [ ! -f "$APP_DIR/dist/node/entry.js" ] && [ -f "$APP_DIR/dist.old/node/entry.js" ]; }; then RESUME=1; fi
 
   say "Update ${old:-an install of unknown version} to $new"
   if [ "$RESUME" = 1 ]; then info "An earlier update was cut off. This run finishes it; dist.old and migrations.old from before it are kept."; fi
+  if [ "$NO_DATABASE" = 1 ]; then info "The app has never started, so there is no database to back up yet; the backup holds the files only."; fi
   info "address:        https://$DOMAIN"
   info "app folder:     $APP_DIR (Node.js $NODE_MAJOR)"
   info "data folder:    $DATA_DIR (not touched)"
@@ -827,7 +872,7 @@ cmd_update() {
   confirm "Back up, replace the app files and restart?" || die "stopped; nothing was changed"
 
   do_backup || die "the backup failed, so the update did not start; nothing was changed"
-  if [ "$RESUME" = 1 ]; then
+  if [ -f "$MARKER" ]; then
     read_marker
   else
     ROLLBACK_BACKUP="$LAST_BACKUP"
@@ -848,6 +893,8 @@ cmd_update() {
     write_state
     if [ "$RESUME" != 1 ]; then
       rm -rf -- "$APP_DIR/dist.old" "$APP_DIR/migrations.old" || die "could not remove dist.old and migrations.old of an earlier update; the app files were not touched"
+    fi
+    if [ ! -f "$MARKER" ]; then
       write_marker || die "could not write $MARKER; the app files were not touched"
     fi
     if ! { swap_dir dist && swap_dir migrations && copy_release_files; }; then
@@ -860,14 +907,13 @@ cmd_update() {
     print_rollback
     die "installing the packages failed; the app was not restarted and may still be running the previous version from memory. Run the update again to finish it, or go back with the commands above"
   fi
-  # The new files and their packages are in place: the update is no longer under way.
-  [ "$DRY_RUN" = 1 ] || rm -f -- "$MARKER"
   if ! restart_app; then
     print_rollback
-    die "could not touch the restart file; restart the app in cPanel's \"Setup Node.js App\""
+    die "could not touch the restart file, so the app was not restarted. Run the update again to finish it, or go back with the commands above"
   fi
-  # The files are in place and the restart is asked for: an interruption from here on
-  # only stops the check.
+  # The new files and their packages are in place and the restart is asked for: the
+  # update is no longer under way, and an interruption from here on only stops the check.
+  [ "$DRY_RUN" = 1 ] || rm -f -- "$MARKER"
   trap - INT TERM HUP
   if [ "$DRY_RUN" = 1 ]; then
     report_health
@@ -875,6 +921,8 @@ cmd_update() {
     return 0
   fi
   if report_health; then
+    STATE_FINISHED=yes
+    write_state
     say "Updated to version $new, and it answers at https://$DOMAIN"
     info "The previous version stays in dist.old and migrations.old until the next update."
     return 0

@@ -139,6 +139,8 @@ The script then does what was done by hand on real hosting:
 
 The script never prints the setup code. At the end it tells you where the settings file is; [step 6](#6-read-the-setup-code) reads the code from it.
 
+If the install stops part-way, do not run it again: it would refuse, because the files are already there. Fix the cause and finish with `./cpanel.sh update` from the same folder.
+
 If an install is already there, the script refuses and points to `update`. An existing data folder or settings file is never replaced: the script keeps it and says so.
 
 Options, for when the defaults do not fit:
@@ -236,7 +238,7 @@ cd ~/tours-release
 
 What the update does, in this order:
 
-1. It makes a backup, as in [step 10](#10-backups). If the backup fails, or there is no database to back up, it stops and changes nothing.
+1. It makes a backup, as in [step 10](#10-backups). If the backup fails, or the database of a platform that has run before is not found, it stops and changes nothing.
 2. It copies the new `dist` and `migrations` folders beside the running ones, as `dist.new` and `migrations.new`. The running app is not touched yet.
 3. It renames, back to back: the running folders become `dist.old` and `migrations.old`, replacing the copies an earlier, finished update left there, and the new ones take their place.
 4. It copies the other new files in, installs the packages, restarts the app and asks the health address.
@@ -268,7 +270,7 @@ It writes a new folder, `/home/you/backups/tours-<date>-<time>`, and prints its 
 | `app.tgz` | The app files as they are now, without the installed packages |
 | `tours-config.env` | A copy of the settings file, with the setup code in it |
 
-The script finds the data folder through the `DATA_DIR` line of the settings file. If the settings file is missing, has no such line, or there is no database in that folder, the backup stops and writes nothing, so a backup folder that exists always holds the data.
+The script finds the data folder through the `DATA_DIR` line of the settings file. If the settings file is missing, has no such line, or there is no database in that folder, the backup stops and writes nothing. The one exception is a platform that has never started, whose first install did not finish: it has no database yet, and the backup says that it holds none.
 
 2. Copy the backup folder to your own computer: in cPanel's **File Manager**, compress the folder and download it, or use `scp` from your computer.
 
@@ -373,7 +375,8 @@ cd ~/apps/tours && ./cpanel.sh status
 | `cloudlinux-selector command was not found` | The hosting has no **Setup Node.js App**, or does not offer its command over SSH. Ask your hosting provider |
 | The install says the hosting did not create the Node.js app | The line above it shows the hosting's own answer. Often an app for this folder or domain exists already: remove it in **Setup Node.js App**, or choose another folder with `--app-root`, and run the install again |
 | The script says the app's Node.js environment was not found | The app runs on another Node.js version than the script expects. Add `--node` with the version shown in **Setup Node.js App** |
-| An update or a backup stops, saying there is no database | The script looks in the folder the `DATA_DIR` line of the settings file names. If the platform has never been opened, open its address once so that it writes its database, and try again. Otherwise `DATA_DIR` points at the wrong folder |
+| The install stopped part-way, for example at the packages, and running it again says an install is already there | Do not remove anything. When the cause is fixed, finish with `./cpanel.sh update` from the same unpacked archive. The script remembers that the install never finished, so it goes on although there is no database to back up yet, and says so |
+| An update or a backup stops, saying there is no database | This install has run before, so it has a database, and the script will not go on without backing it up. It looks in the folder the `DATA_DIR` line of the settings file names: that line points at the wrong folder, or the database was moved or removed. Put the line right, or restore the database as in [step 11](#11-restore-from-a-backup) |
 | `./cpanel.sh status` says an update was cut off | Unpack the archive of that update again if needed and run `./cpanel.sh update` from it; see [step 9](#9-updates) |
 | The setup wizard says the setup code is not right | Copy the code again from the settings file, without spaces around it, as in [step 6](#6-read-the-setup-code) |
 
