@@ -724,7 +724,11 @@ describe("creating an upload", () => {
     const bad = await send(deps, "POST", "/api/v1/uploads", { token: a.token, body: "{not json" });
     expect(bad.status).toBe(400);
     expect((await send(deps, "POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ target: { kind: "new" } }) })).status).toBe(400);
-    expect((await createUpload(deps, a.token, v2, { kind: "replace" })).status).toBe(400);
+    const unknown = await createUpload(deps, a.token, v2, { kind: "swap" });
+    expect(unknown.status).toBe(400);
+    expect(unknown.json.error).toBe("bad_target");
+    // "replace" is a target now (test/replace.test.ts): without a tour it names none.
+    expect((await createUpload(deps, a.token, v2, { kind: "replace" })).status).toBe(404);
     expect((await createUpload(deps, a.token, v2, null)).status).toBe(400);
     expect((await createUpload(deps, a.token, v2, { kind: "chapter", tour_id: "tour_" + "0".repeat(24) })).status).toBe(404);
     expect((await createUpload(deps, a.token, v2, { kind: "chapter", tour_id: "../x" })).status).toBe(404);

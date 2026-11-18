@@ -22,20 +22,27 @@
 //   statement that marks it stored, and commit copies it to the step. A hash is either
 //   that of the bytes in the store or null (unknown): a writer that lost its claim after
 //   writing its object clears it, since which bytes the store kept cannot be told.
+// - An upload that replaces a chapter (src/replace.ts) may hold steps marked reused, whose
+//   key is a picture the chapter already has, under another upload's id. An abort leaves
+//   those out: it deletes only the keys under the upload's own id.
 import type { Hono } from "hono";
 import { newId, newSlug, requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
 import { LIMITS, parseManifest, type Manifest } from "./manifest.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 import { housekeeping } from "./publish.ts";
+import { chapterPictures, findChapter, parseHashes, replaceAnswer, replaceStatements, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, type ImageType } from "./sniff.ts";
 
 /** An upload older than this is swept by the workspace's next create. */
 export const UPLOAD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /** At most this many stale uploads are swept per create, to bound the work of one request. */
 const SWEEP_LIMIT = 5;
-/** The create body: the manifest's cap plus room for the envelope around it. */
-const CREATE_BODY_BYTES = LIMITS.manifestBytes + 4096;
+/**
+ * The create body: the manifest's cap, room for the envelope around it, and a fixed 14,000
+ * bytes for the hash list of a replace (200 hashes of 64 characters, quoted and separated).
+ */
+const CREATE_BODY_BYTES = LIMITS.manifestBytes + 4096 + 14_000;
 /** Attempts at a fresh slug when a new tour's slug collides. */
 const SLUG_ATTEMPTS = 5;
 /** Open uploads per workspace when the config sets no other number. */
@@ -47,11 +54,21 @@ export const STALE_CLAIM_MS = 60_000;
 
 const UPLOAD_ID = /^up_[0-9a-f]{24}$/;
 const TOUR_ID = /^tour_[0-9a-f]{24}$/;
+const CHAPTER_ID = /^ch_[0-9a-f]{24}$/;
 const STEP_NUMBER = /^[1-9][0-9]{0,2}$/;
 
 const DRAFT_META = (type: ImageType) => ({ contentType: type === "png" ? "image/png" : "image/jpeg", cacheControl: "private, no-store" });
 
-type UploadRow = { id: string; tour_id: string | null; manifest: string; logo_key: string | null; logo_bytes: number | null; closing_at: number | null };
+type UploadRow = {
+  id: string;
+  tour_id: string | null;
+  manifest: string;
+  logo_key: string | null;
+  logo_bytes: number | null;
+  closing_at: number | null;
+  /** The chapter this upload replaces, or null for a new tour or a new chapter. */
+  replaces_chapter_id: string | null;
+};
 
 function extOf(name: string): ImageType {
   return name.endsWith(".png") ? "png" : "jpg";
@@ -75,7 +92,7 @@ const notFound = (what: string) => apiError(404, "not_found", `no such ${what}`)
 async function loadUpload(deps: Deps, auth: Auth, id: string): Promise<UploadRow | null> {
   if (!UPLOAD_ID.test(id)) return null;
   return deps.db.first<UploadRow>(
-    "SELECT id, tour_id, manifest, logo_key, logo_bytes, closing_at FROM upload WHERE id = ? AND workspace_id = ?",
+    "SELECT id, tour_id, manifest, logo_key, logo_bytes, closing_at, replaces_chapter_id FROM upload WHERE id = ? AND workspace_id = ?",
     [id, auth.workspaceId],
   );
 }
@@ -90,7 +107,8 @@ function possibleKeys(id: string, manifest: Manifest): string[] {
 /**
  * Removes an upload of this workspace: marks it closing (so no commit can take it any
  * more), deletes exactly its own objects, then its rows. An upload that is already gone,
- * or was committed meanwhile, is left alone.
+ * or was committed meanwhile, is left alone. A step of a replace that reuses a picture of
+ * the chapter names a key the chapter still uses, so reused rows are left out of the keys.
  */
 export async function abortUpload(deps: Deps, workspaceId: string, id: string): Promise<void> {
   const row = await deps.db.first<UploadRow>("SELECT id, manifest, logo_key FROM upload WHERE id = ? AND workspace_id = ?", [id, workspaceId]);
@@ -98,7 +116,7 @@ export async function abortUpload(deps: Deps, workspaceId: string, id: string): 
   const marked = await deps.db.run("UPDATE upload SET closing_at = coalesce(closing_at, ?) WHERE id = ? AND workspace_id = ?", [deps.now(), id, workspaceId]);
   if (marked.changes === 0) return; // committed (or aborted) since the read: nothing of it is ours to delete
   const recorded = await deps.db.all<{ image_key: string }>(
-    "SELECT s.image_key FROM upload_step s JOIN upload u ON u.id = s.upload_id WHERE s.upload_id = ? AND u.workspace_id = ?",
+    "SELECT s.image_key FROM upload_step s JOIN upload u ON u.id = s.upload_id WHERE s.upload_id = ? AND u.workspace_id = ? AND s.reused = 0",
     [id, workspaceId],
   );
   const keys = new Set(possibleKeys(id, JSON.parse(row.manifest) as Manifest));
@@ -231,15 +249,34 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     const target = Object.hasOwn(b, "target") ? b.target : undefined;
     if (target === null || typeof target !== "object" || Array.isArray(target)) return apiError(400, "bad_target", "target must be an object");
     const t = target as Record<string, unknown>;
+    if (t.kind !== "new" && t.kind !== "chapter" && t.kind !== "replace") {
+      return apiError(400, "bad_target", 'target.kind must be "new", "chapter" or "replace"');
+    }
+    // The hash list of a replace: one per step, checked before anything is looked up.
+    let hashes: string[] | null = null;
+    if (Object.hasOwn(b, "sha256")) {
+      if (t.kind !== "replace") return apiError(400, "bad_request", 'sha256 is only allowed with target.kind "replace"');
+      hashes = parseHashes(b.sha256, parsed.manifest.steps.length);
+      if (hashes === null) return apiError(400, "bad_request", "sha256 must be a list of one lowercase hex SHA-256 (64 characters) per step");
+    }
     let tourId: string | null = null;
+    let replaces: { chapterId: string; revision: string | null } | null = null;
     if (t.kind === "chapter") {
       const id = t.tour_id;
       if (typeof id !== "string" || !TOUR_ID.test(id)) return notFound("tour");
       const tour = await deps.db.first<{ id: string }>("SELECT id FROM tour WHERE id = ? AND workspace_id = ?", [id, auth.workspaceId]);
       if (tour === null) return notFound("tour");
       tourId = tour.id;
-    } else if (t.kind !== "new") {
-      return apiError(400, "bad_target", 'target.kind must be "new" or "chapter"');
+    } else if (t.kind === "replace") {
+      const id = t.tour_id;
+      if (typeof id !== "string" || !TOUR_ID.test(id)) return notFound("tour");
+      // A malformed chapter id is looked up as no chapter, so an unknown tour still answers as one.
+      const chapterId = typeof t.chapter_id === "string" && CHAPTER_ID.test(t.chapter_id) ? t.chapter_id : "";
+      const found = await findChapter(deps, auth, id, chapterId);
+      if (!found.tour) return notFound("tour");
+      if (!found.chapter) return notFound("chapter");
+      tourId = id;
+      replaces = { chapterId, revision: found.revision };
     }
 
     // Housekeeping only: whatever goes wrong in it, this request carries on.
@@ -251,21 +288,44 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     // And the publish housekeeping of the workspace (at most 4 calls; it never throws).
     await housekeeping(deps, auth.workspaceId, null, 1);
 
+    // A replace with hashes: which of the new steps the chapter already has a picture for.
+    // The chapter's revision was read before its pictures, so if another replace lands in
+    // between, this upload is created against the older revision and its commit is refused.
+    let reused: Reused[] = [];
+    if (replaces !== null && hashes !== null && tourId !== null) {
+      reused = reusedSteps(parsed.manifest, hashes, await chapterPictures(deps, auth, tourId, replaces.chapterId));
+    }
+
     // One statement, so creates at the same moment can never pass the cap together.
     const id = newId("up");
     const now = deps.now();
     const cap = deps.config.maxOpenUploads ?? DEFAULT_MAX_OPEN_UPLOADS;
-    const inserted = await deps.db.run(
-      `INSERT INTO upload (id, workspace_id, tour_id, manifest, created_at) SELECT ?, ?, ?, ?, ?
-        WHERE (SELECT count(*) FROM upload WHERE workspace_id = ? AND closing_at IS NULL AND created_at >= ?) < ?`,
-      [id, auth.workspaceId, tourId, JSON.stringify(parsed.manifest), now, auth.workspaceId, now - UPLOAD_MAX_AGE_MS, cap],
-    );
-    if (inserted.changes === 0) {
+    const insert: Stmt = {
+      sql: `INSERT INTO upload (id, workspace_id, tour_id, manifest, created_at, replaces_chapter_id, base_revision) SELECT ?, ?, ?, ?, ?, ?, ?
+             WHERE (SELECT count(*) FROM upload WHERE workspace_id = ? AND closing_at IS NULL AND created_at >= ?) < ?`,
+      params: [
+        id, auth.workspaceId, tourId, JSON.stringify(parsed.manifest), now, replaces?.chapterId ?? null, replaces?.revision ?? null,
+        auth.workspaceId, now - UPLOAD_MAX_AGE_MS, cap,
+      ],
+    };
+    let made: boolean;
+    if (reused.length === 0) {
+      made = (await deps.db.run(insert.sql, insert.params)).changes === 1;
+    } else {
+      // The upload and its reused steps in one batch, so an upload never exists without
+      // them; the batch tells no row count, so one look says whether the cap let it in.
+      await deps.db.batch([insert, reusedStatement(auth.workspaceId, id, reused, now)]);
+      made = (await deps.db.first("SELECT 1 AS x FROM upload WHERE id = ? AND workspace_id = ?", [id, auth.workspaceId])) !== null;
+    }
+    if (!made) {
       const res = apiError(429, "too_many_uploads", `this workspace already has ${cap} open uploads; finish or cancel one first`);
       res.headers.set("retry-after", String(CAP_RETRY_AFTER_S));
       return res;
     }
-    return json(201, { upload_id: id, steps: parsed.manifest.steps.length });
+    if (replaces === null) return json(201, { upload_id: id, steps: parsed.manifest.steps.length });
+    // `have`: the step numbers not to send. `settings`: whether this replace also carries
+    // the tour's settings and logo (never, here).
+    return json(201, { upload_id: id, steps: parsed.manifest.steps.length, have: reused.map((r) => r.n), settings: false });
   });
 
   app.put("/api/v1/uploads/:id/steps/:n", async (c) => {
@@ -355,10 +415,23 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
         await deps.db.run("UPDATE upload_step SET sha256 = CASE WHEN stored_at IS NULL THEN '' ELSE NULL END WHERE upload_id = ? AND n = ?", [up.id, n]);
         return taken();
       }
-      const prior = await committed(deps, auth, up.id);
-      if (prior !== null) {
-        await deps.db.run("UPDATE step SET sha256 = NULL WHERE tour_id = ? AND image_key = ?", [prior.tour_id, key]);
-        return taken();
+      if (up.replaces_chapter_id !== null && up.tour_id !== null) {
+        // A committed replace is not found by a chapter named after it. The key is spoken
+        // for while a step of the tour uses it, or while it waits in replaced_object (a
+        // later replace took it out; a publish in progress may still copy from it).
+        const used = await deps.db.first<{ step: number | null; replaced: number | null }>(
+          `SELECT (SELECT 1 FROM step WHERE tour_id = ? AND image_key = ? LIMIT 1) AS step,
+                  (SELECT 1 FROM replaced_object WHERE tour_id = ? AND image_key = ?) AS replaced`,
+          [up.tour_id, key, up.tour_id, key],
+        );
+        if (used?.step === 1) await deps.db.run("UPDATE step SET sha256 = NULL WHERE tour_id = ? AND image_key = ?", [up.tour_id, key]);
+        if (used?.step === 1 || used?.replaced === 1) return taken();
+      } else {
+        const prior = await committed(deps, auth, up.id);
+        if (prior !== null) {
+          await deps.db.run("UPDATE step SET sha256 = NULL WHERE tour_id = ? AND image_key = ?", [prior.tour_id, key]);
+          return taken();
+        }
       }
       await deps.drafts.delete([key]);
       return notFound("upload");
@@ -417,7 +490,9 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     const id = c.req.param("id");
     const up = await loadUpload(deps, auth, id);
     if (up === null || up.closing_at !== null) {
-      const prior = up === null ? await committed(deps, auth, id) : null;
+      // A commit that already happened answers the same again: a new tour or chapter is
+      // found by the chapter named after the upload, a replace by the chapter's revision.
+      const prior = up === null ? ((await committed(deps, auth, id)) ?? (await replaceAnswer(deps, auth, id))) : null;
       return prior !== null ? json(201, prior) : notFound("upload");
     }
     const m = JSON.parse(up.manifest) as Manifest;
@@ -432,6 +507,24 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     // Only a new tour takes the logo; an upload into an existing tour keeps that tour's.
     if (up.tour_id === null && m.cover?.logo && (up.logo_key === null || up.logo_bytes === null)) {
       return apiError(409, "incomplete", "the logo has not been sent");
+    }
+
+    if (up.replaces_chapter_id !== null) {
+      try {
+        await deps.db.batch(replaceStatements(deps, auth, up, m));
+      } catch (err) {
+        if (!isUniqueViolation(err) && !isNotNullViolation(err)) throw err;
+        // Another commit of this upload may have won; then this one answers the same.
+        const prior = await replaceAnswer(deps, auth, up.id);
+        if (prior !== null) return json(201, prior);
+        const still = await loadUpload(deps, auth, up.id);
+        if (still === null || still.closing_at !== null) return notFound("upload"); // aborted meanwhile
+        return apiError(409, "chapter_changed", "the chapter was changed by another upload since this one started; start again");
+      }
+      const answer = await replaceAnswer(deps, auth, up.id);
+      // Not found only if yet another replace of the chapter landed since the batch: then
+      // the draft holds more than this replace, and publishing is not this client's call.
+      return json(201, answer ?? { tour_id: up.tour_id ?? "", chapter_id: up.replaces_chapter_id, steps: m.steps.length, publish: "other_changes" });
     }
 
     const result = { tour_id: up.tour_id ?? "", chapter_id: chapterIdFor(up.id), steps: m.steps.length };
