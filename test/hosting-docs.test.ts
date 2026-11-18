@@ -19,6 +19,7 @@ import installSh from "../deploy/install.sh?raw";
 import packageJson from "../package.json?raw";
 import packageCpanelTs from "../scripts/package-cpanel.ts?raw";
 import appTs from "../src/app.ts?raw";
+import hostGateTs from "../src/host-gate.ts?raw";
 
 const HOSTING = import.meta.glob("../docs/hosting/*.md", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const RUNBOOKS = import.meta.glob("../docs/*.md", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
@@ -436,25 +437,47 @@ describe("the shared cPanel hosting guide", () => {
     expect(top.split("\n").slice(0, 4).join("\n")).toContain("> [!WARNING]\n> Partly verified.");
     expect(top).toMatch(/Partly verified/);
     expect(top).toMatch(/done by hand on one real shared cPanel account, at one provider/);
-    expect(top).toMatch(/`cpanel\.sh`[^\n]*only been tested[^\n]*stand-ins/);
+    // Of the script, an update and a status have run there once; the rest has not.
+    expect(top).toMatch(/`cpanel\.sh`[^\n]*the `update` and `status` commands of an earlier version have run once on that account, from an archive unpacked there/);
+    expect(top).toMatch(/`install`, `backup` as a command of its own, the commands to go back and the second address have only been tested on a development computer against stand-ins/);
     expect(top).toMatch(/The software is not public yet/);
     expect(top).toMatch(/from the owner/);
     // The closing section keeps the two sides apart, and names the script's tests.
     expect(sections(guide)[sections(guide).length - 1]).toBe("What has been run where");
     const last = guide.slice(guide.indexOf("## What has been run where"));
     expect(last).toMatch(/\*\*Run by hand on real hosting,\*\*/);
+    // What the script itself did there, once: an update over the hand-made install, and a status.
+    const ran = last.slice(last.indexOf("**Run by the script on real hosting,**"), last.indexOf("**Tested only on a development computer,**"));
+    expect(ran).toMatch(/^\*\*Run by the script on real hosting,\*\* once, on that same account, with Bash 4\.4 and the version of the script from before the second address:$/m);
+    expect(ran).toMatch(/^- The archive from `npm run package:cpanel`, unpacked on the hosting\.$/m);
+    expect(ran).toMatch(/^- `\.\/cpanel\.sh update` with `--domain`, over the install that had been made by hand: first as a dry run, then for real\./m);
+    expect(ran).toMatch(/backup with the app's own Node\.js[^\n]*`app\.cjs` among them[^\n]*passed the health check/);
+    expect(ran).toMatch(/^- What `npm ci` does to `node_modules` in the app folder\.[^\n]*`npm ci` kept the link\./m);
+    expect(ran).toMatch(/^- `\.\/cpanel\.sh status`, from the installed copy\.$/m);
+    expect(ran).not.toMatch(/cpanel\.sh (install|backup)/);
+    // What it did not do there is listed as tested against stand-ins only.
+    const only = last.slice(last.indexOf("**Tested only on a development computer,**"), last.indexOf("**Not yet confirmed on real hosting,**"));
+    expect(only).toMatch(/^- `\.\/cpanel\.sh install`, and `\.\/cpanel\.sh backup` run as a command of its own\./m);
+    for (const what of [/status code after a health check that passed/, /`sqlite3` tool/, /Resuming an update that was cut off, and the commands to go back/, /The second address/, /The restore steps/]) expect(only).toMatch(what);
+    // The script's own header says the same.
+    expect(cpanelSh).toMatch(/# script, update and status have run there once, with Bash 4\.4, from an archive unpacked/);
+    expect(cpanelSh).toMatch(/# installed copy\. install, backup as a command of its own, resuming an update that was/);
+    expect(cpanelSh).not.toMatch(/This script itself has\s+# only been run against stand-ins/);
     expect(last).toMatch(/\*\*Tested only on a development computer,\*\* never on real hosting/);
     expect(last).toContain("](../../deploy/cpanel/test-cpanel.sh)");
-    // What nobody has seen on real hosting yet is listed, the node_modules link first.
+    // What nobody has seen on real hosting yet is listed: what only an install does, and the second address.
     const open = last.slice(last.indexOf("**Not yet confirmed on real hosting,**"));
-    expect(open).toMatch(/^\*\*Not yet confirmed on real hosting,\*\*[^\n]*\n\n1\. What `npm ci` does to `node_modules` in the app folder\./);
+    expect(open).toMatch(/^\*\*Not yet confirmed on real hosting,\*\*[^\n]*\n\n1\. That `cloudlinux-selector create` answers the way the script expects/);
+    expect([...open.matchAll(/^(\d+)\. /gm)].map((m) => m[1])).toEqual(["1", "2", "3"]);
+    // The link npm ci kept, and the hosting's Bash, are no longer open questions.
+    expect(open).not.toMatch(/node_modules|Bash/);
     expect(cpanelSh).toContain("node_modules was a link into the Node.js environment before npm ci and is a plain folder now");
     expect((JSON.parse(packageJson) as { scripts: Record<string, string> }).scripts["test:cpanel"]).toBe("bash deploy/cpanel/test-cpanel.sh");
   });
 
   it("links no external page, so none that was not opened, and names no provider", () => {
     expect([...guide.matchAll(/\]\(([a-z]+:[^)\s]+)\)/g)]).toEqual([]);
-    expect(guide).not.toMatch(/https?:\/\/(?!tours\.example\.com\b)/);
+    expect(guide).not.toMatch(/https?:\/\/(?!(?:tours|app)\.example\.com\b)/);
     for (const p of SERVER_GUIDES) {
       const provider = hosting[p].match(/^# Host on (?:an? )?(\S+)/)?.[1] ?? "";
       expect(provider.length, p).toBeGreaterThan(2);
@@ -467,7 +490,7 @@ describe("the shared cPanel hosting guide", () => {
     const listed = [...toc.matchAll(/^- \[([^\]]+)\]\(#([^)]+)\)$/gm)].map((m) => m[1]);
     const have = [...split(guide).prose.matchAll(/^## +(.+?) *$/gm)].map((m) => m[1]).filter((h) => h !== "Contents");
     expect(listed).toEqual(have);
-    for (const h of ["What you need", "Create the subdomain", "Upload and unpack the archive", "Install the platform", "Read the setup code", "Open the setup wizard", "HTTPS", "Updates", "Backups", "Restore from a backup", "Roll back an update", "Troubleshooting"]) {
+    for (const h of ["What you need", "Create the subdomain", "Upload and unpack the archive", "Install the platform", "Read the setup code", "Open the setup wizard", "HTTPS", "Updates", "Backups", "Restore from a backup", "Roll back an update", "Troubleshooting", "A second address for the app"]) {
       expect(sections(guide), h).toContain(h);
     }
   });
@@ -475,10 +498,10 @@ describe("the shared cPanel hosting guide", () => {
   it("every cpanel.sh command and option the guide names exists, and every one the script has is in the guide", () => {
     const { commands, flags } = vocabulary();
     expect([...commands].sort()).toEqual(["backup", "install", "status", "update"]);
-    expect([...flags].sort()).toEqual(["--allow-downgrade", "--app-root", "--domain", "--dry-run", "--node", "--yes"]);
+    expect([...flags].sort()).toEqual(["--allow-downgrade", "--app-domain", "--app-root", "--domain", "--dry-run", "--node", "--yes"]);
     const named = new Set<string>();
     for (const l of lines) {
-      for (const m of l.matchAll(/cpanel\.sh((?: +(?:--[a-z][a-z-]*|[a-z]+(?=\s|$)|tours\.example\.com|<[a-z]+>))*)/g)) {
+      for (const m of l.matchAll(/cpanel\.sh((?: +(?:--[a-z][a-z-]*|[a-z]+(?=\s|$)|(?:tours|app)\.example\.com|<[a-z]+>))*)/g)) {
         for (const w of m[1].trim().split(/ +/).filter((x) => /^(--)?[a-z-]+$/.test(x))) named.add(w);
       }
     }
@@ -505,7 +528,11 @@ describe("the shared cPanel hosting guide", () => {
     expect(guide).toContain("`npm ci --omit=dev --ignore-scripts`");
     expect(cpanelSh).toContain("cloudlinux-selector create --json --interpreter nodejs");
     expect(guide).toContain("`cloudlinux-selector create`");
-    expect(cpanelSh).toContain('"https://$DOMAIN/healthz"');
+    // Health is asked at the recorded address, and at both when there are two.
+    expect(cpanelSh).toContain('"https://$host/healthz"');
+    expect(cpanelSh).toContain('check_address "$DOMAIN"');
+    expect(cpanelSh).toContain('report_address "$DOMAIN" tours');
+    expect(cpanelSh).toContain('report_address "$APP_DOMAIN" app');
     expect(appTs).toContain('app.get("/healthz"');
     expect(lines).toContain("curl https://tours.example.com/healthz");
     // The rollback commands the guide shows are the ones the script prints, with the guide's paths.
@@ -566,6 +593,155 @@ describe("the shared cPanel hosting guide", () => {
     rows.forEach((row, i) => {
       if (plain(row)) expect(plain(rows[i + 1] ?? ""), `wrapped paragraph at: ${row.slice(0, 60)}`).toBe(false);
     });
+  });
+
+  /** The section on the second address: from its heading to the next level-two heading. */
+  const second = (): string => {
+    const from = guide.search(/^## \d+\. A second address for the app$/m);
+    expect(from).toBeGreaterThan(-1);
+    const rest = guide.slice(from + 3);
+    return guide.slice(from, from + 3 + rest.search(/^## /m));
+  };
+
+  it("has a numbered section on a second address, after the troubleshooting and before the closing section", () => {
+    const have = sections(guide);
+    expect(have.indexOf("A second address for the app")).toBe(have.indexOf("Troubleshooting") + 1);
+    expect(have.indexOf("A second address for the app")).toBe(have.indexOf("What has been run where") - 1);
+    expect(guide).toMatch(/^- \[\d+\. A second address for the app\]\(#\d+-a-second-address-for-the-app\)$/m);
+    // The numbers of the sections before it did not move: links to them still hold.
+    expect(guide).toMatch(/^## 13\. Troubleshooting$/m);
+    expect(guide).toMatch(/^## 14\. A second address for the app$/m);
+  });
+
+  it("the second address is set up in the order that keeps the platform reachable, and attaching it stays marked Unconfirmed", () => {
+    const part = second();
+    // The steps are the section's first numbered list.
+    const steps = [...split(part).prose.matchAll(/^(\d+)\. (.+)$/gm)].map((m) => ({ n: Number(m[1]), text: m[2] }));
+    // Step 0 comes before all of them: a version that knows the two lines, installed and checked.
+    expect(steps.slice(0, 7).map((x) => x.n)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(steps[0].text).toMatch(/^First update to a version that has this section, without the `--app-domain` option/);
+    expect(steps[0].text).toMatch(/An older version ignores the two lines/);
+    expect(steps[0].text).toMatch(/Only then go on\.$/);
+    const first = steps.slice(1, 7);
+    expect(first[0].text).toMatch(/^Create the subdomain `app\.example\.com`/);
+    expect(first[1].text).toMatch(/^Attach it to the same Node\.js app\./);
+    expect(first[2].text).toMatch(/^Wait for its certificate/);
+    expect(first[3].text).toMatch(/^Add the two lines to the settings file/);
+    expect(first[4].text).toMatch(/^Restart the app/);
+    expect(first[5].text).toMatch(/^Check both addresses, right after the restart/);
+    // Nobody has done the attach step on real hosting: it says so, and so does the closing list.
+    expect(first[1].text).toContain("**Unconfirmed:**");
+    expect(first[1].text).toMatch(/has not been tried on real hosting/);
+    for (const i of [0, 2, 3, 4, 5]) expect(first[i].text, first[i].text).not.toContain("Unconfirmed");
+    const open = guide.slice(guide.indexOf("**Not yet confirmed on real hosting,**"));
+    expect(open).toMatch(/^\d+\. That one Node\.js app can answer for a second subdomain, and that the host name reaches the app unchanged/m);
+    // The script takes no part in it.
+    expect(part).toMatch(/The script creates no domain/);
+    const creates = cpanelSh.split("\n").filter((l) => l.includes("cloudlinux-selector create"));
+    expect(creates.length).toBeGreaterThan(2);
+    for (const l of creates) expect(l, l).not.toMatch(/APP_DOMAIN|app-domain/);
+    // The lines, the restart and the check are the script's own.
+    const code = codeLines(part);
+    expect(code).toContain("nano ~/apps/tours-config.env");
+    expect(code).toContain("TOURS_HOST=tours.example.com");
+    expect(code).toContain("APP_HOST=app.example.com");
+    // The two lines are always a person's: the script prints them and never writes them.
+    expect(cpanelSh).not.toMatch(/printf[^\n#]*(TOURS_HOST|APP_HOST)=/);
+    expect(code).toContain("touch ~/apps/tours/tmp/restart.txt");
+    expect(cpanelSh).toContain('run touch "$APP_DIR/tmp/restart.txt"');
+    expect(code).toContain("cd ~/apps/tours && ./cpanel.sh status --app-domain app.example.com");
+    // What each address answers when it worked, as the app reports it.
+    expect(code).toContain('{"ok":true,"address":"tours"}');
+    expect(code).toContain('{"ok":true,"address":"app"}');
+    expect(cpanelSh).toContain(String.raw`[[ "$reply" == *"\"address\":\"$role\""* ]]`);
+    expect(part).toContain("`health of the tours address: ok`");
+    expect(part).toContain("`health of the app address: ok`");
+    expect(cpanelSh).toContain('info "health of the $2 address: ok"');
+    // How the script comes to remember it: an update that checks both addresses before it changes anything.
+    expect(code).toContain("./cpanel.sh update --app-domain app.example.com");
+    expect(part).toMatch(/Before it asks or changes anything, that update asks both addresses for their roles, once each\. If either does not report its own, it stops, prints the two lines and changes nothing\./);
+    expect(part).toMatch(/It then shows no commands to go back, because the new version is not at fault\./);
+    // An install starts with one address: the option is not offered for it, here or in the script.
+    expect(part).toMatch(/\*\*A new install\.\*\* The install does not take the option, and says so/);
+    for (const l of codeLines(guide)) expect(l, l).not.toMatch(/cpanel\.sh install[^\n]*--app-domain/);
+    expect(cpanelSh).toContain(String.raw`[ "$COMMAND" != install ] || usage_error "--app-domain does not go with install: install with one address first, then add the second with update, as the guide's section \"A second address for the app\" describes"`);
+    expect(guide).toMatch(/^\| `--app-domain <name>` \|[^\n]*It goes with `update` and `status`, not with `install`/m);
+    // One warning, in one line, about what a wrong name does.
+    expect(part).toMatch(/> \[!WARNING\]\n> A wrong name in either of the two lines/);
+  });
+
+  it("an install with one address is moved in that same order, and the way back is given", () => {
+    const part = second();
+    const at = (re: RegExp) => part.search(re);
+    const steps = at(/^1\. Create the subdomain/m);
+    const move = at(/^\*\*An install that has one address today\.\*\*/m);
+    const back = at(/^\*\*The way back\.\*\*/m);
+    expect(steps).toBeGreaterThan(-1);
+    expect(move).toBeGreaterThan(steps);
+    expect(back).toBeGreaterThan(move);
+    const note = part.slice(move, back);
+    // A backup first; the name and its certificate before the two lines; the tours address stays the one it was.
+    expect(note).toMatch(/backup/);
+    // The version first, as in step 0.
+    expect(note.search(/Start with step 0: the installed version must know the two lines before they are added\./)).toBeGreaterThan(-1);
+    expect(note.search(/Start with step 0/)).toBeLessThan(note.search(/steps 1 to 3/));
+    expect(note).toMatch(/step 6 comes right after it/);
+    expect(note.search(/steps 1 to 3/)).toBeLessThan(note.search(/steps 4 to 6/));
+    expect(note).toMatch(/`--domain`[^\n]*stays[^\n]*`tours\.example\.com`/);
+    expect(note).toMatch(/Mythicshot keeps the address it has/);
+    // Back to one address: the two lines out, a restart, and the script's own record of the name.
+    const way = part.slice(back);
+    expect(way).toMatch(/Remove the two lines/);
+    expect(codeLines(way)).toContain("touch ~/apps/tours/tmp/restart.txt");
+    expect(codeLines(way)).toContain("nano ~/apps/tours/.cpanel-install");
+    expect(way).toContain("`APP_DOMAIN=`");
+    expect(cpanelSh).toMatch(/^readonly STATE_NAME=\.cpanel-install$/m);
+    expect(cpanelSh).toContain(`printf 'APP_DOMAIN=%s\\n' "$RECORDED_APP_DOMAIN"`);
+    expect(codeLines(way)).toContain("cd ~/apps/tours && ./cpanel.sh status");
+  });
+
+  it("the script's words about the second address are the agreed ones, and it never reads or writes the host lines of an existing settings file", () => {
+    for (const text of [
+      "  --app-domain <name> A second address, for the app, such as app.example.com. With it, --domain is the address of the tours. Remembered after the first time.",
+      "--app-domain must be a host name in lowercase, such as app.example.com, without https:// and without a path",
+      "--app-domain must be a different name than --domain",
+      "the settings file $SETTINGS is kept as it is. For two addresses it must hold these two lines; add them by hand if they are not there, then restart the app:",
+      'info "TOURS_HOST=$DOMAIN"',
+      'info "APP_HOST=$APP_DOMAIN"',
+      "https://$host/healthz answered, but the platform does not see it as its $role address. The settings file $SETTINGS must hold TOURS_HOST=$DOMAIN and APP_HOST=$APP_DOMAIN, and the app must be restarted after a change.",
+      'say "Installed version $version, and it answers at https://$DOMAIN"',
+      "--app-domain goes only with update and status",
+      "                      With update and status. An install starts with one address.",
+      "https://$host answers its health check but refuses every other request: the settings file names other addresses in TOURS_HOST and APP_HOST than the one this install uses.",
+      'say "Version $new is in place and answers, but the addresses do not report their roles"',
+      "the two addresses do not both report their own role yet, so the update did not start and the app address was not recorded. Nothing was changed",
+      "the app address recorded in $STATE_FILE is the same as the tours address; remove the APP_DOMAIN line. Nothing was changed",
+      'say "Updated to version $new, and it answers at $(answers_at)"',
+      `printf 'https://%s and https://%s' "$DOMAIN" "$APP_DOMAIN"`,
+    ]) {
+      expect(cpanelSh, text).toContain(text);
+    }
+    // Of the settings file the script still reads the DATA_DIR line and no other.
+    const reads = cpanelSh.split("\n").filter((l) => /^\s*[^#\s]/.test(l) && /\b(sed|grep|awk|cat|head|tail|source)\s[^\n]*"\$SETTINGS"/.test(l));
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toContain("DATA_DIR=");
+    // And it writes the file in one place only: the new file of a first install.
+    const writes = cpanelSh.split("\n").filter((l) => /^\s*[^#\s]/.test(l) && /(>>?\s*"\$SETTINGS"|mv[^\n]*"\$SETTINGS"$|tee[^\n]*\$SETTINGS)/.test(l));
+    expect(writes).toEqual(['      mv -- "$tmp" "$SETTINGS"']);
+    // A passed health check is followed by a request without a token whose body is thrown away.
+    expect(cpanelSh).toContain(String.raw`code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "https://$1/api/v1/me" 2>/dev/null)" || return 1`);
+    expect(cpanelSh).toContain('[ "$code" = 421 ]');
+    expect(cpanelSh).not.toMatch(/Authorization|Bearer/i);
+    // The route it asks is one the platform answers on both addresses, and refuses on any other name.
+    expect(hostGateTs).toContain('"GET /api/v1/me": "both"');
+    expect(guide).toMatch(/\| The script says an address answers its health check but refuses every other request \|/);
+    // An app address is written to the state file from the record, which changes only after a passed check.
+    expect(cpanelSh).toContain(`[ -z "$RECORDED_APP_DOMAIN" ] || printf 'APP_DOMAIN=%s\\n' "$RECORDED_APP_DOMAIN"`);
+    expect(cpanelSh.match(/RECORDED_APP_DOMAIN="\$APP_DOMAIN"/g)).toHaveLength(1);
+    // The troubleshooting table names what the script says when a role is wrong.
+    expect(guide).toMatch(/\| The script says the platform does not see an address as its tours or its app address \|/);
+    // The guide's option table has the option.
+    expect(guide).toMatch(/^\| `--app-domain <name>` \|/m);
   });
 
   it("the chooser and the Namecheap VPS guide point to it", () => {
