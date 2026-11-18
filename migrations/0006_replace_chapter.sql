@@ -20,13 +20,24 @@ ALTER TABLE upload ADD COLUMN base_revision TEXT;
 -- commit of that upload finds its result, and the tour's draft_version that replace made.
 ALTER TABLE chapter ADD COLUMN revision TEXT;
 ALTER TABLE chapter ADD COLUMN replaced_version INTEGER;
+-- The draft_version made by the first of the replaces of this chapter that followed one
+-- another with no other change to the tour's draft in between. A snapshot built from the
+-- draft just before that one lacks nothing but this chapter's replaces.
+ALTER TABLE chapter ADD COLUMN replaced_from INTEGER;
 CREATE INDEX chapter_revision ON chapter (revision);
 
 -- The tour's draft_version the live snapshot was built from. For a snapshot published
--- before this migration it is known only when the tour has not changed since: otherwise
--- it stays null, which reads as "the draft may hold changes that were never published".
+-- before this migration it is filled in only when the snapshot is known to hold the whole
+-- draft: the tour has not changed since it went live, and the snapshot has as many steps
+-- as the draft. The times alone do not say so, because a chapter uploaded while a publish
+-- of several calls was running is older than that publish's last call and yet not in it.
+-- Anything else stays null (a snapshot with no step count included), which reads as "the
+-- draft may hold changes that were never published".
 ALTER TABLE snapshot ADD COLUMN draft_version INTEGER;
-UPDATE snapshot SET draft_version = (SELECT t.draft_version FROM tour t WHERE t.id = snapshot.tour_id AND t.updated_at <= snapshot.published_at);
+UPDATE snapshot SET draft_version = (
+  SELECT t.draft_version FROM tour t
+   WHERE t.id = snapshot.tour_id AND t.updated_at <= snapshot.published_at
+     AND snapshot.steps = (SELECT count(*) FROM step s WHERE s.tour_id = t.id));
 
 -- Draft pictures a replace took out of a chapter and no step uses any more, waiting to be
 -- deleted. draft_version is the tour's draft_version that replace made: a publish built
