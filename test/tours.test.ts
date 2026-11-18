@@ -31,12 +31,15 @@ describe("tour list", () => {
 
     const r = await send(deps, "GET", "/api/v1/tours", { token: a.token });
     expect(r.status).toBe(200);
+    const slug = async (id: string) => (await deps.db.first<{ slug: string }>("SELECT slug FROM tour WHERE id = ?", [id]))!.slug;
     expect(r.json).toEqual({
       tours: [
-        { id: older.tour_id, title: "Send an invoice", status: "draft", chapters: 2, steps: 4, updated_at: 1_800_000_003_000 },
-        { id: newer.tour_id, title: "Short one", status: "draft", chapters: 1, steps: 1, updated_at: 1_800_000_001_000 },
+        { id: older.tour_id, title: "Send an invoice", status: "draft", slug: await slug(older.tour_id), url: null, chapters: 2, steps: 4, updated_at: 1_800_000_003_000, published_at: null },
+        { id: newer.tour_id, title: "Short one", status: "draft", slug: await slug(newer.tour_id), url: null, chapters: 1, steps: 1, updated_at: 1_800_000_001_000, published_at: null },
       ],
     });
+    // The fields the desktop app's picker has always read are all still there.
+    for (const t of r.json.tours) expect(t).toMatchObject({ id: expect.any(String), title: expect.any(String), status: "draft", chapters: expect.any(Number), steps: expect.any(Number) });
     const rb = await send(deps, "GET", "/api/v1/tours", { token: b.token });
     expect(rb.json.tours).toHaveLength(1);
     expect(rb.json.tours[0].steps).toBe(3);

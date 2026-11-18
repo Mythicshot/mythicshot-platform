@@ -314,6 +314,40 @@ describe("the call budget, route by route", () => {
     expect(fresh.json.total).toBe(401);
   }, 600_000);
 
+  it("manage: rename with a publish in progress near the snapshot cap; delete of a 400-step tour published twice, with open uploads into it, an abandoned publish and plenty to sweep", async () => {
+    const { deps, a, now, advance } = await clocked();
+    const tourId = await tour400(deps, a.token);
+    const tourPath = `/api/v1/tours/${tourId}`;
+    expect((await publishAll(deps, a.token, tourId)).at(-1)!.status).toBe(200);
+    advance(1000);
+    expect((await publishAll(deps, a.token, tourId)).at(-1)!.status).toBe(200);
+    advance(1000);
+    // A third publish half-way: the rename rewrites the live snapshot and the job's, both near the cap.
+    const half = await call(deps, "POST", publishPath(tourId), { token: a.token });
+    expect(half.status).toBe(202);
+    const renamed = await call(deps, "PATCH", tourPath, { token: a.token, body: JSON.stringify({ title: "é".repeat(LIMITS.title) }), headers: { "content-type": "application/json" } });
+    expect(renamed.status).toBe(200);
+    expect((await call(deps, "PATCH", tourPath, { token: a.token, body: "{}", headers: { "content-type": "application/json" } })).status).toBe(400);
+    // Delete while that publish is in progress: refused, after the housekeeping it runs to make sure.
+    expect((await call(deps, "DELETE", tourPath, { token: a.token })).status).toBe(409);
+    // Two full uploads into the tour, every step sent, never committed.
+    for (let i = 0; i < 2; i++) await sendAll(deps, a.token, heavyManifest(200, "More", TOUR_PART_BYTES), { kind: "chapter", tour_id: tourId }, 3 + i);
+    // The publish is abandoned, and the workspace has plenty to sweep besides.
+    advance(STALE_PUBLISH_MS + HOUR);
+    await seedLeftovers(deps, a.workspaceId, tourId, 5, 1500, now());
+    let d = await call(deps, "DELETE", tourPath, { token: a.token });
+    let n = 1;
+    for (; d.status === 202; n++) {
+      expect(d.json.total).toBeGreaterThan(2000); // 401 draft files, 800 of the uploads, and the public ones
+      d = await call(deps, "DELETE", tourPath, { token: a.token });
+    }
+    expect(d.status).toBe(200);
+    expect(n).toBeGreaterThan(8);
+    expect((await call(deps, "DELETE", tourPath, { token: a.token })).status).toBe(404);
+    expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM deleted_object"))!.n).toBe(0);
+    expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM step"))!.n).toBe(0);
+  }, 600_000);
+
   it("rows written: a 400-step publish writes each image's row a bounded number of times", async () => {
     const { deps, a } = await clocked();
     const tourId = await tour400(deps, a.token);

@@ -22,7 +22,7 @@ import type { Hono } from "hono";
 import { newId, newSlug, requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
 import { LIMITS, parseManifest, type Manifest } from "./manifest.ts";
-import { isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
+import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 import { housekeeping } from "./publish.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, type ImageType } from "./sniff.ts";
 
@@ -189,13 +189,6 @@ function commitStatements(deps: Deps, auth: Auth, up: UploadRow, m: Manifest, to
   stmts.push({ sql: "DELETE FROM upload_step WHERE upload_id IN (SELECT id FROM upload WHERE id = ? AND workspace_id = ?)", params: [up.id, auth.workspaceId] });
   stmts.push({ sql: "DELETE FROM upload WHERE id = ? AND workspace_id = ?", params: [up.id, auth.workspaceId] });
   return stmts;
-}
-
-function isNotNullViolation(err: unknown): boolean {
-  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
-    if (/\bNOT NULL constraint failed\b/.test(e.message)) return true;
-  }
-  return false;
 }
 
 /** Reads an image body for an upload: 413 over the cap, else the bytes. */

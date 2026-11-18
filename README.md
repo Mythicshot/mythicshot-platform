@@ -92,6 +92,23 @@ Every request carries `Authorization: Bearer <token>` and answers `404` for a to
 
 A publish works from the draft as it was when the publish started: calls naming it keep driving that version, so a chapter uploaded meanwhile goes out with the next publish, never half of it with this one. `400 empty_tour` and `413 too_large` (more than 400 steps, or a snapshot over 512,000 bytes) come from the first request, before anything is copied.
 
+### The tour API
+
+Mythicshot lists, renames and deletes tours with these requests. Each carries `Authorization: Bearer <token>`, acts only inside the token's workspace, and answers `404` for a tour of another workspace.
+
+| Request | Answer |
+|---|---|
+| `GET /api/v1/tours` | `200 {"tours":[…]}`, most recently changed first. Each tour has `id`, `title`, `status` (`draft` or `published`), `slug`, `url`, `chapters`, `steps`, `updated_at` and `published_at` (times in milliseconds). `url` is the public link as a path, `/t/<slug>`, to put after the server address; it and `published_at` are `null` for a draft |
+| `PATCH /api/v1/tours/<id>` with `{"title":"New name"}` | `200 {"id","title"}` with the title as saved. The title follows the rule of a tour's title at upload: trimmed, 1 to 200 characters, no control or format characters; otherwise `400 bad_title` with the reason. The slug and the public link stay the same |
+| `DELETE /api/v1/tours/<id>` | `200 {"deleted":true}` when nothing of the tour is left; `202 {"status":"in_progress","done":250,"total":601}` (files removed, of how many) when more remain, so call again; `409 publish_busy` while a publish of the tour is in progress; `404` once it is gone |
+
+A rename shows on the public page of a published tour at once, without publishing again: the title is the one thing a rename changes in the published copy. A browser that already has the page keeps the old title for up to a minute.
+
+> [!warning] Delete cannot be undone
+> A deleted tour's steps, images and public page are gone for good; only a backup taken earlier brings them back.
+
+Delete removes the tour, its chapters and steps, its draft images and logo, its published images (also those a re-publish replaced that were still being served), and any unfinished upload into it. A large tour takes several requests, each removing up to 250 files. From the first request on, the tour is gone from the list, cannot be published or added to, and its public page and images answer `404`; the later requests only remove files. If a request fails or the client stops half-way, send the same request again: it carries on where it stopped. Delete does not stop a publish in progress: let it finish, or unpublish the tour, which stops the publish, then delete. A publish with no progress for 15 minutes no longer counts.
+
 ## Develop
 
 Requires Node 24 or later.
