@@ -28,15 +28,17 @@ CREATE INDEX chapter_revision ON chapter (revision);
 
 -- The tour's draft_version the live snapshot was built from. For a snapshot published
 -- before this migration it is filled in only when the snapshot is known to hold the whole
--- draft: the tour has not changed since it went live, and the snapshot has as many steps
--- as the draft. The times alone do not say so, because a chapter uploaded while a publish
--- of several calls was running is older than that publish's last call and yet not in it.
+-- draft, which is when it has as many steps as the draft: until this migration the only
+-- change to a draft's steps is a whole chapter added, never one taken away or replaced, so
+-- equal counts mean the same steps. The times do not say it (a chapter uploaded while a
+-- publish of several calls was running is older than that publish's last call and yet not
+-- in it), and a rename is no difference (it writes its title into the snapshot too).
 -- Anything else stays null (a snapshot with no step count included), which reads as "the
 -- draft may hold changes that were never published".
 ALTER TABLE snapshot ADD COLUMN draft_version INTEGER;
 UPDATE snapshot SET draft_version = (
   SELECT t.draft_version FROM tour t
-   WHERE t.id = snapshot.tour_id AND t.updated_at <= snapshot.published_at
+   WHERE t.id = snapshot.tour_id
      AND snapshot.steps = (SELECT count(*) FROM step s WHERE s.tour_id = t.id));
 
 -- Draft pictures a replace took out of a chapter and no step uses any more, waiting to be

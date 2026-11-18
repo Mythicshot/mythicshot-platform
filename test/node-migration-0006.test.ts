@@ -45,10 +45,11 @@ describe("migration 0006 on an existing install", () => {
       await tour("tour_same_moment", PUBLISHED, 1, [2], 2);
       // A chapter was uploaded after the publish.
       await tour("tour_chapter_after", PUBLISHED + 1, 2, [2, 1], 2);
-      // Renamed after the publish (a rename moves updated_at, not the steps).
+      // Renamed after the publish: a rename moves updated_at, not the steps, and writes its
+      // title into the snapshot, so the snapshot still holds the whole draft.
       await tour("tour_renamed_after", PUBLISHED + 1, 1, [2], 2);
       // A chapter landed while a publish of several calls was running: the publish went
-      // live later with the older draft, so the times alone say "unchanged".
+      // live later with the older draft, so the times say "unchanged" and only the steps tell.
       await tour("tour_chapter_during", PUBLISHED - 1, 2, [2, 1], 2);
       // Published before the snapshot recorded its step count.
       await tour("tour_no_count", 1000, 1, [2], null);
@@ -64,7 +65,7 @@ describe("migration 0006 on an existing install", () => {
         tour_untouched: 3,
         tour_same_moment: 1,
         tour_chapter_after: null,
-        tour_renamed_after: null,
+        tour_renamed_after: 1,
         tour_chapter_during: null,
         tour_no_count: null,
         tour_open_upload: 1,
