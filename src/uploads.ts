@@ -31,7 +31,7 @@ import { apiError, json, noContent, readCapped } from "./http.ts";
 import { LIMITS, parseManifest, type Manifest } from "./manifest.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 import { housekeeping } from "./publish.ts";
-import { chapterPictures, findChapter, parseHashes, replaceAnswer, replaceStatements, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
+import { chapterPictures, clearReplaced, findChapter, parseHashes, replaceAnswer, replaceStatements, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, type ImageType } from "./sniff.ts";
 
 /** An upload older than this is swept by the workspace's next create. */
@@ -522,6 +522,9 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
         return apiError(409, "chapter_changed", "the chapter was changed by another upload since this one started; start again");
       }
       const answer = await replaceAnswer(deps, auth, up.id);
+      // The pictures this replace took out of the chapter go now (3 calls at most; it never
+      // throws), unless a publish of the older draft is still copying from them.
+      await clearReplaced(deps, auth.workspaceId, up.tour_id);
       // Not found only if yet another replace of the chapter landed since the batch: then
       // the draft holds more than this replace, and publishing is not this client's call.
       return json(201, answer ?? { tour_id: up.tour_id ?? "", chapter_id: up.replaces_chapter_id, steps: m.steps.length, publish: "other_changes" });

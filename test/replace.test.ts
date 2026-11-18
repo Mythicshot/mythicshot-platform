@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { hashToken } from "../src/auth.ts";
 import type { Deps } from "../src/ports.ts";
+import { REPLACED_FILES_PER_CALL } from "../src/replace.ts";
+import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { abort, clone, commit, count, createUpload, fixtures, logoPng, putLogo, putStep, send, sha256Hex, stepImage, type Call, type Json } from "./bundle.ts";
 
@@ -812,5 +814,207 @@ describe("replace: scope and secrets", { timeout: 60_000 }, () => {
       expect(text).not.toContain(a.token.slice(3));
       expect(text).not.toContain(hash);
     }
+  });
+});
+
+describe("replace: removing the replaced pictures", { timeout: 120_000 }, () => {
+  /** Every draft key some row names: steps, logos, replaced pictures and open uploads. */
+  async function namedKeys(deps: Deps): Promise<string[]> {
+    const rows = await deps.db.all<{ k: string }>(
+      `SELECT image_key AS k FROM step UNION SELECT image_key FROM replaced_object UNION SELECT image_key FROM upload_step
+       UNION SELECT logo_key FROM tour WHERE logo_key IS NOT NULL UNION SELECT logo_key FROM upload WHERE logo_key IS NOT NULL`,
+    );
+    return rows.map((r) => r.k).sort();
+  }
+  const replacedKeys = async (deps: Deps) => (await deps.db.all<{ image_key: string }>("SELECT image_key FROM replaced_object ORDER BY image_key")).map((r) => r.image_key);
+  const listTours = (deps: Deps, token: string) => send(deps, "GET", "/api/v1/tours", { token });
+
+  /** Makes the next `times` deletes from the drafts store fail. Returns how many were tried. */
+  function failDraftDeletes(deps: Deps, times: number): { tried: () => number; restore: () => void } {
+    const real = deps.drafts.delete.bind(deps.drafts);
+    let n = 0;
+    deps.drafts.delete = async (keys) => {
+      if (n++ < times) throw new Error("bucket unavailable");
+      return real(keys);
+    };
+    return { tried: () => n, restore: () => (deps.drafts.delete = real) };
+  }
+
+  it("after a replace commit the replaced pictures are gone from the drafts store and the kept ones are there", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadPics(deps, a.token, [1, 2, 3]);
+    const other = await uploadPics(deps, a.token, [1, 2, 3], "Another tour");
+    const old = await stepKeys(deps, t.chapter_id);
+    const { id, manifest } = await sendReplace(deps, a.token, t, [2, 9]);
+    const done = await commit(deps, a.token, id);
+    expect(done.status).toBe(201);
+    const kept = [old[1], `u/${id}/step-002.png`];
+    expect(await stepKeys(deps, t.chapter_id)).toEqual(kept);
+    expect(await ctx.draftKeys()).toEqual([...kept, ...(await stepKeys(deps, other.chapter_id))].sort());
+    expect(await bytesOf(deps.drafts, old[0])).toBeNull();
+    expect(await bytesOf(deps.drafts, old[2])).toBeNull();
+    expect(await bytesOf(deps.drafts, old[1])).toEqual(picture(manifest, 0, 2));
+    expect(await count(deps, "replaced_object")).toBe(0);
+    // Asking again removes nothing more.
+    expect((await commit(deps, a.token, id)).status).toBe(201);
+    expect(await ctx.draftKeys()).toHaveLength(5);
+  });
+
+  it("a publish in progress from the older draft still finds its pictures and goes live, and the next request removes them", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const pics = Array.from({ length: 30 }, (_, i) => i + 1);
+    const t = await uploadPics(deps, a.token, pics);
+    const oldManifest = manifestOf(pics);
+    const old = await stepKeys(deps, t.chapter_id);
+    // The publish has copied its first images and has more to go.
+    const started = await publish(deps, a.token, t.tour_id);
+    expect(started.status).toBe(202);
+    expect(started.json.done).toBeLessThan(30);
+    // The chapter is replaced meanwhile: every old picture is left for removal, none removed.
+    const done = await replaceChapter(deps, a.token, t, [101, 102]);
+    expect(done.status).toBe(201);
+    expect(await replacedKeys(deps)).toEqual([...old].sort());
+    for (const k of old) expect(await bytesOf(deps.drafts, k)).not.toBeNull();
+    // Nor by the tour list, while that publish runs.
+    expect((await listTours(deps, a.token)).status).toBe(200);
+    expect(await replacedKeys(deps)).toHaveLength(30);
+    // The publish finishes the version it started from.
+    let r = await resume(deps, a.token, t.tour_id, started.json.publish_id);
+    while (r.status === 202) r = await resume(deps, a.token, t.tour_id, r.json.publish_id);
+    expect(r.status).toBe(200);
+    expect(r.json.steps).toBe(30);
+    const snap = JSON.parse((await snapshotRow(deps, t.tour_id))!.data);
+    const liveSteps = snap.chapters[0].steps as Json[];
+    expect(liveSteps).toHaveLength(30);
+    for (const i of [0, 13, 29]) expect(await bytesOf(deps.pub, liveSteps[i].image)).toEqual(picture(oldManifest, i, pics[i]));
+    // The old pictures are still there right after it, and go with the next request.
+    expect(await replacedKeys(deps)).toHaveLength(30);
+    expect((await listTours(deps, a.token)).status).toBe(200);
+    expect(await replacedKeys(deps)).toEqual([]);
+    expect(await ctx.draftKeys()).toEqual((await stepKeys(deps, t.chapter_id)).sort());
+    // What is live is untouched by that, and a new publish shows the replaced chapter.
+    expect((await send(deps, "GET", r.json.url)).status).toBe(200);
+    expect((await publishAll(deps, a.token, t.tour_id)).json.steps).toBe(2);
+  });
+
+  it("a publish started after the replace does not hold the replaced pictures back", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadPics(deps, a.token, Array.from({ length: 30 }, (_, i) => i + 1));
+    const stop = failDraftDeletes(deps, 1);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect((await replaceChapter(deps, a.token, t, Array.from({ length: 20 }, (_, i) => i + 101))).status).toBe(201);
+    stop.restore();
+    expect(await replacedKeys(deps)).toHaveLength(30);
+    // A publish of the new draft is in progress: it copies none of the replaced pictures.
+    expect((await publish(deps, a.token, t.tour_id)).status).toBe(202);
+    expect((await listTours(deps, a.token)).status).toBe(200);
+    expect(await replacedKeys(deps)).toEqual([]);
+    expect(await ctx.draftKeys()).toHaveLength(20);
+    expect((await publishAll(deps, a.token, t.tour_id)).json.steps).toBe(20);
+  });
+
+  it("a cleanup that fails leaves the rows, and the next tour list removes the files", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const t = await uploadPics(deps, a.token, [1, 2, 3]);
+    const old = await stepKeys(deps, t.chapter_id);
+    // The store cannot delete: the commit still answers, and nothing is forgotten.
+    const stop = failDraftDeletes(deps, 1);
+    const done = await replaceChapter(deps, a.token, t, [7]);
+    expect(done.status).toBe(201);
+    expect(done.json).toMatchObject({ steps: 1, publish: "draft" });
+    expect(stop.tried()).toBe(1);
+    expect(await replacedKeys(deps)).toEqual([...old].sort());
+    for (const k of old) expect(await bytesOf(deps.drafts, k)).not.toBeNull();
+    // The files go, then the database fails before their rows do: the rows stay.
+    const realRun = deps.db.run.bind(deps.db);
+    deps.db.run = async (sql, params) => {
+      if (sql.startsWith("DELETE FROM replaced_object")) throw new Error("database unavailable for " + a.token);
+      return realRun(sql, params);
+    };
+    expect((await listTours(deps, a.token)).status).toBe(200);
+    deps.db.run = realRun;
+    for (const k of old) expect(await bytesOf(deps.drafts, k)).toBeNull();
+    expect(await replacedKeys(deps)).toHaveLength(3);
+    // The next list deletes the same keys again (already gone is not an error) and the rows.
+    const listed = await listTours(deps, a.token);
+    expect(listed.status).toBe(200);
+    expect(listed.json.tours.map((x: Json) => x.id)).toEqual([t.tour_id]);
+    expect(await replacedKeys(deps)).toEqual([]);
+    expect(await ctx.draftKeys()).toEqual(await stepKeys(deps, t.chapter_id));
+    // What was logged is fixed text.
+    const logged = errors.mock.calls.map((c) => c.map(String).join(" "));
+    expect(logged).toHaveLength(2);
+    for (const line of logged) {
+      expect(line).toBe("replace: could not remove replaced pictures; will retry later");
+      expect(line).not.toContain(a.token);
+    }
+  });
+
+  it("replacing a 200-step chapter with 200 new pictures leaves no file that no row names", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const first = Array.from({ length: 200 }, (_, i) => i);
+    const t = await uploadPics(deps, a.token, first);
+    expect(await ctx.draftKeys()).toEqual(await namedKeys(deps));
+    // 200 other pictures: none of the old ones is kept.
+    const { id, have } = await sendReplace(deps, a.token, t, first.map((i) => 200 + (i % 56)));
+    expect(have).toEqual([]);
+    const done = await commit(deps, a.token, id);
+    expect(done.status).toBe(201);
+    expect(done.json.steps).toBe(200);
+    const stored = await ctx.draftKeys();
+    expect(stored).toEqual(await namedKeys(deps));
+    expect(stored).toHaveLength(200);
+    expect(stored.every((k) => k.startsWith(`u/${id}/`))).toBe(true);
+    expect(await count(deps, "replaced_object")).toBe(0);
+    expect(await count(deps, "step")).toBe(200);
+  }, 300_000);
+
+  it("one request removes at most a page of replaced pictures, the committed tour's first", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const big = await uploadPics(deps, a.token, [1], "Much to remove");
+    const t = await uploadPics(deps, a.token, [1, 2, 3]);
+    // Rows only: deleting a key that was never written is not an error.
+    const leftovers = JSON.stringify(Array.from({ length: REPLACED_FILES_PER_CALL + 10 }, (_, i) => `u/up_${"0".repeat(24)}/left-${String(i).padStart(3, "0")}.png`));
+    await deps.db.run("INSERT INTO replaced_object (tour_id, image_key, draft_version, created_at) SELECT ?, value, 1, 1 FROM json_each(?)", [big.tour_id, leftovers]);
+    const old = await stepKeys(deps, t.chapter_id);
+    expect((await replaceChapter(deps, a.token, t, [9])).status).toBe(201);
+    // This tour's three went first, and the page was filled from the other tour.
+    for (const k of old) expect(await bytesOf(deps.drafts, k)).toBeNull();
+    const left = await deps.db.all<Json>("SELECT tour_id, count(*) AS n FROM replaced_object GROUP BY tour_id");
+    expect(left).toEqual([{ tour_id: big.tour_id, n: 13 }]);
+    expect((await listTours(deps, a.token)).status).toBe(200);
+    expect(await count(deps, "replaced_object")).toBe(0);
+    expect(REPLACED_FILES_PER_CALL).toBe(DELETE_FILES_PER_CALL);
+  });
+
+  it("workspace B's requests never remove A's replaced pictures", async () => {
+    const ctx = await setup();
+    const { deps, a, b } = ctx;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const t = await uploadPics(deps, a.token, [1, 2, 3]);
+    const old = await stepKeys(deps, t.chapter_id);
+    const stop = failDraftDeletes(deps, 1);
+    expect((await replaceChapter(deps, a.token, t, [7])).status).toBe(201);
+    stop.restore();
+    expect(await replacedKeys(deps)).toHaveLength(3);
+    // B lists its tours and replaces a chapter of its own: A's rows and files stay.
+    const bt = await uploadPics(deps, b.token, [1, 2], "B's tour");
+    expect((await listTours(deps, b.token)).status).toBe(200);
+    expect((await replaceChapter(deps, b.token, bt, [5])).status).toBe(201);
+    expect((await listTours(deps, b.token)).status).toBe(200);
+    expect(await replacedKeys(deps)).toEqual([...old].sort());
+    for (const k of old) expect(await bytesOf(deps.drafts, k)).not.toBeNull();
+    // B's own replaced pictures went, and A's go with A's next request.
+    expect(await ctx.draftKeys()).toHaveLength(3 + 1 + 1);
+    expect((await listTours(deps, a.token)).status).toBe(200);
+    expect(await replacedKeys(deps)).toEqual([]);
+    expect(await ctx.draftKeys()).toEqual([...(await stepKeys(deps, t.chapter_id)), ...(await stepKeys(deps, bt.chapter_id))].sort());
   });
 });

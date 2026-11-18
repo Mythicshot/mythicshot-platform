@@ -10,7 +10,7 @@ import { LIMITS } from "../src/manifest.ts";
 import type { Deps } from "../src/ports.ts";
 import { COPY_BATCH, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../src/publish.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
-import { clone, commit, createUpload, fixtures, logoPng, ORIGIN, putLogo, putStep, routeOf, send, sendAll, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
+import { clone, commit, createUpload, fixtures, logoPng, ORIGIN, putLogo, putStep, routeOf, send, sendAll, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 
 const v3 = fixtures.v3 as Json;
 const T0 = 1_800_000_000_000;
@@ -179,6 +179,69 @@ describe("the call budget, route by route", () => {
     expect((await call(deps, "GET", "/api/v1/tours", { token: a.token })).status).toBe(200);
     const step = (await deps.db.first<{ id: string; tour_id: string }>("SELECT id, tour_id FROM step LIMIT 1"))!;
     expect((await call(deps, "GET", `/api/v1/tours/${step.tour_id}/steps/${step.id}/image`, { token: a.token })).status).toBe(200);
+  }, 600_000);
+
+  it("replace: create with five stale 200-step uploads to sweep and 200 pictures to match, the changed steps, commit with 200 pictures to remove, all within the budget", async () => {
+    const ctx = await clocked({ maxOpenUploads: 5 });
+    const { deps, a, advance } = ctx;
+    const big = heavyManifest(200);
+    const STEP ="PUT /api/v1/uploads/:id/steps/:n";
+    const COMMIT = "POST /api/v1/uploads/:id/commit";
+    const jsonBody = (o: unknown) => ({ token: a.token, body: JSON.stringify(o), headers: { "content-type": "application/json" } });
+    // A 200-step tour whose pictures all differ, so each has its own hash.
+    const first = (await createUpload(deps, a.token, big)).json.upload_id as string;
+    for (let n = 1; n <= 200; n++) expect((await putStep(deps, a.token, first, n, stepImage(big.steps[n - 1], n))).status).toBe(204);
+    expect((await putLogo(deps, a.token, first, logoPng())).status).toBe(204);
+    const t = (await commit(deps, a.token, first)).json as { tour_id: string; chapter_id: string };
+    const target = { kind: "replace", tour_id: t.tour_id, chapter_id: t.chapter_id };
+    const hashes = await Promise.all(big.steps.map((s: Json, i: number) => sha256Hex(stepImage(s, i + 1))));
+    // Five full-size uploads left for more than a day, and plenty for the publish housekeeping.
+    for (let i = 0; i < 5; i++) await sendAll(deps, a.token, big, { kind: "new" }, 210 + i);
+    advance(UPLOAD_MAX_AGE_MS + HOUR);
+    await seedLeftovers(deps, a.workspaceId, t.tour_id, 5, 1500, deps.now());
+
+    // Create: the sweep, the housekeeping, and all 200 pictures matched and recorded.
+    const same = await call(deps, "POST", "/api/v1/uploads", jsonBody({ manifest: big, target, sha256: hashes }));
+    expect(same.status).toBe(201);
+    expect(same.json.have).toHaveLength(200);
+    // 2 authentication, the chapter, 26 for the sweep, 4 housekeeping, the pictures, the batch, one look.
+    expect(same.calls).toBe(36);
+    expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM upload"))!.n).toBe(1);
+    noted(await putStep(deps, a.token, same.json.upload_id, 7, stepImage(big.steps[6], 7)), STEP); // 409: the chapter has it
+    // An abort of it deletes none of the 200 pictures it points at.
+    expect((await call(deps, "DELETE", `/api/v1/uploads/${same.json.upload_id}`, { token: a.token })).status).toBe(204);
+    expect(await ctx.draftKeys()).toHaveLength(201);
+    // The same again, committed: nothing to send and nothing to remove.
+    const kept = await call(deps, "POST", "/api/v1/uploads", jsonBody({ manifest: big, target, sha256: hashes }));
+    expect(noted(await commit(deps, a.token, kept.json.upload_id), COMMIT).status).toBe(201);
+    expect(noted(await commit(deps, a.token, kept.json.upload_id), COMMIT).status).toBe(201); // repeated
+    expect(await ctx.draftKeys()).toHaveLength(201);
+
+    // 200 changed steps: every one sent, and the commit has 200 pictures to remove,
+    // with as many again left over from elsewhere in the workspace.
+    const leftovers = JSON.stringify(Array.from({ length: 300 }, (_, i) => `u/up_${"0".repeat(24)}/left-${String(i).padStart(3, "0")}.png`));
+    await deps.db.run("INSERT INTO replaced_object (tour_id, image_key, draft_version, created_at) SELECT ?, value, 1, 1 FROM json_each(?)", ["tour_" + "e".repeat(23) + "1", leftovers]);
+    const changed = await call(deps, "POST", "/api/v1/uploads", jsonBody({ manifest: big, target, sha256: hashes.map((h: string) => h.replace(/^./, (c) => (c === "0" ? "1" : "0"))) }));
+    expect(changed.json.have).toEqual([]);
+    for (let n = 1; n <= 200; n++) noted(await putStep(deps, a.token, changed.json.upload_id, n, stepImage(big.steps[n - 1], 255 - (n % 50))), STEP);
+    const done = noted(await commit(deps, a.token, changed.json.upload_id), COMMIT);
+    expect(done.status).toBe(201);
+    expect(done.json.steps).toBe(200);
+    // 2 authentication, the upload, its stored steps, the batch, the answer, 3 to remove a page.
+    expect(done.calls).toBe(9);
+    expect(await ctx.draftKeys()).toHaveLength(201);
+    expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM replaced_object"))!.n).toBe(250);
+
+    // A second replace of the same chapter that commits too late: refused, within the budget.
+    const late = await call(deps, "POST", "/api/v1/uploads", jsonBody({ manifest: big, target }));
+    const winner = await call(deps, "POST", "/api/v1/uploads", jsonBody({ manifest: heavyManifest(1, "One"), target }));
+    noted(await putStep(deps, a.token, winner.json.upload_id, 1, stepImage(big.steps[0], 3)), STEP);
+    expect(noted(await commit(deps, a.token, winner.json.upload_id), COMMIT).status).toBe(201);
+    for (let n = 1; n <= 200; n++) await putStep(deps, a.token, late.json.upload_id, n, stepImage(big.steps[n - 1], 9));
+    expect(noted(await commit(deps, a.token, late.json.upload_id), COMMIT).status).toBe(409);
+    // The tour list removes a page of what is left.
+    expect((await call(deps, "GET", "/api/v1/tours", { token: a.token })).status).toBe(200);
+    expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM replaced_object"))!.n).toBe(0);
   }, 600_000);
 
   it("publish: every call of a 400-step tour of 20 notes per step, with plenty to sweep, then a re-publish and unpublish", async () => {

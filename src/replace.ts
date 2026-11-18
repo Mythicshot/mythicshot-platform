@@ -16,9 +16,21 @@
 //   insert fails (NOT NULL) and the whole batch rolls back: two replaces of one chapter
 //   can never mix, and a replace built on pictures another replace took away never lands.
 // - A repeated commit finds its result by the chapter's revision.
+// - The files of replaced_object are removed a page at a time (clearReplaced): by the
+//   commit that recorded them, and by the workspace's tour list. Files first, then rows,
+//   so a file is named by a row until it is gone. A publish copies from the draft keys of
+//   the version it started from, so a row waits while a publish job of an older draft
+//   exists for its tour. Deleting the tour takes whatever is left (src/tours.ts).
 import { newId, type Auth } from "./auth.ts";
 import type { Manifest } from "./manifest.ts";
 import type { Deps, Stmt } from "./ports.ts";
+
+/**
+ * Replaced pictures one request removes: the same page a tour delete removes per call
+ * (DELETE_FILES_PER_CALL in src/tours.ts, which imports this file). One replace leaves at
+ * most 200, so its own commit clears them in one page.
+ */
+export const REPLACED_FILES_PER_CALL = 250;
 
 const UPLOAD_ID = /^up_[0-9a-f]{24}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -193,4 +205,32 @@ export async function replaceAnswer(deps: Deps, auth: Auth, uploadId: string): P
   if (row.status !== "published") publish = "draft";
   else if (made !== null && row.draft_version === made && (row.live_version === made - 1 || row.live_version === made)) publish = "ready";
   return { tour_id: row.tour_id, chapter_id: row.chapter_id, steps: row.steps, publish };
+}
+
+/**
+ * Removes one page of replaced pictures of the workspace: at most REPLACED_FILES_PER_CALL
+ * keys, this tour's first (when `tourId` is given), then the oldest. A key is taken only
+ * while no publish job of an older draft exists for its tour: such a publish still copies
+ * from it. The files go from the drafts store first, then their rows, so a call cut off
+ * in between leaves the rows and a later call deletes the same keys again (a key that is
+ * already gone is not an error). Three calls at most. Housekeeping only: an error is
+ * logged as fixed text and never thrown.
+ */
+export async function clearReplaced(deps: Deps, workspaceId: string, tourId: string | null): Promise<void> {
+  const free = "NOT EXISTS (SELECT 1 FROM publish_job j WHERE j.tour_id = replaced_object.tour_id AND j.draft_version < replaced_object.draft_version)";
+  const owned = "tour_id IN (SELECT id FROM tour WHERE workspace_id = ?)";
+  try {
+    const rows = await deps.db.all<{ image_key: string }>(
+      `SELECT image_key FROM replaced_object WHERE ${owned} AND ${free}
+        ORDER BY tour_id <> ?, created_at, tour_id, image_key LIMIT ?`,
+      [workspaceId, tourId ?? "", REPLACED_FILES_PER_CALL],
+    );
+    if (rows.length === 0) return;
+    const keys = rows.map((r) => r.image_key);
+    await deps.drafts.delete(keys);
+    await deps.db.run(`DELETE FROM replaced_object WHERE image_key IN (SELECT value FROM json_each(?)) AND ${owned} AND ${free}`, [JSON.stringify(keys), workspaceId]);
+  } catch {
+    // The error itself is not logged: it could carry anything a back end put in its message.
+    console.error("replace: could not remove replaced pictures; will retry later");
+  }
 }
