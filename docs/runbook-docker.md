@@ -226,6 +226,7 @@ APP_IMAGE=demo-platform:v2 bash install.sh
 |---|---|
 | `--tunnel` | Only with `install`: use the tunnel route. See [Behind a Cloudflare Tunnel](#behind-a-cloudflare-tunnel). |
 | `--direct` | Only with `install`: use the direct route without being asked. |
+| `--new-token` | Only with `install`, on a tunnel install: ask for the tunnel token again and replace it. See [The tunnel token](#the-tunnel-token). |
 | `--dry-run` | Print every command and file write without doing any. |
 | `--yes` or `-y` | Answer "continue?" questions with yes. It never skips the typed domain name that `--delete-data` asks for. |
 | `--force` | Try on a system other than Debian 13 or 12. |
@@ -593,12 +594,24 @@ sudo bash install.sh install --tunnel
 ```
 
 3. At `Domain name for the platform`, enter the hostname of the published application, such as `tours.example.com`. It must be the same name: the stack answers for that hostname only.
-4. At `Tunnel token from the Cloudflare dashboard (what you paste is not shown):`, paste the token and press Enter. Nothing appears while you paste. Pasting the whole installation command works too: the script keeps its last word.
+4. At `Tunnel token from the Cloudflare dashboard (what you paste is not shown):`, paste the token and press Enter. Nothing appears while you paste. Pasting the whole installation command works too: the script keeps its last word. If what you paste has a line break in it, the script takes none of it, says so and asks again; paste the token as one line.
 5. Answer the data folder question and `Continue?` as on the direct route.
 
 The script checks only the token's shape: one word of 100 to 2,048 letters, digits and `+ / - _ =` that starts with `eyJ`. Whether Cloudflare accepts it shows when the stack starts. The script never prints the token, never puts it on a command line and writes it to `/opt/demo-platform/.env` only.
 
 If Docker was not installed yet, the first run installs it and stops, as [step 5](#5-run-installsh) describes. Nothing is written by that run, so the next run asks its questions, the token included, again.
+
+### If the tunnel does not connect
+
+A token of the right shape can still be wrong: cut off, from a deleted tunnel, or refreshed since you copied it. The run then fails after showing cloudflared's log lines and what they mean. Run the script again, without any option:
+
+```sh
+sudo bash install.sh
+```
+
+Until the tunnel has connected once, every run asks for the token again and nothing else: paste the right one, or press Enter to keep the one already stored when the token was not the cause. A token in the `TUNNEL_TOKEN` environment variable is taken instead of asking. The script marks this state with the file `/opt/demo-platform/.tunnel-pending` and removes it when the tunnel connects.
+
+By the time cloudflared fails, the app has usually started and written its database, so the failed run keeps `/opt/demo-platform/.env` and the data folder. The setup code in it has not been shown to anyone: it is printed once, at the end of the first run whose tunnel connects.
 
 To skip the token prompt, for example when a script feeds the other answers, put the token in the `TUNNEL_TOKEN` environment variable of the root shell that runs the installer. Read it at a hidden prompt so that it reaches neither the screen nor the shell's history, and remove it afterwards.
 
@@ -627,7 +640,7 @@ unset TUNNEL_TOKEN
 
 ### What the tunnel route prints
 
-At the end of the first run:
+At the end of the first run whose tunnel connects:
 
 ```text
 The platform is running and its tunnel is connected to Cloudflare.
@@ -696,19 +709,15 @@ The tunnel token reaches cloudflared as the `TUNNEL_TOKEN` environment variable,
 
 Because no backup holds the token, keep it in your password manager, or read it from the dashboard again as in [Create the tunnel and copy its token](#create-the-tunnel-and-copy-its-token).
 
-To replace the token, for example after refreshing it in the dashboard: open a root shell, edit the `TUNNEL_TOKEN=` line of `/opt/demo-platform/.env` in an editor, and run the installer again. It asks nothing and restarts cloudflared with the new token. [Cloudflare's token page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/remote-tunnel-permissions/) says that after a refresh cloudflared can no longer make new connections with the old token.
+To replace the token on a working install, for example after refreshing it in the dashboard, run the installer with `--new-token`. [Cloudflare's token page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/remote-tunnel-permissions/) says that after a refresh cloudflared can no longer make new connections with the old token.
 
 ```sh
-sudo -i
+sudo bash install.sh install --new-token
 ```
 
-```sh
-nano /opt/demo-platform/.env
-```
+It asks for the token at the same hidden prompt, with the same shape check (Enter keeps the stored one), or takes it from the `TUNNEL_TOKEN` environment variable. It then rewrites only the `TUNNEL_TOKEN` line of `.env`, keeps no copy of the old file, and restarts cloudflared with the new token. The setup code and every other setting stay as they are. If the tunnel does not connect with the new token, the script puts the previous token back and starts the previous setup again.
 
-```sh
-bash /home/you/install.sh install
-```
+Without `--new-token`, a run on an install whose tunnel has connected never changes the token, whatever the environment holds.
 
 When you [move to a new server](#10-move-to-a-new-server) on the tunnel route, there is no DNS record to change: install on the new server with the same token and hostname, and restore the backup. Uninstall the old server before you start the new one. While both run, they are two copies of one tunnel, and [Cloudflare's page on tunnel replicas](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-availability/) says a request goes to the geographically closest one, so visitors would land on either server.
 
@@ -802,8 +811,10 @@ Each of these needs a real tunnel, which the tests in this repository do not hav
 | `this install is in direct mode` or `this install is in tunnel mode` | `--tunnel` or `--direct` was given against the route recorded in `.env` | Leave the option out, or switch by hand: [Switch between the direct and the tunnel route](#switch-between-the-direct-and-the-tunnel-route). |
 | `the running stack was written for` the other mode | `.env` was edited to the other route while the stack runs | Put `.env` back as it was, run `sudo bash install.sh uninstall`, make the edit again, then run `sudo bash install.sh`. |
 | `that is not a tunnel token` | What was pasted is not one word starting with `eyJ` | Copy the token again, to its very end ([Create the tunnel and copy its token](#create-the-tunnel-and-copy-its-token)). |
-| Tunnel route: `cloudflared could not read the token`, after its log line `Provided Tunnel token is not valid.` | The token has the right shape but is cut off or altered | Copy it again from the dashboard and run the script again. On a first install it asks again; on a later one, replace it as in [The tunnel token](#the-tunnel-token). |
-| Tunnel route: `Cloudflare refused the tunnel's registration` | The tunnel was deleted, or its token was refreshed after you copied it | Copy the current token from the tunnel's page and replace it as in [The tunnel token](#the-tunnel-token). |
+| Tunnel route: `cloudflared could not read the token`, after its log line `Provided Tunnel token is not valid.` | The token has the right shape but is cut off or altered | Copy it again from the dashboard. If the tunnel has never connected, run `sudo bash install.sh` again: it asks for the token again ([If the tunnel does not connect](#if-the-tunnel-does-not-connect)). On an install that worked before, run `sudo bash install.sh install --new-token`. |
+| Tunnel route: `Cloudflare refused the tunnel's registration` | The tunnel was deleted, or its token was refreshed after you copied it | Copy the current token from the tunnel's page, then as in the row above: run the script again, with `--new-token` if the install worked before. |
+| `what was pasted had more than one line` | The token was copied with a line break in it | Paste it as one line. Nothing of the paste was kept or shown. |
+| `--new-token is for an install in tunnel mode` | `--new-token` on a direct install | Leave the option out. |
 | Tunnel route: `cloudflared could not reach Cloudflare` | Outbound port 7844 or DNS is blocked on the server's network | Allow outbound TCP and UDP port 7844 ([What to have ready for the tunnel](#what-to-have-ready-for-the-tunnel)), then run again. |
 | Tunnel route: the tunnel is `healthy` but the address shows a Cloudflare error page | The tunnel has no published application for the hostname, or its service URL is wrong | Check the route: hostname `tours.example.com`, service URL `http://caddy:80` ([Add the published application](#add-the-published-application)). |
 | Tunnel route: the address shows an empty page | The hostname of the published application differs from `DOMAIN` in `.env` | Make the two the same: change the route's hostname in the dashboard to the one in `.env`. |

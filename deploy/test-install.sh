@@ -112,7 +112,13 @@ esac
 case "$args" in
   *" up "*)
     n=$(cat "$STUB_STATE/ups" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$STUB_STATE/ups"
+    # Like the real app, a started app writes its database into the data folder.
+    # STUB_FAIL_UP=1: the app itself never turns healthy and writes nothing.
+    # STUB_FAIL_UP=tunnel: the app is healthy and has written, then cloudflared fails.
+    app_writes() { [ ! -d "$STUB_DATA" ] || [ -e "$STUB_DATA/db.sqlite" ] || { printf 'SQLite format 3 (stub)\n' >"$STUB_DATA/db.sqlite"; chown 1001:1001 "$STUB_DATA/db.sqlite"; }; }
     if [ "${STUB_FAIL_UP:-0}" = 1 ] && [ "$n" = 1 ]; then echo "container app is unhealthy" >&2; exit 1; fi
+    if [ "${STUB_FAIL_UP:-0}" = tunnel ] && [ "$n" = 1 ]; then app_writes; echo "container cloudflared is unhealthy" >&2; exit 1; fi
+    app_writes
     touch "$STUB_STATE/running" ;;
   *" down "*) rm -f "$STUB_STATE/running" ;;
   *" ps -q "*) [ ! -e "$STUB_STATE/running" ] || echo 0123456789ab ;;
@@ -378,9 +384,10 @@ test_mode_flags() {
   parse_args --tunnel; [ "$MODE_FLAG" = tunnel ] || die "--tunnel"
   MODE_FLAG=""; parse_args install --direct; [ "$MODE_FLAG" = direct ] || die "--direct"
   local bad
-  for bad in "--tunnel --direct" "update --tunnel" "status --direct" "backup --tunnel" "uninstall --tunnel"; do
+  NEW_TOKEN=0; parse_args install --new-token; [ "$NEW_TOKEN" = 1 ] || die "--new-token"
+  for bad in "--tunnel --direct" "update --tunnel" "status --direct" "backup --tunnel" "uninstall --tunnel" "update --new-token" "status --new-token"; do
     # shellcheck disable=SC2086
-    (MODE_FLAG=""; parse_args $bad) >/dev/null 2>&1; [ $? = 2 ] || die "accepted: $bad"
+    (MODE_FLAG=""; NEW_TOKEN=0; parse_args $bad) >/dev/null 2>&1; [ $? = 2 ] || die "accepted: $bad"
   done
 }
 
@@ -584,6 +591,9 @@ APP_IMAGE=demo-platform:latest
 SETUP_CODE=$code"
   expect ".env is exactly the direct-mode file" test "$(cat "$INST/.env")" = "$want"
   expect "no cloudflared in the direct stack" hasnt "$INST/docker-compose.yml" cloudflared
+  expect "the start command is the one from before tunnel mode" grep -q 'compose .* up -d --pull missing --wait --wait-timeout 120$' "$LOG"
+  expect "nothing is removed as an orphan on start" test "$(grep -c ' up .*--remove-orphans' "$LOG")" = 0
+  expect "no tunnel marker in direct mode" test ! -e "$INST/.tunnel-pending"
   expect "the mode question was asked, with direct as the default" has "$ERR" "Choice [1]"
   new_sandbox
   install_sh "$DOMAIN
@@ -874,7 +884,8 @@ TUNNEL_TOKEN=$TOK"
   expect "the DNS check is skipped" hasnt "$OUT" "points at this server"
   expect "no DNS warning" hasnt "$ERR" "A     203.0.113.10"
   expect "compose file validated before use" grep -q 'docker compose --project-name demo-platform --project-directory .* config --quiet' "$LOG"
-  expect "stack started with a health wait" grep -q 'compose .* up -d --pull missing --wait --wait-timeout 120' "$LOG"
+  expect "stack started with a health wait" grep -q 'compose .* up -d --pull missing --wait --wait-timeout 120$' "$LOG"
+  expect "the marker of a tunnel that never connected is gone" test ! -e "$INST/.tunnel-pending"
   expect "prints the service URL for the dashboard" has "$OUT" "http://caddy:80"
   expect "prints the hostname for the dashboard" has "$OUT" "Hostname:     $DOMAIN"
   expect "address printed" has "$OUT" "https://$DOMAIN/setup"
@@ -1035,7 +1046,7 @@ test_switching_modes_by_hand() {
   expect "the direct Caddyfile was saved first" test "$(find "$INST/caddy" -name 'Caddyfile.bak-*' | wc -l)" = 1
   expect "the setup code is kept" test "$(setup_code)" = "$code"
   expect "the data is kept" test "$(cat "$DATA/marker")" = marker
-  expect "containers of the other mode are removed on start" grep -q 'compose .* up -d .*--remove-orphans' "$LOG"
+  expect "start removes no container it did not make" test "$(grep -c ' up .*--remove-orphans' "$LOG")" = 0
   expect "the token is not shown" token_not_shown
   # And back: the lines taken out again, the email still there.
   install_sh "" uninstall --yes
@@ -1046,45 +1057,209 @@ test_switching_modes_by_hand() {
   expect "the port check ran again" has "$OUT" "Checking that ports 80 and 443"
 }
 
-test_tunnel_failed_start_explains_the_token_and_rolls_back() {
+test_tunnel_app_that_never_starts_removes_what_the_run_created() {
   new_sandbox
-  STUB_FAIL_UP=1 STUB_CF_LOG="cloudflared-1  | Provided Tunnel token is not valid." install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
+  STUB_FAIL_UP=1 install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
   expect "fresh run fails" test "$RC" != 0
   expect "shows cloudflared's log" grep -q ' logs .*cloudflared' "$LOG"
   expect "shows the app's log too" grep -q ' logs .*app' "$LOG"
-  expect "says the token could not be read" has "$ERR" "is not a complete tunnel token"
   expect "takes the half-started stack down" grep -q 'compose .* down' "$LOG"
   expect ".env removed, the token with it" test ! -e "$INST/.env"
+  expect "the marker removed" test ! -e "$INST/.tunnel-pending"
   expect "compose file removed" test ! -e "$INST/docker-compose.yml"
+  expect "empty data folder removed" test ! -e "$DATA"
   expect "no file holds the token" test -z "$(grep -rlF -- "$TOK" "$R")"
   expect "the token is not shown" token_not_shown
+}
+
+# The real order of events: the app starts, turns healthy and writes its database, and
+# only then cloudflared fails on the token. The data folder is no longer empty, so .env
+# stays; the next run must ask for the token again and print the setup code.
+test_tunnel_wrong_token_then_right_token() {
   new_sandbox
-  STUB_FAIL_UP=1 STUB_CF_LOG='cloudflared-1  | ERR Register tunnel error from server side error="Unauthorized: stub"' install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
+  STUB_FAIL_UP=tunnel STUB_CF_LOG="cloudflared-1  | Provided Tunnel token is not valid." install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
+  expect "the first run fails" test "$RC" != 0
+  expect "the app wrote its database" test -f "$DATA/db.sqlite"
+  expect "says the token could not be read" has "$ERR" "is not a complete tunnel token"
+  expect "says the next run asks for the token again" has "$ERR" "asks for the tunnel token again"
+  expect "does not say .env was removed" hasnt "$ERR" "removed $INST/.env"
+  expect ".env is kept with the data" test -f "$INST/.env"
+  expect "the tunnel is marked as never connected" test -f "$INST/.tunnel-pending"
+  expect "the marker is 600 root" test "$(stat -c '%a %u:%g' "$INST/.tunnel-pending")" = "600 0:0"
+  expect "the stack file was removed again" test ! -e "$INST/docker-compose.yml"
+  local code; code="$(setup_code)"
+  expect "a setup code was generated" grep -Eqx '[0-9a-f]{32}' <<<"$code"
+  expect "the setup code was not printed by the failed run" test "$(cat "$OUT" "$ERR" "$LOG" | grep -c -- "$code")" = 0
+  expect "the token is not shown" token_not_shown
+  local env_before; env_before="$(grep -v '^TUNNEL_TOKEN=' "$INST/.env")"
+  # Second run, no flag: only the token is asked for, and the right one works.
+  : >"$LOG"
+  install_sh "$TOK2
+" install
+  expect "the second run succeeds" test "$RC" = 0
+  expect "it asked for the token again" has "$ERR" "Tunnel token from"
+  expect "it asked nothing else" test "$(grep -cE 'Domain name for the platform|Choice \[1\]|Email for|Data folder' "$ERR")" = 0
+  expect "the new token is in .env" grep -qx "TUNNEL_TOKEN=$TOK2" "$INST/.env"
+  expect "the old token is in no file" test -z "$(grep -rlF -- "$TOK" "$R")"
+  expect "only .env holds the new token" test "$(grep -rlF -- "$TOK2" "$R" | sed "s|^$R||")" = /opt/demo-platform/.env
+  expect "every other line of .env is unchanged" test "$(grep -v '^TUNNEL_TOKEN=' "$INST/.env")" = "$env_before"
+  expect ".env is still 600 root" test "$(stat -c '%a %u:%g' "$INST/.env")" = "600 0:0"
+  expect "no copy of .env was made" test "$(find "$R" -name '.env.*' | wc -l)" = 0
+  expect "the setup code is the same" test "$(setup_code)" = "$code"
+  expect "the setup code is printed exactly once" test "$(grep -c -- "$code" "$OUT")" = 1
+  expect "with the address" has "$OUT" "https://$DOMAIN/setup"
+  expect "the marker is gone" test ! -e "$INST/.tunnel-pending"
+  expect "neither token is shown" test "$(cat "$OUT" "$ERR" "$LOG" | grep -cF -e "$TOK" -e "$TOK2")" = 0
+  # Third run: nothing is asked, the code is not printed again.
+  local before; before="$(snapshot)"
+  install_sh "" install
+  expect "the third run succeeds without input" test "$RC" = 0
+  expect "it asks nothing" hasnt "$ERR" "Tunnel token from"
+  expect "the code is not printed again" hasnt "$OUT" "$code"
+  expect "nothing changed" test "$(snapshot)" = "$before"
+}
+
+test_tunnel_never_connected_takes_a_token_from_the_environment_or_keeps_the_stored_one() {
+  new_sandbox
+  STUB_FAIL_UP=tunnel STUB_CF_LOG='cloudflared-1  | ERR Register tunnel error from server side error="Unauthorized: stub"' install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
   expect "a refused token fails" test "$RC" != 0
   expect "says Cloudflare refused it" has "$ERR" "Cloudflare refused"
+  local code; code="$(setup_code)"
+  TUNNEL_TOKEN="$TOK2" install_sh "" install
+  expect "the second run succeeds with the token from the environment" test "$RC" = 0
+  expect "no prompt" hasnt "$ERR" "Tunnel token from"
+  expect "the new token is in .env" grep -qx "TUNNEL_TOKEN=$TOK2" "$INST/.env"
+  expect "the setup code is printed exactly once" test "$(grep -c -- "$code" "$OUT")" = 1
+  expect "neither token is shown" test "$(cat "$OUT" "$ERR" "$LOG" | grep -cF -e "$TOK" -e "$TOK2")" = 0
+  # Cloudflare was unreachable, the token was right: Enter keeps it.
   new_sandbox
-  STUB_FAIL_UP=1 STUB_CF_LOG='cloudflared-1  | ERR edge discovery: error looking up Cloudflare edge IPs: the DNS query failed' install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
+  STUB_FAIL_UP=tunnel STUB_CF_LOG='cloudflared-1  | ERR edge discovery: error looking up Cloudflare edge IPs: the DNS query failed' install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
   expect "an unreachable Cloudflare fails" test "$RC" != 0
   expect "says it could not reach Cloudflare" has "$ERR" "could not reach Cloudflare"
   expect "names the outbound port" has "$ERR" "7844"
+  code="$(setup_code)"
+  local env_sum; env_sum="$(sha256sum <"$INST/.env")"
+  install_sh "
+" install
+  expect "the second run succeeds on an empty answer" test "$RC" = 0
+  expect "the prompt offers to keep the token" has "$ERR" "Enter keeps the one"
+  expect ".env is unchanged" test "$(sha256sum <"$INST/.env")" = "$env_sum"
+  expect "the setup code is printed exactly once" test "$(grep -c -- "$code" "$OUT")" = 1
+  # A second failure leaves it asking again.
+  new_sandbox
+  STUB_FAIL_UP=tunnel install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
+  rm -f "$STATE/ups"
+  STUB_FAIL_UP=tunnel install_sh "$TOK2
+" install
+  expect "a second failure fails" test "$RC" != 0
+  expect "still marked as never connected" test -f "$INST/.tunnel-pending"
+  expect ".env still there" test -f "$INST/.env"
+  expect "the setup code is still not printed" test "$(cat "$OUT" "$ERR" | grep -c -- "$(setup_code)")" = 0
+  install_sh "$TOK
+" install
+  expect "the third run succeeds" test "$RC" = 0
+  expect "with the token given last" grep -qx "TUNNEL_TOKEN=$TOK" "$INST/.env"
+  expect "and prints the code once" test "$(grep -c -- "$(setup_code)" "$OUT")" = 1
+}
+
+test_tunnel_failed_start_masks_the_token_in_the_log() {
   # A log line that did hold the token would be masked before it is printed.
   new_sandbox
-  STUB_FAIL_UP=1 STUB_CF_LOG="cloudflared-1  | token=$TOK" install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
+  STUB_FAIL_UP=tunnel STUB_CF_LOG="cloudflared-1  | token=$TOK" install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
   expect "fails" test "$RC" != 0
   expect "the log line is shown" has "$OUT" "cloudflared-1  | token="
   expect "with the token masked" test "$(cat "$OUT" "$ERR" | grep -cF -- "$TOK")" = 0
-  # On an existing install the previous setup is started again and .env stays.
+}
+
+test_new_token_replaces_the_token_of_a_working_install() {
+  new_sandbox
+  tunnel_install
+  local code before; code="$(setup_code)"; before="$(snapshot | grep -v '/\.env$')"
+  local env_before; env_before="$(grep -v '^TUNNEL_TOKEN=' "$INST/.env")"
+  # Without --new-token a token in the environment is not taken, and the run says so.
+  TUNNEL_TOKEN="$TOK2" install_sh "" install
+  expect "a run without the option succeeds" test "$RC" = 0
+  expect "keeps the token" grep -qx "TUNNEL_TOKEN=$TOK" "$INST/.env"
+  expect "says how to replace it" has "$ERR" "--new-token"
+  install_sh "" install --new-token --dry-run
+  expect "a dry run asks and changes nothing" grep -qx "TUNNEL_TOKEN=$TOK" "$INST/.env"
+  : >"$LOG"
+  install_sh "one
+$TOK2
+" install --new-token
+  expect "--new-token succeeds on the second try" test "$RC" = 0
+  expect "it asked at the hidden prompt" has "$ERR" "Tunnel token from"
+  expect "the new token is in .env" grep -qx "TUNNEL_TOKEN=$TOK2" "$INST/.env"
+  expect "every other line of .env is unchanged" test "$(grep -v '^TUNNEL_TOKEN=' "$INST/.env")" = "$env_before"
+  expect ".env is still 600 root" test "$(stat -c '%a %u:%g' "$INST/.env")" = "600 0:0"
+  expect "no copy of .env was made" test "$(find "$R" -name '.env.*' | wc -l)" = 0
+  expect "the old token is in no file" test -z "$(grep -rlF -- "$TOK" "$R")"
+  expect "nothing but .env changed" test "$(snapshot | grep -v '/\.env$')" = "$before"
+  expect "the stack was started again, so cloudflared gets the token" grep -q 'compose .* up -d --pull missing --wait' "$LOG"
+  expect "the setup code is not printed" hasnt "$OUT" "$code"
+  expect "neither token is shown" test "$(cat "$OUT" "$ERR" "$LOG" | grep -cF -e "$TOK" -e "$TOK2")" = 0
+  # A new token that does not connect: the working one is put back.
+  rm -f "$STATE/ups"; : >"$LOG"
+  STUB_FAIL_UP=tunnel STUB_CF_LOG="cloudflared-1  | Provided Tunnel token is not valid." install_sh "$TOK
+" install --new-token
+  expect "a new token that does not connect fails" test "$RC" != 0
+  expect "the working token is back in .env" grep -qx "TUNNEL_TOKEN=$TOK2" "$INST/.env"
+  expect "says so" has "$ERR" "previous token"
+  expect "the previous setup is started again" test "$(grep -c ' up -d' "$LOG")" = 2
+  expect "not taken down" hasnt "$LOG" " down"
+  expect "not marked as never connected" test ! -e "$INST/.tunnel-pending"
+  expect "the stack file is still there" cmp -s "$INST/docker-compose.yml" /src/tunnel/docker-compose.yml
+  # From the environment, without a prompt.
+  TUNNEL_TOKEN="$TOK" install_sh "" install --new-token
+  expect "--new-token takes the environment's token" test "$RC" = 0
+  expect "no prompt" hasnt "$ERR" "Tunnel token from"
+  expect "the token is replaced" grep -qx "TUNNEL_TOKEN=$TOK" "$INST/.env"
+  # Not on a direct install.
+  new_sandbox
+  fresh_install
+  before="$(snapshot)"
+  install_sh "$TOK
+" install --new-token
+  expect "--new-token on a direct install is refused" test "$RC" = 1
+  expect "says why" has "$ERR" "tunnel mode"
+  expect "nothing changed" test "$(snapshot)" = "$before"
+}
+
+# A paste with a line break in it: the rest must not fall into the next question, where
+# a refusal would echo it. Needs a terminal, which script(1) provides.
+test_a_token_pasted_with_a_line_break_is_not_leaked() {
+  new_sandbox
+  command -v script >/dev/null 2>&1 || die "script(1) is missing"
+  local half="${TOK:0:120}" rest="RESTOFTHETOKEN${TOK:120}"
+  OUT="$T/out"
+  set +e
+  { sleep 1; printf '%s\n' "$DOMAIN"; sleep 1; printf '%s\n%s\n' "$half" "$rest"; sleep 2; printf '%s\n' "$TOK"; sleep 1; printf '\n'; sleep 2; } \
+    | env PATH="$T/bin:$PATH" DP_ROOT="$R" STUB_LOG="$LOG" STUB_STATE="$STATE" STUB_DATA="$STUB_DATA" \
+      script -qec "bash $SCRIPT install --tunnel --yes" /dev/null >"$OUT" 2>&1
+  RC=$?
+  set -e
+  expect "the install succeeds once the token is pasted whole" test "$RC" = 0
+  expect "the two-line paste was refused" has "$OUT" "more than one line"
+  expect "the whole token is stored, not its first line" grep -qx "TUNNEL_TOKEN=$TOK" "$INST/.env"
+  expect "the rest of the paste is shown nowhere" test "$(cat "$OUT" "$LOG" | grep -c RESTOFTHETOKEN)" = 0
+  expect "the first line is shown nowhere" test "$(cat "$OUT" "$LOG" | grep -cF -- "$half")" = 0
+  expect "the data folder is the default, not the rest of the paste" grep -qx "DATA_DIR=/opt/demo-platform/data" "$INST/.env"
+}
+
+test_tunnel_failed_restart_of_a_working_install_keeps_everything() {
   new_sandbox
   tunnel_install
   printf '# previous working state\n' >>"$INST/docker-compose.yml"
   local env_sum compose_sum; env_sum="$(sha256sum <"$INST/.env")"; compose_sum="$(sha256sum <"$INST/docker-compose.yml")"
   rm -f "$STATE/ups"; : >"$LOG"
-  STUB_FAIL_UP=1 STUB_CF_LOG="cloudflared-1  | Provided Tunnel token is not valid." install_sh "" install
+  STUB_FAIL_UP=tunnel STUB_CF_LOG="cloudflared-1  | Provided Tunnel token is not valid." install_sh "" install
   expect "exit code non-zero" test "$RC" != 0
   expect ".env unchanged" test "$(sha256sum <"$INST/.env")" = "$env_sum"
   expect "previous compose file restored" test "$(sha256sum <"$INST/docker-compose.yml")" = "$compose_sum"
   expect "explains the token here too" has "$ERR" "is not a complete tunnel token"
+  expect "says how to replace the token" has "$ERR" "--new-token"
   expect "not taken down" hasnt "$LOG" " down"
+  expect "not marked as never connected" test ! -e "$INST/.tunnel-pending"
 }
 
 test_tunnel_update_status_backup_uninstall() {

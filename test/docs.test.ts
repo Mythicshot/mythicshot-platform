@@ -471,6 +471,8 @@ describe("the tunnel route", () => {
       "cloudflared could not read the token",
       "Cloudflare refused the tunnel's registration",
       "cloudflared could not reach Cloudflare",
+      "what was pasted had more than one line",
+      "--new-token is for an install in tunnel mode",
     ]) {
       expect(runbook, s).toContain(s);
       expect(installSh, s).toContain(s);
@@ -488,5 +490,28 @@ describe("the tunnel route", () => {
       expect(runbook, s).toContain(s);
       expect(installSh, s).toContain(s);
     }
+  });
+});
+
+describe("a tunnel token that does not connect", () => {
+  const runbook = docs[DOCKER];
+
+  it("the runbook says a failed first tunnel install is put right by running the script again", () => {
+    expect(runbook).toContain("### If the tunnel does not connect");
+    expect(runbook).toContain("every run asks for the token again");
+    expect(runbook).toContain("printed once, at the end of the first run whose tunnel connects");
+    expect(runbook).not.toContain("On a first install it asks again");
+    expect(installSh).toContain("it asks for the tunnel token again");
+  });
+
+  it("the runbook's way to replace the token on a working install is --new-token, not an edit of .env", () => {
+    expect(runbook).toContain("sudo bash install.sh install --new-token");
+    expect(runbook).not.toMatch(/edit the `TUNNEL_TOKEN=` line/);
+    expect(runbook).toContain(".tunnel-pending");
+    expect(installSh).toContain('PENDING_FILE="$INSTALL_DIR/.tunnel-pending"');
+  });
+
+  it("starting the stack removes no container the script did not make", () => {
+    for (const line of installSh.split("\n")) if (/ up -d/.test(line)) expect(line).not.toContain("--remove-orphans");
   });
 });

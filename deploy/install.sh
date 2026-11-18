@@ -6,7 +6,7 @@
 # tunnel.
 #
 #   sudo bash install.sh [install|update|backup|status|uninstall] [--tunnel|--direct]
-#                        [--dry-run] [--yes] [--force] [--delete-data]
+#                        [--new-token] [--dry-run] [--yes] [--force] [--delete-data]
 #
 # Pages checked on 2026-11-17 for what this script does:
 #   Debian releases (13 "trixie" is stable, 12 "bookworm" is oldstable):
@@ -37,9 +37,12 @@
 # with the service URL http://caddy:80. Everything else is done here.
 #
 # Safety rules this script keeps:
-# - It never removes or overwrites the data folder, the .env file or a backup. The one
-#   exception is `uninstall --delete-data`, after the exact domain name is typed;
-#   --yes does not skip that.
+# - It never removes or overwrites the data folder, the .env file or a backup. The
+#   exceptions: `uninstall --delete-data`, after the exact domain name is typed (--yes
+#   does not skip that); and, in tunnel mode, the TUNNEL_TOKEN line of .env, which is
+#   replaced when a new token is given (--new-token, or while the tunnel has never
+#   connected). Every other line of .env, the setup code included, is carried over
+#   unchanged, and no copy of the old file is kept.
 # - The data folder is a new or empty folder outside the system folders, recorded in
 #   .env as its resolved path; later runs accept only that folder, and only while it
 #   still resolves to itself.
@@ -51,7 +54,11 @@
 #   it replaced are restored and files it created are removed again.
 # - The setup code is generated here, written only to .env (mode 600, root), printed
 #   once at the end of the run that made it, and never logged or passed as a command
-#   argument.
+#   argument. In tunnel mode it is printed once at the end of the first run whose
+#   tunnel connects, which may be a later run than the one that made it.
+# - A tunnel that has never connected is marked by the file .tunnel-pending in the
+#   install folder. While it is there, a run asks for the token again, so a wrong token
+#   is put right by running the script again.
 # - The tunnel token is read at a hidden prompt (or from the TUNNEL_TOKEN environment
 #   variable), checked for shape only, and written only to .env. It is never printed,
 #   never passed as a command argument and never written to the compose file or a
@@ -107,6 +114,7 @@ CADDY_DIR="$INSTALL_DIR/caddy"
 CADDYFILE="$CADDY_DIR/Caddyfile"
 BACKUP_DIR="$INSTALL_DIR/backups"
 LOCK_FILE="$INSTALL_DIR/.install.lock"
+PENDING_FILE="$INSTALL_DIR/.tunnel-pending"
 OS_RELEASE="$DP_ROOT/etc/os-release"
 KEYRING_DIR="$DP_ROOT/etc/apt/keyrings"
 KEYRING="$KEYRING_DIR/docker.asc"
@@ -119,9 +127,14 @@ ASSUME_YES=0
 FORCE=0
 DELETE_DATA=0
 MODE_FLAG=""  # tunnel or direct, when --tunnel or --direct was given
+NEW_TOKEN=0
 
 MODE=""       # direct or tunnel
 TOKEN=""      # the tunnel token; never printed
+OLD_TOKEN=""  # the token .env held when this run began
+TOKEN_CHANGED=0
+PENDING=0     # 1 when this install's tunnel has never connected (PENDING_FILE was there)
+SECRET_EXTRA=0
 DOMAIN=""
 ACME_EMAIL=""
 DATA_DIR=""   # the resolved path as the host sees it, without DP_ROOT; stored in .env
@@ -163,6 +176,8 @@ Options:
                   no certificate is requested; the tunnel token is asked for.
   --direct        With install: publish ports 80 and 443 and get a certificate (the
                   default at the question a first install asks).
+  --new-token     With install, on a tunnel install: ask for the tunnel token again and
+                  replace the one in .env.
   --dry-run       Print every command and file write without doing any.
   --yes           Do not ask "continue?" questions (never skips the data deletion check).
   --force         Try on a system other than Debian 13 or 12.
@@ -203,6 +218,7 @@ parse_args() {
       --direct)
         [ "$MODE_FLAG" != tunnel ] || usage_error "give only one of --tunnel and --direct"
         MODE_FLAG=direct ;;
+      --new-token) NEW_TOKEN=1 ;;
       -h | --help) usage; exit 0 ;;
       *) usage_error "unknown argument: $a" ;;
     esac
@@ -212,6 +228,9 @@ parse_args() {
   fi
   if [ -n "$MODE_FLAG" ] && [ "$COMMAND" != install ]; then
     usage_error "--tunnel and --direct go only with install; the other commands read the mode from .env"
+  fi
+  if [ "$NEW_TOKEN" = 1 ] && [ "$COMMAND" != install ]; then
+    usage_error "--new-token goes only with install"
   fi
 }
 
@@ -359,7 +378,9 @@ remove_own_tmpdir() {
 }
 
 # Undoes what a failed run created: files it made, and folders it made if empty. The
-# data folder goes only if empty; while it holds files, .env stays with it.
+# data folder goes only if empty; while it holds files, .env stays with it, and so does
+# the mark that the tunnel has never connected, which makes the next run ask for the
+# token again.
 undo_created() {
   local i p keep_env=0
   for p in ${CREATED[@]+"${CREATED[@]}"}; do
@@ -374,6 +395,7 @@ undo_created() {
     if [ "$p" = "$ENV_FILE" ] && [ "$keep_env" = 1 ]; then
       printf 'kept %s: the data folder it belongs to is not empty\n' "$p" >&2; continue
     fi
+    if [ "$p" = "$PENDING_FILE" ] && [ "$keep_env" = 1 ]; then continue; fi
     if [ -d "$p" ] && [ ! -L "$p" ]; then
       if safe_rmdir_empty "$p"; then printf 'removed %s (created by this failed run)\n' "$p" >&2
       else printf 'kept %s: it is not empty\n' "$p" >&2; fi
@@ -477,14 +499,31 @@ read_line() {
 }
 
 # Reads one line without showing it, and keeps its last word: the token, also when the
-# whole install command from the dashboard was pasted.
+# whole install command from the dashboard was pasted. A paste can hold a line break:
+# on a terminal, whatever arrives right after the line is read too, hidden, and thrown
+# away, so that it cannot fall into the next question and be echoed there. SECRET_EXTRA
+# is 1 when such extra text was thrown away. Answers piped in are not a paste and are
+# left alone.
 read_secret() {
-  local __out="$1" line
+  local __out="$1" line extra="" more=0
   if [ ! -t 0 ] && { : </dev/tty; } 2>/dev/null; then
     IFS= read -rs line </dev/tty || return 1
+    while IFS= read -rs -t 0.3 extra </dev/tty; do
+      [ -z "${extra//[[:space:]]/}" ] || more=1
+      extra=""
+    done
   else
     IFS= read -rs line || return 1
+    if [ -t 0 ]; then
+      while IFS= read -rs -t 0.3 extra; do
+        [ -z "${extra//[[:space:]]/}" ] || more=1
+        extra=""
+      done
+    fi
   fi
+  # A last piece without a line end is in extra when the wait ran out.
+  [ -z "${extra//[[:space:]]/}" ] || more=1
+  SECRET_EXTRA="$more"
   line="${line%"${line##*[![:space:]]}"}"
   line="${line##*[[:space:]]}"
   printf -v "$__out" '%s' "$line"
@@ -515,9 +554,12 @@ ask_mode() {
   die "no valid choice given; nothing was changed"
 }
 
-# The token is never echoed: not while it is typed, and not in a refusal.
+# The token is never echoed: not while it is typed, and not in a refusal. With "keep",
+# an empty answer keeps the token already in TOKEN.
 ask_token() {
-  local answer tries
+  local keep="${1:-}" answer tries
+  local prompt='Tunnel token from the Cloudflare dashboard (what you paste is not shown): '
+  [ -z "$keep" ] || prompt='Tunnel token from the Cloudflare dashboard (what you paste is not shown; Enter keeps the one in .env): '
   if [ -n "$ENV_TOKEN" ]; then
     valid_token "$ENV_TOKEN" || die "the TUNNEL_TOKEN environment variable does not hold a tunnel token (one long word starting with eyJ); nothing was changed"
     TOKEN="$ENV_TOKEN"
@@ -525,9 +567,14 @@ ask_token() {
     return 0
   fi
   for tries in 1 2 3; do
-    printf 'Tunnel token from the Cloudflare dashboard (what you paste is not shown): ' >&2
+    printf '%s' "$prompt" >&2
     read_secret answer || die "no answer given; run the script in a terminal"
     printf '\n' >&2
+    if [ "$SECRET_EXTRA" = 1 ]; then
+      warn "what was pasted had more than one line, so none of it was taken: paste the token as one line (try $tries of 3)"
+      continue
+    fi
+    if [ -n "$keep" ] && [ -z "$answer" ]; then info "keeping the token in .env"; return 0; fi
     if valid_token "$answer"; then TOKEN="$answer"; return 0; fi
     warn "that is not a tunnel token: paste the long word starting with eyJ, or the install command that ends with it (try $tries of 3)"
   done
@@ -767,7 +814,14 @@ read_env_file() {
   esac
   valid_domain "$DOMAIN" || die "$ENV_FILE has no valid DOMAIN; fix it by hand, nothing was changed"
   if [ "$MODE" = tunnel ]; then
-    valid_token "$TOKEN" || die "$ENV_FILE says DEPLOY_MODE=tunnel but has no TUNNEL_TOKEN of the right shape (one long word starting with eyJ); fix it by hand, nothing was changed"
+    if ! valid_token "$TOKEN"; then
+      # An install run that is about to ask for the token anyway goes on without one.
+      if [ "$COMMAND" = install ] && { [ -e "$PENDING_FILE" ] || [ "$NEW_TOKEN" = 1 ]; }; then
+        TOKEN=""
+      else
+        die "$ENV_FILE says DEPLOY_MODE=tunnel but has no TUNNEL_TOKEN of the right shape (one long word starting with eyJ); nothing was changed. Give it a new one with: sudo bash $SELF install --new-token"
+      fi
+    fi
   else
     TOKEN=""
     valid_email "$ACME_EMAIL" || die "$ENV_FILE has no valid ACME_EMAIL; fix it by hand, nothing was changed"
@@ -796,12 +850,16 @@ load_or_ask_config() {
     read_env_file
     check_recorded_data strict
     if [ -n "$MODE_FLAG" ] && [ "$MODE_FLAG" != "$MODE" ]; then refuse_mode_switch; fi
+    if [ "$NEW_TOKEN" = 1 ] && [ "$MODE" != tunnel ]; then
+      die "--new-token is for an install in tunnel mode; this install is in direct mode and has no tunnel token. Nothing was changed."
+    fi
     if [ "$MODE" = tunnel ]; then
       info "tunnel mode, domain $DOMAIN, data folder $DATA_DIR, image $IMAGE"
     else
       info "domain $DOMAIN, email $ACME_EMAIL, data folder $DATA_DIR, image $IMAGE"
     fi
     refuse_other_modes_stack
+    if [ "$MODE" = tunnel ]; then renew_token; fi
     return 0
   fi
   FIRST_RUN=1
@@ -813,6 +871,48 @@ load_or_ask_config() {
   DATA_PATH="$DP_ROOT$DATA_DIR"
   IMAGE="${APP_IMAGE:-$DEFAULT_APP_IMAGE}"
   valid_image "$IMAGE" || die "APP_IMAGE is not a valid image name"
+}
+
+# On an existing tunnel install: asks for the token again when the tunnel has never
+# connected (so a wrong token is put right by running the script again) or when
+# --new-token was given. Otherwise the token in .env stays, whatever the environment
+# holds.
+renew_token() {
+  OLD_TOKEN="$TOKEN"
+  [ ! -e "$PENDING_FILE" ] || PENDING=1
+  if [ "$PENDING" = 1 ] || [ "$NEW_TOKEN" = 1 ]; then
+    if [ "$PENDING" = 1 ]; then
+      say "The tunnel of this install has never connected, so the tunnel token is asked for again"
+    else
+      say "Replacing the tunnel token"
+    fi
+    if valid_token "$OLD_TOKEN"; then ask_token keep; else ask_token; fi
+    [ "$TOKEN" = "$OLD_TOKEN" ] || TOKEN_CHANGED=1
+  elif [ -n "$ENV_TOKEN" ]; then
+    warn "TUNNEL_TOKEN is set in the environment, but this install already has a token that connected, so it is not taken. To replace the token: sudo bash $SELF install --new-token"
+  fi
+}
+
+# Rewrites .env with one line changed, TUNNEL_TOKEN, and every other line as it was.
+# The new file is complete before it takes the old one's place; no copy of the old
+# file is kept, so no file but .env ever holds a token.
+replace_env_token() {
+  local new="$1" tmp line found=0
+  valid_token "$new" || die "no tunnel token to write"
+  if [ "$DRY_RUN" = 1 ]; then info "would replace the TUNNEL_TOKEN line of $ENV_FILE"; return 0; fi
+  tmp="$(mktemp -- "$INSTALL_DIR/.env.new.XXXXXX")"
+  TMP_FILES+=("$tmp")
+  guard_path "$tmp"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      TUNNEL_TOKEN=*) [ "$found" = 1 ] || printf 'TUNNEL_TOKEN=%s\n' "$new"; found=1 ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <"$ENV_FILE" >"$tmp"
+  [ "$found" = 1 ] || printf 'TUNNEL_TOKEN=%s\n' "$new" >>"$tmp"
+  chmod 600 -- "$tmp"
+  chown 0:0 -- "$tmp"
+  safe_mv "$tmp" "$ENV_FILE"
 }
 
 # An existing install is never switched to the other mode by a flag: the two modes
@@ -952,6 +1052,11 @@ EOF
 }
 
 write_env_file() {
+  if [ -e "$ENV_FILE" ] && [ "$TOKEN_CHANGED" = 1 ]; then
+    say "Replacing the tunnel token in $ENV_FILE (every other line stays as it is; the setup code does not change)"
+    replace_env_token "$TOKEN"
+    return 0
+  fi
   if [ -e "$ENV_FILE" ]; then
     say "Keeping $ENV_FILE as it is (the setup code does not change)"
     return 0
@@ -1004,6 +1109,13 @@ write_env_file() {
   CREATED+=("$ENV_FILE")
   CODE_GENERATED=1
   safe_rm_file "$tmp"
+  if [ "$MODE" = tunnel ]; then
+    # Stays until the tunnel has connected once; see finish.
+    guard_path "$PENDING_FILE"
+    printf 'Written by install.sh: the tunnel of this install has not connected yet. Until it has, install asks for the tunnel token again. Removed by the first run that connects.\n' >"$PENDING_FILE"
+    chmod 600 -- "$PENDING_FILE"
+    CREATED+=("$PENDING_FILE")
+  fi
 }
 
 install_stack_files() {
@@ -1070,9 +1182,7 @@ start_stack() {
   else
     say "Starting the platform: pulling any image not on this server yet, then waiting up to ${WAIT_SECONDS}s for it to report healthy"
   fi
-  # --remove-orphans: a container left by the other mode's stack file (cloudflared after
-  # a switch back to direct mode) does not keep running beside this one.
-  if ! run "${DC[@]}" up -d --pull missing --wait --wait-timeout "$WAIT_SECONDS" --remove-orphans; then
+  if ! run "${DC[@]}" up -d --pull missing --wait --wait-timeout "$WAIT_SECONDS"; then
     warn "the platform did not start"
     if [ "$MODE" = tunnel ]; then explain_tunnel_failure; fi
     if [ "$COMPOSE_CREATED" = 1 ]; then
@@ -1080,12 +1190,30 @@ start_stack() {
       run "${DC[@]}" logs --tail 50 app || true
       say "Taking the half-started stack down again"
       run "${DC[@]}" down || warn "could not take the stack down"
+      if [ "$MODE" = tunnel ]; then
+        die "starting failed; see the log lines above. Run this script again: it asks for the tunnel token again, and prints the setup code once the tunnel has connected. The files this run created are removed below; .env stays if the app has already written to the data folder."
+      fi
       die "starting failed; see the log lines above. The files this run created are removed below."
     fi
-    if [ "${#REPLACED[@]}" -gt 0 ]; then
+    local token_put_back=0
+    if [ "$TOKEN_CHANGED" = 1 ] && [ "$PENDING" = 0 ] && valid_token "$OLD_TOKEN"; then
+      say "Putting the previous token back into $ENV_FILE: it connected before"
+      replace_env_token "$OLD_TOKEN"
+      token_put_back=1
+    fi
+    if [ "${#REPLACED[@]}" -gt 0 ] || [ "$token_put_back" = 1 ]; then
       say "Putting back the files this run replaced and starting the previous setup"
       restore_replaced
       run "${DC[@]}" up -d || warn "the previous setup did not start either"
+    fi
+    if [ "$token_put_back" = 1 ]; then
+      die "starting failed with the new token. The previous token is back in $ENV_FILE; the data folder and the backups were not changed. See the logs with: ${DC[*]} logs"
+    fi
+    if [ "$MODE" = tunnel ] && [ "$PENDING" = 1 ]; then
+      die "starting failed. Run this script again: it asks for the tunnel token again. The data folder and the backups were not changed. See the logs with: ${DC[*]} logs"
+    fi
+    if [ "$MODE" = tunnel ]; then
+      die "starting failed. The data folder, $ENV_FILE and the backups were not changed. If the token is the cause, replace it with: sudo bash $SELF install --new-token. See the logs with: ${DC[*]} logs"
     fi
     die "starting failed. The data folder, $ENV_FILE and the backups were not changed. See the logs with: ${DC[*]} logs"
   fi
@@ -1106,7 +1234,10 @@ finish() {
   else
     printf '\nThe platform is running at https://%s\n' "$DOMAIN"
   fi
-  if [ "$CODE_GENERATED" = 1 ]; then
+  # The tunnel has connected: the mark that it never did goes, and a setup code that a
+  # failed earlier run made without printing it is printed now, once.
+  if [ "$MODE" = tunnel ] && [ -e "$PENDING_FILE" ]; then safe_rm_file "$PENDING_FILE"; fi
+  if [ "$CODE_GENERATED" = 1 ] || [ "$PENDING" = 1 ]; then
     local line code=""
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in SETUP_CODE=*) code="${line#SETUP_CODE=}" ;; esac
