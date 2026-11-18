@@ -30,6 +30,8 @@ The full steps, with backup, restore, moving servers and troubleshooting, are in
 
 The full steps are in the [Cloudflare runbook](docs/runbook-cloudflare.md).
 
+It is built to run on Cloudflare's Free plan, which allows 50 subrequests and 10 ms of CPU time per request, and counts every D1 and R2 call as a subrequest ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)). No request makes more than 40 database and storage calls, which the test suite checks for every route, and a large tour is published over several requests (see [Publish a tour](#publish-a-tour)). The CPU limit has only been estimated: the heaviest requests take about 5 to 8 ms of the app's own CPU in plain Node (see [Costs](docs/runbook-cloudflare.md#costs) in the runbook).
+
 ## Who does what
 
 ### Docker on Debian
@@ -56,6 +58,33 @@ The full steps are in the [Cloudflare runbook](docs/runbook-cloudflare.md).
 ## Connect Mythicshot
 
 The setup wizard's last step shows the server address. In Mythicshot, open Settings › Output › Tour publishing, paste the server address and the API token from the wizard, and press Test connection. The token is shown once, by the wizard; keep it in a password manager.
+
+## Publish a tour
+
+Mythicshot uploads tours as drafts. To publish one, or take it down again, run the helper with the server address and the tour id; it reads the token from `DEMO_PLATFORM_TOKEN`, or asks for it without echoing it, and never takes it as an argument.
+
+```sh
+node scripts/publish.ts https://tours.example.com tour_0123456789abcdef01234567
+```
+
+```sh
+node scripts/publish.ts https://tours.example.com tour_0123456789abcdef01234567 --unpublish
+```
+
+A large tour publishes over several requests, so the helper prints its progress (`Copying images: 24 of 60 done`) and keeps calling until the new version is live. Visitors see the previously published version until the last request. If the helper is stopped half-way, run the same command again within 15 minutes and it continues the same publish; after that the half-done publish is cleaned up and a new one starts. The previously published version is never touched by a publish that did not finish.
+
+### The publish API
+
+Every request carries `Authorization: Bearer <token>` and answers `404` for a tour of another workspace.
+
+| Request | Answer |
+|---|---|
+| `POST /api/v1/tours/<id>/publish` with no body | Starts a publish, or joins the one already in progress for the tour. `202 {"status":"in_progress","publish_id":"pub_…","done":12,"total":60}`, or `200` at once for a tour of at most 12 images |
+| `POST /api/v1/tours/<id>/publish` with `{"publish_id":"pub_…"}` | Copies the next 12 images: `202` as above while more remain; `200 {"slug","url","steps"}` once the new version is live, and the same `200` on any repeat |
+| either, when that publish was stopped | `409 publish_cancelled`: the tour was unpublished, or the publish failed or was abandoned; publish again to start over |
+| `POST /api/v1/tours/<id>/unpublish` | `204` when the tour and all its public images are gone; `202` when the tour is unpublished but images remain to remove, so call again; a publish in progress is cancelled |
+
+A publish works from the draft as it was when the publish started: a chapter uploaded meanwhile goes out with the next publish, never half of it with this one. `400 empty_tour` and `413 too_large` (more than 400 steps, or a snapshot over 512,000 bytes) come from the first request, before anything is copied.
 
 ## Develop
 

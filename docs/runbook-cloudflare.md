@@ -94,7 +94,7 @@ This creates the tables in the database. It asks you to confirm.
 npx wrangler d1 migrations apply demo-platform --remote
 ```
 
-**How to tell it worked:** it lists `0001_init.sql`, `0002_guide_cards.sql` and `0003_publish.sql` as applied. Running it again says there is nothing to apply.
+**How to tell it worked:** it lists `0001_init.sql`, `0002_guide_cards.sql`, `0003_publish.sql` and `0004_publish_steps.sql` as applied. Running it again says there is nothing to apply.
 
 ## 6. Give the public bucket its hostname
 
@@ -281,8 +281,13 @@ Cloudflare's [Workers pricing page](https://developers.cloudflare.com/workers/pl
 
 **Unconfirmed:** whether R2 asks for a payment method before it can be used is not stated on the pages read.
 
-> [!WARNING]
-> On the Free plan one Worker request may make at most 50 subrequests, and every R2 and D1 call counts ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)). Publish reads and writes each image once, plus about ten database calls, so publishing a tour of more than about 19 steps fails on the Free plan.
+### Per-request limits on the Free plan
+
+Cloudflare's [Workers limits page](https://developers.cloudflare.com/workers/platform/limits/) gives the Free plan 50 subrequests and 10 ms of CPU time per request, and counts every call to R2 or D1 as a subrequest. The [D1 limits page](https://developers.cloudflare.com/d1/platform/limits/) allows 50 queries per Worker invocation on the Free plan and counts a batch as one query.
+
+The app keeps every request at or under 40 database and storage calls, and the test suite drives each route to its worst case to check it. Publishing is the only job that needs more, so it runs over several requests of at most 12 images each: a 400-step tour takes 34 requests, and `scripts/publish.ts` makes them for you (see [Publish a tour](../README.md#publish-a-tour)). Unpublish and the clean-up of replaced images also work a page at a time. A request that goes over 40 calls anyway logs `budget: a POST request made … calls`, which `npx wrangler tail` shows.
+
+The CPU limit has not been measured on Cloudflare. In plain Node on a desktop computer, the app's own CPU time for the heaviest requests was about 6 to 8 ms for the first request of a 400-step publish with a snapshot near its 512,000-byte cap, 5 to 8 ms for the page of such a tour, and 5 to 13 ms for an upload whose manifest is at its 262,144-byte cap (the higher figure on a cold start); every other request measured under 3 ms. Workers run on different hardware, so treat these as estimates, and keep tours well under the caps if a request is refused for CPU.
 
 ## Troubleshooting by symptom
 
@@ -309,5 +314,6 @@ Cloudflare's [Workers pricing page](https://developers.cloudflare.com/workers/pl
 - [Workers Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/), for attaching the Worker to its hostname.
 - [Workers secrets](https://developers.cloudflare.com/workers/configuration/secrets/) and [Workers Wrangler commands](https://developers.cloudflare.com/workers/wrangler/commands/workers/), for `wrangler secret put` and `wrangler deploy`.
 - [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) and [R2 pricing](https://developers.cloudflare.com/r2/pricing/), for the free amounts.
+- [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) and [D1 limits](https://developers.cloudflare.com/d1/platform/limits/), for the subrequests, CPU time and queries allowed per request.
 
 The Worker's settings are in [wrangler.jsonc](../wrangler.jsonc), and the migrations in [migrations/](../migrations/).
