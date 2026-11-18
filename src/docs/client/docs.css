@@ -1,7 +1,324 @@
-/* The documentation page's own stylesheet. The reference viewer brings its own; this one
-   only takes away the parts of it the page replaces. */
+/* The documentation page's own stylesheet: the header, "Get connected", the token box,
+   the examples and the guides. The reference viewer brings its own stylesheet, loaded
+   before this one; of the viewer, this file only takes away the two parts the page
+   replaces (see the end).
 
-/* The viewer's title block and its authorise bar: the page has its own header and token box. */
+   Light and dark follow the system. The colours below are the page's; the viewer has its
+   own dark look, switched on by the class "dark-mode" on the html element, which the page
+   script sets from the same system setting. The dark background here is the viewer's
+   (#1c2022), so the two meet without a seam. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1f2933;
+  --muted: #52606d;
+  --line: #d5dbe1;
+  --panel: #f4f6f8;
+  --code-bg: #eef1f4;
+  --link: #175cab;
+  --button-bg: #175cab;
+  --button-fg: #ffffff;
+  --ok: #1b6b3a;
+  --bad: #a3262c;
+  --focus: #175cab;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c2022;
+    --fg: #e4e6e6;
+    --muted: #aab4bc;
+    --line: #3b4348;
+    --panel: #252b2e;
+    --code-bg: #2b3236;
+    --link: #8cc0ff;
+    --button-bg: #8cc0ff;
+    --button-fg: #10202f;
+    --ok: #7fd6a0;
+    --bad: #ffa0a0;
+    --focus: #8cc0ff;
+  }
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html {
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+}
+
+/* Every block of our own carries the class "own", and every rule below is under it, so
+   nothing here restyles the viewer. They line up with the viewer's column (max-width
+   1460px, 20px at the sides). */
+.own {
+  box-sizing: border-box;
+  margin: 0 auto;
+  max-width: 1460px;
+  padding: 0 20px;
+  width: 100%;
+}
+
+.page-header {
+  padding-top: 32px;
+}
+
+.page-header h1 {
+  font-size: 2rem;
+  line-height: 1.2;
+  margin: 0 0 4px;
+}
+
+.own.page-header p {
+  color: var(--muted);
+  margin: 0 0 4px;
+}
+
+.block {
+  margin-top: 40px;
+}
+
+.own > h2 {
+  border-bottom: 1px solid var(--line);
+  font-size: 1.5rem;
+  line-height: 1.25;
+  margin: 0 0 16px;
+  padding-bottom: 8px;
+}
+
+.own h3 {
+  font-size: 1.1rem;
+  margin: 24px 0 8px;
+}
+
+/* Running text keeps a readable line; commands and tables may use the full width. */
+.own p,
+.own .steps {
+  max-width: 46rem;
+}
+
+.own p {
+  margin: 0 0 12px;
+}
+
+.own a {
+  color: var(--link);
+}
+
+.own a:focus-visible,
+.own button:focus-visible,
+.own input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.own code,
+.own pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.9rem;
+}
+
+.own p code,
+.own td code {
+  background: var(--code-bg);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.steps {
+  margin: 0 0 16px;
+  padding-left: 1.5rem;
+}
+
+.steps > li {
+  margin-bottom: 12px;
+}
+
+.note,
+.answers,
+.legend {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* The token box. */
+.token-box {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin: 0 0 16px;
+  max-width: 46rem;
+  padding: 16px;
+}
+
+.token-box label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.token-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.token-row input {
+  background: var(--bg);
+  border: 1px solid var(--muted);
+  border-radius: 4px;
+  box-sizing: border-box;
+  color: var(--fg);
+  flex: 1 1 16rem;
+  font: inherit;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.own button {
+  background: var(--button-bg);
+  border: 1px solid var(--button-bg);
+  border-radius: 4px;
+  color: var(--button-fg);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  padding: 8px 16px;
+}
+
+.own button.quiet {
+  background: transparent;
+  border-color: var(--muted);
+  color: var(--fg);
+}
+
+.token-box .note {
+  margin: 8px 0 0;
+}
+
+.own .status,
+#reference .status {
+  margin: 8px 0 0;
+  min-height: 1.5em;
+}
+
+.status.ok {
+  color: var(--ok);
+}
+
+.status.bad {
+  color: var(--bad);
+}
+
+/* A command with its copy button. A long command wraps instead of scrolling sideways;
+   copied, it is still one line. */
+.command {
+  align-items: flex-start;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 10px 12px;
+}
+
+.command pre {
+  flex: 1 1 auto;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.own .command button {
+  flex: 0 0 auto;
+  font-size: 0.85rem;
+  padding: 4px 10px;
+}
+
+.guide-links {
+  margin: 0;
+  padding-left: 1.5rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.own table {
+  border-collapse: collapse;
+  margin: 0 0 16px;
+  width: 100%;
+}
+
+.own th,
+.own td {
+  border-bottom: 1px solid var(--line);
+  padding: 6px 12px 6px 0;
+  text-align: left;
+  vertical-align: top;
+}
+
+.own th {
+  font-size: 0.9rem;
+}
+
+.limits {
+  margin: 0 0 16px;
+  max-width: 46rem;
+  padding-left: 1.5rem;
+}
+
+#reference {
+  min-height: 4rem;
+}
+
+/* The one line shown in the viewer's place, without JavaScript or when it cannot start. */
+#reference > p {
+  box-sizing: border-box;
+  margin: 0 auto;
+  max-width: 1460px;
+  padding: 0 20px;
+}
+
+.page-footer {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin-top: 48px;
+  padding-bottom: 32px;
+  padding-top: 16px;
+}
+
+@media (max-width: 600px) {
+  .page-header h1 {
+    font-size: 1.6rem;
+  }
+
+  .command {
+    flex-direction: column;
+  }
+
+  .command button {
+    align-self: flex-end;
+  }
+}
+
+/* The viewer's title block and its authorise bar: the page has its own header and token
+   box. Nothing else of the viewer is hidden. Both class names are the viewer's own
+   (test/docs-page.test.ts checks its script still uses them). */
 .swagger-ui .information-container,
 .swagger-ui .scheme-container {
   display: none;

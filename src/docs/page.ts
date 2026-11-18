@@ -8,12 +8,16 @@
 // a cross-origin header. In two-address mode the host gate keeps the page and its files
 // to the app address (src/host-gate.ts); nothing here looks at the host.
 //
-// The page body is a plain shell for now: the header, the mount the viewer fills, and
-// the footer. The token box and the guides come with the page itself.
+// The page is server-rendered and reads without JavaScript: the header, "Get connected",
+// the links to the guides, the mount the viewer fills, the three guides (src/docs/guides.ts)
+// and the footer. Its script (src/docs/client/main.ts) adds the token box, the copy
+// buttons and the viewer.
 import type { Hono } from "hono";
 import { matchesEtag, PLAYER_FILE_IMMUTABLE } from "../page.ts";
 import type { Deps } from "../ports.ts";
 import { VERSION } from "../version.ts";
+import { CODE_MEANINGS, errorCodes, GUIDES, limitLines, type Guide, type GuideStep } from "./guides.ts";
+import { GET_STARTED, openapi } from "./openapi.ts";
 import { DOCS_CSS, DOCS_CSS_ETAG, DOCS_CSS_PATH, DOCS_JS, DOCS_JS_ETAG, DOCS_JS_PATH, OPENAPI_JSON, OPENAPI_JSON_ETAG, OPENAPI_YAML, OPENAPI_YAML_ETAG } from "./site-assets.ts";
 import { VIEWER_CSS, VIEWER_CSS_ETAG, VIEWER_CSS_PATH, VIEWER_JS, VIEWER_JS_ETAG, VIEWER_JS_PATH, VIEWER_LICENCES } from "./viewer-assets.ts";
 
@@ -34,9 +38,73 @@ const DOCS_FILE_CACHE = "public, max-age=300";
 /** The notices change only with the viewer. */
 const LICENCES_CACHE = "public, max-age=86400";
 
-/** The page. Byte-for-byte the same on both targets and for every host: it names no address but its own files'. */
+const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+/** Text as HTML text or an attribute's value. */
+function esc(text: string): string {
+  return text.replace(/[&<>"']/g, (ch) => ESCAPES[ch]);
+}
+
+/** A command in its box, with a copy button the page script shows where the browser can copy. */
+function command(curl: string, attrs = ""): string {
+  return `<div class="command"><pre><code${attrs}>${esc(curl)}</code></pre><button type="button" hidden>Copy</button></div>`;
+}
+
+function stepHtml(step: GuideStep): string {
+  const parts = [`<p>${esc(step.text)}</p>`];
+  if (step.note !== undefined) parts.push(`<p class="note">${esc(step.note)}</p>`);
+  if (step.example !== undefined) {
+    const { curl, expect, repeatUntil } = step.example;
+    parts.push(command(curl, ' class="example"'));
+    parts.push(`<p class="answers">${repeatUntil === undefined ? `Answers ${expect}.` : `Answers ${repeatUntil} when it is done, 202 until then.`}</p>`);
+  }
+  return `<li>${parts.join("")}</li>`;
+}
+
+/** Every error code of the description with its status and its meaning, and the description's own list of limits. */
+function tables(): string {
+  const doc = openapi();
+  const rows = errorCodes(doc).map(({ code, statuses }) => `<tr><td>${statuses.join(", ")}</td><td><code>${esc(code)}</code></td><td>${esc(CODE_MEANINGS[code] ?? "")}</td></tr>`);
+  const limits = limitLines(doc).map((line) => `<li>${esc(line)}</li>`);
+  return `<h3>Error codes</h3>
+<div class="table-wrap"><table>
+<thead><tr><th scope="col">Status</th><th scope="col">Code</th><th scope="col">Meaning</th></tr></thead>
+<tbody>
+${rows.join("\n")}
+</tbody>
+</table></div>
+<h3>Limits</h3>
+<ul class="limits">
+${limits.join("\n")}
+</ul>`;
+}
+
+function guideHtml(guide: Guide): string {
+  const legend = guide.placeholders.map(([word, meaning]) => `<code>${esc(word)}</code> is ${esc(meaning)}`).join("; ");
+  return `<section class="own block guide" id="guide-${guide.id}">
+<h2>${esc(guide.title)}</h2>
+<p>${esc(guide.intro)}</p>
+<p class="legend">In the examples, ${legend}.</p>
+<ol class="steps">
+${guide.steps.map(stepHtml).join("\n")}
+</ol>
+${guide.id === "errors-and-limits" ? tables() + "\n" : ""}${(guide.closing ?? []).map((line) => `<p>${esc(line)}</p>`).join("\n")}
+</section>`;
+}
+
+/** The page, built once: it is fixed text. */
+let page: string | null = null;
+
+/**
+ * The page. Byte-for-byte the same on both targets and for every host: it names no
+ * address but its own files' and, in the examples, the placeholder GUIDE_ORIGIN, which
+ * the page script replaces with the address the page was opened on.
+ *
+ * It reads without JavaScript: the header, "Get connected", the guides and the footer
+ * are plain HTML. The token box and the copy buttons are hidden until the page script
+ * shows them, since they do nothing without it; the viewer fills #reference.
+ */
 export function docsHtml(): string {
-  return `<!doctype html>
+  page ??= `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -47,16 +115,38 @@ export function docsHtml(): string {
 <link rel="stylesheet" href="${DOCS_CSS_PATH}">
 </head>
 <body>
-<header>
+<header class="own page-header">
 <h1>Mythicshot API</h1>
-<p>Version ${VERSION}</p>
+<p>Version ${esc(VERSION)}</p>
 <p>Download the description: <a href="/api/v1/openapi.json">JSON</a> <a href="/api/v1/openapi.yaml">YAML</a></p>
 </header>
 <main>
-<h2>Reference</h2>
+<section class="own block" id="get-connected">
+<h2>Get connected</h2>
+<ol class="steps">
+<li>Create a token in your workspace. Today the setup wizard shows it once, at the end of setup; keep it in a password manager.</li>
+<li>Send it with every request, as the header <code>Authorization: Bearer YOUR_TOKEN</code>.</li>
+<li>Try the first call. It answers with your workspace's name and the server's version.</li>
+</ol>
+<div class="token-box" id="token-box" hidden>
+<label for="token">Paste a token to try the calls on this page</label>
+<div class="token-row"><input id="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false"><button type="button" id="use-token">Use token</button><button type="button" id="forget-token" class="quiet" hidden>Forget token</button></div>
+<p class="note">Kept in this tab only, never stored.</p>
+<p class="status" id="token-status" role="status" aria-live="polite"></p>
+</div>
+${command(GET_STARTED, ' id="first-command"')}
+<h3 id="guides">Guides</h3>
+<ul class="guide-links">
+${GUIDES.map((g) => `<li><a href="#guide-${g.id}">${esc(g.title)}</a></li>`).join("\n")}
+</ul>
+</section>
+<section aria-labelledby="reference-title">
+<div class="own block"><h2 id="reference-title">Reference</h2></div>
 <div id="reference"><noscript><p>The reference needs JavaScript. Everything it shows is also in the description, as JSON and YAML above.</p></noscript></div>
+</section>
+${GUIDES.map(guideHtml).join("\n")}
 </main>
-<footer>
+<footer class="own page-footer">
 <p>The reference is shown with Swagger UI, used under the Apache License 2.0. <a href="/docs/licences.txt">Licence notices</a></p>
 </footer>
 <script src="${VIEWER_JS_PATH}"></script>
@@ -64,6 +154,7 @@ export function docsHtml(): string {
 </body>
 </html>
 `;
+  return page;
 }
 
 /** The page's ETag: the first 32 hex digits of its SHA-256, worked out once and kept. */

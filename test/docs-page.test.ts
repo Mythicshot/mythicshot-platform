@@ -1,13 +1,19 @@
 // The documentation page, its four files, the licence notices and where each answers:
 // headers, caching, the policy, the host rules, and that none of it costs a database or
-// storage call, needs a token or sets a cookie.
+// storage call, needs a token or sets a cookie. Then the page itself: its parts, that it
+// loads nothing but its own files, and what its script may and may not do with a token.
+// (The guides' commands are run in test/docs-guides.test.ts.)
 import { describe, expect, it, vi } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
+import { intercept, looksLikeToken, REFUSED, type ViewerRequest } from "../src/docs/client/rules.ts";
+import { GUIDE_ORIGIN, GUIDES } from "../src/docs/guides.ts";
+import { GET_STARTED } from "../src/docs/openapi.ts";
 import { DOCS_CSP, DOCS_PAGE_CACHE, docsFile, docsHtml } from "../src/docs/page.ts";
 import { DOCS_CSS, DOCS_CSS_ETAG, DOCS_CSS_PATH, DOCS_JS, DOCS_JS_ETAG, DOCS_JS_PATH } from "../src/docs/site-assets.ts";
 import { VIEWER_CSS, VIEWER_CSS_ETAG, VIEWER_CSS_PATH, VIEWER_JS, VIEWER_JS_ETAG, VIEWER_JS_PATH, VIEWER_LICENCES } from "../src/docs/viewer-assets.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { contentSecurityPolicy } from "../src/page.ts";
+import { VERSION } from "../src/version.ts";
 import { send, type Call } from "./bundle.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -85,9 +91,10 @@ describe("the documentation page", () => {
     // The same bytes for every host and on every call, and nothing in them but our own files.
     expect(docsHtml()).toBe(docsHtml());
     expect((await send(deps, "GET", "/docs?x=1", { origin: "http://localhost:8787" })).text).toBe(r.text);
-    const linked = [...r.text.matchAll(/(?:src|href)="([^"]*)"/g)].map((m) => m[1]);
+    const linked = [...r.text.matchAll(/(?:src|href)="([^"]*)"/g)].map((m) => m[1]).filter((l) => !l.startsWith("#"));
     expect(linked.sort()).toEqual([...FILES.map((f) => f.path), "/docs/licences.txt", "/api/v1/openapi.json", "/api/v1/openapi.yaml"].sort());
-    expect(r.text).not.toMatch(/:\/\/|example\.|localhost/);
+    // The only address in it is the examples' placeholder, which is no host at all.
+    expect(r.text.split(GUIDE_ORIGIN).join("")).not.toMatch(/:\/\/|example\.|localhost/);
     expect(r.text).not.toMatch(/<style|style=|\son[a-z]+=|<script(?![^>]*\ssrc=)/i);
     expect(r.text).toContain("<title>Mythicshot API documentation</title>");
     expect(r.text).toContain("The reference needs JavaScript. Everything it shows is also in the description, as JSON and YAML above.");
@@ -382,5 +389,452 @@ describe("the documentation page", () => {
     } finally {
       for (const spy of noise) spy.mockRestore();
     }
+  });
+});
+
+/** The page with its tags taken out: the text a reader sees. */
+function visible(html: string): string {
+  const entities: Record<string, string> = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" };
+  return html
+    .replace(/<head>[\s\S]*?<\/head>/, "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&(?:amp|lt|gt|quot|#39);/g, (e) => entities[e])
+    .replace(/\s+/g, " ");
+}
+
+describe("the documentation page's parts", () => {
+  it("the page has the approved parts in order", () => {
+    const html = docsHtml();
+    const parts = [
+      // The header, with the version and the two download links.
+      "<h1>Mythicshot API</h1>",
+      `<p>Version ${VERSION}</p>`,
+      'Download the description: <a href="/api/v1/openapi.json">JSON</a> <a href="/api/v1/openapi.yaml">YAML</a>',
+      // Get connected, with its three steps.
+      "<h2>Get connected</h2>",
+      "<li>Create a token in your workspace. Today the setup wizard shows it once, at the end of setup; keep it in a password manager.</li>",
+      "<li>Send it with every request, as the header <code>Authorization: Bearer YOUR_TOKEN</code>.</li>",
+      "<li>Try the first call. It answers with your workspace's name and the server's version.</li>",
+      // The token box.
+      '<label for="token">Paste a token to try the calls on this page</label>',
+      '<input id="token" type="password"',
+      '<button type="button" id="use-token">Use token</button>',
+      "Kept in this tab only, never stored.",
+      // The first command, with its copy button.
+      '<code id="first-command">curl https://YOUR-SITE/api/v1/me -H &quot;Authorization: Bearer YOUR_TOKEN&quot;</code></pre><button type="button" hidden>Copy</button>',
+      // The links to the three guides.
+      ">Guides</h3>",
+      '<a href="#guide-upload-and-publish">Upload and publish a tour</a>',
+      '<a href="#guide-update-a-tour">Update a tour over the same link</a>',
+      '<a href="#guide-errors-and-limits">Errors and limits</a>',
+      // The reference: the mount the viewer fills, and what is shown without JavaScript.
+      '<h2 id="reference-title">Reference</h2>',
+      '<div id="reference"><noscript><p>The reference needs JavaScript. Everything it shows is also in the description, as JSON and YAML above.</p></noscript></div>',
+      // The three guides, as sections of this page.
+      '<section class="own block guide" id="guide-upload-and-publish">\n<h2>Upload and publish a tour</h2>',
+      '<section class="own block guide" id="guide-update-a-tour">\n<h2>Update a tour over the same link</h2>',
+      '<section class="own block guide" id="guide-errors-and-limits">\n<h2>Errors and limits</h2>',
+      "<h3>Error codes</h3>",
+      "<h3>Limits</h3>",
+      // The footer, then the two scripts, the viewer's first.
+      'The reference is shown with Swagger UI, used under the Apache License 2.0. <a href="/docs/licences.txt">Licence notices</a>',
+      `<script src="${VIEWER_JS_PATH}"></script>\n<script src="${DOCS_JS_PATH}"></script>\n</body>`,
+    ];
+    let at = 0;
+    for (const part of parts) {
+      const found = html.indexOf(part, at);
+      expect(found, `missing, or out of order: ${part}`).toBeGreaterThanOrEqual(0);
+      expect(html.split(part).length - 1, `more than once: ${part}`).toBe(1);
+      at = found + part.length;
+    }
+    // One of each landmark, one h1, and the first command is the description's own.
+    for (const tag of ["<header", "<main>", "<footer", "<h1>", "<title>"]) expect(html.split(tag).length - 1, tag).toBe(1);
+    expect(html).toContain(GET_STARTED.replace(/"/g, "&quot;"));
+    expect(GUIDES.map((g) => g.title)).toEqual(["Upload and publish a tour", "Update a tour over the same link", "Errors and limits"]);
+    // Every link into the page lands on something, and every id is there once.
+    const ids = [...html.matchAll(/\sid="([^"]*)"/g)].map((m) => m[1]);
+    expect(new Set(ids).size).toBe(ids.length);
+    const anchors = [...html.matchAll(/href="#([^"]*)"/g)].map((m) => m[1]);
+    expect(anchors).toEqual(["guide-upload-and-publish", "guide-update-a-tour", "guide-errors-and-limits"]);
+    for (const anchor of anchors) expect(ids, anchor).toContain(anchor);
+    expect(html).toContain('<label for="token">');
+    expect(html).toContain('aria-labelledby="reference-title"');
+    // The stylesheets come before anything is drawn, the viewer's first so ours can take its two parts away.
+    expect(html.indexOf(VIEWER_CSS_PATH)).toBeLessThan(html.indexOf(DOCS_CSS_PATH));
+    expect(html.indexOf(DOCS_CSS_PATH)).toBeLessThan(html.indexOf("<body>"));
+  });
+
+  it("the page is the same bytes for every host and carries only the placeholder origin", async () => {
+    const html = docsHtml();
+    const { deps } = await makeDeps();
+    const two = await twoAddress();
+    const local = await twoAddress({ hosts: { tours: "tours.localhost:8787", app: "app.localhost:8787" } });
+    const answers = [
+      await send(deps, "GET", "/docs"),
+      await send(deps, "GET", "/docs", { origin: "http://localhost:8787" }),
+      await send(deps, "GET", "/docs", { origin: "https://anything.example.net" }),
+      await send(two.deps, "GET", "/docs", { origin: APP }),
+      await send(local.deps, "GET", "/docs", { origin: "http://app.localhost:8787" }),
+    ];
+    for (const r of answers) {
+      expect(r.status).toBe(200);
+      expect(r.text === html).toBe(true);
+      expect(r.headers.get("etag")).toBe(answers[0].headers.get("etag"));
+    }
+    // Every address in the page is the placeholder, in a command; the script puts the real one in.
+    expect(GUIDE_ORIGIN).toBe("https://YOUR-SITE");
+    const addresses = html.match(/[a-z][a-z0-9+.-]*:\/\/[^\s"'<&]*/g) ?? [];
+    expect(addresses.length).toBeGreaterThan(10);
+    for (const address of addresses) expect(address.startsWith(`${GUIDE_ORIGIN}/api/v1/`), address).toBe(true);
+    for (const host of ["example.com", "example.net", "localhost", "mythicshot.com"]) expect(html, host).not.toContain(host);
+    expect(DOCS_JS).toContain(JSON.stringify(GUIDE_ORIGIN));
+    expect(DOCS_JS).toContain("location.origin");
+    // Nothing in the page changes from one moment to the next: no date, no id made up on the way.
+    expect(docsHtml() === html).toBe(true);
+  });
+
+  it("the page loads only its own four files", () => {
+    const html = docsHtml();
+    const loaded = [...html.matchAll(/<(script|link|img|iframe|object|embed|source|video|audio|form|base|meta)\b([^>]*)>/g)].map((m) => `${m[1]}${m[2]}`);
+    expect(loaded).toEqual([
+      'meta charset="utf-8"',
+      'meta name="viewport" content="width=device-width, initial-scale=1"',
+      'meta name="referrer" content="no-referrer"',
+      `link rel="stylesheet" href="${VIEWER_CSS_PATH}"`,
+      `link rel="stylesheet" href="${DOCS_CSS_PATH}"`,
+      `script src="${VIEWER_JS_PATH}"`,
+      `script src="${DOCS_JS_PATH}"`,
+    ]);
+    // Every src and href is one of the four hashed files, a place on this page, a description file or the notices.
+    const allowed = new Set([VIEWER_CSS_PATH, DOCS_CSS_PATH, VIEWER_JS_PATH, DOCS_JS_PATH, "/api/v1/openapi.json", "/api/v1/openapi.yaml", "/docs/licences.txt"]);
+    for (const m of html.matchAll(/\s(?:src|href|action|formaction|poster|srcset|data|ping|background)="([^"]*)"/g)) {
+      expect(m[1].startsWith("#guide-") || allowed.has(m[1]), m[1]).toBe(true);
+    }
+    // Nothing inline: no script without a src, no style element, no style or event attribute.
+    for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)) {
+      expect(m[1]).toMatch(/^ src="\/docs\/(viewer|docs)\.[0-9a-f]{16}\.js"$/);
+      expect(m[2]).toBe("");
+    }
+    expect(html).not.toMatch(/<style\b/i);
+    expect(html).not.toMatch(/\sstyle\s*=/i);
+    expect(html).not.toMatch(/\son[a-z]+\s*=/i);
+    expect(html).not.toMatch(/javascript:|data:|blob:|<svg\b/i);
+    expect(html).not.toMatch(/\starget=/);
+    // Our stylesheet and script load nothing either.
+    expect(DOCS_CSS).not.toMatch(/url\(|@import|@font-face|expression\(/i);
+    expect(DOCS_JS).not.toMatch(/import\(|importScripts|createElement\("(script|link|style|iframe|img)"\)|\.src\s*=|\.href\s*=/);
+  });
+
+  it("the token field is a password field outside any form, with autocomplete off", () => {
+    const html = docsHtml();
+    const inputs = [...html.matchAll(/<input\b[^>]*>/g)].map((m) => m[0]);
+    expect(inputs).toEqual(['<input id="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">']);
+    // No form anywhere, so nothing can submit the field; and no name, so nothing would carry it.
+    expect(html).not.toMatch(/<form\b/i);
+    expect(inputs[0]).not.toMatch(/\sname=|\svalue=/);
+    expect(html).not.toMatch(/<textarea\b|<select\b/i);
+    // Every button only does what the script gives it: none can submit.
+    const buttons = [...html.matchAll(/<button\b[^>]*>/g)].map((m) => m[0]);
+    expect(buttons.length).toBeGreaterThan(3);
+    for (const b of buttons) expect(b, b).toContain('type="button"');
+    // Without the page script the box and the copy buttons would do nothing, so they start hidden.
+    expect(html).toContain('<div class="token-box" id="token-box" hidden>');
+    expect(html).toContain('<button type="button" id="forget-token" class="quiet" hidden>Forget token</button>');
+    for (const b of buttons.filter((x) => !x.includes("id="))) expect(b).toBe('<button type="button" hidden>');
+    expect(DOCS_CSS).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}/);
+    // What happened to the token is told to a screen reader, too.
+    expect(html).toContain('<p class="status" id="token-status" role="status" aria-live="polite"></p>');
+  });
+
+  it("the page script keeps the token in memory only", () => {
+    // Nowhere to keep it, nowhere to send it but fetch, and no way to make markup or code of text.
+    const never = [
+      "localStorage", "sessionStorage", "indexedDB", "document.cookie", "cookie", "window.name", "sendBeacon", "WebSocket", "EventSource", "XMLHttpRequest",
+      "postMessage", "BroadcastChannel", "SharedWorker", "serviceWorker", "caches", "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write",
+      "history.", "pushState", "replaceState", "location.hash =", "location.href =", "location.assign", "location.replace", "window.open", "eval(", "new Function",
+      "setAttribute", "console.", "opener", "Image(",
+    ];
+    for (const word of never) expect(DOCS_JS.includes(word), word).toBe(false);
+    // The address is only read: to resolve a request against it, to show it, and to return to a guide.
+    expect([...new Set([...DOCS_JS.matchAll(/location\.([a-z]+)/g)].map((m) => m[1]))].sort()).toEqual(["hash", "href", "origin"]);
+    expect(DOCS_JS).not.toMatch(/location\.[a-z]+\s*=[^=]/);
+    expect(DOCS_JS).not.toMatch(/\blocation\s*=[^=]/);
+
+    // One fetch of our own, to this site's /api/v1/me, without cookies.
+    const fetches = [...DOCS_JS.matchAll(/\bfetch\(([^;]*);/g)].map((m) => m[1]);
+    expect(fetches).toHaveLength(1);
+    for (const call of fetches) {
+      expect(call.startsWith('"/api/v1/me", { credentials: "omit",'), call).toBe(true);
+      expect(call).toContain('redirect: "error"');
+      expect(call).toContain('referrerPolicy: "no-referrer"');
+      expect(call).toContain('cache: "no-store"');
+    }
+    expect(DOCS_JS).not.toMatch(/credentials: "(include|same-origin)"/);
+    expect(DOCS_JS).toContain('req.credentials = "omit";');
+
+    // The token is one variable of the script's closure: declared once, set only by the token box.
+    expect(DOCS_JS.startsWith('"use strict";\n(() => {')).toBe(true);
+    expect(DOCS_JS.trimEnd().endsWith("})();")).toBe(true);
+    expect(DOCS_JS.match(/\bvar token = "";/g)).toHaveLength(1);
+    expect([...DOCS_JS.matchAll(/^\s*token = (.+);$/gm)].map((m) => m[1]).sort()).toEqual(['""', '""', "candidate"]);
+    expect(DOCS_JS).not.toMatch(/(window|globalThis|self|document)\.[A-Za-z_$]+\s*=[^=]/);
+    // It is read in one place only: where a request of the viewer is let through.
+    expect(DOCS_JS).toContain("requestInterceptor: (req) => intercept(req, location.href, token)");
+    // (Counted with every quoted text taken out, since the messages say "token" too.)
+    const code = DOCS_JS.replace(/"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g, "''");
+    expect(code.match(/\btoken\b/g)).toHaveLength(5);
+    // What the visitor typed is cleared from the field once the server has answered.
+    expect(DOCS_JS).toContain('input.value = "";');
+    // The page is told only through text nodes and class names.
+    expect(DOCS_JS).toContain("status.textContent = text;");
+  });
+
+  it("the page script starts the viewer with the validator off, no stored authorisation and the base layout", () => {
+    for (const option of [
+      'url: "/api/v1/openapi.json"',
+      "dom_id: MOUNT",
+      'layout: "BaseLayout"',
+      "presets: [SwaggerUIBundle.presets.apis]",
+      "validatorUrl: null",
+      "persistAuthorization: false",
+      "deepLinking: true",
+      'docExpansion: "list"',
+      "defaultModelsExpandDepth: -1",
+      "requestSnippetsEnabled: true",
+      "withCredentials: false",
+      "requestInterceptor: (req) => intercept(req, location.href, token)",
+    ]) {
+      expect(DOCS_JS, option).toContain(option);
+    }
+    expect(DOCS_JS).toContain('var MOUNT = "#reference";');
+    expect(docsHtml()).toContain('<div id="reference">');
+    // The viewer's own top bar and its second preset are not used, and nothing turns the settings above back on.
+    expect(DOCS_JS).not.toMatch(/StandaloneLayout|SwaggerUIStandalonePreset|persistAuthorization: true|withCredentials: true|validatorUrl: "|oauth|preauthorize|queryConfigEnabled|configUrl/);
+    // The viewer still reads every one of those settings by these names.
+    for (const name of ["validatorUrl", "persistAuthorization", "requestInterceptor", "withCredentials", "deepLinking", "docExpansion", "defaultModelsExpandDepth", "requestSnippetsEnabled", "onComplete", "BaseLayout"]) {
+      expect(VIEWER_JS.includes(name), name).toBe(true);
+    }
+    // What "Forget token" clears, the viewer still has under these names.
+    for (const name of ["clearRequest", "clearResponse", "specSelectors", "specActions"]) {
+      expect(VIEWER_JS.includes(name), name).toBe(true);
+      expect(DOCS_JS.includes(name), name).toBe(true);
+    }
+  });
+
+  it("the interceptor refuses another origin and a path outside the API", () => {
+    const PAGE = "https://app.example.com/docs#guide-errors-and-limits";
+    const TOKEN = FAKE_TOKEN;
+    const req = (url: string, more: Partial<ViewerRequest> = {}): ViewerRequest => ({ url, method: "GET", headers: { Accept: "application/json" }, ...more });
+    expect(REFUSED).toBe("This page only sends requests to this site's own API.");
+
+    // To this site's API: no cookie, and the token.
+    for (const url of ["https://app.example.com/api/v1/me", "/api/v1/tours", "/api/v1/uploads/up_000000000000000000000000/steps/1", "https://APP.example.com:443/api/v1/me?x=1", "//app.example.com/api/v1/me"]) {
+      const out = intercept(req(url, { credentials: "include" }), PAGE, TOKEN);
+      expect(out.credentials, url).toBe("omit");
+      expect(out.headers, url).toEqual({ Accept: "application/json", Authorization: `Bearer ${TOKEN}` });
+      expect(out.url, url).toBe(url);
+    }
+    // Without a token held, nothing is added; with one, it replaces any the request came with.
+    expect(intercept(req("/api/v1/me"), PAGE, "")).toEqual({ url: "/api/v1/me", method: "GET", credentials: "omit", headers: { Accept: "application/json" } });
+    expect(intercept(req("/api/v1/me", { headers: { Authorization: "Bearer other" } }), PAGE, TOKEN).headers).toEqual({ Authorization: `Bearer ${TOKEN}` });
+    expect(intercept({ url: "/api/v1/me" }, PAGE, TOKEN)).toEqual({ url: "/api/v1/me", credentials: "omit", headers: { Authorization: `Bearer ${TOKEN}` } });
+    // The description is public: fetching it never carries the token.
+    expect(intercept(req("/api/v1/openapi.json", { loadSpec: true, credentials: "same-origin" }), PAGE, TOKEN)).toEqual({ url: "/api/v1/openapi.json", method: "GET", loadSpec: true, credentials: "omit", headers: { Accept: "application/json" } });
+    // The health check is the one documented request outside /api/v1/: allowed, without cookie or token.
+    expect(intercept(req("/healthz", { credentials: "include" }), PAGE, TOKEN)).toEqual({ url: "/healthz", method: "GET", credentials: "omit", headers: { Accept: "application/json" } });
+
+    // Anything else is refused before it is sent: another origin, another scheme or port, a path outside the API.
+    const refused = [
+      "https://tours.example.com/api/v1/me",
+      "https://evil.example.net/api/v1/me",
+      "http://app.example.com/api/v1/me",
+      "https://app.example.com:8443/api/v1/me",
+      "https://app.example.com.evil.example.net/api/v1/me",
+      "https://app.example.com@evil.example.net/api/v1/me",
+      "//evil.example.net/api/v1/me",
+      "\\\\evil.example.net/api/v1/me",
+      "/\\evil.example.net/api/v1/me",
+      "/setup",
+      "/setup/claim",
+      "/docs",
+      "/t/some-slug",
+      "/api/v1",
+      "/api/v10/me",
+      "/api/v2/me",
+      "/api/v1/../../setup/claim",
+      "/api/v1/%2e%2e/%2E%2E/setup/claim",
+      "/api/v1/..\\..\\setup",
+      "/healthz/",
+      "/healthz/../setup",
+      "/healthzz",
+      "/API/V1/me",
+      "javascript:alert(1)",
+      "data:text/plain,x",
+      "blob:https://app.example.com/1",
+      "file:///etc/passwd",
+      "ws://app.example.com/api/v1/me",
+      "https://",
+      "",
+    ];
+    for (const url of refused) {
+      const r = req(url, { credentials: "include" });
+      expect(() => intercept(r, PAGE, TOKEN), url).toThrow(REFUSED);
+      // A refused request is left as it was: nothing was added to it.
+      expect(r, url).toEqual({ url, method: "GET", credentials: "include", headers: { Accept: "application/json" } });
+    }
+    // An empty address is the page itself, and dots are worked out as a browser does before the check.
+    expect(new URL("", PAGE).pathname).toBe("/docs");
+    expect(new URL("/api/v1/%2e%2e/%2E%2E/setup/claim", PAGE).pathname).toBe("/setup/claim");
+    // A page address that makes no sense refuses everything.
+    expect(() => intercept(req("/api/v1/me"), "not an address", TOKEN)).toThrow(REFUSED);
+    // On a local server the same rules hold for its own origin.
+    expect(intercept(req("http://localhost:8787/api/v1/me"), "http://localhost:8787/docs", TOKEN).credentials).toBe("omit");
+    expect(() => intercept(req("http://127.0.0.1:8787/api/v1/me"), "http://localhost:8787/docs", TOKEN)).toThrow(REFUSED);
+
+    // The script's idea of a token is the server's.
+    expect(looksLikeToken(FAKE_TOKEN)).toBe(true);
+    for (const bad of ["", "dp_", "YOUR_TOKEN", "dp_" + "0".repeat(39), "dp_" + "0".repeat(41), "dp_" + "G".repeat(40), "DP_" + "0".repeat(40), ` ${FAKE_TOKEN}`, `${FAKE_TOKEN}\n`, `Bearer ${FAKE_TOKEN}`]) {
+      expect(looksLikeToken(bad), JSON.stringify(bad)).toBe(false);
+    }
+    expect(FAKE_TOKEN).toHaveLength(43);
+  });
+
+  it("a seeded token is what the page script takes for a token, and the request the token box makes tells the three cases apart", async () => {
+    const { deps } = await makeDeps();
+    const a = await seedWorkspace(deps, "Acme");
+    expect(looksLikeToken(a.token)).toBe(true);
+    expect((await send(deps, "GET", "/api/v1/me", { token: a.token })).json.workspace).toBe("Acme");
+    expect((await send(deps, "GET", "/api/v1/me", { token: FAKE_TOKEN })).status).toBe(401);
+    expect((await send(deps, "GET", "/api/v1/me")).status).toBe(401);
+  });
+
+  it("every string the page and its script show is the approved one", () => {
+    const text = visible(docsHtml());
+    for (const s of [
+      "Mythicshot API",
+      `Version ${VERSION}`,
+      "Download the description: JSON YAML",
+      "Get connected",
+      "Create a token in your workspace. Today the setup wizard shows it once, at the end of setup; keep it in a password manager.",
+      "Send it with every request, as the header Authorization: Bearer YOUR_TOKEN .",
+      "Try the first call. It answers with your workspace's name and the server's version.",
+      "Paste a token to try the calls on this page",
+      "Use token",
+      "Kept in this tab only, never stored.",
+      "Forget token",
+      'curl https://YOUR-SITE/api/v1/me -H "Authorization: Bearer YOUR_TOKEN"',
+      "Copy",
+      "Guides",
+      "Upload and publish a tour",
+      "Update a tour over the same link",
+      "Errors and limits",
+      "Reference",
+      "The reference needs JavaScript. Everything it shows is also in the description, as JSON and YAML above.",
+      "The reference is shown with Swagger UI, used under the Apache License 2.0. Licence notices",
+    ]) {
+      expect(text, s).toContain(s);
+    }
+    expect(docsHtml()).toContain("<title>Mythicshot API documentation</title>");
+    // The three steps are a numbered list, so they read "1.", "2.", "3.".
+    expect(docsHtml()).toMatch(/<h2>Get connected<\/h2>\n<ol class="steps">\n<li>Create[^\n]*\n<li>Send[^\n]*\n<li>Try[^\n]*\n<\/ol>/);
+    // What the script says, word for word.
+    for (const s of [
+      '"That does not look like a token. A token starts with dp_ and is 43 characters long."',
+      '"Checking\\u2026"',
+      "`Connected to ${workspace}. The calls on this page now use this token.`",
+      '"The server does not know this token. Check that you pasted all of it."',
+      '"The server could not be reached. Try again."',
+      '"Token forgotten."',
+      '"Copy"',
+      '"Copied"',
+      '"The reference could not be loaded. Reload the page, or read the description as JSON or YAML."',
+      '"This page only sends requests to this site\'s own API."',
+    ]) {
+      expect(DOCS_JS, s).toContain(s);
+    }
+  });
+});
+
+describe("the documentation page beside the viewer", () => {
+  /** The stylesheet without its comments. */
+  const css = DOCS_CSS.replace(/\/\*[\s\S]*?\*\//g, "");
+  /** Every selector of the stylesheet, media queries opened up. */
+  const selectors = [...css.replace(/@media[^{]*\{/g, "").matchAll(/([^{}]+)\{/g)].flatMap((m) => m[1].split(",").map((s) => s.trim())).filter((s) => s !== "");
+
+  it("hides the viewer's own title block and authorise bar, and nothing else of it", () => {
+    const viewerRules = selectors.filter((s) => s.includes("swagger-ui"));
+    expect(viewerRules).toEqual([".swagger-ui .information-container", ".swagger-ui .scheme-container"]);
+    expect(css).toMatch(/\.swagger-ui \.information-container,\s*\.swagger-ui \.scheme-container \{\s*display: none;\s*\}/);
+    // Both names are the viewer's own, as its script writes them: the block around its
+    // title and introduction, and the bar that holds the servers and the Authorize button.
+    expect(VIEWER_JS).toContain('{className:"information-container"}');
+    expect(VIEWER_JS).toContain('"div",{className:"scheme-container"}');
+    expect(VIEWER_JS.split("information-container").length - 1).toBe(1);
+    expect(VIEWER_JS.split('"scheme-container"').length - 1).toBe(1);
+    expect(VIEWER_CSS).toContain(".swagger-ui .scheme-container{");
+    // The bar holds the servers and the authorise button of the layout in use.
+    const at = VIEWER_JS.indexOf('className:"scheme-container"');
+    const bar = VIEWER_JS.slice(at, at + 600);
+    expect(bar).toContain("schemes wrapper");
+    expect(VIEWER_JS).toContain('className:"auth-wrapper"');
+
+    // display: none appears for those two and for [hidden] alone, and nothing is hidden another way.
+    expect(css.match(/display:\s*none/g)).toHaveLength(2);
+    expect(css).not.toMatch(/visibility:\s*hidden|opacity:\s*0|height:\s*0|clip-path|text-indent/);
+    // Every other rule is about our own blocks, so nothing here restyles the viewer: it is
+    // under ".own", names a class or id only our markup has, or is the page itself.
+    const ours = /^(\.own\b|\.(page-header|page-footer|block|steps|note|answers|legend|token-box|token-row|status|command|guide-links|table-wrap|limits)\b|#reference\b|:root$|html$|body$|\[hidden\]$)/;
+    for (const s of selectors.filter((x) => !x.includes("swagger-ui"))) expect(ours.test(s), s).toBe(true);
+    // And none of those class names is one the viewer's stylesheet uses.
+    for (const name of ["own", "page-header", "page-footer", "block", "steps", "note", "answers", "legend", "token-box", "token-row", "status", "command", "guide-links", "table-wrap", "limits"]) {
+      expect(new RegExp(`\\.${name}(?![\\w-])`).test(VIEWER_CSS), name).toBe(false);
+    }
+    // The viewer's stylesheet, for its part, styles nothing outside itself.
+    const outside = [...VIEWER_CSS.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/(?:^|\})([^{}@]+)\{/g)]
+      .flatMap((m) => m[1].split(","))
+      .map((s) => s.trim())
+      .filter((s) => !s.startsWith(".swagger-ui") && !s.startsWith("html.dark-mode") && !/^(\d+(\.\d+)?%|from|to)$/.test(s));
+    expect(outside).toEqual([]);
+  });
+
+  it("is light or dark as the system is, and switches the viewer's own dark look on with it", () => {
+    // Our colours are named once and given for both; nothing else in the stylesheet is a colour.
+    const light = /:root \{([^}]*)\}/.exec(css)![1];
+    const dark = /@media \(prefers-color-scheme: dark\) \{\s*:root \{([^}]*)\}/.exec(css)![1];
+    const names = (block: string) => [...block.matchAll(/(--[a-z-]+):/g)].map((m) => m[1]);
+    expect(names(light).length).toBeGreaterThanOrEqual(8);
+    expect(names(dark)).toEqual(names(light));
+    expect(light).toContain("color-scheme: light dark");
+    const rest = css.replace(/:root \{[^}]*\}/g, "");
+    expect(rest).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/);
+    for (const name of names(light)) expect(rest, name).toContain(`var(${name})`);
+    expect(css).toMatch(/body \{[^}]*background: var\(--bg\);[^}]*color: var\(--fg\);/);
+
+    // The viewer has a dark look of its own, keyed on a class on the html element; it does
+    // not follow the system by itself, so the page script sets that class from the system's setting.
+    expect(VIEWER_CSS).toContain("html.dark-mode .swagger-ui{background:#1c2022;color:#e4e6e6}");
+    expect(VIEWER_CSS).not.toContain("prefers-color-scheme");
+    expect(VIEWER_JS).not.toContain("dark-mode");
+    expect(DOCS_JS).toContain('var DARK = "dark-mode";');
+    expect(DOCS_JS).toContain('matchMedia("(prefers-color-scheme: dark)")');
+    expect(DOCS_JS).toContain("document.documentElement.classList.toggle(DARK, dark.matches)");
+    expect(DOCS_JS).toContain('dark.addEventListener("change", apply)');
+    // Our dark background is the viewer's, so the two meet without a seam.
+    expect(dark).toContain("--bg: #1c2022;");
+  });
+
+  it("fits a phone and a keyboard: one column, long commands wrap, focus shows", () => {
+    expect(docsHtml()).toContain('<meta name="viewport" content="width=device-width, initial-scale=1">');
+    expect(css).toMatch(/\.command pre \{[^}]*white-space: pre-wrap;/);
+    expect(css).toMatch(/\.command pre \{[^}]*overflow-wrap: anywhere;/);
+    expect(css).toMatch(/\.table-wrap \{\s*overflow-x: auto;/);
+    expect(css).toMatch(/@media \(max-width: 600px\)/);
+    // No fixed width anywhere: only max-width, and widths in percent.
+    expect(css).not.toMatch(/[^-]width:\s*\d+(px|rem|em)/);
+    // Keyboard: what can be focused shows it, in the page's order, with nothing taken out of it.
+    expect(css).toMatch(/\.own a:focus-visible,\s*\.own button:focus-visible,\s*\.own input:focus-visible \{\s*outline: 2px solid var\(--focus\);/);
+    expect(css).not.toMatch(/outline:\s*(none|0)/);
+    expect(docsHtml()).not.toMatch(/tabindex=/);
+    expect(DOCS_JS).toContain('if (event.key === "Enter") void check();');
   });
 });
