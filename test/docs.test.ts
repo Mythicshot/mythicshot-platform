@@ -736,6 +736,37 @@ describe("two addresses in the stack files", () => {
     expect(replace).not.toContain("APP_DOMAIN");
   });
 
+  it("the role check tells an older platform from a changed Host header, and asks without a curl settings file", () => {
+    expect(installSh).toContain("answered, but the platform running here is older than two addresses. Run: sudo bash");
+    const check = installSh.match(/^check_role\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    expect(check).toContain("older than two addresses");
+    expect(check).toContain("does not see it as its");
+    const calls = check.split("\n").filter((l) => /\$\(curl /.test(l));
+    expect(calls.length).toBeGreaterThan(0);
+    for (const l of calls) expect(l).toMatch(/\$\(curl -q /);
+  });
+
+  it("the script takes neither host name nor the token from the caller's environment into Compose", () => {
+    for (const name of ["TUNNEL_TOKEN", "APP_DOMAIN", "DOMAIN"]) expect(installSh, name).toMatch(new RegExp(`^unset ${name}$`, "m"));
+  });
+
+  it("TOURS_HOST and APP_HOST in a Docker .env are reported as having no effect, in the script and in the runbook", () => {
+    const read = installSh.match(/^read_env_file\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    expect(read).toContain("TOURS_HOST | APP_HOST)");
+    expect(read).toContain("which has no effect on an install made by this script: a second address is set with APP_DOMAIN");
+    const row = docs[DOCKER].split("\n").find((l) => l.startsWith("| `--app-domain=<name>` |")) ?? "";
+    expect(row).toMatch(/`TOURS_HOST` or `APP_HOST` line written into `\.env` by hand has no effect/);
+  });
+
+  it("the runbook row says which Compose version the two-address settings were checked on, and the way back after a failed start", () => {
+    const row = docs[DOCKER].split("\n").find((l) => l.startsWith("| `--app-domain=<name>` |")) ?? "";
+    expect(row).toMatch(/checked on Docker Compose 5\.5\.1, not on the oldest version the script accepts/);
+    expect(row).toContain("validates the new stack file before it replaces anything");
+    expect(row).toMatch(/puts the old Caddyfile back but never changes `\.env`/);
+    expect(row).toContain("remove the `APP_DOMAIN` line");
+    expect(installSh).toMatch(/^# .*checked on Compose 5\.5\.1/m);
+  });
+
   it("the stack files name only placeholder hosts", () => {
     for (const [p, text] of Object.entries(FILES)) {
       for (const m of text.matchAll(/\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev)\b/g)) expect(isPlaceholderHost(m[0]), `${p}: ${m[0]}`).toBe(true);

@@ -112,6 +112,10 @@ readonly DEFAULT_DATA_DIR=/opt/demo-platform/data
 readonly DEFAULT_APP_IMAGE=demo-platform:latest
 readonly WAIT_SECONDS=120
 # up --wait-timeout and up --pull need Compose 2.17 or later; 2.20 leaves a margin.
+# The stack files' two-address settings nest one variable in another
+# (${APP_DOMAIN:+${DOMAIN}}). That was checked on Compose 5.5.1, not on this minimum;
+# install_stack_files validates the new stack file with the installed Compose before it
+# replaces anything, so a Compose that cannot read it stops the run with nothing changed.
 readonly MIN_COMPOSE=2.20.0
 readonly DOCKER_KEY_FPR=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
 # What the tunnel's published application points at: Caddy, by its service name on the
@@ -127,9 +131,11 @@ readonly ROLE_PAUSE=4
 # child process needs it.
 ENV_TOKEN="${TUNNEL_TOKEN:-}"
 unset TUNNEL_TOKEN
-# The app address comes from .env or --app-domain only. One left in the environment
-# would be read by Compose before .env, so it is taken out.
+# The two host names come from .env, the domain question and --app-domain only: this
+# script never takes either from the environment. One left there would be read by
+# Compose before .env, so both are taken out.
 unset APP_DOMAIN
+unset DOMAIN
 
 case "$0" in
   install.sh | */install.sh) SELF="$0" ;;
@@ -937,7 +943,7 @@ resolves_here() {
 # ---------------------------------------------------------------- configuration
 
 read_env_file() {
-  local line key value have_code=0 mode=""
+  local line key value have_code=0 mode="" host_lines=0
   TOKEN=""
   APP_DOMAIN=""
   while IFS= read -r line || [ -n "$line" ]; do
@@ -953,8 +959,14 @@ read_env_file() {
       SETUP_CODE) [ -z "$value" ] || have_code=1 ;;
       DEPLOY_MODE) mode="$value" ;;
       TUNNEL_TOKEN) TOKEN="$value" ;;
+      TOURS_HOST | APP_HOST) host_lines=1 ;;
     esac
   done <"$ENV_FILE"
+  # The app's own two settings: the stack file sets both from DOMAIN and APP_DOMAIN, so
+  # a line for either in .env changes nothing. Said once, without the values.
+  if [ "$host_lines" = 1 ]; then
+    warn "$ENV_FILE has a TOURS_HOST or APP_HOST line, which has no effect on an install made by this script: a second address is set with APP_DOMAIN, and the stack gives the app both settings from DOMAIN and APP_DOMAIN. Remove the line."
+  fi
   # No DEPLOY_MODE line is direct mode: that is every .env written before tunnel mode
   # existed, and what direct mode still writes.
   case "$mode" in
@@ -1574,13 +1586,20 @@ check_role() {
     warn "$url was not asked: $host does not resolve to an address of this server (not yet, or this server is behind a router). Open it in a browser instead: it must show \"address\":\"$role\"."
     return 0
   fi
-  info "\$ curl --proto =https --tlsv1.2 -fsS --max-time 8 $url"
+  # -q comes first, so that root's curl settings file is not read.
+  info "\$ curl -q --proto =https --tlsv1.2 -fsS --max-time 8 $url"
   for ((n = 1; n <= tries; n++)); do
     body=""
-    if body="$(curl --proto '=https' --tlsv1.2 -fsS --max-time 8 "$url" 2>/dev/null)" && [[ "$body" == *'"ok":true'* ]]; then
+    if body="$(curl -q --proto '=https' --tlsv1.2 -fsS --max-time 8 "$url" 2>/dev/null)" && [[ "$body" == *'"ok":true'* ]]; then
       if [[ "$body" == *"\"address\":\"$role\""* ]]; then
         info "$host is the platform's $role address"
         return 0
+      fi
+      # No role at all: an app from before two addresses answers like that, and so does
+      # a current one for a host name that is neither of its two.
+      if [[ "$body" != *'"address"'* ]]; then
+        printf 'ERROR: %s answered, but the platform running here is older than two addresses. Run: sudo bash %s update. If it is up to date already, the request reached it under another host name: check that nothing in front of the platform changes the Host header.\n' "$url" "$SELF" >&2
+        return 1
       fi
       printf 'ERROR: %s answered, but the platform does not see it as its %s address. Check DOMAIN and APP_DOMAIN in %s, and that nothing in front of the platform changes the Host header.\n' "$url" "$role" "$LOGICAL_INSTALL_DIR/.env" >&2
       return 1

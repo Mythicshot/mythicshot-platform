@@ -141,6 +141,9 @@ case "$args" in
     in_env="$(sed -n 's/^TUNNEL_TOKEN=//p' "$envfile" 2>/dev/null | tail -n 1)"
     printf '%s\n' "${TUNNEL_TOKEN:-$in_env}" >>"$STUB_STATE/up-tokens"
     printf '%s\n' "$in_env" >>"$STUB_STATE/up-env-tokens"
+    # up-names: the two host names as this start's own environment holds them, which
+    # Compose would read before .env.
+    printf '%s %s\n' "${DOMAIN-unset}" "${APP_DOMAIN-unset}" >>"$STUB_STATE/up-names"
     # STUB_UP_SIGNAL: the run gets that signal during the starts listed in STUB_UP_SIGNAL_ON
     # (default: the first). The first start is cut short by it; a later one finishes.
     if [ -n "${STUB_UP_SIGNAL:-}" ] && [[ " ${STUB_UP_SIGNAL_ON:-1} " == *" $n "* ]]; then
@@ -314,6 +317,8 @@ asked() { grep -c -- "^curl .*https://$1/healthz\$" "$LOG" || true; }
 sum_of() { sha256sum <"$1" | awk '{print $1}'; }
 # The sentence a run prints when an address does not report its own role.
 wrong_role() { printf 'https://%s/healthz answered, but the platform does not see it as its %s address. Check DOMAIN and APP_DOMAIN in /opt/demo-platform/.env, and that nothing in front of the platform changes the Host header.' "$1" "$2"; }
+# The sentence for an address that answers without naming any role.
+old_platform() { printf 'https://%s/healthz answered, but the platform running here is older than two addresses. Run: sudo bash %s update' "$1" "$SCRIPT"; }
 # The token appears nowhere in what the run printed or in any stub's command line.
 token_not_shown() { ! grep -qF -- "$TOK" "$OUT" "$ERR" "$LOG"; }
 # Nor does a piece of either token: its first or last 12 characters.
@@ -1946,7 +1951,8 @@ SETUP_CODE=$code"
   expect "the stack is started before an address is asked" test "$(grep -nE ' up -d |/healthz$' "$LOG" | head -n 1 | grep -c ' up -d ')" = 1
   expect "the tours address is asked for its role, once" test "$(asked "$DOMAIN")" = 1
   expect "the app address is asked for its role, once" test "$(asked "$APP")" = 1
-  expect "asked over HTTPS only" test "$(grep -c '^curl --proto =https --tlsv1.2 ' "$LOG")" = 2
+  expect "asked over HTTPS only, and without reading a curl settings file" test "$(grep -c '^curl -q --proto =https --tlsv1.2 ' "$LOG")" = 2
+  expect "-q is the first argument of every question" test "$(grep -c 'healthz$' "$LOG")" = "$(grep -c '^curl -q .*healthz$' "$LOG")"
   expect "says both addresses and which one Mythicshot uses" has "$OUT" "Tours are at https://$DOMAIN; the app address is https://$APP. Mythicshot keeps using https://$DOMAIN."
   expect "the wizard is on the tours address" has "$OUT" "https://$DOMAIN/setup"
   expect "no wizard address on the app address" hasnt "$OUT" "https://$APP/setup"
@@ -1971,7 +1977,7 @@ SETUP_CODE=$code"
   expect "status names the tours address" has "$OUT" "address: https://$DOMAIN"
   expect "status names the app address" has "$OUT" "app address: https://$APP"
   expect "status asks both addresses" test "$(asked "$DOMAIN") $(asked "$APP")" = "1 1"
-  STUB_HEALTH_APP='{"ok":true}' STUB_RESOLVE="$HERE" install_sh "" status
+  STUB_HEALTH_APP='{"ok":true,"address":"tours"}' STUB_RESOLVE="$HERE" install_sh "" status
   expect "status fails when an address reports the wrong role" test "$RC" = 1
   expect "status says which" has "$ERR" "$(wrong_role "$APP" app)"
 }
@@ -1995,9 +2001,9 @@ test_each_address_must_report_its_own_role() {
   STUB_HEALTH_APP='{"ok":true,"address":"tours"}' STUB_RESOLVE="$HERE" install_sh "" install
   expect "the next run fails too" test "$RC" = 1
   expect "and changes nothing" test "$(snapshot)" = "$before"
-  # Neither address is seen in a role (every request arrives under another name).
+  # Each address is seen in the other's role.
   new_sandbox
-  STUB_HEALTH_TOURS='{"ok":true}' STUB_HEALTH_APP='{"ok":true}' STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes "--app-domain=$APP"
+  STUB_HEALTH_TOURS='{"ok":true,"address":"app"}' STUB_HEALTH_APP='{"ok":true,"address":"tours"}' STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes "--app-domain=$APP"
   expect "both wrong: the run fails" test "$RC" = 1
   expect "both wrong: names the tours address" has "$ERR" "$(wrong_role "$DOMAIN" tours)"
   expect "both wrong: names the app address" has "$ERR" "$(wrong_role "$APP" app)"
@@ -2274,9 +2280,9 @@ TUNNEL_TOKEN=$TOK"
   expect "no published application yet: the run succeeds" test "$RC" = 0
   expect "no published application yet: says the address did not answer" has "$ERR" "https://$APP/healthz did not answer"
   expect "no published application yet: points at the published application" has "$ERR" "published application"
-  # The published application rewrites the Host header: the address reports no role.
+  # The published application rewrites the Host header: the address reports the other role.
   new_sandbox
-  STUB_HEALTH_APP='{"ok":true}' install_sh "$TUNNEL_ANSWERS" install --tunnel --yes "--app-domain=$APP"
+  STUB_HEALTH_APP='{"ok":true,"address":"tours"}' install_sh "$TUNNEL_ANSWERS" install --tunnel --yes "--app-domain=$APP"
   expect "wrong role: the run fails" test "$RC" = 1
   expect "wrong role: says which address" has "$ERR" "$(wrong_role "$APP" app)"
   expect "wrong role: the install stays" test -f "$INST/.env"
@@ -2333,6 +2339,77 @@ test_dry_run_with_app_domain_writes_nothing() {
   install_sh "" install --dry-run
   expect "a dry run after the edit succeeds" test "$RC" = 0
   expect "and changes nothing" test "$(snapshot)" = "$before"
+}
+
+# An app image from before two addresses answers /healthz without any role: the run
+# says that, not that something changes the Host header.
+test_an_app_older_than_two_addresses_is_named_as_such() {
+  new_sandbox
+  STUB_HEALTH_TOURS='{"ok":true}' STUB_HEALTH_APP='{"ok":true}' STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes "--app-domain=$APP"
+  expect "the run fails" test "$RC" = 1
+  expect "says the platform is older, for the tours address" has "$ERR" "$(old_platform "$DOMAIN")"
+  expect "says the platform is older, for the app address" has "$ERR" "$(old_platform "$APP")"
+  expect "does not use the sentence for a wrong role" hasnt "$ERR" "does not see it as its"
+  expect "the install is not undone" test -f "$INST/.env" -a -f "$INST/docker-compose.yml"
+  expect "nothing is taken down" hasnt "$LOG" " down"
+  # A reply that names the other role keeps the sentence about the Host header.
+  STUB_HEALTH_APP='{"ok":true,"address":"tours"}' STUB_RESOLVE="$HERE" install_sh "" install
+  expect "another role: the run fails" test "$RC" = 1
+  expect "another role: the sentence about the role" has "$ERR" "$(wrong_role "$APP" app)"
+  expect "another role: not called an older platform" hasnt "$ERR" "older than two addresses"
+  # status and the tunnel route say the same.
+  STUB_HEALTH_APP='{"ok":true}' STUB_RESOLVE="$HERE" install_sh "" status
+  expect "status: fails" test "$RC" = 1
+  expect "status: says the platform is older" has "$ERR" "$(old_platform "$APP")"
+  new_sandbox
+  STUB_HEALTH_APP='{"ok":true}' install_sh "$TUNNEL_ANSWERS" install --tunnel --yes "--app-domain=$APP"
+  expect "tunnel: fails" test "$RC" = 1
+  expect "tunnel: says the platform is older" has "$ERR" "$(old_platform "$APP")"
+  expect "tunnel: the token is not shown" token_not_shown
+}
+
+# TOURS_HOST and APP_HOST are the app's own settings; in a Docker install's .env they do
+# nothing, and the script says so instead of leaving the owner to wonder.
+test_host_lines_written_by_hand_are_reported_as_having_no_effect() {
+  new_sandbox
+  fresh_install
+  expect "an install without the lines says nothing about them" test "$(cat "$OUT" "$ERR" | grep -cE 'TOURS_HOST|APP_HOST')" = 0
+  printf 'TOURS_HOST=%s\nAPP_HOST=%s\n' "$DOMAIN" "handwritten.example.net" >>"$INST/.env"
+  local env_sum cmd key; env_sum="$(sum_of "$INST/.env")"
+  for cmd in install status update backup; do
+    install_sh "" "$cmd"
+    expect "$cmd: still succeeds" test "$RC" = 0
+    expect "$cmd: says the lines have no effect and names the setting to use" has "$ERR" "TOURS_HOST or APP_HOST line, which has no effect on an install made by this script: a second address is set with APP_DOMAIN"
+    expect "$cmd: warns once" test "$(grep -c 'has no effect on an install made by this script' "$ERR")" = 1
+    expect "$cmd: prints no value of the lines" test "$(cat "$OUT" "$ERR" | grep -c 'handwritten')" = 0
+  done
+  expect ".env is left as it is" test "$(sum_of "$INST/.env")" = "$env_sum"
+  expect "the one-address Caddyfile stays" test "$(sum_of "$INST/caddy/Caddyfile")" = "$CADDYFILE_0_1_3"
+  expect "no address is asked for a role" test "$(grep -c healthz "$LOG")" = 0
+  for key in TOURS_HOST APP_HOST; do
+    new_sandbox
+    tunnel_install
+    printf '%s=%s\n' "$key" "handwritten.example.net" >>"$INST/.env"
+    install_sh "" install
+    expect "tunnel, $key alone: succeeds with the warning" test "$RC $(grep -c 'has no effect on an install made by this script' "$ERR")" = "0 1"
+    expect "tunnel, $key alone: the token is not shown" token_not_shown
+  done
+}
+
+# Compose reads its own environment before .env, so a DOMAIN or APP_DOMAIN left in the
+# caller's shell must not reach it.
+test_names_in_the_environment_do_not_reach_the_stack() {
+  new_sandbox
+  DOMAIN=other.example.net APP_DOMAIN=other-app.example.net install_sh "$ANSWERS" install --yes
+  expect "a first install succeeds" test "$RC" = 0
+  expect "the domain is the one typed" grep -qx "DOMAIN=tours.example.com" "$INST/.env"
+  expect "no app address is taken from the environment" test "$(grep -c APP_DOMAIN "$INST/.env")" = 0
+  expect "the start was handed neither name by the environment" test "$(sort -u "$STATE/up-names")" = "unset unset"
+  rm -f "$STATE/up-names"
+  DOMAIN=other.example.net APP_DOMAIN=other-app.example.net install_sh "" install
+  expect "a later run succeeds" test "$RC" = 0
+  expect "a later run hands over neither name" test "$(sort -u "$STATE/up-names")" = "unset unset"
+  expect "the names from the environment appear nowhere" test "$(cat "$OUT" "$ERR" "$LOG" | grep -c 'example\.net')" = 0
 }
 
 # ---------------------------------------------------------------- run
