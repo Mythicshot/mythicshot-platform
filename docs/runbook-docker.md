@@ -5,6 +5,8 @@
 
 This runbook puts the platform on one Debian server with any DNS provider. `install.sh` installs Docker, writes the settings, starts the app behind Caddy and gets the HTTPS certificate. The DNS record, the firewall, the domain itself, backups kept off the server and keeping Debian patched stay yours.
 
+There are two routes to the server, chosen when you install. The direct route, steps 1 to 6 below, needs ports 80 and 443 open to the server. The tunnel route needs no open port at all, which suits a server at home behind a router: it is described in [Behind a Cloudflare Tunnel](#behind-a-cloudflare-tunnel) and replaces steps 2, 3 and 6.
+
 Examples use `tours.example.com` for the platform's address, `203.0.113.10` and `2001:db8::10` for the server's addresses, and `you` for your login on the server. Put your own in their place.
 
 ## Contents
@@ -21,6 +23,7 @@ Examples use `tours.example.com` for the platform's address, `203.0.113.10` and 
 - [9. Back up and restore](#9-back-up-and-restore)
 - [10. Move to a new server](#10-move-to-a-new-server)
 - [11. Uninstall](#11-uninstall)
+- [Behind a Cloudflare Tunnel](#behind-a-cloudflare-tunnel)
 - [Troubleshooting by symptom](#troubleshooting-by-symptom)
 - [Pages this runbook relies on](#pages-this-runbook-relies-on)
 
@@ -40,6 +43,8 @@ Examples use `tours.example.com` for the platform's address, `203.0.113.10` and 
 5. A computer with Docker and a copy of this repository. The app image is not published anywhere yet, so you build it yourself in [step 4](#4-build-the-app-image-and-copy-it-to-the-server).
 
 Nothing else may listen on ports 80 and 443 on the server. The script checks this and stops if something does.
+
+Items 2 and 3 and the two ports are for the direct route. For the tunnel route, read [What to have ready for the tunnel](#what-to-have-ready-for-the-tunnel) instead.
 
 **How to tell it worked:** on the server, this prints a line naming Debian GNU/Linux 13 (trixie), or 12 (bookworm).
 
@@ -166,8 +171,10 @@ Each question allows three tries.
 
 | Prompt | What to answer |
 |---|---|
+| `How do visitors reach this server?` then `Choice [1]:` | Press Enter, or type `1`, for the direct route of steps 1 to 6. Type `2` for the tunnel route. `--direct` or `--tunnel` answers this for you. |
 | `Domain name for the platform (for example tours.example.com):` | The hostname from [step 2](#2-create-the-dns-record). Lowercase letters, digits, hyphens and dots; no IP address. |
-| `Email for the certificate authority (expiry notices):` | An address that reaches you. Caddy gives it to the certificate authority as the contact for the certificate. |
+| `Email for the certificate authority (expiry notices):` | Direct route only. An address that reaches you. Caddy gives it to the certificate authority as the contact for the certificate. |
+| `Tunnel token from the Cloudflare dashboard (what you paste is not shown):` | Tunnel route only. See [Run install.sh with --tunnel](#run-installsh-with---tunnel). |
 | `Data folder, new or empty [/opt/demo-platform/data]:` | Press Enter for the default. Any other folder must be new or empty and outside the system folders, such as `/srv/demo-platform`. |
 | `Continue? [y/N]` | Type `y` after checking the summary it shows. `--yes` answers this for you. |
 
@@ -178,12 +185,12 @@ In this order, saying each step before doing it:
 1. Refuses to run unless it is root on Debian 13 or 12 (any system with `--force`).
 2. Asks the questions above. On a later run it reads the answers from `/opt/demo-platform/.env` and asks nothing.
 3. Checks Docker: it stops if Docker is a snap, if Compose is older than 2.20.0 or if the Docker daemon does not answer. When Docker is installed, it also checks that the app image is on the server, and tries to pull it if not.
-4. Checks that nothing else listens on ports 80 and 443, and whether the domain points at this server.
+4. Checks that nothing else listens on ports 80 and 443, and whether the domain points at this server. The tunnel route skips both checks, because it publishes no port and its DNS record is managed at Cloudflare.
 5. Only if `docker compose version` failed in step 3: stops if Debian's own Docker packages are installed, otherwise installs Docker Engine and the Compose plugin from [Docker's apt repository](https://docs.docker.com/engine/install/debian/), checking the repository key's fingerprint first, and then checks the app image.
 6. Creates `/opt/demo-platform` (root only) with `caddy/` and `backups/` inside, and the data folder, owned by id 1001 with mode 700. Existing folders are left as they are.
-7. Writes `/opt/demo-platform/.env` (mode 600, root only) only if it does not exist yet: `DOMAIN`, `ACME_EMAIL`, `DATA_DIR`, `APP_IMAGE` and a new `SETUP_CODE` of 32 random hex characters.
-8. Writes `docker-compose.yml` and `caddy/Caddyfile`. A file that already exists and differs is first saved as `<name>.bak-<date>-<time>`.
-9. Starts the stack and waits up to 120 seconds for the app to report healthy.
+7. Writes `/opt/demo-platform/.env` (mode 600, root only) only if it does not exist yet: `DOMAIN`, `ACME_EMAIL`, `DATA_DIR`, `APP_IMAGE` and a new `SETUP_CODE` of 32 random hex characters. On the tunnel route it writes `DEPLOY_MODE=tunnel` and `TUNNEL_TOKEN` instead of `ACME_EMAIL`.
+8. Writes `docker-compose.yml` and `caddy/Caddyfile`, in the form for the route recorded in `.env`. A file that already exists and differs is first saved as `<name>.bak-<date>-<time>`.
+9. Starts the stack and waits up to 120 seconds for the app to report healthy and, on the tunnel route, for the tunnel to connect to Cloudflare.
 
 If a run fails, it puts back the files it replaced and removes the files it created. It never removes the data folder, `.env` or a backup.
 
@@ -225,6 +232,9 @@ APP_IMAGE=demo-platform:v2 bash install.sh
 
 | Option | What it does |
 |---|---|
+| `--tunnel` | Only with `install`: use the tunnel route. See [Behind a Cloudflare Tunnel](#behind-a-cloudflare-tunnel). |
+| `--direct` | Only with `install`: use the direct route without being asked. |
+| `--new-token` | Only with `install`, on a tunnel install: ask for the tunnel token again and replace it. See [The tunnel token](#the-tunnel-token). |
 | `--dry-run` | Print every command and file write without doing any. |
 | `--yes` or `-y` | Answer "continue?" questions with yes. It never skips the typed domain name that `--delete-data` asks for. |
 | `--force` | Try on a system other than Debian 13 or 12. |
@@ -388,7 +398,7 @@ sudo bash install.sh backup
 
 It makes a consistent copy of the database inside the running app container, then writes `/opt/demo-platform/backups/demo-platform-<date>-<time>.tar.gz` (mode 600) holding `db.sqlite`, `drafts/` and `public/`. It never removes an older backup, so delete old ones yourself when the disk fills.
 
-The archive does not hold `.env` or the certificate. Neither is needed to restore: `install.sh` writes a new `.env` on a new server, and Caddy gets a new certificate.
+The archive does not hold `.env` or the certificate. Neither is needed to restore: `install.sh` writes a new `.env` on a new server, and Caddy gets a new certificate. Because `.env` is left out, no backup archive holds the setup code or, on the tunnel route, the tunnel token.
 
 > [!WARNING]
 > A backup on the same server is lost with the server: copy every archive somewhere else.
@@ -498,11 +508,11 @@ What stays on the server:
 | What | Where |
 |---|---|
 | The data folder: database, drafts and published images | `/opt/demo-platform/data`, or the folder you chose |
-| The settings, with the setup code | `/opt/demo-platform/.env` |
+| The settings, with the setup code and, on the tunnel route, the tunnel token | `/opt/demo-platform/.env` |
 | The backups | `/opt/demo-platform/backups` |
 | The stack file, the Caddyfile and any `.bak-*` copies | `/opt/demo-platform` |
 | The certificate and its key, and Caddy's settings | `/opt/demo-platform/caddy-data` and `/opt/demo-platform/caddy-config` |
-| The app and Caddy images | Docker's image store |
+| The app and Caddy images, and the cloudflared image on the tunnel route | Docker's image store |
 | Docker itself, its apt source and key | as installed by Docker's packages |
 
 Run `sudo bash install.sh` again to start the platform on the same data.
@@ -523,6 +533,265 @@ sudo mv /opt/demo-platform/.env /opt/demo-platform/.env.old
 ```
 
 To remove Docker too, follow the uninstall section of [Docker's Debian page](https://docs.docker.com/engine/install/debian/).
+
+## Behind a Cloudflare Tunnel
+
+Use this route when the server cannot take connections from the internet: a server at home, behind a router you cannot or do not want to forward ports on. A small program in the stack, cloudflared, connects out from the server to Cloudflare, and visitors reach the platform through that connection. It replaces [step 2](#2-create-the-dns-record), [step 3](#3-open-ports-80-and-443) and [step 6](#6-the-https-certificate); every other step stays as written.
+
+**Unconfirmed:** this route has not yet been run against a real tunnel. The stack, with a made-up token and no way out to the internet, is checked by this repository's tests; the parts that need Cloudflare are listed under [What is not yet confirmed](#what-is-not-yet-confirmed).
+
+| | Direct route | Tunnel route |
+|---|---|---|
+| Ports open to the server | 80 and 443 | none |
+| Ports the stack publishes on the server | 80 and 443 | none |
+| HTTPS certificate | Caddy gets it on the server | Cloudflare's, at its edge; none on the server |
+| DNS record | an A record you create, at any DNS provider | managed at Cloudflare, which must run the domain's DNS |
+| Containers | app, caddy | app, caddy, cloudflared |
+| Secrets in `.env` | the setup code | the setup code and the tunnel token |
+
+### What to have ready for the tunnel
+
+1. Items 1, 4 and 5 of [step 1](#1-what-to-have-ready): the Debian server, root access, and a computer to build the image on.
+2. A Cloudflare account with your domain added to it, so that Cloudflare runs the domain's DNS. [Cloudflare's tunnel page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/) names this as the prerequisite for a published application.
+3. Outbound connections from the server to Cloudflare on port 7844, TCP and UDP, as [Cloudflare's firewall page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/) lists. A home router normally allows this already. No inbound port is needed.
+
+**How to tell it worked:** the domain shows as active in Cloudflare's dashboard, and on the server `grep PRETTY_NAME /etc/os-release` names Debian 13 or 12.
+
+### Create the tunnel and copy its token
+
+These are the steps of [Cloudflare's tunnel page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/) as read on 2026-11-17; the dashboard's wording may have changed since.
+
+1. In Cloudflare's dashboard, go to Networking › Tunnels and select Create a tunnel.
+2. Enter a name for the tunnel, such as `tours`, and select Create Tunnel.
+3. The dashboard shows an installation command for the operating system you pick. Do not run it: `install.sh` runs cloudflared for you. The command ends in one long word that starts with `eyJ`. That word is the tunnel token.
+4. Copy the token into your password manager. To see it again later, [Cloudflare's token page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/remote-tunnel-permissions/) says to open the tunnel, and on its Overview tab select Add a replica, which shows the installation command again.
+
+> [!WARNING]
+> The tunnel token works like a password: Cloudflare's page says anyone who has it can run the tunnel, and so receive the visitors meant for your platform. Never paste it into a chat, a ticket or a command line.
+
+**How to tell it worked:** the tunnel is listed under Networking › Tunnels. It shows as not connected until [the installer has run](#run-installsh-with---tunnel).
+
+### Add the published application
+
+1. Go to Networking › Tunnels and select your tunnel.
+2. On the Routes tab, select Add route, then choose Published application.
+3. Enter the subdomain, such as `tours`, and pick your domain from the Domain list, so that the hostname reads `tours.example.com`.
+4. In Service URL, enter exactly this:
+
+```text
+http://caddy:80
+```
+
+5. Select Add route.
+
+The service URL is an address inside the stack, not on your network: `caddy` is the name of the stack's front server on the stack's own private network, where cloudflared runs too. It is plain HTTP on purpose; see [How the tunnel route is wired](#how-the-tunnel-route-is-wired). The installer prints the same hostname and service URL at the end of every run.
+
+Leave the route's other settings as they are. In particular leave HTTP Host Header empty: the platform's setup wizard needs the hostname the visitor typed.
+
+**Unconfirmed:** Cloudflare's pages do not say in words that adding the published application also creates the hostname's DNS record. If `tours.example.com` does not resolve afterwards, create the record by hand as [Cloudflare's DNS page for tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/dns/) describes.
+
+**How to tell it worked:** the route is listed on the tunnel's Routes tab with the hostname and the service URL above.
+
+### Run install.sh with --tunnel
+
+1. Build the image and copy it and the script to the server, as in [step 4](#4-build-the-app-image-and-copy-it-to-the-server).
+2. Follow [step 5](#5-run-installsh), adding `--tunnel` to each run of the script.
+
+```sh
+sudo bash install.sh install --tunnel
+```
+
+3. At `Domain name for the platform`, enter the hostname of the published application, such as `tours.example.com`. It must be the same name: the stack answers for that hostname only.
+4. At `Tunnel token from the Cloudflare dashboard (what you paste is not shown):`, paste the token and press Enter. Nothing appears while you paste. Pasting the whole installation command works too: the script keeps its last word. If what you paste has a line break in it, the script takes none of it, says so and asks again; paste the token as one line.
+5. Answer the data folder question and `Continue?` as on the direct route.
+
+The script checks only the token's shape: one word of 100 to 2,048 letters, digits and `+ / - _ =` that starts with `eyJ`. Whether Cloudflare accepts it shows when the stack starts. The script never prints the token, never puts it on a command line and writes it to `/opt/demo-platform/.env` only.
+
+If Docker was not installed yet, the first run installs it and stops, as [step 5](#5-run-installsh) describes. Nothing is written by that run, so the next run asks its questions, the token included, again.
+
+### If the tunnel does not connect
+
+A token of the right shape can still be wrong: cut off, from a deleted tunnel, or refreshed since you copied it. The run then fails after showing cloudflared's log lines and what they mean. Run the script again, without any option:
+
+```sh
+sudo bash install.sh
+```
+
+Until the tunnel has connected once, every run asks for the token again and nothing else: paste the right one, or press Enter to keep the one already stored when the token was not the cause. A token in the `TUNNEL_TOKEN` environment variable is taken instead of asking. The script marks this state with the file `/opt/demo-platform/.tunnel-pending` and removes it when the tunnel connects.
+
+By the time cloudflared fails, the app has usually started and written its database, so the failed run keeps `/opt/demo-platform/.env` and the data folder. The setup code in it has not been shown to anyone: it is printed once, at the end of the first run whose tunnel connects.
+
+To skip the token prompt, for example when a script feeds the other answers, put the token in the `TUNNEL_TOKEN` environment variable of the root shell that runs the installer. Read it at a hidden prompt so that it reaches neither the screen nor the shell's history, and remove it afterwards.
+
+```sh
+sudo -i
+```
+
+```sh
+read -rs TUNNEL_TOKEN
+```
+
+```sh
+export TUNNEL_TOKEN
+```
+
+```sh
+bash /home/you/install.sh install --tunnel
+```
+
+```sh
+unset TUNNEL_TOKEN
+```
+
+> [!WARNING]
+> Do not type the token after `TUNNEL_TOKEN=` on a command line: the line stays in the shell's history and shows in the server's process list while it runs.
+
+### What the tunnel route prints
+
+At the end of the first run whose tunnel connects:
+
+```text
+The platform is running and its tunnel is connected to Cloudflare.
+
+In Cloudflare's dashboard, the tunnel needs one published application (skip this if it is there already):
+  Hostname:     tours.example.com
+  Service URL:  http://caddy:80
+No port is published on this server; it is reached only through the tunnel, at https://tours.example.com
+
+  Open:        https://tours.example.com/setup
+  Setup code:  <your setup code>
+```
+
+The setup code is printed this once, as on the direct route. The token is never printed. Go on with [step 7](#7-the-setup-wizard-and-mythicshot).
+
+**How to tell it worked:** on the server, this shows three containers and both the app and the tunnel `healthy`. For the tunnel, healthy means cloudflared holds a connection to Cloudflare.
+
+```sh
+sudo bash install.sh status
+```
+
+From your computer, this prints `{"ok":true}`.
+
+```sh
+curl https://tours.example.com/healthz
+```
+
+On the server, this prints nothing, because nothing listens on ports 80 and 443.
+
+```sh
+sudo ss -Hltn 'sport = :80 or sport = :443'
+```
+
+### How the tunnel route is wired
+
+A request travels: visitor, over HTTPS, to Cloudflare; down the tunnel to cloudflared; over plain HTTP to Caddy at `caddy:80`; to the app at `app:3000`. The last two hops never leave the stack's private network on the server, and no container publishes a port.
+
+cloudflared talks to Caddy and not straight to the app, for three reasons.
+
+1. The hostname check stays in the stack. Caddy answers only for the hostname in `DOMAIN`, as it does on the direct route. A request for any other hostname the tunnel is given does not reach the app.
+2. The same headers are set on both routes. Caddy adds the one-week HSTS header, so browsers keep to HTTPS for the platform's address. It also sends a visitor who arrived at Cloudflare over plain HTTP on to HTTPS, using the `X-Forwarded-Proto` header that, by [Cloudflare's headers page](https://developers.cloudflare.com/fundamentals/reference/http-headers/), Cloudflare sets itself and overwrites if a visitor sent one.
+3. The app is the same on both routes. It has exactly one neighbour, Caddy, and needs no setting that says which route is in use.
+
+The hop from cloudflared to Caddy is plain HTTP because it stays inside one machine: a certificate there would protect nothing, and with no open port Caddy could not get one from a certificate authority anyway. Caddy's automatic HTTPS is switched off on this route.
+
+What the app sees:
+
+- The `Host` header is the hostname the visitor typed. cloudflared replaces it only when a route's HTTP Host Header setting is filled in, which [Cloudflare's origin settings page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/cloudflared-parameters/origin-parameters/) lists as empty by default, and Caddy passes it on unchanged. The setup wizard's same-origin check compares it with the page's own address, so it keeps working.
+- No forwarded address or scheme is trusted, because the app reads none: not `X-Forwarded-For`, not `X-Forwarded-Proto`, not Cloudflare's own visitor-address header. It sets no cookies and builds no links from such headers. A visitor who forges one of them gains nothing. Caddy, as on the direct route, does not trust the forwarded headers it receives and writes its own for the app.
+
+The tunnel token reaches cloudflared as the `TUNNEL_TOKEN` environment variable, which [Cloudflare's run parameters page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/cloudflared-parameters/run-parameters/) gives as the variable for the token. Docker Compose fills it in from `.env` when it starts the container. The token is not in `docker-compose.yml`, not on cloudflared's command line, which is `tunnel --no-autoupdate --metrics 127.0.0.1:20241 run`, and not in the environment of the app or of Caddy. `--no-autoupdate` is the same page's parameter that stops cloudflared from updating itself: the image is pinned by its digest, and [step 8](#8-update) is how it changes.
+
+### The tunnel token
+
+| Where | Holds the token? |
+|---|---|
+| `/opt/demo-platform/.env` (mode 600, root only) | Yes. It is the only file that does. |
+| The cloudflared container's environment, which `docker inspect` shows to root | Yes |
+| `docker-compose.yml`, the Caddyfile and their `.bak-*` copies | No |
+| Backup archives in `/opt/demo-platform/backups` | No: `.env` is not in them |
+| The script's output, a dry run's output and `sudo bash install.sh status` | No |
+| cloudflared's log lines, as the script shows them when a start fails | No: the script masks the token in them before printing |
+
+> [!WARNING]
+> Anyone who can read `/opt/demo-platform/.env`, or run `docker` on the server, can read the token. Keep both to root, and never copy `.env` into a backup, a ticket or a repository.
+
+Because no backup holds the token, keep it in your password manager, or read it from the dashboard again as in [Create the tunnel and copy its token](#create-the-tunnel-and-copy-its-token).
+
+To replace the token on a working install, for example after refreshing it in the dashboard, run the installer with `--new-token`. [Cloudflare's token page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/remote-tunnel-permissions/) says that after a refresh cloudflared can no longer make new connections with the old token.
+
+```sh
+sudo bash install.sh install --new-token
+```
+
+It asks for the token at the same hidden prompt, with the same shape check (Enter keeps the stored one), or takes it from the `TUNNEL_TOKEN` environment variable. It then rewrites only the `TUNNEL_TOKEN` line of `.env`, keeps no copy of the old file, and restarts cloudflared with the new token. The setup code and every other setting stay as they are. If the tunnel does not connect with the new token, the script puts the previous token back and starts the previous setup again.
+
+Without `--new-token`, a run on an install whose tunnel has connected never changes the token, whatever the environment holds.
+
+When you [move to a new server](#10-move-to-a-new-server) on the tunnel route, there is no DNS record to change: install on the new server with the same token and hostname, and restore the backup. Uninstall the old server before you start the new one. While both run, they are two copies of one tunnel, and [Cloudflare's page on tunnel replicas](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-availability/) says a request goes to the geographically closest one, so visitors would land on either server.
+
+After [uninstalling](#11-uninstall), the tunnel and its route stay in your Cloudflare account, and the token in `.env` still runs the tunnel. Delete the tunnel in the dashboard when you no longer need it.
+
+### Switch between the direct and the tunnel route
+
+The route is recorded in `/opt/demo-platform/.env`: the line `DEPLOY_MODE=tunnel` means the tunnel route, and no such line means the direct route. Every later run, and `update`, `backup`, `status` and `uninstall`, read it from there, so `--tunnel` is needed only on the first install.
+
+The script never switches an existing install by itself. `--tunnel` on a direct install, or `--direct` on a tunnel install, stops with the steps below and changes nothing. The switch changes what is open to the internet, so it is done by hand. The data, the setup code, the API token and the backups are all kept.
+
+From direct to tunnel:
+
+1. Create the tunnel and its published application, as in the sections above.
+2. Stop the stack. The data folder, `.env` and the backups stay.
+
+```sh
+sudo bash install.sh uninstall
+```
+
+3. Open a root shell and edit `.env`.
+
+```sh
+sudo -i
+```
+
+```sh
+nano /opt/demo-platform/.env
+```
+
+4. Add these two lines, with your token in place of the placeholder, and save. The `ACME_EMAIL` line may stay; the tunnel route ignores it.
+
+```text
+DEPLOY_MODE=tunnel
+TUNNEL_TOKEN=<your tunnel token>
+```
+
+5. Start the platform. The script saves the old stack file and Caddyfile as `.bak-<date>-<time>` and writes the tunnel ones.
+
+```sh
+bash /home/you/install.sh install
+```
+
+6. Close ports 80 and 443 on the firewall or router, and remove the old A record if Cloudflare did not replace it. The certificate in `/opt/demo-platform/caddy-data` is no longer used.
+
+From tunnel to direct:
+
+1. Do [step 2](#2-create-the-dns-record) and [step 3](#3-open-ports-80-and-443) for the server.
+2. Stop the stack with `sudo bash install.sh uninstall`.
+3. In a root shell, edit `/opt/demo-platform/.env`: remove the `DEPLOY_MODE` and `TUNNEL_TOKEN` lines, and add a line `ACME_EMAIL=admin@example.com` with your own address if there is none.
+4. Run `bash /home/you/install.sh install`. It checks the ports and the DNS record again, as on a first direct install.
+5. Delete the tunnel in Cloudflare's dashboard, so the token you removed opens nothing.
+
+If you edit `.env` while the stack is still running, the script stops with "the running stack was written for" the other route and changes nothing. Put `.env` back as it was, run the uninstall, and make the edit again.
+
+**How to tell it worked:** `sudo bash install.sh status` shows the containers of the new route, three with cloudflared or two without, and `curl https://tours.example.com/healthz` prints `{"ok":true}`.
+
+### What is not yet confirmed
+
+Each of these needs a real tunnel, which the tests in this repository do not have.
+
+1. **Unconfirmed:** that cloudflared connects with a real token and turns `healthy`. Its health check is cloudflared's own `ready` command, which was seen to fail while nothing is connected; that it succeeds once connected is from cloudflared's source code.
+2. **Unconfirmed:** that a request arrives at Caddy with the visitor's `Host` header. This follows from Cloudflare's origin settings page and from cloudflared's source code. The tests send such a request to `caddy:80` themselves and the wizard's check passes.
+3. **Unconfirmed:** that the `X-Forwarded-Proto` header Cloudflare sets reaches Caddy through the tunnel, so that a visitor on plain HTTP is sent on to HTTPS. If it does not, such a visitor is served over plain HTTP between the browser and Cloudflare.
+4. **Unconfirmed:** the words Cloudflare adds when it refuses a well-formed token. The script recognises cloudflared's own line, `Register tunnel error from server side`, and shows whatever follows it.
+5. **Unconfirmed:** the dashboard steps, which are taken from Cloudflare's pages and not from a session in the dashboard.
 
 ## Troubleshooting by symptom
 
@@ -547,6 +816,16 @@ To remove Docker too, follow the uninstall section of [Docker's Debian page](htt
 | "This site has already been set up." | Someone finished setup first, possibly in another tab | If nobody holds the token, see [If the token was lost](#if-the-token-was-lost-before-anyone-saved-it). |
 | "Something went wrong. Try again." on a setup step | The page's address differs from the one the browser sent, or the server failed | Open the wizard on `https://tours.example.com/setup` itself, not through another address. |
 | Mythicshot's Test connection fails | Wrong address or token, or no certificate yet | Check the address is `https://tours.example.com`, then the token, then [step 6](#6-the-https-certificate). |
+| `this install is in direct mode` or `this install is in tunnel mode` | `--tunnel` or `--direct` was given against the route recorded in `.env` | Leave the option out, or switch by hand: [Switch between the direct and the tunnel route](#switch-between-the-direct-and-the-tunnel-route). |
+| `the running stack was written for` the other mode | `.env` was edited to the other route while the stack runs | Put `.env` back as it was, run `sudo bash install.sh uninstall`, make the edit again, then run `sudo bash install.sh`. |
+| `that is not a tunnel token` | What was pasted is not one word starting with `eyJ` | Copy the token again, to its very end ([Create the tunnel and copy its token](#create-the-tunnel-and-copy-its-token)). |
+| Tunnel route: `cloudflared could not read the token`, after its log line `Provided Tunnel token is not valid.` | The token has the right shape but is cut off or altered | Copy it again from the dashboard. If the tunnel has never connected, run `sudo bash install.sh` again: it asks for the token again ([If the tunnel does not connect](#if-the-tunnel-does-not-connect)). On an install that worked before, run `sudo bash install.sh install --new-token`. |
+| Tunnel route: `Cloudflare refused the tunnel's registration` | The tunnel was deleted, or its token was refreshed after you copied it | Copy the current token from the tunnel's page, then as in the row above: run the script again, with `--new-token` if the install worked before. |
+| `what was pasted had more than one line` | The token was copied with a line break in it | Paste it as one line. Nothing of the paste was kept or shown. |
+| `--new-token is for an install in tunnel mode` | `--new-token` on a direct install | Leave the option out. |
+| Tunnel route: `cloudflared could not reach Cloudflare` | Outbound port 7844 or DNS is blocked on the server's network | Allow outbound TCP and UDP port 7844 ([What to have ready for the tunnel](#what-to-have-ready-for-the-tunnel)), then run again. |
+| Tunnel route: the tunnel is `healthy` but the address shows a Cloudflare error page | The tunnel has no published application for the hostname, or its service URL is wrong | Check the route: hostname `tours.example.com`, service URL `http://caddy:80` ([Add the published application](#add-the-published-application)). |
+| Tunnel route: the address shows an empty page | The hostname of the published application differs from `DOMAIN` in `.env` | Make the two the same: change the route's hostname in the dashboard to the one in `.env`. |
 
 ## Pages this runbook relies on
 
@@ -556,5 +835,13 @@ To remove Docker too, follow the uninstall section of [Docker's Debian page](htt
 - [docker buildx build](https://docs.docker.com/reference/cli/docker/buildx/build/), for building for another architecture.
 - [docker compose down](https://docs.docker.com/reference/cli/docker/compose/down/), for what uninstall removes.
 - [Caddy: Automatic HTTPS](https://caddyserver.com/docs/automatic-https), for what the certificate needs and how failures are retried.
+- [Cloudflare: Create a tunnel (dashboard)](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/), for creating the tunnel, the installation command that holds the token, and adding a published application with its service URL.
+- [Cloudflare: Tunnel permissions](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/remote-tunnel-permissions/), for what the token allows, where the dashboard shows it again and what refreshing it does.
+- [Cloudflare: Run parameters](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/cloudflared-parameters/run-parameters/), for the token's environment variable, `--no-autoupdate` and `--metrics`.
+- [Cloudflare: Origin parameters](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/cloudflared-parameters/origin-parameters/), for the HTTP Host Header setting and its empty default.
+- [Cloudflare: Tunnel with firewall](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/), for outbound port 7844 and needing no inbound port.
+- [Cloudflare: Tunnel availability](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-availability/), for how requests are shared between two copies of one tunnel.
+- [Cloudflare: DNS records for tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/dns/), for creating the hostname's record by hand.
+- [Cloudflare: HTTP headers](https://developers.cloudflare.com/fundamentals/reference/http-headers/), for the forwarded headers Cloudflare sets and which of them it overwrites.
 
-The script itself is [deploy/install.sh](../deploy/install.sh), and the stack it writes is [deploy/docker-compose.yml](../deploy/docker-compose.yml) with [deploy/caddy/Caddyfile](../deploy/caddy/Caddyfile).
+The script itself is [deploy/install.sh](../deploy/install.sh), and the stack it writes is [deploy/docker-compose.yml](../deploy/docker-compose.yml) with [deploy/caddy/Caddyfile](../deploy/caddy/Caddyfile) on the direct route, or [deploy/tunnel/docker-compose.yml](../deploy/tunnel/docker-compose.yml) with [deploy/tunnel/caddy/Caddyfile](../deploy/tunnel/caddy/Caddyfile) on the tunnel route.

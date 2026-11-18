@@ -1,0 +1,6 @@
+# Used only by deploy/test-container.sh, on top of tunnel/docker-compose.yml: the
+# stack's network gets no route out of the Docker host, so cloudflared, which is given a
+# made-up token there, cannot reach Cloudflare whatever it tries.
+networks:
+  default:
+    internal: true
