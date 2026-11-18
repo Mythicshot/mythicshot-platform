@@ -4,10 +4,12 @@
 # holding this file, a .env file and the caddy/ folder: docker compose up -d
 #
 # .env (mode 600, never committed) holds DOMAIN, DEPLOY_MODE=tunnel, DATA_DIR (a host
-# folder owned by id 1001), APP_IMAGE, SETUP_CODE and TUNNEL_TOKEN.
+# folder owned by id 1001), APP_IMAGE, SETUP_CODE and TUNNEL_TOKEN. With a second
+# address, for the app, it also holds APP_DOMAIN; DOMAIN is then the address of the
+# tours, and caddy/Caddyfile is the two-address one (deploy/tunnel/caddy/Caddyfile.two).
 #
 # In Cloudflare's dashboard the tunnel's published application for DOMAIN has the
-# service URL http://caddy:80
+# service URL http://caddy:80, and so has the one for APP_DOMAIN when there is one.
 
 # Docker's local log files, capped at three files of 10 MB per container.
 x-logging: &logging
@@ -24,6 +26,10 @@ services:
       # cloudflared may see.
       SETUP_CODE: ${SETUP_CODE:?SETUP_CODE is not set in .env}
       PUBLIC_IMAGE_BASE: ${PUBLIC_IMAGE_BASE:-}
+      # The two addresses the app answers on, each in its own role. Both are empty
+      # without APP_DOMAIN in .env, which is one address: every host is answered.
+      TOURS_HOST: ${APP_DOMAIN:+${DOMAIN}}
+      APP_HOST: ${APP_DOMAIN:-}
       # Paths and port inside the container; in .env, DATA_DIR is the folder on the host.
       DATA_DIR: /data
       PORT: "3000"
@@ -50,6 +56,8 @@ services:
     environment:
       # Read by the Caddyfile as {$DOMAIN}.
       DOMAIN: ${DOMAIN:?DOMAIN is not set in .env}
+      # Read only by the two-address Caddyfile, as {$APP_DOMAIN}.
+      APP_DOMAIN: ${APP_DOMAIN:-}
     # No ports: only cloudflared, on the stack's own network, reaches Caddy.
     volumes:
       # The folder is mounted, not the single Caddyfile, so edits and reloads apply.

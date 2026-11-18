@@ -235,6 +235,7 @@ APP_IMAGE=demo-platform:v2 bash install.sh
 | `--tunnel` | Only with `install`: use the tunnel route. See [Behind a Cloudflare Tunnel](#behind-a-cloudflare-tunnel). |
 | `--direct` | Only with `install`: use the direct route without being asked. |
 | `--new-token` | Only with `install`, on a tunnel install: ask for the tunnel token again and replace it once the new one has connected. See [The tunnel token](#the-tunnel-token). |
+| `--app-domain=<name>` | Only with `install`: a second address, for the app, as in `--app-domain=app.example.com`. The domain asked for stays the address of the tours. A first install records it as `APP_DOMAIN` in `.env`, from which the stack gives the app `TOURS_HOST` and `APP_HOST`, and after the start each address must report its own role at `/healthz`. On an existing install the script does not change `.env`: it stops and names the `APP_DOMAIN` line to add by hand before running `install` again. |
 | `--dry-run` | Print every command and file write without doing any. |
 | `--yes` or `-y` | Answer "continue?" questions with yes. It never skips the typed domain name that `--delete-data` asks for. |
 | `--force` | Try on a system other than Debian 13 or 12. |

@@ -26,11 +26,19 @@ const REPO_FILES = Object.keys(
 ).map((k) => k.replace(/^\.\.\//, ""));
 
 /** The code that reads environment variables, as text. */
-const CODE = import.meta.glob(["../src/**/*.ts", "../scripts/*.ts", "../deploy/docker-compose.yml", "../deploy/caddy/Caddyfile", "../Dockerfile", "../wrangler.jsonc"], {
-  query: "?raw",
-  import: "default",
-  eager: true,
-}) as Record<string, string>;
+const CODE = import.meta.glob(
+  [
+    "../src/**/*.ts",
+    "../scripts/*.ts",
+    "../deploy/docker-compose.yml",
+    "../deploy/caddy/Caddyfile",
+    "../deploy/caddy/Caddyfile.two",
+    "../deploy/tunnel/caddy/Caddyfile.two",
+    "../Dockerfile",
+    "../wrangler.jsonc",
+  ],
+  { query: "?raw", import: "default", eager: true },
+) as Record<string, string>;
 
 /** Docs keyed by their path from the repo root. */
 const docs: Record<string, string> = Object.fromEntries(Object.entries(DOCS).map(([k, v]) => [k.replace(/^\.\.\//, ""), v]));
@@ -105,13 +113,13 @@ function resolveLink(from: string, target: string): string | null {
   return parts.join("/");
 }
 
-/** The commands and options install.sh's parse_args accepts. */
+/** The commands and options install.sh's parse_args accepts; an option that takes a value (--name=*) is listed by its name. */
 function scriptVocabulary(): { commands: Set<string>; flags: Set<string> } {
   const body = installSh.match(/^parse_args\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
   const commands = new Set<string>();
   const flags = new Set<string>();
-  for (const m of body.matchAll(/^\s*([a-z| -]+)\)/gm)) {
-    for (const word of m[1].split("|").map((w) => w.trim())) {
+  for (const m of body.matchAll(/^\s*([a-z| =*-]+)\)/gm)) {
+    for (const word of m[1].split("|").map((w) => w.trim().replace(/=\*$/, ""))) {
       if (word.startsWith("-")) flags.add(word);
       else if (/^[a-z]+$/.test(word)) commands.add(word);
     }
@@ -119,13 +127,13 @@ function scriptVocabulary(): { commands: Set<string>; flags: Set<string> } {
   return { commands, flags };
 }
 
-/** The install.sh commands and options a doc names: the words after install.sh on each code line. */
+/** The install.sh commands and options a doc names: the words after install.sh on each code line, an option's =value dropped. */
 function docVocabulary(md: string): { commands: string[]; flags: string[] } {
   const commands: string[] = [];
   const flags: string[] = [];
   for (const line of codeLines(md)) {
-    for (const m of line.matchAll(/install\.sh((?: +(?:--?[a-z][a-z-]*|[a-z]+)(?=\s|$))*)/g)) {
-      for (const word of m[1].trim().split(/ +/).filter(Boolean)) (word.startsWith("-") ? flags : commands).push(word);
+    for (const m of line.matchAll(/install\.sh((?: +(?:--?[a-z][a-z-]*(?:=[a-z0-9.<>-]+)?|[a-z]+)(?=\s|$))*)/g)) {
+      for (const word of m[1].trim().split(/ +/).filter(Boolean)) (word.startsWith("-") ? flags : commands).push(word.replace(/=.*$/, ""));
     }
   }
   return { commands, flags };
@@ -170,7 +178,7 @@ function variablesRead(): Set<string> {
       add(/\$\{([A-Z][A-Z0-9_]*)/g, text);
       add(/^ {6}([A-Z][A-Z0-9_]*):/gm, text);
     }
-    if (path.endsWith("Caddyfile")) add(/\{\$([A-Z][A-Z0-9_]*)\}/g, text);
+    if (/Caddyfile(\.two)?$/.test(path)) add(/\{\$([A-Z][A-Z0-9_]*)\}/g, text);
     if (path.endsWith("Dockerfile")) add(/\b([A-Z][A-Z0-9_]*)=/g, text.match(/^ENV [\s\S]*?[^\\]\n/m)?.[0] ?? "");
     if (path.endsWith("wrangler.jsonc")) add(/"([A-Z][A-Z0-9_]*)"\s*:/g, text.match(/"vars"\s*:\s*\{[^}]*\}/)?.[0] ?? "");
   }
@@ -326,7 +334,13 @@ describe("the docs", () => {
     const named = docVocabulary(docs[DOCKER]);
     const spans = new Set(codeSpans(split(docs[DOCKER]).prose));
     for (const c of commands) expect(named.commands, `install.sh ${c}`).toContain(c);
-    for (const f of flags) expect(named.flags.includes(f) || spans.has(f), `install.sh ${f}`).toBe(true);
+    for (const f of flags) expect(named.flags.includes(f) || spans.has(f) || spans.has(`${f}=<name>`), `install.sh ${f}`).toBe(true);
+  });
+
+  it("the option that takes a value is in the script's vocabulary and in the runbook's option table", () => {
+    expect(scriptVocabulary().flags).toContain("--app-domain");
+    expect(docVocabulary("`sudo bash install.sh install --app-domain=app.example.com --yes`")).toEqual({ commands: ["install"], flags: ["--app-domain", "--yes"] });
+    expect(docs[DOCKER]).toMatch(/^\| `--app-domain=<name>` \| Only with `install`: /m);
   });
 
   it("every environment variable the docs name is read by the code", () => {
@@ -624,5 +638,107 @@ describe("a tunnel token that does not connect", () => {
 
   it("starting the stack removes no container the script did not make", () => {
     for (const line of installSh.split("\n")) if (/ up -d/.test(line)) expect(line).not.toContain("--remove-orphans");
+  });
+});
+
+describe("two addresses in the stack files", () => {
+  const FILES = import.meta.glob(
+    [
+      "../deploy/docker-compose.yml",
+      "../deploy/tunnel/docker-compose.yml",
+      "../deploy/caddy/Caddyfile",
+      "../deploy/caddy/Caddyfile.two",
+      "../deploy/tunnel/caddy/Caddyfile",
+      "../deploy/tunnel/caddy/Caddyfile.two",
+    ],
+    { query: "?raw", import: "default", eager: true },
+  ) as Record<string, string>;
+  const file = (path: string): string => {
+    const text = FILES[`../deploy/${path}`];
+    if (text === undefined) throw new Error(`no deploy/${path}`);
+    return text;
+  };
+
+  /** The body of a here-document inside install.sh, by its end marker. */
+  function embedded(marker: string): string {
+    const m = installSh.match(new RegExp(`<<'${marker}'\\n([\\s\\S]*?)^${marker}$`, "m"));
+    if (!m) throw new Error(`no ${marker} in install.sh`);
+    return m[1];
+  }
+
+  /** One service's block of a compose file. */
+  function service(text: string, name: string): string {
+    const m = text.match(new RegExp(`^  ${name}:\\n((?:(?:    .*)?\\n)*)`, "m"));
+    if (!m) throw new Error(`no service ${name}`);
+    return m[1];
+  }
+
+  /** The lines of b that differ from the line of a at the same place, as pairs. */
+  function changedLines(a: string, b: string): [string, string][] {
+    const x = a.split("\n");
+    const y = b.split("\n");
+    expect(y.length).toBe(x.length);
+    return x.flatMap((line, i): [string, string][] => (line === y[i] ? [] : [[line, y[i]]]));
+  }
+
+  it("install.sh carries exact copies of all four Caddyfiles and both stack files", () => {
+    expect(embedded("DP_COMPOSE_END")).toBe(file("docker-compose.yml"));
+    expect(embedded("DP_TUNNEL_COMPOSE_END")).toBe(file("tunnel/docker-compose.yml"));
+    expect(embedded("DP_CADDYFILE_END")).toBe(file("caddy/Caddyfile"));
+    expect(embedded("DP_CADDYFILE_TWO_END")).toBe(file("caddy/Caddyfile.two"));
+    expect(embedded("DP_TUNNEL_CADDYFILE_END")).toBe(file("tunnel/caddy/Caddyfile"));
+    expect(embedded("DP_TUNNEL_CADDYFILE_TWO_END")).toBe(file("tunnel/caddy/Caddyfile.two"));
+  });
+
+  it("the two-address Caddyfiles differ from the one-address ones only in the site address line", () => {
+    expect(changedLines(file("caddy/Caddyfile"), file("caddy/Caddyfile.two"))).toEqual([["{$DOMAIN} {", "{$DOMAIN}, {$APP_DOMAIN} {"]]);
+    expect(changedLines(file("tunnel/caddy/Caddyfile"), file("tunnel/caddy/Caddyfile.two"))).toEqual([
+      ["http://{$DOMAIN} {", "http://{$DOMAIN}, http://{$APP_DOMAIN} {"],
+    ]);
+  });
+
+  it("the one-address Caddyfiles have no place for a second name, so an empty one cannot widen them", () => {
+    for (const p of ["caddy/Caddyfile", "tunnel/caddy/Caddyfile"]) expect(file(p), p).not.toContain("APP_DOMAIN");
+  });
+
+  it("both stack files give the app its two addresses, derived from DOMAIN and APP_DOMAIN, and Caddy the app address", () => {
+    for (const p of ["docker-compose.yml", "tunnel/docker-compose.yml"]) {
+      const app = service(file(p), "app");
+      expect(app, p).toContain("      TOURS_HOST: ${APP_DOMAIN:+${DOMAIN}}\n");
+      expect(app, p).toContain("      APP_HOST: ${APP_DOMAIN:-}\n");
+      const caddy = service(file(p), "caddy");
+      expect(caddy, p).toContain("      APP_DOMAIN: ${APP_DOMAIN:-}\n");
+      expect(caddy, p).toContain("      DOMAIN: ${DOMAIN:?DOMAIN is not set in .env}\n");
+      // Without APP_DOMAIN nothing is required: one address stays the default.
+      expect(file(p), p).not.toMatch(/\$\{APP_DOMAIN:\?/);
+      expect(file(p), p).not.toMatch(/\$\{(TOURS_HOST|APP_HOST)/);
+    }
+    expect(service(file("tunnel/docker-compose.yml"), "cloudflared")).not.toMatch(/APP_DOMAIN|TOURS_HOST|APP_HOST/);
+  });
+
+  it("install.sh reads APP_DOMAIN from .env, takes --app-domain=<name> and never rewrites .env for it", () => {
+    const read = installSh.match(/^read_env_file\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    expect(read).toMatch(/^ {6}APP_DOMAIN\) /m);
+    expect(read).toContain("has an APP_DOMAIN that is not a valid host name or is the same as DOMAIN; fix it by hand, nothing was changed");
+    expect(installSh).toContain("  --app-domain=<name>  With install: a second address, for the app. The domain asked for stays the address of the tours.");
+    for (const s of [
+      "--app-domain goes only with install",
+      "--app-domain must be a host name in lowercase, such as app.example.com, without https:// and without a path",
+      "the app address must be a different name than the tours address",
+      "and install.sh does not change that file. To add the second address, add that line to",
+      "Mythicshot keeps using https://",
+      "answered, but the platform does not see it as its",
+      "and that nothing in front of the platform changes the Host header.",
+    ]) expect(installSh, s).toContain(s);
+    // The only function that rewrites an existing .env changes the TUNNEL_TOKEN line alone.
+    const replace = installSh.match(/^replace_env_token\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    expect(replace).not.toBe("");
+    expect(replace).not.toContain("APP_DOMAIN");
+  });
+
+  it("the stack files name only placeholder hosts", () => {
+    for (const [p, text] of Object.entries(FILES)) {
+      for (const m of text.matchAll(/\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev)\b/g)) expect(isPlaceholderHost(m[0]), `${p}: ${m[0]}`).toBe(true);
+    }
   });
 });
