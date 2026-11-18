@@ -12,7 +12,7 @@
 // cookie, no storage, no network request but the tour's own images.
 import type { PageChapter, PageData, PageStep, PageTour } from "../page.ts";
 import { allSeen, canHit, hashFor, nextUnseen, parseHash, reduce, start, type Action, type Screen, type State } from "./state.ts";
-import { ctaCorner } from "./layout.ts";
+import { ctaCorner, hotspotBox, type Rect } from "./layout.ts";
 import TourCore from "./vendor/tour-core.js";
 
 type Box4 = [number, number, number, number];
@@ -459,6 +459,12 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
     r = { x0: Math.max(0, r.x0), y0: Math.max(0, r.y0), x1: Math.min(sz.w, r.x1), y1: Math.min(sz.h, r.y1) };
     return r.x1 > r.x0 && r.y1 > r.y0 ? r : null;
   }
+  /** The square around the click hotspot, in displayed pixels after zoom, or null when the step has none. */
+  function hotspotFor(st: PageStep, z: Zoomed, sz: { w: number; h: number }): Rect | null {
+    const c = onStep() ? click(st) : null;
+    if (!c) return null;
+    return hotspotBox((c[0] / 100) * sz.w * z.k + z.tx, (c[1] / 100) * sz.h * z.k + z.ty, z.k);
+  }
   /**
    * A spot picked for the card, in displayed pixels after zoom, while it is on the picture:
    * the card points at it and still keeps clear of the spotlight. Null for the hotspot or no anchor.
@@ -779,14 +785,16 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
     const aim = avoid && cardKind === "guide" ? aimFor(z, sz, cardData) : null;
     const cardBox = placeCard(sz, avoid, aim);
     if (ctaEl && ctaEl.parentElement === frame && !ctaEl.hidden) {
-      // Top right, unless the spotlight or the card is there: then another corner. The
-      // button never covers the card or the card the button: if every corner would meet
-      // the card, the card docks under the picture instead.
+      // Top right, unless the hotspot, the spotlight or the card is there: then another
+      // corner. The button never covers the card or the card the button: if every corner
+      // would meet the card, the card docks under the picture instead. It keeps clear of
+      // the hotspot first and the spotlight second wherever some corner allows.
       const inset = narrow.matches ? 9 : 12;
-      let corner = ctaCorner(sz.w, sz.h, ctaEl.offsetWidth, ctaEl.offsetHeight, inset, cardBox, avoid);
+      const keepClear = [hotspotFor(p.step, z, sz), avoid];
+      let corner = ctaCorner(sz.w, sz.h, ctaEl.offsetWidth, ctaEl.offsetHeight, inset, cardBox, keepClear);
       if (corner === null) {
         placeCard(sz, avoid, aim, true);
-        corner = ctaCorner(sz.w, sz.h, ctaEl.offsetWidth, ctaEl.offsetHeight, inset, null, avoid) ?? { left: false, bottom: false };
+        corner = ctaCorner(sz.w, sz.h, ctaEl.offsetWidth, ctaEl.offsetHeight, inset, null, keepClear) ?? { left: false, bottom: false };
       }
       ctaEl.classList.toggle("left", corner.left);
       ctaEl.classList.toggle("bottom", corner.bottom);
