@@ -94,6 +94,16 @@ if [[ "$args" == " compose version"* ]]; then
   exit 0
 fi
 installed || { echo "docker: command not found" >&2; exit 127; }
+# Like Compose, every command that reads the tunnel stack file fails while TUNNEL_TOKEN
+# has no value in its environment or in .env (the file's ${TUNNEL_TOKEN:?...}).
+if [[ "$args" == *" compose "* ]]; then
+  cf=""; pd=""; prev=""
+  for a in "$@"; do [ "$prev" != "-f" ] || cf="$a"; [ "$prev" != "--project-directory" ] || pd="$a"; prev="$a"; done
+  if [ -n "$cf" ] && grep -q 'TUNNEL_TOKEN:?' "$cf" 2>/dev/null; then
+    tok="${TUNNEL_TOKEN:-$(sed -n 's/^TUNNEL_TOKEN=//p' "$pd/.env" 2>/dev/null | tail -n 1)}"
+    [ -n "$tok" ] || { echo "required variable TUNNEL_TOKEN is missing a value: TUNNEL_TOKEN is not set in .env" >&2; exit 1; }
+  fi
+fi
 case "$args" in
   " info "*)
     [ "${STUB_DAEMON_DOWN:-0}" != 1 ] || { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
@@ -122,8 +132,12 @@ case "$args" in
     in_env="$(sed -n 's/^TUNNEL_TOKEN=//p' "$envfile" 2>/dev/null | tail -n 1)"
     printf '%s\n' "${TUNNEL_TOKEN:-$in_env}" >>"$STUB_STATE/up-tokens"
     printf '%s\n' "$in_env" >>"$STUB_STATE/up-env-tokens"
-    # STUB_UP_SIGNAL: the run is interrupted while the first start waits.
-    if [ -n "${STUB_UP_SIGNAL:-}" ] && [ "$n" = 1 ]; then kill -s "$STUB_UP_SIGNAL" "$PPID"; exit 130; fi
+    # STUB_UP_SIGNAL: the run gets that signal during the starts listed in STUB_UP_SIGNAL_ON
+    # (default: the first). The first start is cut short by it; a later one finishes.
+    if [ -n "${STUB_UP_SIGNAL:-}" ] && [[ " ${STUB_UP_SIGNAL_ON:-1} " == *" $n "* ]]; then
+      kill -s "$STUB_UP_SIGNAL" "$PPID"
+      [ "$n" != 1 ] || exit 130
+    fi
     # Like the real app, a started app writes its database into the data folder.
     # STUB_FAIL_UP=1: the app itself never turns healthy and writes nothing.
     # STUB_FAIL_UP=tunnel: the app is healthy and has written, then cloudflared fails.
@@ -133,6 +147,7 @@ case "$args" in
     app_writes
     touch "$STUB_STATE/running" ;;
   *" down "*) rm -f "$STUB_STATE/running" ;;
+  *" restart caddy "*) [ "${STUB_FAIL_RESTART:-0}" != 1 ] || { echo "cannot restart container" >&2; exit 1; } ;;
   *" ps -q "*) [ ! -e "$STUB_STATE/running" ] || echo 0123456789ab ;;
   *" logs "*)
     if [[ "$args" == *" cloudflared "* ]]; then printf '%s\n' "${STUB_CF_LOG:-cloudflared  | stub log line}"; else echo "app  | stub log line"; fi ;;
@@ -262,6 +277,20 @@ exec /bin/mv "$@"
 EOF
   chmod +x "$T/bin/mv"
 }
+# A cp that, with STUB_FAIL_RESTORE_CP=1, fails when a replaced file is copied back.
+stub_cp() {
+  cat >"$T/bin/cp" <<'EOF'
+#!/bin/bash
+if [ "${STUB_FAIL_RESTORE_CP:-0}" = 1 ] && [[ "${*: -1}" == */.restore.* ]]; then
+  echo "cp: error writing '${*: -1}': No space left on device" >&2
+  exit 1
+fi
+exec /bin/cp "$@"
+EOF
+  chmod +x "$T/bin/cp"
+}
+# What the last start gave cloudflared is what .env holds.
+containers_match_env() { [ "$(last_up_token)" = "$(env_token)" ]; }
 
 die() { printf '      %s\n' "$*"; exit 1; }
 expect() { local msg="$1"; shift; "$@" || die "$msg"; }
@@ -1376,7 +1405,9 @@ test_interrupted_new_token_keeps_the_old_token_and_the_site_running() {
     forget_starts
     STUB_UP_SIGNAL="$sig" install_sh "$TOK2
 " install --new-token
-    expect "$sig: the run stops with an error" test "$RC" != 0
+    local want=143
+    case "$sig" in INT) want=130 ;; HUP) want=129 ;; esac
+    expect "$sig: the run ends with exit code $want" test "$RC" = "$want"
     expect "$sig: the new token was being tried" test "$(head -n 1 "$STATE/up-tokens")" = "$TOK2"
     expect "$sig: .env is unchanged, the old token in it" test "$(sha256sum <"$INST/.env")" = "$env_sum"
     expect "$sig: .env is still 600 root" test "$(stat -c '%a %u:%g' "$INST/.env")" = "600 0:0"
@@ -1385,6 +1416,8 @@ test_interrupted_new_token_keeps_the_old_token_and_the_site_running() {
     expect "$sig: the site is started again, once, on the old token" test "$(wc -l <"$STATE/up-tokens") $(last_up_token)" = "2 $TOK"
     expect "$sig: not taken down" hasnt "$LOG" " down"
     expect "$sig: says the new token was not saved" has "$ERR" "the new token was not saved"
+    expect "$sig: says the site was started again and had been out of reach" has "$ERR" "The site is started again on the previous token; it could not be reached while the new one was tried."
+    expect "$sig: does not claim nothing happened" test "$(cat "$OUT" "$ERR" | grep -c 'keeps running')" = 0
     expect "$sig: names the command to try again" has "$ERR" "sudo bash $SCRIPT install --new-token"
     expect "$sig: not marked as never connected" test ! -e "$INST/.tunnel-pending"
     expect "$sig: no part of a token is shown" no_token_part_shown
@@ -1428,7 +1461,7 @@ three
     expect "every file is as it was" test "$(snapshot)" = "$before"
     expect "nothing was started or stopped" test "$(grep -cE ' (up|down) ' "$LOG")" = 0
     expect "says nothing was changed" has "$ERR" "Nothing was changed"
-    expect "says the site keeps its token" has "$ERR" "keeps running on the token it had"
+    expect "says the stored token is still the one in use" has "$ERR" "the token already stored is still the one in use"
     expect "names the command to try again" has "$ERR" "sudo bash $SCRIPT install --new-token"
     expect "no part of a token is shown" no_token_part_shown
   done
@@ -1455,6 +1488,7 @@ three
   expect "every file is as it was" test "$(snapshot)" = "$before"
   expect "the site is started again on the old token" test "$(wc -l <"$STATE/up-tokens") $(last_up_token)" = "2 $TOK"
   expect "says the new token was not saved" has "$ERR" "the new token was not saved"
+  expect "says the site was started again and had been out of reach" has "$ERR" "The site is started again on the previous token; it could not be reached while the new one was tried."
   expect "names the command to try again" has "$ERR" "sudo bash $SCRIPT install --new-token"
   expect "no part of a token is shown" no_token_part_shown
 }
@@ -1490,6 +1524,8 @@ three
 " install --new-token
   expect "--new-token succeeds" test "$RC" = 0
   expect "says the old token stays until the new one works" has "$OUT" "The token in use now stays in"
+  expect "says the site is out of reach for a moment" has "$OUT" "the site cannot be reached for a moment"
+  expect "does not claim nothing happens" test "$(cat "$OUT" "$ERR" | grep -c 'keeps running')" = 0
   expect "no part of a token is shown" no_token_part_shown
 }
 
@@ -1572,6 +1608,218 @@ test_update_leaves_a_tunnel_that_never_connected_marked() {
   expect "nothing changed, the mark included" test "$(snapshot)" = "$before"
   expect "the closing message repeats what to do" test "$(tail -n 1 "$ERR" | grep -cF "Run: sudo bash $SCRIPT install")" = 1
   expect "no part of a token is shown" no_token_part_shown
+}
+
+# ---------------------------------------------------------------- tunnel mode: review of the follow-ups
+
+# S1: a second signal while the site is being started again does not cut that short.
+test_a_second_signal_does_not_stop_the_site_being_started_again() {
+  local sig
+  for sig in TERM INT; do
+    # Interrupted, then signalled again during the start on the previous token.
+    new_sandbox
+    tunnel_install
+    forget_starts
+    STUB_UP_SIGNAL="$sig" STUB_UP_SIGNAL_ON="1 2" install_sh "$TOK2
+" install --new-token
+    expect "$sig twice: the run ends with an error" test "$RC" != 0
+    expect "$sig twice: the site was started again on the old token" test "$(wc -l <"$STATE/up-tokens") $(last_up_token)" = "2 $TOK"
+    expect "$sig twice: the site is marked running by that start" test -e "$STATE/running"
+    expect "$sig twice: the closing message is still printed" has "$ERR" "To replace the token, run: sudo bash $SCRIPT install --new-token"
+    expect "$sig twice: containers and .env agree" containers_match_env
+    # The new token does not connect, and the signal comes during the start that follows.
+    new_sandbox
+    tunnel_install
+    forget_starts
+    STUB_FAIL_UP=tunnel STUB_UP_SIGNAL="$sig" STUB_UP_SIGNAL_ON="2" install_sh "$TOK2
+" install --new-token
+    expect "$sig in the restore: the run ends with an error" test "$RC" != 0
+    expect "$sig in the restore: the last start is on the old token" test "$(last_up_token)" = "$TOK"
+    expect "$sig in the restore: the site is marked running" test -e "$STATE/running"
+    expect "$sig in the restore: .env holds the old token" test "$(env_token)" = "$TOK"
+    expect "$sig in the restore: says the new token was not saved" has "$ERR" "the new token was not saved"
+    expect "$sig in the restore: names the command to try again" has "$ERR" "sudo bash $SCRIPT install --new-token"
+    expect "$sig in the restore: no part of a token is shown" no_token_part_shown
+  done
+}
+
+# S2: once the tunnel has connected on the new token it is saved, whatever a later step does.
+test_a_new_token_that_connected_is_kept_when_a_later_step_fails() {
+  new_sandbox
+  tunnel_install
+  printf '# edited by hand\n' >>"$INST/caddy/Caddyfile"
+  forget_starts
+  STUB_FAIL_RESTART=1 install_sh "$TOK2
+" install --new-token
+  expect "the failed Caddy restart fails the run" test "$RC" != 0
+  expect "Caddy was being restarted" grep -q 'compose .* restart caddy$' "$LOG"
+  expect "the new token, which connected, is in .env" test "$(env_token)" = "$TOK2"
+  expect "the stack was not started again on the old token" test "$(wc -l <"$STATE/up-tokens") $(last_up_token)" = "1 $TOK2"
+  expect "does not say the token was not saved" hasnt "$ERR" "was not saved"
+  expect ".env is still 600 root" test "$(stat -c '%a %u:%g' "$INST/.env")" = "600 0:0"
+  expect "containers and .env agree" containers_match_env
+  expect "no part of a token is shown" no_token_part_shown
+  # The token is saved before Caddy is restarted.
+  new_sandbox
+  tunnel_install
+  printf '# edited by hand\n' >>"$INST/caddy/Caddyfile"
+  forget_starts
+  install_sh "$TOK2
+" install --new-token
+  expect "the run succeeds" test "$RC" = 0
+  expect "saving comes before the Caddy restart" test "$(grep -nE 'saving it in|Restarting Caddy' "$OUT" | sed 's/^[0-9]*:==> //; s/ .*//' | tr '\n' ' ')" = "The Restarting "
+}
+
+# S3: while the tunnel has never connected there is no working token to protect, so the
+# token given is saved at once and the containers never run on a token .env does not hold.
+test_a_retry_on_an_unfinished_install_keeps_env_and_containers_in_step() {
+  new_sandbox
+  tunnel_install
+  printf 'x\n' >"$INST/.tunnel-pending"; chmod 600 "$INST/.tunnel-pending"
+  forget_starts
+  STUB_FAIL_UP=tunnel STUB_CF_LOG="cloudflared-1  | ERR edge discovery: error looking up Cloudflare edge IPs" install_sh "$TOK2
+" install
+  expect "the retry fails" test "$RC" != 0
+  expect "this run replaced no file" test "$(find "$R" -name '*.bak-*' | wc -l)" = 0
+  expect "the token given is in .env" test "$(env_token)" = "$TOK2"
+  expect "cloudflared runs on the token .env holds" containers_match_env
+  expect "there was one start, and nothing was taken down" test "$(wc -l <"$STATE/up-tokens") $(grep -c ' down' "$LOG")" = "1 0"
+  expect "still marked as never connected" test -f "$INST/.tunnel-pending"
+  expect ".env is still 600 root" test "$(stat -c '%a %u:%g' "$INST/.env")" = "600 0:0"
+  expect "no copy of .env was made" test "$(find "$R" -name '.env.*' | wc -l)" = 0
+  expect "names the command to run next" has "$ERR" "Run: sudo bash $SCRIPT install"
+  expect "no part of a token is shown" no_token_part_shown
+  # Interrupted instead: the same.
+  forget_starts
+  STUB_UP_SIGNAL=TERM install_sh "$TOK
+" install
+  expect "interrupted: exit code 143" test "$RC" = 143
+  expect "interrupted: cloudflared runs on the token .env holds" containers_match_env
+  expect "interrupted: one start, no second one" test "$(wc -l <"$STATE/up-tokens")" = 1
+  # The network is put right: Enter keeps the token, and the run finishes the install.
+  forget_starts
+  install_sh "
+" install
+  expect "the next run succeeds" test "$RC" = 0
+  expect "on the token given last" test "$(env_token) $(last_up_token)" = "$TOK $TOK"
+  expect "the mark is gone" test ! -e "$INST/.tunnel-pending"
+}
+
+# N1: whether Caddy runs is asked of Docker itself, so it is answered also when .env has
+# no token for Compose to fill in; a changed Caddyfile then still gets its restart.
+test_caddy_is_restarted_when_env_had_no_token() {
+  new_sandbox
+  tunnel_install
+  sed -i '/^TUNNEL_TOKEN=/d' "$INST/.env"
+  printf '# edited by hand\n' >>"$INST/caddy/Caddyfile"
+  forget_starts
+  install_sh "$TOK2
+" install --new-token
+  expect "the run succeeds" test "$RC" = 0
+  expect "whether Caddy runs is asked by label, not through the stack file" grep -qx 'docker ps -q --filter label=com.docker.compose.project=demo-platform --filter label=com.docker.compose.service=caddy' "$LOG"
+  expect "Caddy was restarted for the new Caddyfile" grep -q 'compose .* restart caddy$' "$LOG"
+  expect "the token is in .env" test "$(env_token)" = "$TOK2"
+  expect "containers and .env agree" containers_match_env
+  expect "no Compose command failed for a missing token" test "$(cat "$OUT" "$ERR" | grep -c 'missing a value')" = 0
+}
+
+# N2: a stack that was not running is not "started again".
+test_new_token_on_a_stopped_stack_does_not_claim_the_site_runs() {
+  local how
+  for how in fails interrupted; do
+    new_sandbox
+    tunnel_install
+    install_sh "" uninstall --yes
+    expect "$how: uninstall succeeds" test "$RC" = 0
+    local env_sum; env_sum="$(sha256sum <"$INST/.env")"
+    forget_starts
+    if [ "$how" = fails ]; then
+      STUB_FAIL_UP=tunnel install_sh "$TOK2
+" install --new-token
+    else
+      STUB_UP_SIGNAL=TERM install_sh "$TOK2
+" install --new-token
+    fi
+    expect "$how: the run ends with an error" test "$RC" != 0
+    expect "$how: .env is unchanged" test "$(sha256sum <"$INST/.env")" = "$env_sum"
+    expect "$how: no start on the old token" test "$(wc -l <"$STATE/up-tokens")" = 1
+    expect "$how: what the run started is taken down" grep -q 'compose .* down$' "$LOG"
+    expect "$how: nothing is left running" test ! -e "$STATE/running"
+    expect "$how: says the platform was not running before" has "$ERR" "was not running before this run"
+    expect "$how: says at the start that the platform is not running" has "$OUT" "The platform is not running now"
+    expect "$how: does not claim the site runs" test "$(cat "$OUT" "$ERR" | grep -cE 'keeps running|is started again on the previous token')" = 0
+    expect "$how: says the new token was not saved" has "$ERR" "the new token was not saved"
+    expect "$how: no part of a token is shown" no_token_part_shown
+  done
+}
+
+# N3: a replaced file that cannot be copied back is left as it is, never emptied.
+test_a_failed_copy_back_never_empties_a_file() {
+  new_sandbox
+  tunnel_install
+  stub_cp
+  printf '# previous working state\n' >>"$INST/docker-compose.yml"
+  forget_starts
+  STUB_FAIL_UP=tunnel STUB_FAIL_RESTORE_CP=1 install_sh "$TOK2
+" install --new-token
+  expect "the run fails" test "$RC" != 0
+  expect "the stack file is not empty: it is the one this run wrote" cmp -s "$INST/docker-compose.yml" /src/tunnel/docker-compose.yml
+  expect "says which file could not be put back" has "$ERR" "could not put back"
+  expect "the copy this run saved is still there" test "$(find "$INST" -maxdepth 1 -name 'docker-compose.yml.bak-*' | wc -l)" = 1
+  expect "no temporary file is left" test "$(find "$R" -name '.restore.*' | wc -l)" = 0
+  expect "the site is still started again on the old token" test "$(last_up_token) $(env_token)" = "$TOK $TOK"
+}
+
+# N4: a temporary .env left by a run that was killed outright is removed, unread.
+test_a_leftover_temporary_env_file_is_removed() {
+  new_sandbox
+  tunnel_install
+  printf 'TUNNEL_TOKEN=%s\n' "$TOK2" >"$INST/.env.new.Ab12Cd"; chmod 600 "$INST/.env.new.Ab12Cd"
+  mkdir "$INST/.env.new.folder"
+  local env_sum; env_sum="$(sha256sum <"$INST/.env")"
+  install_sh "" install --dry-run
+  expect "a dry run leaves it" test -f "$INST/.env.new.Ab12Cd"
+  install_sh "" install
+  expect "the run succeeds" test "$RC" = 0
+  expect "the leftover file is gone" test ! -e "$INST/.env.new.Ab12Cd"
+  expect "says so, by name only" has "$OUT" ".env.new.Ab12Cd"
+  expect "a folder of that name is not touched" test -d "$INST/.env.new.folder"
+  expect ".env is unchanged" test "$(sha256sum <"$INST/.env")" = "$env_sum"
+  expect "its content is not shown" no_token_part_shown
+  expect "the token in it is in no file" test -z "$(grep -rlF -- "$TOK2" "$R")"
+}
+
+# N5: a signal where no new token is on trial starts nothing again.
+test_a_signal_without_a_token_on_trial_starts_nothing_again() {
+  # A first install, tunnel and direct.
+  new_sandbox
+  STUB_UP_SIGNAL=TERM install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
+  expect "first tunnel install: exit code 143" test "$RC" = 143
+  expect "first tunnel install: one start only" test "$(wc -l <"$STATE/up-tokens")" = 1
+  expect "first tunnel install: no word of a previous token" test "$(cat "$OUT" "$ERR" | grep -c 'previous token')" = 0
+  new_sandbox
+  STUB_UP_SIGNAL=INT install_sh "$ANSWERS" install --yes
+  expect "first direct install: exit code 130" test "$RC" = 130
+  expect "first direct install: one start only" test "$(wc -l <"$STATE/up-tokens")" = 1
+  expect "first direct install: no word of a previous token" test "$(cat "$OUT" "$ERR" | grep -c 'previous token')" = 0
+  # A later run of a direct install, and of a tunnel install whose token is not changed.
+  new_sandbox
+  fresh_install
+  local before; before="$(snapshot)"
+  forget_starts
+  STUB_UP_SIGNAL=HUP install_sh "" install
+  expect "direct rerun: exit code 129" test "$RC" = 129
+  expect "direct rerun: one start only" test "$(wc -l <"$STATE/up-tokens")" = 1
+  expect "direct rerun: no file changed" test "$(snapshot)" = "$before"
+  new_sandbox
+  tunnel_install
+  before="$(snapshot)"
+  forget_starts
+  STUB_UP_SIGNAL=TERM install_sh "" install
+  expect "tunnel rerun: exit code 143" test "$RC" = 143
+  expect "tunnel rerun: one start only" test "$(wc -l <"$STATE/up-tokens")" = 1
+  expect "tunnel rerun: no file changed" test "$(snapshot)" = "$before"
+  expect "tunnel rerun: no word of a new token" test "$(cat "$OUT" "$ERR" | grep -c 'was not saved')" = 0
 }
 
 # ---------------------------------------------------------------- run

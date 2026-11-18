@@ -595,7 +595,19 @@ describe("a tunnel token that does not connect", () => {
   });
 
   it("the runbook says a new token is saved only after it has connected, and what update does with an unfinished install", () => {
-    expect(runbook).toContain("saved to `.env` only once the tunnel has connected with it");
+    expect(runbook).toContain("saved to `.env` before the stack starts");
+    // A trial is not free: the tunnel restarts, and neither text may claim otherwise.
+    const started = "The site is started again on the previous token";
+    expect(runbook).toContain(started);
+    expect(installSh).toContain(started);
+    expect(runbook).toContain("the site cannot be reached for a moment");
+    expect(installSh).toContain("the site cannot be reached for a moment");
+    expect(runbook).not.toContain("keeps running");
+    expect(installSh.split("\n").filter((l) => !l.startsWith("#")).join("\n")).not.toContain("keeps running");
+    // The new token is saved straight after the start, before Caddy is restarted.
+    const start = installSh.match(/^start_stack\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    expect(start.indexOf("save_new_token")).toBeGreaterThan(0);
+    expect(start.indexOf("save_new_token")).toBeLessThan(start.indexOf("restart caddy"));
     expect(runbook).toContain("Only once the tunnel has connected does the script rewrite the `TUNNEL_TOKEN` line of `.env`");
     expect(runbook).not.toContain("puts the previous token back");
     expect(installSh).not.toContain("Putting the previous token back");

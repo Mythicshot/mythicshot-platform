@@ -619,7 +619,7 @@ sudo bash install.sh
 
 Until the tunnel has connected once, every run asks for the token again and nothing else: paste the right one, or press Enter to keep the one already stored when the token was not the cause. A token in the `TUNNEL_TOKEN` environment variable is taken instead of asking. The run starts by saying so: `The last install here did not finish: its tunnel never connected to Cloudflare, so the site cannot be reached yet`.
 
-The token you give is tried first and saved to `.env` only once the tunnel has connected with it. If it does not connect, or you give no usable answer, `.env` is left as it was and the message ends with the command to run next.
+While the tunnel has never connected there is no working token to protect, so the token you give is saved to `.env` before the stack starts and cloudflared always runs on the token `.env` holds. If it does not connect, the message ends with the command to run next. If you give no usable answer, `.env` is left as it was.
 
 The script marks this state with the file `/opt/demo-platform/.tunnel-pending`. Only an install run whose tunnel connects removes it. `sudo bash install.sh update` leaves the file where it is, whether or not the update itself works: it says at the start that the install was never finished, and its last line, `this install is still not finished`, repeats that `sudo bash install.sh install` is the command that finishes it.
 
@@ -727,11 +727,18 @@ To replace the token on a working install, for example after refreshing it in th
 sudo bash install.sh install --new-token
 ```
 
-It asks for the token at the same hidden prompt, with the same shape check (Enter keeps the stored one), or takes it from the `TUNNEL_TOKEN` environment variable. It then restarts cloudflared with the new token while `.env` still holds the old one, and waits for the tunnel to connect.
+It asks for the token at the same hidden prompt, with the same shape check (Enter keeps the stored one), or takes it from the `TUNNEL_TOKEN` environment variable. It then restarts cloudflared with the new token while `.env` still holds the old one, and waits up to 120 seconds for the tunnel to connect.
 
-Only once the tunnel has connected does the script rewrite the `TUNNEL_TOKEN` line of `.env`. It keeps no copy of the old file, and the setup code and every other setting stay as they are. The new file is written next to `.env` with the same mode, 600, and takes its place in one step.
+> [!WARNING]
+> Trying a new token restarts the tunnel, so the site cannot be reached for a moment, and for up to about two minutes if the new token is wrong.
 
-If the tunnel does not connect with the new token, or the run is stopped before the token is saved (Ctrl-C, a closed terminal, a failed step), the new token is not saved. `.env` still holds the previous token, the script starts the stack on it again, and it prints `the new token was not saved` with the command to try again. No answer, or three answers that are not tokens, changes nothing either.
+Only once the tunnel has connected does the script rewrite the `TUNNEL_TOKEN` line of `.env`, and it does so at once, before any later step of the run. It keeps no copy of the old file, and the setup code and every other setting stay as they are. The new file is written next to `.env` with the same mode, 600, and takes its place in one step.
+
+If the tunnel does not connect with the new token, or the run is stopped before the token is saved (Ctrl-C, a closed terminal, a failed step), the new token is not saved. `.env` still holds the previous token, and the script prints `the new token was not saved` with the command to try again. The site is started again on the previous token; it was out of reach while the new one was tried. If the platform was not running before the run, for example after `uninstall`, it is stopped again instead. No answer, or three answers that are not tokens, changes nothing and restarts nothing.
+
+A token that was refreshed in the dashboard no longer makes new connections, so if the old token was refreshed, the site stays out of reach after a failed try until a run with the current token succeeds.
+
+A run that is killed outright can leave a file named `.env.new.` and six more characters next to `.env`. The next run removes it without reading it.
 
 `--new-token` needs a tunnel install to work on. On a server with no install it stops before asking anything, with `nothing is installed on this machine` and the command that installs in tunnel mode, `sudo bash install.sh install --tunnel`. On a direct install it stops the same way and says the install is not in tunnel mode.
 
@@ -834,7 +841,7 @@ Each of these needs a real tunnel, which the tests in this repository do not hav
 | `what was pasted had more than one line` | The token was copied with a line break in it | Paste it as one line. Nothing of the paste was kept or shown. |
 | `--new-token is for an install in tunnel mode` | `--new-token` on a direct install | Leave the option out. Nothing was changed. |
 | `nothing is installed on this machine` | `--new-token` on a server that has no install | Nothing was changed. Install first: `sudo bash install.sh install --tunnel`. |
-| `the new token was not saved` | With `--new-token`, the tunnel did not connect on the new token, or the run was stopped before it had | The site is running on the previous token, which is still in `.env`. Copy the current token from the tunnel's page and run `sudo bash install.sh install --new-token` again ([The tunnel token](#the-tunnel-token)). |
+| `the new token was not saved` | With `--new-token`, the tunnel did not connect on the new token, or the run was stopped before it had | The site is started again on the previous token, which is still in `.env`; it was out of reach while the new one was tried. Copy the current token from the tunnel's page and run `sudo bash install.sh install --new-token` again ([The tunnel token](#the-tunnel-token)). |
 | `this install is still not finished`, at the end of `update` | The tunnel had never connected when the platform was installed | Run `sudo bash install.sh install`: it asks for the token again and prints the setup code once the tunnel connects ([If the tunnel does not connect](#if-the-tunnel-does-not-connect)). |
 | Tunnel route: `cloudflared could not reach Cloudflare` | Outbound port 7844 or DNS is blocked on the server's network | Allow outbound TCP and UDP port 7844 ([What to have ready for the tunnel](#what-to-have-ready-for-the-tunnel)), then run again. |
 | Tunnel route: the tunnel is `healthy` but the address shows a Cloudflare error page | The tunnel has no published application for the hostname, or its service URL is wrong | Check the route: hostname `tours.example.com`, service URL `http://caddy:80` ([Add the published application](#add-the-published-application)). |
