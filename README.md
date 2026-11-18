@@ -98,7 +98,7 @@ Mythicshot lists, renames and deletes tours with these requests. Each carries `A
 
 | Request | Answer |
 |---|---|
-| `GET /api/v1/me` | `200 {"workspace","version"}`: the workspace's name and the version of the server |
+| `GET /api/v1/me` | `200 {"workspace","version"}`: the workspace's name and the version of the server. With two addresses the answer also has `addresses`, the two host names; see [One address or two](#one-address-or-two) |
 | `GET /api/v1/tours` | `200 {"tours":[…]}`, most recently changed first. Each tour has `id`, `title`, `status` (`draft` or `published`), `slug`, `url`, `chapters`, `steps`, `updated_at` and `published_at` (times in milliseconds). `url` is the public link as a path, `/t/<slug>`, to put after the server address; it and `published_at` are `null` for a draft |
 | `PATCH /api/v1/tours/<id>` with `{"title":"New name"}` | `200 {"id","title"}` with the title as saved. The title follows the rule of a tour's title at upload: trimmed, 1 to 200 characters, no control or format characters; otherwise `400 bad_title` with the reason. The slug and the public link stay the same |
 | `DELETE /api/v1/tours/<id>` | `200 {"deleted":true}` when nothing of the tour is left; `202 {"status":"in_progress","done":250,"total":601}` (files removed, of how many) when more remain, so call again; `409 publish_busy` while a publish of the tour is in progress; `404` once it is gone, the same answer as for a tour that never existed |
@@ -113,6 +113,64 @@ Delete removes the tour, its chapters and steps, its draft images and logo, its 
 A repeated delete request after the tour is gone answers `404`, and the server cannot tell that from a tour that never existed. A client should treat `404` from a delete request as "gone": the tour is not there, which is what was asked for.
 
 Deleting removes the files from the server; it cannot reach copies that were already handed out. A browser that opened the public page in the last minute may show it once more from its own cache, and images a visitor already downloaded stay in that browser's cache (published images are sent with a one-year cache lifetime, because their names never change). A CDN or caching proxy in front of the server can keep serving both for as long as it holds them; purge it there if that matters. The same holds after an unpublish.
+
+## One address or two
+
+By default the platform serves one address and checks no host name: it answers the same on every name that reaches it. That is one-address mode, and it is all a tour site needs today.
+
+With two addresses the platform knows two host names and the role of each: the tours address, such as `tours.example.com`, where visitors open tours, and the app address, such as `app.example.com`. Two settings turn it on, `TOURS_HOST` and `APP_HOST`, each a host name without `https://` and without a path. Set both for two addresses, or neither for one.
+
+> [!warning] Never run on real hosting
+> Nothing about two addresses has been run on real hosting yet: it is checked by this repository's tests only, so turn it on only after a backup and when the site may be down for a while.
+
+### What answers where
+
+| Request | Tours address | App address | Any other host name |
+|---|---|---|---|
+| A tour page, `/t/<slug>` | Answers | `308` to the same path and query on the tours address | `421` |
+| A published picture, `/p/<name>` | Answers | `308`, as for a tour page; the picture itself is never sent from the app address | `421` |
+| The token API, `/api/v1/…` | Answers | Answers, the same as on the tours address | `421` |
+| The setup wizard, `/setup` and what it loads | Answers | `404` with `{"error":"not_found"}` | `421` |
+| The player's script and stylesheet | Answers | `404` with `{"error":"not_found"}` | `421` |
+| `/healthz` | Answers, and names the role | Answers, and names the role | Answers, without a role |
+
+A host name that is neither of the two gets an empty `421` on every path except `/healthz`, whether the path exists or not: no body and no content type, so the answer says nothing about the site. The check reads no token and makes no database or storage call.
+
+The redirect is a `308` whose `Location` is `https://` (plain `http://` only when the tours host is a `localhost` name) plus the configured tours host plus the request's own path and query; nothing in it comes from a header. It is sent with `Cache-Control: no-store`, so a browser does not remember a wrong setting. The tours address never redirects, so a redirect cannot loop.
+
+`/healthz` answers on every host name, because a container's own health check asks by an internal name. Asked on the tours address it prints `{"ok":true,"address":"tours"}`, on the app address `{"ok":true,"address":"app"}`, and on any other name, or with one address, `{"ok":true}`. The install scripts use this to check that each address reaches the platform under its own name.
+
+`GET /api/v1/me` adds the two host names as configured, without a scheme: `{"workspace":"Acme Tours","version":"…","addresses":{"tours":"tours.example.com","app":"app.example.com"}}`. With one address the key is absent and the answer is as before. The `url` of a tour in the tour list and in the publish answer stays the path `/t/<slug>` on both addresses.
+
+Mythicshot keeps the tours address. The setup wizard is on the tours address only, the server address it shows is that one, and Mythicshot builds every tour link from the server address it was given. Pointed at the app address its uploads would still work, but the links it shows would be on the app address and reach the tour only through the redirect.
+
+The host name is taken from the address the request was sent to: the `Host` header on Node, the request's own address on Cloudflare. No `X-Forwarded-Host`, `Forwarded` or `X-Original-Host` header is read, and there is no setting to trust one, so whatever stands in front of the platform must pass the `Host` header on unchanged. On Node with two addresses, a request whose request line holds a full address instead of a path gets the empty `421` too.
+
+### A pair that cannot be used
+
+One setting without the other, a value that is not a plain host name, or the same name twice (also on two different ports) is never read as one address. On Node the app does not start: it prints one of the lines below and exits with code 1, before it opens the database. A Worker cannot refuse to start, so on Cloudflare every request, `/healthz` included, answers `500` with `{"error":"misconfigured"}`, and the line is in the Worker's log.
+
+```text
+TOURS_HOST is set but APP_HOST is not. Set both for two addresses, or neither for one.
+APP_HOST is set but TOURS_HOST is not. Set both for two addresses, or neither for one.
+TOURS_HOST is not a host name. Write it like tours.example.com, without https:// and without a path.
+APP_HOST is not a host name. Write it like app.example.com, without https:// and without a path.
+TOURS_HOST and APP_HOST name the same host. Two addresses need two different host names.
+```
+
+> [!warning] A wrong name locks the site out
+> A well-formed but wrong name in `TOURS_HOST` makes the platform refuse its own address, every tour link and Mythicshot included, until the name is fixed or both settings are removed.
+
+### Turn it on, and go back
+
+| Route | How two addresses are turned on |
+|---|---|
+| Docker on Debian | `--app-domain=<name>` on a first install, or one `APP_DOMAIN` line added to `.env` by hand on an existing one; the script then checks both addresses by their role. See [Two addresses](docs/runbook-docker.md#two-addresses) in the Docker runbook. |
+| Shared cPanel hosting | Two lines added to the settings file by hand, then `cpanel.sh` checks both addresses. See [A second address for the app](docs/hosting/cpanel.md#14-a-second-address-for-the-app) in that guide. |
+| Cloudflare | Not yet. The guided setup sets up one address and writes both settings empty; a second address there waits for a later version. See [Two addresses](docs/runbook-cloudflare.md#two-addresses) in the Cloudflare runbook. |
+| Node, started by hand | Set `TOURS_HOST` and `APP_HOST` in the environment the app starts with. |
+
+To go back to one address, remove both settings (on Docker, the `APP_DOMAIN` line) and restart the app; each of the three pages above gives the steps. The tours address is the same name before and after, so links to tours that are already out there keep working both ways.
 
 ## Develop
 
@@ -174,11 +232,13 @@ Nothing in the code is tied to a hostname, account or bucket name.
 |---|---|---|
 | `SETUP_CODE` | both | Opens the setup wizard once. At least 16 characters, generated, never committed. A Worker secret on Cloudflare; a line in the root-only `.env` in the container. |
 | `PUBLIC_IMAGE_BASE` | both | Empty (the default on both targets): the app serves published images itself on `/p/<name>`. Optionally, on Cloudflare, the address of the public bucket's own custom domain, such as `https://images.example.com`. |
+| `TOURS_HOST` | both | Optional, and only together with `APP_HOST`: the host name of the tours address, such as `tours.example.com`, without `https://` and without a path. Both empty or unset (the default) is one address, and no host name is checked. See [One address or two](#one-address-or-two). |
+| `APP_HOST` | both | Optional, and only together with `TOURS_HOST`: the host name of the app address, such as `app.example.com`, in the same form. It must be a different name than the tours address. |
 | `DATA_DIR` | Node | The folder holding `db.sqlite`, `drafts/` and `public/`. Required. In the container it is `/data`. |
 | `PORT` | Node | The port the app listens on. Default 3000. |
 | `DB`, `DRAFTS`, `PUB` | Cloudflare | The D1 binding and the two R2 bindings in `wrangler.jsonc`; an install's names and id are in its `wrangler.deploy.jsonc`, written by `npm run setup:cloudflare`. |
 
-The container stack's `.env`, written by `install.sh`, also holds `DOMAIN`, `ACME_EMAIL`, `DATA_DIR` (the folder on the host) and `APP_IMAGE`.
+The container stack's `.env`, written by `install.sh`, also holds `DOMAIN`, `ACME_EMAIL`, `DATA_DIR` (the folder on the host) and `APP_IMAGE`, and for two addresses `APP_DOMAIN`, the app address: the stack then gives the app `TOURS_HOST` (from `DOMAIN`) and `APP_HOST` (from `APP_DOMAIN`) itself, and a `TOURS_HOST` or `APP_HOST` line in that `.env` has no effect.
 
 ## Layout
 

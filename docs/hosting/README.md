@@ -34,6 +34,8 @@ One more route needs no server of your own and no Docker:
 |---|---|
 | [Shared cPanel hosting](cpanel.md) | You already pay for shared hosting whose cPanel has "Setup Node.js App", with SSH access. The platform runs as a Node.js app in your hosting account, installed by a script from one archive. The guide names no prices. |
 
+Every route above sets up one address. To give the app a second address beside the address of the tours, see [Two addresses](../runbook-docker.md#two-addresses) in the Docker runbook, which the server guides install through, or [A second address for the app](cpanel.md#14-a-second-address-for-the-app) in the cPanel guide. Neither has been run on real hosting yet, the per-provider guides do not change for it, and the Fly.io and Cloudflare routes do not have it yet.
+
 ## What every route has in common
 
 1. You get a copy of this repository from the owner.
