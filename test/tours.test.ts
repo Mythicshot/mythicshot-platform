@@ -36,8 +36,8 @@ describe("tour list", () => {
     const slug = async (id: string) => (await deps.db.first<{ slug: string }>("SELECT slug FROM tour WHERE id = ?", [id]))!.slug;
     expect(r.json).toEqual({
       tours: [
-        { id: older.tour_id, title: "Send an invoice", status: "draft", slug: await slug(older.tour_id), url: null, chapters: 2, steps: 4, updated_at: 1_800_000_003_000, published_at: null },
-        { id: newer.tour_id, title: "Short one", status: "draft", slug: await slug(newer.tour_id), url: null, chapters: 1, steps: 1, updated_at: 1_800_000_001_000, published_at: null },
+        { id: older.tour_id, title: "Send an invoice", status: "draft", slug: await slug(older.tour_id), url: null, chapters: 2, steps: 4, updated_at: 1_800_000_003_000, published_at: null, unpublished_changes: false },
+        { id: newer.tour_id, title: "Short one", status: "draft", slug: await slug(newer.tour_id), url: null, chapters: 1, steps: 1, updated_at: 1_800_000_001_000, published_at: null, unpublished_changes: false },
       ],
     });
     // The fields the desktop app's picker has always read are all still there.
@@ -45,6 +45,48 @@ describe("tour list", () => {
     const rb = await send(deps, "GET", "/api/v1/tours", { token: b.token });
     expect(rb.json.tours).toHaveLength(1);
     expect(rb.json.tours[0].steps).toBe(3);
+  });
+
+  it("unpublished_changes says whether a publish would change what visitors see", async () => {
+    const { deps } = await makeDeps({ retiredGraceMs: 0 });
+    const a = await seedWorkspace(deps, "A");
+    const b = await seedWorkspace(deps, "B");
+    const post = (path: string) => send(deps, "POST", path, { token: a.token });
+    const flags = async (token = a.token): Promise<Record<string, unknown>> => {
+      const r = await send(deps, "GET", "/api/v1/tours", { token });
+      expect(r.status).toBe(200);
+      return Object.fromEntries(r.json.tours.map((t: Json) => [t.id, t.unpublished_changes]));
+    };
+    const draft = await uploadTour(deps, a.token, v2);
+    const t = await uploadTour(deps, a.token, v2, { kind: "new" }, 1);
+    // B has a published tour with a chapter waiting: it must never show in A's list.
+    const other = await uploadTour(deps, b.token, v3);
+    expect((await send(deps, "POST", `/api/v1/tours/${other.tour_id}/publish`, { token: b.token })).status).toBe(200);
+    await uploadTour(deps, b.token, v2, { kind: "chapter", tour_id: other.tour_id }, 2);
+
+    // Two drafts: nothing is public, so nothing is behind.
+    expect(await flags()).toEqual({ [draft.tour_id]: false, [t.tour_id]: false });
+    // Published and untouched.
+    expect((await post(`/api/v1/tours/${t.tour_id}/publish`)).status).toBe(200);
+    expect(await flags()).toEqual({ [draft.tour_id]: false, [t.tour_id]: false });
+    // A chapter uploaded as a draft is waiting.
+    await uploadTour(deps, a.token, v2, { kind: "chapter", tour_id: t.tour_id }, 3);
+    expect(await flags()).toEqual({ [draft.tour_id]: false, [t.tour_id]: true });
+    // Publishing the waiting changes clears it.
+    expect((await post(`/api/v1/tours/${t.tour_id}/publish`)).status).toBe(200);
+    expect(await flags()).toEqual({ [draft.tour_id]: false, [t.tour_id]: false });
+    // A rename is live at once: nothing waits.
+    expect((await send(deps, "PATCH", `/api/v1/tours/${t.tour_id}`, { token: a.token, body: JSON.stringify({ title: "Renamed" }), headers: { "content-type": "application/json" } })).status).toBe(200);
+    expect(await flags()).toEqual({ [draft.tour_id]: false, [t.tour_id]: false });
+    // A snapshot from before draft versions were recorded: unknown reads as "may be behind".
+    await deps.db.run("UPDATE snapshot SET draft_version = NULL WHERE tour_id = ?", [t.tour_id]);
+    expect(await flags()).toEqual({ [draft.tour_id]: false, [t.tour_id]: true });
+    // Waiting changes, then unpublished: a draft again, so false.
+    expect((await post(`/api/v1/tours/${t.tour_id}/unpublish`)).status).toBe(204);
+    expect(await flags()).toEqual({ [draft.tour_id]: false, [t.tour_id]: false });
+    // Every entry carries the field as a boolean, and B sees only its own tour, which is behind.
+    for (const v of Object.values(await flags())) expect(typeof v).toBe("boolean");
+    expect(await flags(b.token)).toEqual({ [other.tour_id]: true });
   });
 
   it("an empty workspace lists no tours", async () => {

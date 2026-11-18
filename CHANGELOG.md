@@ -2,6 +2,10 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.6 (2026-11-18)
+
+- The tour list says for each tour whether changes are waiting to be published, so an app can offer to publish them.
+
 ## 0.1.5 (2026-11-18)
 
 - Two addresses: the site can serve tours on one address and keep a second address for the app. With neither set, everything works as before.

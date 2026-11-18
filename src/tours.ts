@@ -155,11 +155,16 @@ export function tourRoutes(app: Hono, deps: Deps): void {
     await housekeeping(deps, auth.workspaceId, null, 1);
     // And one page of the draft pictures chapter replaces left behind (at most 3 calls).
     await clearReplaced(deps, auth.workspaceId, null);
-    const rows = await deps.db.all<{ id: string; title: string; status: "draft" | "published"; slug: string; chapters: number; steps: number; updated_at: number; published_at: number | null }>(
+    // live_version is the draft_version the live snapshot was built from: null when the
+    // tour has no snapshot, and for a snapshot from before migration 0006 that is not known
+    // to hold the whole draft. It is read in this same statement, so the list makes no
+    // extra call for it.
+    const rows = await deps.db.all<{ id: string; title: string; status: "draft" | "published"; slug: string; chapters: number; steps: number; updated_at: number; published_at: number | null; draft_version: number; live_version: number | null }>(
       `SELECT t.id, t.title, t.status, t.slug,
               (SELECT count(*) FROM chapter c WHERE c.tour_id = t.id) AS chapters,
               (SELECT count(*) FROM step s WHERE s.tour_id = t.id) AS steps,
-              t.updated_at, t.published_at
+              t.updated_at, t.published_at, t.draft_version,
+              (SELECT n.draft_version FROM snapshot n WHERE n.tour_id = t.id) AS live_version
          FROM tour t WHERE t.workspace_id = ? ORDER BY t.updated_at DESC, t.id`,
       [auth.workspaceId],
     );
@@ -167,6 +172,11 @@ export function tourRoutes(app: Hono, deps: Deps): void {
     // the client to put after the server address it was given. The server does not build a
     // full address, because behind a proxy it cannot know the scheme visitors use. A draft
     // has no link.
+    // `unpublished_changes` says the live page is behind the draft, so a publish would
+    // change what visitors see: the snapshot was built from an older draft version than the
+    // tour's (every upload commit and chapter replace raises it; a rename does not, since
+    // it writes its title into the snapshot too), or from one that was never recorded.
+    // Always false for a draft, which has no live page.
     const tours = rows.map((t) => ({
       id: t.id,
       title: t.title,
@@ -177,6 +187,7 @@ export function tourRoutes(app: Hono, deps: Deps): void {
       steps: t.steps,
       updated_at: t.updated_at,
       published_at: t.status === "published" ? t.published_at : null,
+      unpublished_changes: t.status === "published" && (t.live_version === null || t.live_version < t.draft_version),
     }));
     return json(200, { tours });
   });
