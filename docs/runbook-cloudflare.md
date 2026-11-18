@@ -281,11 +281,15 @@ Cloudflare's [Workers pricing page](https://developers.cloudflare.com/workers/pl
 
 **Unconfirmed:** whether R2 asks for a payment method before it can be used is not stated on the pages read.
 
+### Clean-up without a scheduled trigger
+
+A publish that is abandoned half-way leaves images it already copied, recorded as pending and not served. Nothing needs to be scheduled to remove them: after 15 minutes without progress, the workspace's next publish, unpublish, tour list or upload (the recorder lists tours each time it opens its picker) retires them and deletes them, a page at a time, together with replaced images whose grace period has passed. A Cron Trigger is optional; this app does not define one, and adding one only makes the clean-up independent of traffic.
+
 ### Per-request limits on the Free plan
 
 Cloudflare's [Workers limits page](https://developers.cloudflare.com/workers/platform/limits/) gives the Free plan 50 subrequests and 10 ms of CPU time per request, and counts every call to R2 or D1 as a subrequest. The [D1 limits page](https://developers.cloudflare.com/d1/platform/limits/) allows 50 queries per Worker invocation on the Free plan and counts a batch as one query.
 
-The app keeps every request at or under 40 database and storage calls, and the test suite drives each route to its worst case to check it. Publishing is the only job that needs more, so it runs over several requests of at most 12 images each: a 400-step tour takes 34 requests, and `scripts/publish.ts` makes them for you (see [Publish a tour](../README.md#publish-a-tour)). Unpublish and the clean-up of replaced images also work a page at a time. A request that goes over 40 calls anyway logs `budget: a POST request made … calls`, which `npx wrangler tail` shows.
+The app keeps every request at or under 40 database and storage calls, and the test suite drives each route to its worst case to check it. Publishing is the only job that needs more, so it runs over several requests of at most 12 images each: a 400-step tour takes 34 requests, and `scripts/publish.ts` makes them for you (see [Publish a tour](../README.md#publish-a-tour)). Unpublish and the clean-up of replaced images also work a page at a time. Each call of a publish refreshes one heartbeat row and marks only the images it copied, so a 400-step publish writes about 1,700 rows in all (D1's free amount is counted in rows written). A request that goes over 40 calls anyway logs `budget: a POST request made … calls`, which `npx wrangler tail` shows.
 
 The CPU limit has not been measured on Cloudflare. In plain Node on a desktop computer, the app's own CPU time for the heaviest requests was about 6 to 8 ms for the first request of a 400-step publish with a snapshot near its 512,000-byte cap, 5 to 8 ms for the page of such a tour, and 5 to 13 ms for an upload whose manifest is at its 262,144-byte cap (the higher figure on a cold start); every other request measured under 3 ms. Workers run on different hardware, so treat these as estimates, and keep tours well under the caps if a request is refused for CPU.
 

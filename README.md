@@ -71,7 +71,7 @@ node scripts/publish.ts https://tours.example.com tour_0123456789abcdef01234567
 node scripts/publish.ts https://tours.example.com tour_0123456789abcdef01234567 --unpublish
 ```
 
-A large tour publishes over several requests, so the helper prints its progress (`Copying images: 24 of 60 done`) and keeps calling until the new version is live. Visitors see the previously published version until the last request. If the helper is stopped half-way, run the same command again within 15 minutes and it continues the same publish; after that the half-done publish is cleaned up and a new one starts. The previously published version is never touched by a publish that did not finish.
+A large tour publishes over several requests, so the helper prints its progress (`Copying images: 24 of 60 done`) and keeps calling until the new version is live. Visitors see the previously published version until the last request. If the helper stops half-way (interrupted, a lost connection, or a 429 or 5xx answer), run the same command again: within 15 minutes it continues the same publish. After 15 minutes without progress, or if a chapter was uploaded to the tour in the meantime, that same run starts a new publish from the current draft and the half-done one is cleaned up. The previously published version is never touched by a publish that did not finish.
 
 ### The publish API
 
@@ -79,12 +79,12 @@ Every request carries `Authorization: Bearer <token>` and answers `404` for a to
 
 | Request | Answer |
 |---|---|
-| `POST /api/v1/tours/<id>/publish` with no body | Starts a publish, or joins the one already in progress for the tour. `202 {"status":"in_progress","publish_id":"pub_…","done":12,"total":60}`, or `200` at once for a tour of at most 12 images |
-| `POST /api/v1/tours/<id>/publish` with `{"publish_id":"pub_…"}` | Copies the next 12 images: `202` as above while more remain; `200 {"slug","url","steps"}` once the new version is live, and the same `200` on any repeat |
-| either, when that publish was stopped | `409 publish_cancelled`: the tour was unpublished, or the publish failed or was abandoned; publish again to start over |
+| `POST /api/v1/tours/<id>/publish` with no body | Starts a publish, or joins the one in progress for the tour if it was built from the current draft; one built from an older draft is cancelled and a new one started. `202 {"status":"in_progress","publish_id":"pub_…","done":12,"total":60}`, or `200` at once for a small tour |
+| `POST /api/v1/tours/<id>/publish` with `{"publish_id":"pub_…"}` | Copies the next images (up to 12): `202` as above while more remain; `200 {"slug","url","steps"}` once the new version is live, and the same `200` on any repeat |
+| either, when that publish was stopped | `409 publish_cancelled`: the tour was unpublished, the publish failed or was abandoned, or a fresh start replaced it; publish again to start over. `409 publish_busy` means another start of the tour landed at the same moment: try again |
 | `POST /api/v1/tours/<id>/unpublish` | `204` when the tour and all its public images are gone; `202` when the tour is unpublished but images remain to remove, so call again; a publish in progress is cancelled |
 
-A publish works from the draft as it was when the publish started: a chapter uploaded meanwhile goes out with the next publish, never half of it with this one. `400 empty_tour` and `413 too_large` (more than 400 steps, or a snapshot over 512,000 bytes) come from the first request, before anything is copied.
+A publish works from the draft as it was when the publish started: calls naming it keep driving that version, so a chapter uploaded meanwhile goes out with the next publish, never half of it with this one. `400 empty_tour` and `413 too_large` (more than 400 steps, or a snapshot over 512,000 bytes) come from the first request, before anything is copied.
 
 ## Develop
 
