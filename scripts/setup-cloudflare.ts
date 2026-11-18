@@ -227,12 +227,30 @@ export function shown(args: string[]): string {
   return "npx wrangler " + args.join(" ");
 }
 
+/**
+ * What to show of a failed Wrangler call: its own message without colour codes or the
+ * generic lines about logs and bug reports, and a plain next step for the failures a
+ * new account meets.
+ */
+export function wranglerError(r: WranglerResult): string[] {
+  const text = (r.stderr + "\n" + r.stdout).replace(new RegExp(String.fromCharCode(27) + "\\[[0-9;]*m", "g"), "");
+  const lines = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !/If you think this is a bug|Logs were written to|^-+$/.test(l));
+  const out = lines.slice(-6);
+  if (/\[code: 10042\]/.test(text)) {
+    out.push("R2 is not enabled on this account yet. In the Cloudflare dashboard, open R2 object storage and enable it, then run the same command again.");
+  }
+  return out;
+}
+
 /** A reading call: always run, also in a dry run. Throws Stop when it fails. */
 async function read(io: Io, args: string[], what: string): Promise<string> {
   const r = await io.wrangler(args);
   if (r.code !== 0) {
     io.err(`ERROR: could not ${what} (${shown(args)} failed).`);
-    for (const l of (r.stderr || r.stdout).trim().split("\n").slice(-5)) if (l.trim()) io.err(`    ${l}`);
+    for (const l of wranglerError(r)) io.err(`    ${l}`);
     io.err("    Nothing was changed by this step. Fix the cause and run the same command again.");
     throw new Stop();
   }
@@ -249,7 +267,7 @@ async function change(io: Io, o: Options, args: string[], what: string, input?: 
   const r = await io.wrangler(args, input === undefined ? { show: true } : { input, show: true });
   if (r.code !== 0) {
     io.err(`ERROR: could not ${what}.`);
-    for (const l of (r.stderr || r.stdout).trim().split("\n").slice(-8)) if (l.trim()) io.err(`    ${l}`);
+    for (const l of wranglerError(r)) io.err(`    ${l}`);
     io.err("    Everything done before this step is kept. Fix the cause and run the same command again: it picks up where it stopped.");
     throw new Stop();
   }

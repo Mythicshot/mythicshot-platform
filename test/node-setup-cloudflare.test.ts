@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { checkDomain, checkName, DEPLOY_CONFIG, main, parseArgs, readInstall, stripJsonComments, type Io, type WranglerResult } from "../scripts/setup-cloudflare.ts";
+import { checkDomain, checkName, DEPLOY_CONFIG, main, parseArgs, readInstall, stripJsonComments, wranglerError, type Io, type WranglerResult } from "../scripts/setup-cloudflare.ts";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const DB_ID = "11111111-2222-3333-4444-555555555555";
@@ -452,5 +452,23 @@ describe("update", () => {
     expect(await h.run("update")).toBe(1);
     expect(text(h.err)).toContain("npm run setup:cloudflare");
     expect(h.calls).toEqual([]);
+  });
+});
+
+describe("Wrangler's errors", () => {
+  it("are shown without colour codes or generic lines, with a next step when R2 is not enabled", async () => {
+    const r = {
+      code: 1,
+      stdout: "",
+      stderr:
+        "\u001b[31mX [ERROR]\u001b[0m A request to the Cloudflare API (/accounts/<id>/r2/buckets) failed.\n\n  Please enable R2 through the Cloudflare Dashboard. [code: 10042]\n\n  If you think this is a bug, please open an issue.\n🪵  Logs were written to \"x.log\"\n",
+    };
+    const lines = wranglerError(r);
+    expect(lines.join("\n")).not.toMatch(/\u001b|bug|Logs were written/);
+    expect(lines).toContain("Please enable R2 through the Cloudflare Dashboard. [code: 10042]");
+    expect(lines.at(-1)).toMatch(/R2 is not enabled on this account yet/);
+    const h = harness(fakeAccount({ failOnce: "r2 bucket list" }));
+    expect(await h.run("--yes")).toBe(1);
+    expect(changing(h.calls)).toEqual([]);
   });
 });
