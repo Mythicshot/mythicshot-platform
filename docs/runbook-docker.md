@@ -7,7 +7,7 @@ This runbook puts the platform on one Debian server with any DNS provider. `inst
 
 There are two routes to the server, chosen when you install. The direct route, steps 1 to 6 below, needs ports 80 and 443 open to the server. The tunnel route needs no open port at all, which suits a server at home behind a router: it is described in [Behind a Cloudflare Tunnel](#behind-a-cloudflare-tunnel) and replaces steps 2, 3 and 6.
 
-Examples use `tours.example.com` for the platform's address, `203.0.113.10` and `2001:db8::10` for the server's addresses, and `you` for your login on the server. Put your own in their place.
+Examples use `tours.example.com` for the platform's address, `203.0.113.10` and `2001:db8::10` for the server's addresses, and `you` for your login on the server. The optional second address of [Two addresses](#two-addresses) is `app.example.com`. Put your own in their place.
 
 ## Contents
 
@@ -24,6 +24,7 @@ Examples use `tours.example.com` for the platform's address, `203.0.113.10` and 
 - [10. Move to a new server](#10-move-to-a-new-server)
 - [11. Uninstall](#11-uninstall)
 - [Behind a Cloudflare Tunnel](#behind-a-cloudflare-tunnel)
+- [Two addresses](#two-addresses)
 - [Troubleshooting by symptom](#troubleshooting-by-symptom)
 - [Pages this runbook relies on](#pages-this-runbook-relies-on)
 
@@ -188,8 +189,8 @@ In this order, saying each step before doing it:
 4. Checks that nothing else listens on ports 80 and 443, and whether the domain points at this server. The tunnel route skips both checks, because it publishes no port and its DNS record is managed at Cloudflare.
 5. Only if `docker compose version` failed in step 3: stops if Debian's own Docker packages are installed, otherwise installs Docker Engine and the Compose plugin from [Docker's apt repository](https://docs.docker.com/engine/install/debian/), checking the repository key's fingerprint first, and then checks the app image.
 6. Creates `/opt/demo-platform` (root only) with `caddy/` and `backups/` inside, and the data folder, owned by id 1001 with mode 700. Existing folders are left as they are.
-7. Writes `/opt/demo-platform/.env` (mode 600, root only) only if it does not exist yet: `DOMAIN`, `ACME_EMAIL`, `DATA_DIR`, `APP_IMAGE` and a new `SETUP_CODE` of 32 random hex characters. On the tunnel route it writes `DEPLOY_MODE=tunnel` and `TUNNEL_TOKEN` instead of `ACME_EMAIL`.
-8. Writes `docker-compose.yml` and `caddy/Caddyfile`, in the form for the route recorded in `.env`. A file that already exists and differs is first saved as `<name>.bak-<date>-<time>`.
+7. Writes `/opt/demo-platform/.env` (mode 600, root only) only if it does not exist yet: `DOMAIN`, `ACME_EMAIL`, `DATA_DIR`, `APP_IMAGE` and a new `SETUP_CODE` of 32 random hex characters. On the tunnel route it writes `DEPLOY_MODE=tunnel` and `TUNNEL_TOKEN` instead of `ACME_EMAIL`. With `--app-domain=<name>` it also writes `APP_DOMAIN`.
+8. Writes `docker-compose.yml` and `caddy/Caddyfile`, in the form for the route and for the one or two addresses recorded in `.env`. A file that already exists and differs is first saved as `<name>.bak-<date>-<time>`.
 9. Starts the stack and waits up to 120 seconds for the app to report healthy and, on the tunnel route, for the tunnel to connect to Cloudflare.
 
 If a run fails, it puts back the files it replaced and removes the files it created. It never removes the data folder, `.env` or a backup.
@@ -225,9 +226,9 @@ APP_IMAGE=demo-platform:v2 bash install.sh
 | Command | What it does |
 |---|---|
 | `sudo bash install.sh install` | Install or repair. The default when no command is given. |
-| `sudo bash install.sh update` | Back up, pull newer images and restart. See [step 8](#8-update). |
+| `sudo bash install.sh update` | Back up, pull newer images and restart. See [step 8](#8-update). With [two addresses](#two-addresses) it then checks both. |
 | `sudo bash install.sh backup` | Write a backup archive. See [step 9](#9-back-up-and-restore). |
-| `sudo bash install.sh status` | Show the containers, the app's health check and the data folder's size. |
+| `sudo bash install.sh status` | Show the containers, the app's health check and the data folder's size. With [two addresses](#two-addresses) it also asks each address for its role, and ends with exit code 1 when one reports the wrong role. |
 | `sudo bash install.sh uninstall` | Stop and remove the containers. See [step 11](#11-uninstall). |
 
 | Option | What it does |
@@ -235,7 +236,7 @@ APP_IMAGE=demo-platform:v2 bash install.sh
 | `--tunnel` | Only with `install`: use the tunnel route. See [Behind a Cloudflare Tunnel](#behind-a-cloudflare-tunnel). |
 | `--direct` | Only with `install`: use the direct route without being asked. |
 | `--new-token` | Only with `install`, on a tunnel install: ask for the tunnel token again and replace it once the new one has connected. See [The tunnel token](#the-tunnel-token). |
-| `--app-domain=<name>` | Only with `install`: a second address, for the app, as in `--app-domain=app.example.com`. The domain asked for stays the address of the tours. A first install records it as `APP_DOMAIN` in `.env`, from which the stack gives the app `TOURS_HOST` and `APP_HOST`, and after the start each address must report its own role at `/healthz`. On an existing install the script does not change `.env`: it stops and names the `APP_DOMAIN` line to add by hand before running `install` again. A `TOURS_HOST` or `APP_HOST` line written into `.env` by hand has no effect, and the script says so: the second address is set with `APP_DOMAIN` only. The way the stack file derives the two settings was checked on Docker Compose 5.5.1, not on the oldest version the script accepts; the script validates the new stack file before it replaces anything, so an older Compose that cannot read it stops the run with nothing changed. The way back: if the start fails after `APP_DOMAIN` was added by hand, the script puts the old Caddyfile back but never changes `.env`, so remove the `APP_DOMAIN` line (or put the earlier one back) and run `install` again. |
+| `--app-domain=<name>` | Only with `install`: a second address, for the app, as in `--app-domain=app.example.com`. The domain asked for stays the address of the tours. It is taken on a first install only; an existing install adds one line to `.env` by hand. See [Two addresses](#two-addresses). |
 | `--dry-run` | Print every command and file write without doing any. |
 | `--yes` or `-y` | Answer "continue?" questions with yes. It never skips the typed domain name that `--delete-data` asks for. |
 | `--force` | Try on a system other than Debian 13 or 12. |
@@ -693,7 +694,7 @@ A request travels: visitor, over HTTPS, to Cloudflare; down the tunnel to cloudf
 
 cloudflared talks to Caddy and not straight to the app, for three reasons.
 
-1. The hostname check stays in the stack. Caddy answers only for the hostname in `DOMAIN`, as it does on the direct route. A request for any other hostname the tunnel is given does not reach the app.
+1. The hostname check stays in the stack. Caddy answers only for the hostname in `DOMAIN` (with [two addresses](#two-addresses), also for the one in `APP_DOMAIN`), as it does on the direct route. A request for any other hostname the tunnel is given does not reach the app.
 2. The same headers are set on both routes. Caddy adds the one-week HSTS header, so browsers keep to HTTPS for the platform's address. It also sends a visitor who arrived at Cloudflare over plain HTTP on to HTTPS, using the `X-Forwarded-Proto` header that, by [Cloudflare's headers page](https://developers.cloudflare.com/fundamentals/reference/http-headers/), Cloudflare sets itself and overwrites if a visitor sent one.
 3. The app is the same on both routes. It has exactly one neighbour, Caddy, and needs no setting that says which route is in use.
 
@@ -701,8 +702,8 @@ The hop from cloudflared to Caddy is plain HTTP because it stays inside one mach
 
 What the app sees:
 
-- The `Host` header is the hostname the visitor typed. cloudflared replaces it only when a route's HTTP Host Header setting is filled in, which [Cloudflare's origin settings page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/cloudflared-parameters/origin-parameters/) lists as empty by default, and Caddy passes it on unchanged. The setup wizard's same-origin check compares it with the page's own address, so it keeps working.
-- No forwarded address or scheme is trusted, because the app reads none: not `X-Forwarded-For`, not `X-Forwarded-Proto`, not Cloudflare's own visitor-address header. It sets no cookies and builds no links from such headers. A visitor who forges one of them gains nothing. Caddy, as on the direct route, does not trust the forwarded headers it receives and writes its own for the app.
+- The `Host` header is the hostname the visitor typed. cloudflared replaces it only when a route's HTTP Host Header setting is filled in, which [Cloudflare's origin settings page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/cloudflared-parameters/origin-parameters/) lists as empty by default, and Caddy passes it on unchanged. The setup wizard's same-origin check compares it with the page's own address, so it keeps working. With [two addresses](#two-addresses), the `Host` header is also the one thing that decides which of the two a request is for.
+- No forwarded address, scheme or host name is trusted, because the app still reads none: not `X-Forwarded-For`, not `X-Forwarded-Proto`, not `X-Forwarded-Host`, `Forwarded` or `X-Original-Host`, not Cloudflare's own visitor-address header. It sets no cookies and builds no links from such headers; the one address it builds with two addresses, the redirect from the app address to the tours address, takes its host name from the settings. A visitor who forges one of them gains nothing. Caddy, as on the direct route, does not trust the forwarded headers it receives and writes its own for the app.
 
 The tunnel token reaches cloudflared as the `TUNNEL_TOKEN` environment variable, which [Cloudflare's run parameters page](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/cloudflared-parameters/run-parameters/) gives as the variable for the token. Docker Compose fills it in from `.env` when it starts the container. The token is not in `docker-compose.yml`, not on cloudflared's command line, which is `tunnel --no-autoupdate --metrics 127.0.0.1:20241 run`, and not in the environment of the app or of Caddy. `--no-autoupdate` is the same page's parameter that stops cloudflared from updating itself: the image is pinned by its digest, and [step 8](#8-update) is how it changes.
 
@@ -811,6 +812,150 @@ Each of these needs a real tunnel, which the tests in this repository do not hav
 4. **Unconfirmed:** the words Cloudflare adds when it refuses a well-formed token. The script recognises cloudflared's own line, `Register tunnel error from server side`, and shows whatever follows it.
 5. **Unconfirmed:** the dashboard steps, which are taken from Cloudflare's pages and not from a session in the dashboard.
 
+## Two addresses
+
+The platform can answer on two names instead of one: the address of the tours, `tours.example.com`, and a second address for the app, `app.example.com`. This is optional, and every step above sets up one address. What each address answers is in [One address or two](../README.md#one-address-or-two) in the README: tours and their pictures on the tours address only, the token API on both, and an empty answer with status 421 for any other name.
+
+**Unconfirmed:** nothing in this section has been run on a real server or against a real tunnel. The script's part is checked by this repository's tests with a stand-in for Docker, and the app's part by tests that send requests under both names.
+
+On this route the second address is one setting: the line `APP_DOMAIN` in `/opt/demo-platform/.env`. `DOMAIN` stays what it is and is from then on the address of the tours. From the two, the stack gives the app its own settings, `TOURS_HOST` and `APP_HOST`, and the Caddyfile the script writes answers for both names. A `TOURS_HOST` or `APP_HOST` line written into `.env` by hand has no effect, and the script warns about it: "has a TOURS_HOST or APP_HOST line, which has no effect on an install made by this script".
+
+> [!WARNING]
+> Never change the `DOMAIN` line to make room for a second address: it is the name every published tour link and Mythicshot use, and the app address is always the new name.
+
+The way the stack file derives the two settings was checked on Docker Compose 5.5.1, not on the oldest version the script accepts; the script validates the new stack file before it replaces anything, so an older Compose that cannot read it stops the run with nothing changed.
+
+### What to have ready for two addresses
+
+1. A version of the platform that knows two addresses: the app image and `install.sh` from the same, current copy of this repository. An older app ignores the two settings, and the script's check then fails.
+2. A second hostname that nothing else uses, such as `app.example.com`.
+3. On the direct route, a DNS record for it that points at the same server, created as in [step 2](#2-create-the-dns-record). The open ports stay the same two, and Caddy gets a certificate for each name by itself, as in [step 6](#6-the-https-certificate).
+
+| Type | Name | Value | TTL |
+|---|---|---|---|
+| A | `app` (the part before your domain) | `203.0.113.10` | the provider's default |
+| AAAA (only if the server has a public IPv6 address) | `app` | `2001:db8::10` | the provider's default |
+
+4. On the tunnel route, no DNS record of your own: add a second published application to the same tunnel instead, as in [Add the published application](#add-the-published-application), with the subdomain `app` and the same service URL, `http://caddy:80`. The tunnel then has a published application for each of the two names.
+
+> [!WARNING]
+> On the tunnel route, leave HTTP Host Header empty on both published applications: a name filled in there reaches the platform in place of the one the visitor typed, and that address is then refused or answered in the wrong role.
+
+**How to tell it worked:** on the direct route, `getent ahosts app.example.com` on the server prints the server's address. On the tunnel route, the tunnel's Routes tab lists both hostnames with the same service URL.
+
+### On a first install
+
+Follow [step 5](#5-run-installsh) and add the option to every run of the script.
+
+```sh
+sudo bash install.sh install --app-domain=app.example.com
+```
+
+On the tunnel route, add it beside `--tunnel`.
+
+```sh
+sudo bash install.sh install --tunnel --app-domain=app.example.com
+```
+
+1. Answer `Domain name for the platform` with the tours address, `tours.example.com`, as before. The option names the other one.
+2. The option must be a hostname in lowercase that differs from the tours address. Otherwise the script stops before it writes anything, for example with "the app address must be a different name than the tours address". With any command but `install` it stops with `--app-domain goes only with install`.
+3. Check the summary before `Continue?`: it shows both names.
+
+The script then writes `APP_DOMAIN` into the new `.env`, checks the DNS record of both names on the direct route, writes the Caddyfile for two addresses, starts the stack and checks both addresses, as described under [The check of both addresses](#the-check-of-both-addresses). After the usual closing lines it prints one more.
+
+```text
+Tours are at https://tours.example.com; the app address is https://app.example.com. Mythicshot keeps using https://tours.example.com.
+```
+
+On the tunnel route the closing lines name both hostnames, under "the tunnel needs two published applications, one for each address".
+
+Open the setup wizard on the tours address, `https://tours.example.com/setup`, and give Mythicshot that address, as in [step 7](#7-the-setup-wizard-and-mythicshot). The wizard is not on the app address.
+
+### On an install that has one address today
+
+The script never rewrites an existing `.env`. Given `--app-domain=app.example.com` on an existing install, it stops with nothing changed and names the line to add: "this install's .env does not hold APP_DOMAIN=app.example.com, and install.sh does not change that file. To add the second address, add that line to /opt/demo-platform/.env as root, then run: sudo bash install.sh install". So the line is added by hand, in this order. Steps 1 to 3 change nothing about how the site answers.
+
+1. Update to the current version first, still with one address: load the new image and run `sudo bash install.sh update` with the new `install.sh`, as in [step 8](#8-update), and see that `sudo bash install.sh status` shows the app `healthy`.
+2. Create the DNS record or the second published application, as in [What to have ready for two addresses](#what-to-have-ready-for-two-addresses).
+3. Make a backup, as in [step 9](#9-back-up-and-restore).
+
+```sh
+sudo bash install.sh backup
+```
+
+4. Open a root shell and edit `.env`.
+
+```sh
+sudo -i
+```
+
+```sh
+nano /opt/demo-platform/.env
+```
+
+5. Add this one line, with your own name in lowercase, and save. Change nothing else.
+
+```text
+APP_DOMAIN=app.example.com
+```
+
+6. Run the install again. It reads the line, saves the old Caddyfile (and the stack file, if it is an older one) as `.bak-<date>-<time>`, writes the one for two addresses, starts the app with its two settings, restarts Caddy and checks both addresses.
+
+```sh
+bash /home/you/install.sh install
+```
+
+> [!WARNING]
+> Step 6 restarts the app and Caddy, so the site does not answer for a moment; do it when that is acceptable, and check both addresses right after it.
+
+If the line holds something that cannot be a second address, the run stops first, with `has an APP_DOMAIN that is not a valid host name or is the same as DOMAIN`, and nothing is changed. If the start fails after `APP_DOMAIN` was added by hand, the script puts the old Caddyfile back but never changes `.env`, so remove the `APP_DOMAIN` line (or put the earlier one back) and run `install` again.
+
+`sudo bash install.sh update` writes no file, so it never moves an install between one address and two. When `.env` and the Caddyfile disagree, it stops with nothing changed, saying either "but the Caddyfile here was written for one address, and update does not rewrite it" or "but the Caddyfile here was written for two addresses, and update does not rewrite it". Run `sudo bash install.sh install`, which writes the Caddyfile that matches `.env`.
+
+### The check of both addresses
+
+After every start, by `install` and by `update`, the script asks each address for `/healthz` through whatever is in front of the platform and requires the role the platform reports to be that address's own. When it passes, it says `tours.example.com is the platform's tours address` and `app.example.com is the platform's app address`.
+
+| What the script says | What it means | What to do |
+|---|---|---|
+| `answered, but the platform running here is older than two addresses` | The address answered without any role: the app is from before two addresses, or the request reached it under a name that is neither of the two | Load the current image and run `sudo bash install.sh update`. If it is current already, something in front of the platform changes the `Host` header: see the row below. |
+| `answered, but the platform does not see it as its` tours address, or its app address | The address answered in the other role | Check `DOMAIN` and `APP_DOMAIN` in `.env`, "and that nothing in front of the platform changes the Host header." On the tunnel route, check that each published application has its own hostname and an empty HTTP Host Header. |
+| `was not asked` | Direct route only: the name does not resolve to an address of this server, not yet or because the server is behind a router | A warning, not a failure. Open the address in a browser and look for the role yourself. |
+| `did not answer` | The certificate for the name is not there yet, or the tunnel has no published application for it | A warning, not a failure. Check the ports or the route, then run `sudo bash install.sh status`. |
+
+A wrong role ends the run with exit code 1. Nothing is undone: the install stays as it is, and a first install has printed its setup code before the check. `sudo bash install.sh status` repeats the check, asking each address once, and ends with exit code 1 on a wrong role too. Without `curl` on the server the script asks nothing and says so.
+
+**How to tell it worked:** from your computer, this prints `{"ok":true,"address":"tours"}`.
+
+```sh
+curl https://tours.example.com/healthz
+```
+
+And this prints `{"ok":true,"address":"app"}`.
+
+```sh
+curl https://app.example.com/healthz
+```
+
+### Go back to one address
+
+1. In a root shell, open `/opt/demo-platform/.env` in an editor, remove the `APP_DOMAIN` line and save, as in steps 4 and 5 above.
+2. Leave the root shell with `exit` and run the install again. It saves the Caddyfile for two addresses as `.bak-<date>-<time>`, writes the one for one address and starts the app without its two settings, so it answers on every name that reaches it, as before.
+
+```sh
+sudo bash install.sh install
+```
+
+3. Remove the DNS record or the published application of `app.example.com` when you no longer want it. Its certificate in `/opt/demo-platform/caddy-data` is then no longer used.
+
+The tours address is the same name before and after, so tour links that are already out there and Mythicshot keep working both ways.
+
+**How to tell it worked:** `curl https://tours.example.com/healthz` prints `{"ok":true}` again, without an address, and `sudo bash install.sh status` shows no app address.
+
+### Two addresses on the other routes
+
+The server guides in [docs/hosting](hosting/README.md) install through this runbook, so this section holds for them as it is. The [Fly.io guide](hosting/fly.md) does not use `install.sh`, and its steps for two addresses wait for a later version. Shared cPanel hosting has its own steps, in [A second address for the app](hosting/cpanel.md#14-a-second-address-for-the-app), and so has Cloudflare, in [Two addresses](runbook-cloudflare.md#two-addresses) of that runbook.
+
 ## Troubleshooting by symptom
 
 | Symptom | Likely cause | What to do |
@@ -846,7 +991,14 @@ Each of these needs a real tunnel, which the tests in this repository do not hav
 | `this install is still not finished`, at the end of `update` | The tunnel had never connected when the platform was installed | Run `sudo bash install.sh install`: it asks for the token again and prints the setup code once the tunnel connects ([If the tunnel does not connect](#if-the-tunnel-does-not-connect)). |
 | Tunnel route: `cloudflared could not reach Cloudflare` | Outbound port 7844 or DNS is blocked on the server's network | Allow outbound TCP and UDP port 7844 ([What to have ready for the tunnel](#what-to-have-ready-for-the-tunnel)), then run again. |
 | Tunnel route: the tunnel is `healthy` but the address shows a Cloudflare error page | The tunnel has no published application for the hostname, or its service URL is wrong | Check the route: hostname `tours.example.com`, service URL `http://caddy:80` ([Add the published application](#add-the-published-application)). |
-| Tunnel route: the address shows an empty page | The hostname of the published application differs from `DOMAIN` in `.env` | Make the two the same: change the route's hostname in the dashboard to the one in `.env`. |
+| Tunnel route: the address shows an empty page | The hostname of the published application differs from `DOMAIN` in `.env` or, for the second of two addresses, from `APP_DOMAIN` | Make the two the same: change the route's hostname in the dashboard to the one in `.env`. |
+| `this install's .env does not hold APP_DOMAIN=app.example.com` | `--app-domain=<name>` was given on an existing install, whose `.env` the script never rewrites | Nothing was changed. Add the line by hand: [On an install that has one address today](#on-an-install-that-has-one-address-today). |
+| `has an APP_DOMAIN that is not a valid host name or is the same as DOMAIN` | The `APP_DOMAIN` line in `.env` is mistyped, or names the tours address | Nothing was changed. Correct the line, or remove it for one address, then run `sudo bash install.sh`. |
+| A warning that `.env` has a `TOURS_HOST` or `APP_HOST` line | The line was added by hand; on this route it has no effect | Remove it. The second address is the `APP_DOMAIN` line only ([Two addresses](#two-addresses)). |
+| `the Caddyfile here was written for` one address, or for two addresses, at the start of `update` | `.env` and the Caddyfile disagree about the second address, and `update` writes no file | Nothing was changed. Run `sudo bash install.sh install`. |
+| `the platform running here is older than two addresses` | The app image is from before two addresses, or the `Host` header is changed on the way | See [The check of both addresses](#the-check-of-both-addresses). |
+| `the platform does not see it as its` tours or app address | An address reaches the platform under the other name | See [The check of both addresses](#the-check-of-both-addresses). |
+| With two addresses, `/setup` on the app address shows `{"error":"not_found"}` | The setup wizard is on the tours address only | Open `https://tours.example.com/setup`. |
 
 ## Pages this runbook relies on
 
@@ -865,4 +1017,4 @@ Each of these needs a real tunnel, which the tests in this repository do not hav
 - [Cloudflare: DNS records for tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/dns/), for creating the hostname's record by hand.
 - [Cloudflare: HTTP headers](https://developers.cloudflare.com/fundamentals/reference/http-headers/), for the forwarded headers Cloudflare sets and which of them it overwrites.
 
-The script itself is [deploy/install.sh](../deploy/install.sh), and the stack it writes is [deploy/docker-compose.yml](../deploy/docker-compose.yml) with [deploy/caddy/Caddyfile](../deploy/caddy/Caddyfile) on the direct route, or [deploy/tunnel/docker-compose.yml](../deploy/tunnel/docker-compose.yml) with [deploy/tunnel/caddy/Caddyfile](../deploy/tunnel/caddy/Caddyfile) on the tunnel route.
+The script itself is [deploy/install.sh](../deploy/install.sh), and the stack it writes is [deploy/docker-compose.yml](../deploy/docker-compose.yml) with [deploy/caddy/Caddyfile](../deploy/caddy/Caddyfile) on the direct route, or [deploy/tunnel/docker-compose.yml](../deploy/tunnel/docker-compose.yml) with [deploy/tunnel/caddy/Caddyfile](../deploy/tunnel/caddy/Caddyfile) on the tunnel route. With two addresses the Caddyfile is [deploy/caddy/Caddyfile.two](../deploy/caddy/Caddyfile.two) or [deploy/tunnel/caddy/Caddyfile.two](../deploy/tunnel/caddy/Caddyfile.two) instead.
