@@ -15,22 +15,37 @@ type Call = { args: string[]; input?: string };
 /** The pretend Cloudflare account. */
 type Account = {
   signedIn: boolean;
+  accounts: { id: string; name: string }[];
   databases: { name: string; uuid: string }[];
   buckets: string[];
+  /** Worker names. */
   workers: Set<string>;
+  /** SETUP_CODE and other secrets (of any Worker; tests use one at a time). */
   secrets: Map<string, string>;
   pendingMigrations: boolean;
+  /** Custom domains the deploy cannot attach (their domain is not on the account). */
+  unattachable: Set<string>;
   /** Fail the first call whose shown command contains this text. */
   failOnce?: string;
 };
 
-const CHANGING = /^(d1 create|d1 migrations apply|r2 bucket create|deploy|secret put|secret delete|d1 delete|r2 bucket delete)/;
+const CHANGING = /^(d1 create|d1 migrations apply|r2 bucket create|deploy|secret put|secret delete|d1 delete|r2 bucket delete|delete)/;
 
 function fakeAccount(over: Partial<Account> = {}): Account {
-  return { signedIn: true, databases: [], buckets: [], workers: new Set(), secrets: new Map(), pendingMigrations: true, ...over };
+  return {
+    signedIn: true,
+    accounts: [{ id: "0123456789abcdef0123456789abcdef", name: "owner@example.com's Account" }],
+    databases: [],
+    buckets: [],
+    workers: new Set(),
+    secrets: new Map(),
+    pendingMigrations: true,
+    unattachable: new Set(),
+    ...over,
+  };
 }
 
-function stub(account: Account, calls: Call[]) {
+function stub(account: Account, calls: Call[], root: string) {
   return async (args: string[], opts: { input?: string } = {}): Promise<WranglerResult> => {
     calls.push(opts.input === undefined ? { args: [...args] } : { args: [...args], input: opts.input });
     const line = args.join(" ");
@@ -40,9 +55,11 @@ function stub(account: Account, calls: Call[]) {
       account.failOnce = undefined;
       return fail("A request to the Cloudflare API failed (simulated).");
     }
+    if (line === "whoami --json") return account.signedIn ? ok(JSON.stringify({ loggedIn: true, email: "owner@example.com", accounts: account.accounts })) : fail('{"loggedIn":false}');
     if (!account.signedIn) return fail("You are not authenticated. Please run `wrangler login`.");
-    const worker = () => args[args.indexOf("--config") + 1] && "demo"; // one Worker per test
-    if (line === "whoami --json") return ok('{"loggedIn":true}');
+    /** The Worker a call is about: --name, or the name in the --config file. */
+    const config = () => JSON.parse(stripJsonComments(readFileSync(join(root, args[args.indexOf("--config") + 1]), "utf8")));
+    const worker = () => (args.includes("--name") ? args[args.indexOf("--name") + 1] : config().name);
     if (line === "d1 list --json") return ok(JSON.stringify(account.databases.map((d) => ({ uuid: d.uuid, name: d.name }))));
     if (args[0] === "d1" && args[1] === "create") {
       account.databases.push({ name: args[2], uuid: DB_ID });
@@ -59,15 +76,18 @@ function stub(account: Account, calls: Call[]) {
       return ok("applied");
     }
     if (args[0] === "deploy") {
-      account.workers.add(worker());
-      return ok("Uploaded demo-platform\nDeployed demo-platform triggers\n  https://demo-platform.example-account.workers.dev\n");
+      const c = config();
+      account.workers.add(c.name); // the script is uploaded before its domains are attached
+      for (const r of c.routes ?? []) if (account.unattachable.has(r.pattern)) return fail(`X [ERROR] A request to the Cloudflare API failed. Could not attach ${r.pattern}: zone not found.`);
+      return ok(`Uploaded ${c.name}\nDeployed ${c.name} triggers\n  https://${c.name}.example-account.workers.dev\n`);
     }
     if (args[0] === "secret" && args[1] === "list") {
-      if (!account.workers.has("demo")) return fail("This Worker does not exist on your account. [code: 10007]");
+      const w = worker();
+      if (!account.workers.has(w)) return fail(`X [ERROR] Worker "${w}" not found.\nIf this is a new Worker, run \`wrangler deploy\` first to create it.`);
       return ok(JSON.stringify([...account.secrets.keys()].map((name) => ({ name, type: "secret_text" }))));
     }
     if (args[0] === "secret" && args[1] === "put") {
-      account.workers.add("demo");
+      account.workers.add(worker());
       account.secrets.set(args[2], (opts.input ?? "").trim());
       return ok("Success! Uploaded secret SETUP_CODE");
     }
@@ -89,7 +109,7 @@ function checkout(): string {
   return root;
 }
 
-function harness(account: Account, opts: { root?: string; answers?: string[]; tty?: boolean } = {}) {
+function harness(account: Account, opts: { root?: string; answers?: string[]; tty?: boolean; env?: Record<string, string> } = {}) {
   const root = opts.root ?? checkout();
   const calls: Call[] = [];
   const out: string[] = [];
@@ -98,7 +118,8 @@ function harness(account: Account, opts: { root?: string; answers?: string[]; tt
   const asked: string[] = [];
   const io: Io = {
     root,
-    wrangler: stub(account, calls),
+    wrangler: stub(account, calls, root),
+    env: opts.env ?? {},
     hasWrangler: () => true,
     nodeVersion: "v24.19.0",
     ask:
@@ -158,9 +179,10 @@ describe("setup:cloudflare from nothing", () => {
 
   it("asks for a name and an address, and attaches an own domain that is on Cloudflare", async () => {
     const account = fakeAccount();
-    const h = harness(account, { answers: ["tours", "2", "tours.example.com", "y", ""] });
+    const h = harness(account, { answers: ["tours", "2", "tours.example.com", "y", "tours.example.com", ""] });
     expect(await h.run()).toBe(0);
-    expect(h.asked).toHaveLength(5);
+    expect(h.asked).toHaveLength(6);
+    expect(h.asked[4]).toContain("Type tours.example.com");
     expect(changing(h.calls).slice(0, 3)).toEqual(["d1 create tours", "r2 bucket create tours-drafts", "r2 bucket create tours-public"]);
     const config = JSON.parse(stripJsonComments(readFileSync(join(h.root, DEPLOY_CONFIG), "utf8")));
     expect(config.name).toBe("tours");
@@ -199,7 +221,7 @@ describe("setup:cloudflare again", () => {
   it("reuses a database and buckets that already exist", async () => {
     const account = fakeAccount({ databases: [{ name: "demo-platform", uuid: DB_ID }], buckets: ["demo-platform-drafts"] });
     const h = harness(account);
-    expect(await h.run("--yes")).toBe(0);
+    expect(await h.run("--yes", "--adopt-existing")).toBe(0);
     const c = changing(h.calls);
     expect(c).not.toContain("d1 create demo-platform");
     expect(c).not.toContain("r2 bucket create demo-platform-drafts");
@@ -212,7 +234,7 @@ describe("setup:cloudflare again", () => {
     const first = harness(account);
     expect(await first.run("--yes")).toBe(0);
     const second = harness(account, { root: first.root });
-    expect(await second.run("--yes", "--domain", "tours.example.com")).toBe(0);
+    expect(await second.run("--yes", "--domain", "tours.example.com", "--replace-existing-domain")).toBe(0);
     expect(changing(second.calls)).toEqual([`deploy --config ${DEPLOY_CONFIG}`]);
     expect(readInstall(first.root)).toEqual({ name: "demo-platform", domain: "tours.example.com", databaseId: DB_ID, publicImageBase: "" });
     expect(text(second.out)).toContain("change the server address in Mythicshot to https://tours.example.com");
@@ -333,7 +355,7 @@ describe("a run that stops half-way", () => {
       expect(account.databases).toHaveLength(1);
       expect(account.buckets.sort()).toEqual(["demo-platform-drafts", "demo-platform-public"]);
       expect(account.pendingMigrations).toBe(false);
-      expect(account.workers.has("demo")).toBe(true);
+      expect(account.workers.has("demo-platform")).toBe(true);
       expect(account.secrets.get("SETUP_CODE")).toBe(codeIn(second.out));
       expect(shown(second.calls)).not.toContain("d1 create demo-platform");
     });
@@ -395,7 +417,7 @@ describe("answers are checked", () => {
   });
 
   it("asks again after a bad domain, and stops with the message on a bad --domain", async () => {
-    const asked = harness(fakeAccount(), { answers: ["", "2", "https://tours.example.com/", "tours.example.com", "y", ""] });
+    const asked = harness(fakeAccount(), { answers: ["", "2", "https://tours.example.com/", "tours.example.com", "y", "tours.example.com", ""] });
     expect(await asked.run()).toBe(0);
     expect(text(asked.err)).toContain("without https:// in front");
     expect(readInstall(asked.root)!.domain).toBe("tours.example.com");
@@ -471,4 +493,176 @@ describe("Wrangler's errors", () => {
     expect(await h.run("--yes")).toBe(1);
     expect(changing(h.calls)).toEqual([]);
   });
+});
+
+/** Calls that create, attach, deploy or store something: none may happen before a gate is passed. */
+const noChange = (calls: Call[]) => expect(changing(calls)).toEqual([]);
+
+describe("a new own address (it replaces what that hostname has)", () => {
+  it("stops with --yes alone, before anything is created or deployed", async () => {
+    const h = harness(fakeAccount());
+    expect(await h.run("--yes", "--domain", "www.example.com")).toBe(1);
+    expect(text(h.out)).toMatch(/WILL be pointed at this platform/);
+    expect(text(h.err)).toContain("--replace-existing-domain; --yes is not enough");
+    noChange(h.calls);
+    expect(readdirSync(h.root)).not.toContain(DEPLOY_CONFIG);
+  });
+
+  it("stops without a terminal, and when the hostname typed at the prompt does not match", async () => {
+    const none = harness(fakeAccount(), { tty: false });
+    expect(await none.run("--domain", "www.example.com")).toBe(1);
+    noChange(none.calls);
+    const typo = harness(fakeAccount(), { answers: ["", "www.exampel.com"] });
+    expect(await typo.run("--domain", "www.example.com")).toBe(1);
+    noChange(typo.calls);
+  });
+
+  it("goes on with --replace-existing-domain, or with the hostname typed", async () => {
+    const flag = harness(fakeAccount());
+    expect(await flag.run("--yes", "--domain", "www.example.com", "--replace-existing-domain")).toBe(0);
+    expect(readInstall(flag.root)!.domain).toBe("www.example.com");
+    const typed = harness(fakeAccount(), { answers: ["", "www.example.com", ""] });
+    expect(await typed.run("--domain", "www.example.com")).toBe(0);
+  });
+
+  it("asks again when the address changes, but not on a re-run with the same address", async () => {
+    const account = fakeAccount();
+    const first = harness(account);
+    expect(await first.run("--yes", "--domain", "tours.example.com", "--replace-existing-domain")).toBe(0);
+    const same = harness(account, { root: first.root });
+    expect(await same.run("--yes")).toBe(0);
+    const other = harness(account, { root: first.root });
+    expect(await other.run("--yes", "--domain", "www.example.com")).toBe(1);
+    noChange(other.calls);
+    expect(readInstall(first.root)!.domain).toBe("tours.example.com");
+  });
+
+  it("a dry run says the flag would be needed and changes nothing", async () => {
+    const h = harness(fakeAccount());
+    expect(await h.run("--dry-run", "--domain", "www.example.com")).toBe(0);
+    expect(text(h.out)).toContain("A real run would need --replace-existing-domain");
+    noChange(h.calls);
+  });
+});
+
+describe("a domain that cannot be attached", () => {
+  it("is taken out of the settings again, so the next run completes, and says what to do", async () => {
+    const account = fakeAccount({ unattachable: new Set(["tours.example.com"]) });
+    const first = harness(account);
+    expect(await first.run("--yes", "--domain", "tours.example.com", "--replace-existing-domain")).toBe(1);
+    const err = text(first.err);
+    expect(err).toContain("npm run setup:cloudflare -- --no-domain");
+    expect(err).toContain("taken out of wrangler.deploy.jsonc again");
+    expect(readInstall(first.root)!.domain).toBeNull();
+    expect(account.secrets.has("SETUP_CODE")).toBe(false);
+    const again = harness(account, { root: first.root });
+    expect(await again.run("--yes")).toBe(0);
+    expect(account.secrets.get("SETUP_CODE")).toBe(codeIn(again.out));
+  });
+});
+
+describe("same-named things in a checkout that has not installed before", () => {
+  const cases: [string, Partial<Account>][] = [
+    ["a database", { databases: [{ name: "demo-platform", uuid: DB_ID }] }],
+    ["a bucket", { buckets: ["demo-platform-public"] }],
+    ["a Worker", { workers: new Set(["demo-platform"]) }],
+  ];
+  for (const [what, over] of cases) {
+    it(`${what}: lists it and stops with --yes alone, before any change`, async () => {
+      const h = harness(fakeAccount(over));
+      expect(await h.run("--yes")).toBe(1);
+      expect(text(h.out)).toContain("already exist on this account, but this checkout has not set them up");
+      expect(text(h.err)).toContain("--adopt-existing; --yes is not enough");
+      noChange(h.calls);
+      expect(readdirSync(h.root)).not.toContain(DEPLOY_CONFIG);
+    });
+  }
+
+  it("a second checkout with the default name cannot take over the first install", async () => {
+    const account = fakeAccount();
+    const first = harness(account);
+    expect(await first.run("--yes")).toBe(0);
+    const second = harness(account); // a fresh checkout
+    expect(await second.run("--yes")).toBe(1);
+    noChange(second.calls);
+    const named = harness(account);
+    expect(await named.run("--yes", "--name", "tours-two")).toBe(0);
+  });
+
+  it("goes on with the name typed, and keeps the code the Worker has", async () => {
+    const account = fakeAccount({ workers: new Set(["demo-platform"]), secrets: new Map([["SETUP_CODE", "old"]]) });
+    const h = harness(account, { answers: ["", "", "demo-platform", ""] });
+    expect(await h.run()).toBe(0);
+    expect(account.secrets.get("SETUP_CODE")).toBe("old");
+    expect(codeIn(h.out)).toBeNull();
+  });
+});
+
+describe("the account", () => {
+  it("is named in the plan, with no email address or account id", async () => {
+    const h = harness(fakeAccount());
+    expect(await h.run("--yes")).toBe(0);
+    const out = text(h.out);
+    expect(out).toContain("Account: (email hidden)'s Account");
+    expect(out).not.toContain("owner@example.com");
+    expect(out).not.toContain("0123456789abcdef0123456789abcdef");
+  });
+
+  it("with several accounts, stops before anything else and explains CLOUDFLARE_ACCOUNT_ID", async () => {
+    const accounts = [
+      { id: "a".repeat(32), name: "Acme Tours" },
+      { id: "b".repeat(32), name: "Side project" },
+    ];
+    const h = harness(fakeAccount({ accounts }));
+    expect(await h.run("--yes")).toBe(1);
+    expect(text(h.err)).toContain("CLOUDFLARE_ACCOUNT_ID");
+    expect(text(h.err)).toContain("Side project");
+    expect(shown(h.calls)).toEqual(["whoami --json"]);
+    const chosen = harness(fakeAccount({ accounts }), { env: { CLOUDFLARE_ACCOUNT_ID: "b".repeat(32) } });
+    expect(await chosen.run("--yes")).toBe(0);
+    expect(text(chosen.out)).toContain("Account: Side project");
+    const wrong = harness(fakeAccount({ accounts }), { env: { CLOUDFLARE_ACCOUNT_ID: "c".repeat(32) } });
+    expect(await wrong.run("--yes")).toBe(1);
+    expect(shown(wrong.calls)).toEqual(["whoami --json"]);
+  });
+});
+
+describe("--new-setup-code on an install that had a code", () => {
+  it("says the code does nothing if setup was already finished", async () => {
+    const account = fakeAccount();
+    const first = harness(account);
+    expect(await first.run("--yes")).toBe(0);
+    expect(text(first.out)).toContain("Open the setup wizard and enter this setup code");
+    const again = harness(account, { root: first.root });
+    expect(await again.run("--yes", "--new-setup-code")).toBe(0);
+    const out = text(again.out);
+    expect(out).not.toContain("Open the setup wizard and enter this setup code");
+    expect(out).toContain("If setup was already finished, the wizard stays closed and this code opens nothing");
+    expect(out).toContain("The token was lost");
+  });
+});
+
+describe("a hand-edited wrangler.deploy.jsonc", () => {
+  const cases: [string, string, string][] = [
+    ["a bad name", '"name": "demo-platform"', '"name": "Demo Platform"'],
+    ["a domain that is not a plain host name", '"pattern": "tours.example.com"', '"pattern": "https://tours.example.com/"'],
+    ["a domain in capitals", '"pattern": "tours.example.com"', '"pattern": "Tours.example.com"'],
+  ];
+  for (const [label, from, to] of cases) {
+    it(`with ${label} stops every mode before any change`, async () => {
+      const account = fakeAccount();
+      const first = harness(account);
+      expect(await first.run("--yes", "--domain", "tours.example.com", "--replace-existing-domain")).toBe(0);
+      const path = join(first.root, DEPLOY_CONFIG);
+      const before = readFileSync(path, "utf8");
+      expect(before).toContain(from);
+      writeFileSync(path, before.replace(from, to));
+      for (const argv of [["--yes"], ["update", "--yes"], ["status"]]) {
+        const h = harness(account, { root: first.root });
+        expect(await h.run(...argv), argv.join(" ")).toBe(1);
+        expect(text(h.err)).toContain(DEPLOY_CONFIG);
+        noChange(h.calls);
+      }
+    });
+  }
 });

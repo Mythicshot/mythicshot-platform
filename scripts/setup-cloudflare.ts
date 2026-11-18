@@ -2,19 +2,27 @@
 //
 //   npm run setup:cloudflare -- [setup|status|update] [--dry-run] [--yes]
 //                               [--name <name>] [--domain <host> | --no-domain]
+//                               [--replace-existing-domain] [--adopt-existing]
 //                               [--new-setup-code] [--help]
 //
-// setup (the default) checks Node and Wrangler, checks Wrangler is signed in, asks for a
-// name and an address, then creates the D1 database and the two R2 buckets if they do
-// not exist, writes wrangler.deploy.jsonc (this install's Wrangler configuration, built
-// from wrangler.jsonc and ignored by Git), applies the migrations to the remote
-// database, deploys, stores a generated setup code as the SETUP_CODE secret and prints
-// the setup wizard's address and the code once. status only reads. update applies new
-// migrations, then deploys.
+// setup (the default) checks Node and Wrangler, checks Wrangler is signed in to exactly
+// one account, asks for a name and an address, then creates the D1 database and the two
+// R2 buckets if they do not exist, writes wrangler.deploy.jsonc (this install's Wrangler
+// configuration, built from wrangler.jsonc and ignored by Git), applies the migrations
+// to the remote database, deploys, stores a generated setup code as the SETUP_CODE
+// secret and prints the setup wizard's address and the code once. status only reads.
+// update applies new migrations, then deploys.
 //
 // Safety rules this script keeps:
-// - It never deletes anything, and never recreates a database or bucket that exists:
-//   it looks first and reuses what it finds, saying so.
+// - It never deletes a database, bucket, Worker or secret, and never recreates one that
+//   exists: it looks first and reuses what it finds, saying so.
+// - In a checkout that has not installed before, a database, bucket or Worker that
+//   already has the chosen name is only taken over with --adopt-existing (or the name
+//   typed at the prompt); --yes is not enough. Otherwise it stops before any change.
+// - Attaching a new own address replaces whatever DNS record or Worker domain that
+//   hostname has: Wrangler run without a terminal overrides both without asking. So a
+//   new hostname is only attached with --replace-existing-domain (or the hostname typed
+//   at the prompt); --yes is not enough. Otherwise it stops before any change.
 // - The setup code is generated here from node:crypto, handed to Wrangler on standard
 //   input (never as an argument, so it never shows in the process list), never written
 //   to a file and printed once, at the end of the run that stored it. A code that is
@@ -33,9 +41,11 @@ import { fileURLToPath } from "node:url";
 /** The modes this command has. test/docs.test.ts reads these lists from this file's text. */
 export const COMMANDS = ["setup", "status", "update"];
 /** The options this command takes. */
-export const FLAGS = ["--dry-run", "--yes", "--name", "--domain", "--no-domain", "--new-setup-code", "--help"];
+export const FLAGS = ["--dry-run", "--yes", "--name", "--domain", "--no-domain", "--replace-existing-domain", "--adopt-existing", "--new-setup-code", "--help"];
 /** The options that take a value, as the next word. */
 const VALUE_FLAGS = ["--name", "--domain"];
+/** The options only setup takes. */
+const SETUP_ONLY = ["--name", "--domain", "--no-domain", "--replace-existing-domain", "--adopt-existing", "--new-setup-code"];
 
 /** This install's Wrangler configuration, written by this script and ignored by Git. */
 export const DEPLOY_CONFIG = "wrangler.deploy.jsonc";
@@ -63,6 +73,8 @@ export type Io = {
   /** True when Wrangler is installed in the checkout (npm ci has run). */
   hasWrangler: () => boolean;
   nodeVersion: string;
+  /** The environment; only CLOUDFLARE_ACCOUNT_ID is read, which Wrangler also reads. */
+  env: Record<string, string | undefined>;
   /** Asks one question and returns the answer; null when nobody can answer (no terminal). */
   ask: ((question: string) => Promise<string>) | null;
   out: (line: string) => void;
@@ -76,6 +88,8 @@ export type Options = {
   dryRun: boolean;
   yes: boolean;
   newSetupCode: boolean;
+  replaceExistingDomain: boolean;
+  adoptExisting: boolean;
   help: boolean;
   name?: string;
   domain?: string;
@@ -85,13 +99,15 @@ export type Options = {
 class Stop extends Error {}
 
 export function parseArgs(argv: string[]): Options | { error: string } {
-  const o: Options = { command: "setup", dryRun: false, yes: false, newSetupCode: false, help: false, noDomain: false };
+  const o: Options = { command: "setup", dryRun: false, yes: false, newSetupCode: false, replaceExistingDomain: false, adoptExisting: false, help: false, noDomain: false };
+  const seen: string[] = [];
   let commandSeen = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("-")) {
       const [flag, inline] = a.includes("=") ? [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)] : [a, undefined];
       if (!FLAGS.includes(flag)) return { error: `Unknown option ${flag}. Run with --help to see the options.` };
+      seen.push(flag);
       if (VALUE_FLAGS.includes(flag)) {
         const v = inline ?? argv[++i];
         if (v === undefined || v === "") return { error: `${flag} needs a value, such as ${flag === "--name" ? "--name demo-platform" : "--domain tours.example.com"}.` };
@@ -102,6 +118,8 @@ export function parseArgs(argv: string[]): Options | { error: string } {
       } else if (flag === "--dry-run") o.dryRun = true;
       else if (flag === "--yes") o.yes = true;
       else if (flag === "--no-domain") o.noDomain = true;
+      else if (flag === "--replace-existing-domain") o.replaceExistingDomain = true;
+      else if (flag === "--adopt-existing") o.adoptExisting = true;
       else if (flag === "--new-setup-code") o.newSetupCode = true;
       else if (flag === "--help") o.help = true;
     } else {
@@ -112,9 +130,8 @@ export function parseArgs(argv: string[]): Options | { error: string } {
     }
   }
   if (o.domain !== undefined && o.noDomain) return { error: "--domain and --no-domain cannot be used together." };
-  if (o.command !== "setup" && (o.name !== undefined || o.domain !== undefined || o.noDomain || o.newSetupCode)) {
-    return { error: `--name, --domain, --no-domain and --new-setup-code belong to setup, not ${o.command}.` };
-  }
+  const misplaced = seen.filter((f) => SETUP_ONLY.includes(f));
+  if (o.command !== "setup" && misplaced.length > 0) return { error: `${misplaced.join(", ")} belong${misplaced.length === 1 ? "s" : ""} to setup, not ${o.command}.` };
   return o;
 }
 
@@ -176,19 +193,46 @@ type Json = Record<string, any>;
 /** What this script records about an install: everything is in wrangler.deploy.jsonc. */
 export type Install = { name: string; domain: string | null; databaseId: string | null; publicImageBase: string };
 
+/** A wrangler.deploy.jsonc this script cannot use as it stands. */
+export class InstallConfigError extends Error {}
+
 function readJsonc(path: string): Json {
   return JSON.parse(stripJsonComments(readFileSync(path, "utf8"))) as Json;
 }
 
+/**
+ * The install recorded in wrangler.deploy.jsonc, or null when there is none. The name and
+ * address are checked with the same rules as the options, since the file can be edited
+ * by hand; a bad value throws InstallConfigError.
+ */
 export function readInstall(root: string): Install | null {
   const path = join(root, DEPLOY_CONFIG);
   if (!existsSync(path)) return null;
-  const c = readJsonc(path);
-  const route = Array.isArray(c.routes) ? c.routes.find((r: Json) => r && r.custom_domain === true) : undefined;
+  let c: Json;
+  try {
+    c = readJsonc(path);
+  } catch {
+    throw new InstallConfigError(`${DEPLOY_CONFIG} is not valid JSON with comments. Fix it by hand, or move it aside and run setup again.`);
+  }
+  const name = typeof c.name === "string" ? c.name : "";
+  const nameError = checkName(name);
+  if (nameError !== null) throw new InstallConfigError(`${DEPLOY_CONFIG} names the install "${name}": ${nameError}`);
+  const routes: Json[] = Array.isArray(c.routes) ? c.routes : [];
+  const domains = routes.filter((r) => r && r.custom_domain === true);
+  if (routes.length !== domains.length || domains.length > 1) {
+    throw new InstallConfigError(`${DEPLOY_CONFIG} has routes this command did not write; it handles one custom domain only. Fix "routes" by hand.`);
+  }
+  let domain: string | null = null;
+  if (domains.length === 1) {
+    const checked = checkDomain(String(domains[0].pattern ?? ""));
+    if ("error" in checked) throw new InstallConfigError(`${DEPLOY_CONFIG} has the address "${String(domains[0].pattern)}": ${checked.error}`);
+    if (checked.host !== domains[0].pattern) throw new InstallConfigError(`${DEPLOY_CONFIG} has the address "${String(domains[0].pattern)}": write it as ${checked.host}.`);
+    domain = checked.host;
+  }
   const id = c.d1_databases?.[0]?.database_id;
   return {
-    name: String(c.name),
-    domain: route ? String(route.pattern) : null,
+    name,
+    domain,
     databaseId: typeof id === "string" && !/^0{8}-/.test(id) ? id : null,
     publicImageBase: typeof c.vars?.PUBLIC_IMAGE_BASE === "string" ? c.vars.PUBLIC_IMAGE_BASE : "",
   };
@@ -257,8 +301,8 @@ async function read(io: Io, args: string[], what: string): Promise<string> {
   return r.stdout;
 }
 
-/** A changing call: printed instead in a dry run. Throws Stop when it fails. */
-async function change(io: Io, o: Options, args: string[], what: string, input?: string): Promise<string> {
+/** A changing call: printed instead in a dry run. Returns its output, or throws Stop (after `onFail`) when it fails. */
+async function change(io: Io, o: Options, args: string[], what: string, input?: string, onFail?: () => void): Promise<string> {
   if (o.dryRun) {
     info(io, `would run: ${shown(args)}${input === undefined ? "" : "   (the value goes on standard input and is not shown)"}`);
     return "";
@@ -268,7 +312,8 @@ async function change(io: Io, o: Options, args: string[], what: string, input?: 
   if (r.code !== 0) {
     io.err(`ERROR: could not ${what}.`);
     for (const l of wranglerError(r)) io.err(`    ${l}`);
-    io.err("    Everything done before this step is kept. Fix the cause and run the same command again: it picks up where it stopped.");
+    if (onFail) onFail();
+    else io.err("    Everything done before this step is kept. Fix the cause and run the same command again: it picks up where it stopped.");
     throw new Stop();
   }
   return r.stdout;
@@ -289,26 +334,62 @@ function checkPrerequisites(io: Io): void {
   info(io, "Wrangler: installed");
 }
 
-/** True when signed in. When not, a real run stops with what to run; a dry run goes on. */
-async function checkSignedIn(io: Io, o: Options): Promise<boolean> {
+/** An account name with any email address in it hidden: the default name is "<email>'s Account". */
+export function accountLabel(name: string): string {
+  return name.replace(/[^\s@'"]+@[^\s@'"]+/g, "(email hidden)");
+}
+
+/**
+ * The name of the one account the run acts on, or null in a dry run that is not signed
+ * in. A real run that is not signed in, or that sees several accounts without
+ * CLOUDFLARE_ACCOUNT_ID naming one of them, stops with what to do.
+ */
+async function checkSignedIn(io: Io, o: Options): Promise<string | null> {
   say(io, "Checking that Wrangler is signed in to Cloudflare");
   const r = await io.wrangler(["whoami", "--json"]);
-  if (r.code === 0) {
-    info(io, "Signed in.");
-    return true;
+  let who: Json | null = null;
+  try {
+    const start = r.stdout.indexOf("{");
+    who = start >= 0 ? (JSON.parse(r.stdout.slice(start)) as Json) : null;
+  } catch {
+    who = null;
   }
-  if (o.dryRun) {
-    info(io, "Not signed in. A real run would stop here; this dry run goes on as if the account were empty.");
-    return false;
+  if (r.code !== 0 || !who || who.loggedIn === false) {
+    if (o.dryRun) {
+      info(io, "Not signed in. A real run would stop here; this dry run goes on as if the account were empty.");
+      return null;
+    }
+    io.err("ERROR: Wrangler is not signed in to Cloudflare, so nothing was done.");
+    io.err("    Run this, sign in in the browser window it opens, then run this command again:");
+    io.err("");
+    io.err("        npx wrangler login");
+    io.err("");
+    io.err("    On a computer without a browser, use `npx wrangler login --device` and open the address it prints on another device.");
+    io.err("    No Cloudflare account yet? Create one first; the Free plan is enough to start.");
+    throw new Stop();
   }
-  io.err("ERROR: Wrangler is not signed in to Cloudflare, so nothing was done.");
-  io.err("    Run this, sign in in the browser window it opens, then run this command again:");
-  io.err("");
-  io.err("        npx wrangler login");
-  io.err("");
-  io.err("    On a computer without a browser, use `npx wrangler login --device` and open the address it prints on another device.");
-  io.err("    No Cloudflare account yet? Create one first; the Free plan is enough to start.");
-  throw new Stop();
+  const accounts: Json[] = Array.isArray(who.accounts) ? who.accounts : [];
+  const chosen = io.env.CLOUDFLARE_ACCOUNT_ID;
+  let account: Json | undefined;
+  if (chosen) {
+    account = accounts.find((a) => a && a.id === chosen);
+    if (!account) {
+      io.err("ERROR: CLOUDFLARE_ACCOUNT_ID names an account this login cannot use, so nothing was done. Check the id in the dashboard, or unset it.");
+      throw new Stop();
+    }
+  } else if (accounts.length === 1) {
+    account = accounts[0];
+  } else {
+    io.err(`ERROR: this login can use ${accounts.length === 0 ? "no account" : `${accounts.length} accounts`}, so nothing was done.`);
+    if (accounts.length > 1) {
+      io.err("    Choose one by setting CLOUDFLARE_ACCOUNT_ID to its id (shown on the account's overview page in the dashboard) for this command, then run it again. These are the accounts:");
+      for (const a of accounts) io.err(`      - ${accountLabel(String(a?.name ?? "(no name)"))}`);
+    }
+    throw new Stop();
+  }
+  const label = accountLabel(String(account?.name ?? "(no name)"));
+  info(io, `Signed in. Account: ${label}`);
+  return label;
 }
 
 async function askLine(io: Io, o: Options, question: string, fallback: string): Promise<string> {
@@ -327,7 +408,30 @@ async function askYesNo(io: Io, o: Options, question: string, fallback: boolean)
   }
 }
 
-/** Asks until the answer passes `check`; without a terminal, the first refusal stops. */
+/**
+ * A confirmation that --yes does not give: the flag, or the exact word typed at the
+ * prompt. Without either it stops; nothing has been changed when it is called.
+ */
+async function confirmStrongly(io: Io, o: Options, flagGiven: boolean, flag: string, word: string): Promise<void> {
+  if (o.dryRun) {
+    info(io, `A real run would need ${flag}, or ${word} typed at the prompt, to go on.`);
+    return;
+  }
+  if (flagGiven) {
+    info(io, `${flag} given: going on.`);
+    return;
+  }
+  if (o.yes || io.ask === null) {
+    io.err(`ERROR: this needs ${flag}; --yes is not enough. Nothing was changed.`);
+    throw new Stop();
+  }
+  const typed = (await io.ask(`    Type ${word} to go on, or press Enter to stop: `)).trim().toLowerCase();
+  if (typed !== word) {
+    io.err("Stopped. Nothing was changed.");
+    throw new Stop();
+  }
+}
+
 type Checked = { ok: string } | { error: string };
 
 async function askValid(io: Io, o: Options, question: string, fallback: string, check: (s: string) => Checked): Promise<string> {
@@ -370,7 +474,7 @@ async function decide(io: Io, o: Options, existing: Install | null): Promise<{ n
     name = await askValid(io, o, `    Name for this install, used for the Worker, the database and the buckets [${DEFAULT_NAME}]: `, DEFAULT_NAME, nameCheck);
   }
   if (existing && name !== existing.name) {
-    io.err(`ERROR: this checkout is already set up as ${existing.name}. To set up a second install, use a separate checkout of the repository.`);
+    io.err(`ERROR: this checkout is already set up as ${existing.name}. To set up a second install, use a separate checkout of the repository with a different --name.`);
     throw new Stop();
   }
 
@@ -410,21 +514,46 @@ async function decide(io: Io, o: Options, existing: Install | null): Promise<{ n
   return { name, domain: host };
 }
 
-type Found = { databaseId: string | null; drafts: boolean; pub: boolean };
+/** What a Worker of this name has on the account: null when there is no such Worker. */
+type WorkerFound = { setupCode: boolean } | null;
+type Found = { databaseId: string | null; drafts: boolean; pub: boolean; worker: WorkerFound };
+
+/** Whether a Worker of this name exists and has SETUP_CODE, from `secret list --name`. Stops when that cannot be told. */
+async function findWorker(io: Io, name: string): Promise<WorkerFound> {
+  const args = ["secret", "list", "--name", name];
+  const r = await io.wrangler(args);
+  if (r.code !== 0) {
+    if (/Worker "[^"]*"(?: \(env: [^)]*\))? not found\./.test(r.stderr + r.stdout)) return null;
+    io.err(`ERROR: could not tell whether a Worker named ${name} exists (${shown(args)} failed).`);
+    for (const l of wranglerError(r)) io.err(`    ${l}`);
+    io.err("    Nothing was changed by this step. Fix the cause and run the same command again.");
+    throw new Stop();
+  }
+  const start = r.stdout.indexOf("[");
+  try {
+    const list = start < 0 ? [] : (JSON.parse(r.stdout.slice(start)) as Json[]);
+    return { setupCode: list.some((s) => s && s.name === "SETUP_CODE") };
+  } catch {
+    io.err(`ERROR: could not read the secrets list of the Worker ${name}. Nothing was changed. Run the same command again.`);
+    throw new Stop();
+  }
+}
 
 async function lookUp(io: Io, name: string, signedIn: boolean): Promise<Found> {
   say(io, "Looking for what already exists on the account");
   if (!signedIn) {
     info(io, "Skipped: not signed in.");
-    return { databaseId: null, drafts: false, pub: false };
+    return { databaseId: null, drafts: false, pub: false, worker: null };
   }
   const databaseId = findDatabase(await read(io, ["d1", "list", "--json"], "list the D1 databases"), name);
   const buckets = listBuckets(await read(io, ["r2", "bucket", "list"], "list the R2 buckets"));
+  const worker = await findWorker(io, name);
   const b = bucketNames(name);
-  const found = { databaseId, drafts: buckets.has(b.drafts), pub: buckets.has(b.pub) };
+  const found = { databaseId, drafts: buckets.has(b.drafts), pub: buckets.has(b.pub), worker };
   info(io, `Database ${name}: ${found.databaseId ? "exists" : "not there yet"}`);
   info(io, `Bucket ${b.drafts}: ${found.drafts ? "exists" : "not there yet"}`);
   info(io, `Bucket ${b.pub}: ${found.pub ? "exists" : "not there yet"}`);
+  info(io, `Worker ${name}: ${found.worker ? "exists" : "not there yet"}`);
   return found;
 }
 
@@ -441,25 +570,12 @@ export function listBuckets(listText: string): Set<string> {
   return new Set([...listText.matchAll(/^name:\s+(\S+)\s*$/gm)].map((m) => m[1]));
 }
 
-/** True when SETUP_CODE is set on the Worker; null when that cannot be told (no Worker yet). */
-async function secretSet(io: Io): Promise<boolean | null> {
-  const r = await io.wrangler(["secret", "list", "--config", DEPLOY_CONFIG]);
-  if (r.code !== 0) return null;
-  const start = r.stdout.indexOf("[");
-  if (start < 0) return null;
-  try {
-    return (JSON.parse(r.stdout.slice(start)) as Json[]).some((s) => s && s.name === "SETUP_CODE");
-  } catch {
-    return null;
-  }
-}
-
 /** Writes the deploy config if its text changed; true when it changed (or would, in a dry run). */
-function writeConfig(io: Io, o: Options, text: string): boolean {
+function writeConfig(io: Io, o: Options, text: string, quiet = false): boolean {
   const path = join(io.root, DEPLOY_CONFIG);
   const before = existsSync(path) ? readFileSync(path, "utf8") : null;
   if (before === text) {
-    info(io, `${DEPLOY_CONFIG} is already up to date: skipped`);
+    if (!quiet) info(io, `${DEPLOY_CONFIG} is already up to date: skipped`);
     return false;
   }
   if (o.dryRun) {
@@ -492,13 +608,41 @@ function workersDevAddress(deployOutput: string): string | null {
 
 async function setup(io: Io, o: Options): Promise<void> {
   checkPrerequisites(io);
-  const signedIn = await checkSignedIn(io, o);
+  const account = await checkSignedIn(io, o);
+  const signedIn = account !== null;
   const existing = readInstall(io.root);
   const { name, domain } = await decide(io, o, existing);
   const found = await lookUp(io, name, signedIn);
   const b = bucketNames(name);
 
+  // Gate 1: same-named resources in a checkout that has not installed before.
+  if (!existing) {
+    const there = [
+      found.databaseId ? `the database ${name}` : null,
+      found.drafts ? `the bucket ${b.drafts}` : null,
+      found.pub ? `the bucket ${b.pub}` : null,
+      found.worker ? `the Worker ${name}` : null,
+    ].filter((s): s is string => s !== null);
+    if (there.length > 0) {
+      say(io, `Things named ${name} already exist on this account, but this checkout has not set them up`);
+      info(io, `Found: ${there.join(", ")}.`);
+      info(io, "Going on takes them over: this install would use that database and those buckets, and the deploy would replace that Worker's code.");
+      info(io, "If they belong to another install, stop and choose another name with --name. If they are this install's (set up from another copy of the repository, or by a run here that stopped before saving its settings), go on.");
+      await confirmStrongly(io, o, o.adoptExisting, "--adopt-existing", name);
+    }
+  }
+
+  // Gate 2: a new own address replaces what that hostname has today.
+  const newDomain = domain !== null && domain !== (existing?.domain ?? null);
+  if (newDomain) {
+    say(io, `Attaching ${domain} replaces what that address has today`);
+    info(io, `If ${domain} already has a DNS record (a website, mail service or anything else) or is the custom domain of another Worker, it WILL be pointed at this platform instead, without a further question: Wrangler does that when it runs without a terminal.`);
+    info(io, "This command cannot look the hostname up beforehand. Check the domain's DNS records in the Cloudflare dashboard first.");
+    await confirmStrongly(io, o, o.replaceExistingDomain, "--replace-existing-domain", domain);
+  }
+
   say(io, o.dryRun ? "Dry run: nothing below is changed, every changing command is printed instead" : "Here is what happens next");
+  info(io, `Account: ${account ?? "(not signed in)"}`);
   info(io, `Database ${name}: ${found.databaseId ? "reuse the one that exists" : "create"}`);
   info(io, `Buckets ${b.drafts} and ${b.pub}: ${found.drafts && found.pub ? "reuse the ones that exist" : "create what is missing"} (neither gets public access)`);
   info(io, `Address: ${domain ? `https://${domain} (attached as a custom domain), plus the free workers.dev address` : "the free workers.dev address"}`);
@@ -527,12 +671,8 @@ async function setup(io: Io, o: Options): Promise<void> {
     }
   }
 
-  for (const [bucket, exists] of [[b.drafts, found.drafts], [b.pub, found.pub]] as const) {
-    say(io, `Bucket ${bucket}`);
-    if (exists) info(io, "Already exists: reused, not recreated");
-    else await change(io, o, ["r2", "bucket", "create", bucket], `create the bucket ${bucket}`);
-  }
-
+  // Written as soon as the database id is known, so a run that stops later is this
+  // checkout's install on the next run, not something to adopt.
   say(io, `Writing this install's settings to ${DEPLOY_CONFIG}`);
   const install = {
     name,
@@ -541,15 +681,33 @@ async function setup(io: Io, o: Options): Promise<void> {
     publicImageBase: existing?.publicImageBase ?? "",
   };
   const configChanged = writeConfig(io, o, deployConfigText(io.root, install));
+  for (const [bucket, exists] of [[b.drafts, found.drafts], [b.pub, found.pub]] as const) {
+    say(io, `Bucket ${bucket}`);
+    if (exists) info(io, "Already exists: reused, not recreated");
+    else await change(io, o, ["r2", "bucket", "create", bucket], `create the bucket ${bucket}`);
+  }
+
   const canRead = signedIn && !o.dryRun ? true : signedIn && existsSync(join(io.root, DEPLOY_CONFIG)) && found.databaseId !== null;
 
   const migrated = await migrate(io, o, name, canRead);
 
-  const codeBefore = canRead ? await secretSet(io) : null;
+  const codeBefore = found.worker?.setupCode ?? false;
   say(io, "Deploying the Worker");
   let deployOutput = "";
-  if (configChanged || migrated || codeBefore !== true) {
-    deployOutput = await change(io, o, ["deploy", "--config", DEPLOY_CONFIG], "deploy the Worker");
+  if (configChanged || migrated || !found.worker || !codeBefore) {
+    // A new address that cannot be attached (most often: its domain is not an active zone
+    // on this account) must not stay in the settings, or every later run would stop here
+    // again before the setup code. Put the previous address back and say what to do.
+    const onFail = newDomain
+      ? () => {
+          writeConfig(io, { ...o, dryRun: false }, deployConfigText(io.root, { ...install, domain: existing?.domain ?? null }), true);
+          io.err(`    The address ${domain} was taken out of ${DEPLOY_CONFIG} again, so running again does not repeat this failure.`);
+          io.err("    The most common cause is a domain that is not an active zone on this Cloudflare account. Then either:");
+          io.err("      - set up on the free address now: npm run setup:cloudflare -- --no-domain");
+          io.err(`      - or, once the domain is active on this account: npm run setup:cloudflare -- --domain ${domain} --replace-existing-domain`);
+        }
+      : undefined;
+    deployOutput = await change(io, o, ["deploy", "--config", DEPLOY_CONFIG], "deploy the Worker", undefined, onFail);
     if (domain && !o.dryRun) info(io, "The certificate for a new custom domain can take a few minutes after the first deploy.");
   } else {
     info(io, "Already deployed and nothing changed: skipped (use `npm run setup:cloudflare -- update` to deploy a new version)");
@@ -557,15 +715,10 @@ async function setup(io: Io, o: Options): Promise<void> {
 
   say(io, "The setup code");
   let code: string | null = null;
-  const codeNow = codeBefore ?? (o.dryRun ? null : await secretSet(io));
-  if (codeNow === null && !o.dryRun) {
-    io.err(`ERROR: could not tell whether the setup code is set (${shown(["secret", "list", "--config", DEPLOY_CONFIG])} failed). Nothing was generated. Run the same command again.`);
-    throw new Stop();
-  }
-  if (codeNow === true && !o.newSetupCode) {
+  if (codeBefore && !o.newSetupCode) {
     info(io, "Already set: kept, and not shown again. If it was lost before setup was finished, run this again with --new-setup-code.");
   } else {
-    if (codeNow === true) info(io, "--new-setup-code: replacing the code that is set; the old one stops working.");
+    if (codeBefore) info(io, "--new-setup-code: replacing the code that is set; the old one stops working.");
     const generated = Buffer.from(io.random()).toString("hex");
     if (!/^[0-9a-f]{32,}$/.test(generated)) throw new Error("the random source gave too few bytes");
     await change(io, o, ["secret", "put", "SETUP_CODE", "--config", DEPLOY_CONFIG], "store the setup code", generated);
@@ -578,13 +731,25 @@ async function setup(io: Io, o: Options): Promise<void> {
   if (address) info(io, `Address: ${address}`);
   else info(io, "Address: the workers.dev address Wrangler printed when it deployed, https://<name>.<your-account-subdomain>.workers.dev");
   info(io, `Setup wizard: ${address ?? "that address"}/setup`);
-  if (code !== null) {
+  // With no SETUP_CODE before this run, setup cannot have been finished on this Worker.
+  if (code !== null && !codeBefore) {
     io.out("");
     io.out("Open the setup wizard and enter this setup code. It is shown only this once and not saved");
     io.out("anywhere on this computer; keep it until you have finished the wizard:");
     io.out("");
     io.out(`  Setup code:  ${code}`);
     io.out("");
+  } else if (code !== null) {
+    // A code was set before, so setup may already have been finished, and this command
+    // cannot tell: the wizard closes for good once it is.
+    io.out("");
+    io.out("New setup code. It is shown only this once and not saved anywhere on this computer:");
+    io.out("");
+    io.out(`  Setup code:  ${code}`);
+    io.out("");
+    io.out("If setup has not been finished yet, open the setup wizard and enter it there; the old code no longer works.");
+    io.out("If setup was already finished, the wizard stays closed and this code opens nothing. It does not reset the");
+    io.out(`workspace or the API token. To start setup over after a lost token, see "The token was lost" in ${DOCS.runbook}.`);
   } else if (domain && existing && existing.domain !== domain) {
     info(io, `If setup was already finished, change the server address in Mythicshot to ${address}. Nothing else changes.`);
   }
@@ -597,9 +762,10 @@ async function status(io: Io, o: Options): Promise<void> {
     info(io, `This checkout is not set up yet (no ${DEPLOY_CONFIG}). Run: npm run setup:cloudflare`);
     return;
   }
-  await checkSignedIn(io, { ...o, dryRun: false });
+  const account = await checkSignedIn(io, { ...o, dryRun: false });
   const found = await lookUp(io, existing.name, true);
   say(io, "This install");
+  info(io, `Account: ${account}`);
   info(io, `Name: ${existing.name}`);
   info(io, `Address: ${existing.domain ? `https://${existing.domain} (custom domain), and the workers.dev address` : "the workers.dev address only, https://" + existing.name + ".<your-account-subdomain>.workers.dev"}`);
   info(io, `Database id in ${DEPLOY_CONFIG}: ${existing.databaseId ?? "none"}${found.databaseId && found.databaseId !== existing.databaseId ? ` (the account has ${found.databaseId}: run setup again)` : ""}`);
@@ -607,8 +773,7 @@ async function status(io: Io, o: Options): Promise<void> {
     const pending = await read(io, ["d1", "migrations", "list", existing.name, "--remote", "--config", DEPLOY_CONFIG], "list the migrations still to apply");
     info(io, `Migrations: ${/No migrations to apply/i.test(pending) ? "all applied" : "some still to apply (run update)"}`);
   }
-  const code = await secretSet(io);
-  info(io, `Setup code: ${code === true ? "set" : code === false ? "not set (run setup again)" : "unknown: the Worker may not be deployed yet"}`);
+  info(io, `Setup code: ${!found.worker ? "unknown: the Worker is not deployed yet (run setup again)" : found.worker.setupCode ? "set" : "not set (run setup again)"}`);
   info(io, `Published images: ${existing.publicImageBase ? existing.publicImageBase : "served by the app itself on /p/<name>"}`);
 }
 
@@ -619,7 +784,8 @@ async function update(io: Io, o: Options): Promise<void> {
     io.err(`ERROR: this checkout is not set up yet (no ${DEPLOY_CONFIG} with a database id). Run \`npm run setup:cloudflare\` first.`);
     throw new Stop();
   }
-  await checkSignedIn(io, { ...o, dryRun: false });
+  const account = await checkSignedIn(io, { ...o, dryRun: false });
+  info(io, `Updating ${existing.name} on the account ${account}`);
   say(io, `Refreshing ${DEPLOY_CONFIG} from wrangler.jsonc, keeping this install's names, id and address`);
   writeConfig(io, o, deployConfigText(io.root, { ...existing, databaseId: existing.databaseId }));
   await migrate(io, o, existing.name, true);
@@ -638,15 +804,18 @@ Modes:
   update    apply new migrations, then deploy the new version
 
 Options:
-  --dry-run          make only reading calls; print every changing command instead
-  --yes              take the defaults instead of asking
-  --name <name>      the install's name (default ${DEFAULT_NAME})
-  --domain <host>    your own address, such as tours.example.com, on a domain active on this account
-  --no-domain        use only the free workers.dev address
-  --new-setup-code   replace the setup code (when it was lost before setup was finished)
-  --help             show this
+  --dry-run                  make only reading calls; print every changing command instead
+  --yes                      take the defaults instead of asking
+  --name <name>              the install's name (default ${DEFAULT_NAME})
+  --domain <host>            your own address, such as tours.example.com, on a domain active on this account
+  --no-domain                use only the free workers.dev address
+  --replace-existing-domain  confirm that a new --domain may replace the DNS record or Worker domain it has today
+  --adopt-existing           confirm taking over a database, bucket or Worker that already has the name
+  --new-setup-code           replace the setup code (when it was lost before setup was finished)
+  --help                     show this
 
-It never deletes anything. See ${DOCS.runbook}.`;
+With several Cloudflare accounts, set CLOUDFLARE_ACCOUNT_ID to choose one.
+It never deletes a database, bucket, Worker or secret. See ${DOCS.runbook}.`;
 
 /** Runs the command; returns the exit code. */
 export async function main(argv: string[], io: Io): Promise<number> {
@@ -666,6 +835,10 @@ export async function main(argv: string[], io: Io): Promise<number> {
     return 0;
   } catch (e) {
     if (e instanceof Stop) return 1;
+    if (e instanceof InstallConfigError) {
+      io.err(`ERROR: ${e.message} Nothing was changed.`);
+      return 1;
+    }
     throw e;
   }
 }
@@ -708,6 +881,7 @@ if (process.argv[1] && resolve(fileURLToPath(import.meta.url)).toLowerCase() ===
     wrangler: realWrangler(root),
     hasWrangler: () => existsSync(join(root, "node_modules", "wrangler", "bin", "wrangler.js")),
     nodeVersion: process.version,
+    env: process.env,
     ask: rl ? (q) => new Promise((res) => rl.question(q, res)) : null,
     out: (l) => process.stdout.write(l + "\n"),
     err: (l) => process.stderr.write(l + "\n"),
