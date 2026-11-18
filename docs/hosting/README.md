@@ -1,0 +1,50 @@
+# Hosting guides
+
+> [!WARNING]
+> Draft: Not yet verified on a real account. These guides are written from each provider's documentation and from the code in this repository. Nothing in them has been run on a real account yet.
+
+> [!NOTE]
+> The software is not public yet. There is no published image and no public repository, so every guide starts from a copy of this repository from the owner. The server guides also need Docker on your own computer to build the image.
+
+You own a domain and have no hosting yet. Pick one row, then follow its guide from top to bottom. Every guide uses `tours.example.com` where your own address goes.
+
+Prices were checked 2026-11-17 on the pages each guide links. They are in US dollars, before tax, for the smallest setup that fits.
+
+## Choose a provider
+
+| Provider | Monthly cost | Effort | Best for |
+|---|---|---|---|
+| [DigitalOcean](digitalocean.md) | $6 | Medium: one server, SSH, one DNS record | A plain rented server with the fewest surprises |
+| [Akamai Cloud (Linode)](linode.md) | $5 | Medium: one server, SSH, one DNS record | The cheapest plain rented server of the four |
+| [AWS Lightsail](aws-lightsail.md) | $7 | Medium: as above, plus one firewall rule and a static address | You want it inside your own AWS account at a flat price |
+| [Azure virtual machine](azure.md) | About $13: the server, its disk and its address are billed separately | Medium to high: more choices in the portal, more lines on the bill | You want it inside your own Azure account |
+| [Fly.io](fly.md) | About $3.84, and Fly waives a personal bill under $5 | Low to medium: no server to look after, but everything is typed as commands | You do not want to patch a server |
+
+The two runbooks cover what the guides above build on:
+
+| Runbook | Use it when |
+|---|---|
+| [Docker on Debian](../runbook-docker.md) | You already have a Debian server, at any provider or at home. The four server guides above follow this runbook for the install itself. |
+| [Cloudflare](../runbook-cloudflare.md) | Your domain is on Cloudflare, or you are willing to move it there. No server and no disk. |
+
+## What every route has in common
+
+1. You get a copy of this repository from the owner.
+2. You create one hostname for the platform, such as `tours.example.com`, at the company that runs your domain's DNS.
+3. You open `https://tours.example.com/setup` once, enter the setup code, and copy the API token into Mythicshot.
+4. Backups kept somewhere else are yours to make. No route here makes them for you.
+
+> [!WARNING]
+> Every provider bills until you delete what you created, not until you stop it. Each guide ends with the steps to delete everything.
+
+## How the server guides differ
+
+| | DigitalOcean | Akamai Cloud | AWS Lightsail | Azure |
+|---|---|---|---|---|
+| Plan | Basic, 1 GiB | Nanode 1 GB | $7 Linux plan, 1 GB | B2ats v2, or B2pts v2 on Arm |
+| Debian image | 13 | 13 | 13 | 12 |
+| Login name | `root` | `root` | `admin` | the one you choose, such as `azureuser` |
+| Control-panel firewall | None unless you create one | None unless you choose one | Always on: opens 22 and 80 only | Always on: opens only what you tick |
+| What you must open | Nothing, or 80 and 443 if you add a firewall | Nothing, or 80 and 443 if you add a firewall | 443 | 80 and 443 |
+
+Each guide says where every row above comes from.
