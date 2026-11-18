@@ -23,6 +23,7 @@ import { newId, newSlug, requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
 import { LIMITS, parseManifest, type Manifest } from "./manifest.ts";
 import { isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
+import { housekeeping } from "./publish.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, type ImageType } from "./sniff.ts";
 
 /** An upload older than this is swept by the workspace's next create. */
@@ -150,8 +151,8 @@ function commitStatements(deps: Deps, auth: Auth, up: UploadRow, m: Manifest, to
   if (up.tour_id === null) {
     const logoType = m.cover?.logo ? extOf(m.cover.logo) : null;
     stmts.push({
-      sql: `INSERT INTO tour (id, workspace_id, title, slug, status, spotlight_dim, theme, zoom, cover, cta, end_card, autoplay, logo_key, logo_type, created_at, updated_at)
-            VALUES (?, (SELECT workspace_id ${openUpload}), ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      sql: `INSERT INTO tour (id, workspace_id, title, slug, status, spotlight_dim, theme, zoom, cover, cta, end_card, autoplay, logo_key, logo_type, created_at, updated_at, draft_version)
+            VALUES (?, (SELECT workspace_id ${openUpload}), ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       params: [
         tourId, up.id, auth.workspaceId, m.title, slug, m.spotlight_dim,
         JSON.stringify(m.theme), JSON.stringify(m.zoom), json01(m.cover), json01(m.cta), json01(m.end), JSON.stringify(m.autoplay),
@@ -170,7 +171,7 @@ function commitStatements(deps: Deps, auth: Auth, up: UploadRow, m: Manifest, to
       params: [chapterId, up.id, auth.workspaceId, auth.workspaceId, m.title, tourId],
     });
     stmts.push({
-      sql: "UPDATE tour SET spotlight_dim = coalesce(spotlight_dim, ?), updated_at = ? WHERE id = ? AND workspace_id = ?",
+      sql: "UPDATE tour SET spotlight_dim = coalesce(spotlight_dim, ?), updated_at = ?, draft_version = draft_version + 1 WHERE id = ? AND workspace_id = ?",
       params: [m.spotlight_dim, now, tourId, auth.workspaceId],
     });
   }
@@ -241,6 +242,8 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     } catch {
       console.error("sweep: could not look for abandoned uploads; will retry later");
     }
+    // And the publish housekeeping of the workspace (at most 4 calls; it never throws).
+    await housekeeping(deps, auth.workspaceId, null, 1);
 
     // One statement, so creates at the same moment can never pass the cap together.
     const id = newId("up");

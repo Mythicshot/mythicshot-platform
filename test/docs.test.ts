@@ -24,7 +24,7 @@ const REPO_FILES = Object.keys(
 ).map((k) => k.replace(/^\.\.\//, ""));
 
 /** The code that reads environment variables, as text. */
-const CODE = import.meta.glob(["../src/**/*.ts", "../deploy/docker-compose.yml", "../deploy/caddy/Caddyfile", "../Dockerfile", "../wrangler.jsonc"], {
+const CODE = import.meta.glob(["../src/**/*.ts", "../scripts/*.ts", "../deploy/docker-compose.yml", "../deploy/caddy/Caddyfile", "../Dockerfile", "../wrangler.jsonc"], {
   query: "?raw",
   import: "default",
   eager: true,

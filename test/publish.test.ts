@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { hashToken } from "../src/auth.ts";
 import { isUniqueViolation, type Db, type Deps, type Stmt, type Value } from "../src/ports.ts";
-import { MAX_SNAPSHOT_BYTES, PUBLIC_CACHE, STALE_PUBLISH_MS, type Snapshot } from "../src/publish.ts";
-import { clone, count, fixtures, png, send, uploadTour, type Json } from "./bundle.ts";
+import { COPY_BATCH, MAX_SNAPSHOT_BYTES, PUBLIC_CACHE, STALE_PUBLISH_MS, type Snapshot } from "../src/publish.ts";
+import { clone, count, fixtures, png, send, uploadTour, type Call, type Json } from "./bundle.ts";
 
 const v2 = fixtures.v2 as Json;
 const v3 = fixtures.v3 as Json;
@@ -21,6 +21,20 @@ async function setup(config?: Parameters<typeof makeDeps>[0]): Promise<Ctx> {
 
 const publish = (deps: Deps, token: string | null, tourId: string) => send(deps, "POST", `/api/v1/tours/${tourId}/publish`, { token });
 const unpublish = (deps: Deps, token: string | null, tourId: string) => send(deps, "POST", `/api/v1/tours/${tourId}/unpublish`, { token });
+/** A later call of a publish in progress, naming it. */
+const resume = (deps: Deps, token: string, tourId: string, publishId: string) =>
+  send(deps, "POST", `/api/v1/tours/${tourId}/publish`, { token, body: JSON.stringify({ publish_id: publishId }), headers: { "content-type": "application/json" } });
+
+/** Calls publish until it is no longer in progress, as the command-line helper does. */
+async function publishAll(deps: Deps, token: string, tourId: string): Promise<{ last: Call; calls: Call[] }> {
+  let r = await publish(deps, token, tourId);
+  const calls = [r];
+  while (r.status === 202) {
+    r = await resume(deps, token, tourId, r.json.publish_id);
+    calls.push(r);
+  }
+  return { last: r, calls };
+}
 
 async function snapshotOf(deps: Deps, tourId: string): Promise<Snapshot | null> {
   const row = await deps.db.first<{ data: string }>("SELECT data FROM snapshot WHERE tour_id = ?", [tourId]);
@@ -504,7 +518,7 @@ describe("failures half-way", () => {
     const realBatch = deps.db.batch.bind(deps.db);
     deps.db.batch = async (stmts) => {
       await realBatch(stmts);
-      throw new Error("connection lost after commit");
+      if (stmts[0].sql.includes("INSERT INTO snapshot ")) throw new Error("connection lost after commit");
     };
     const r = await publish(deps, a.token, t.tour_id);
     deps.db.batch = realBatch;
@@ -657,7 +671,8 @@ describe("races", () => {
       await publish(deps, a.token, t.tour_id);
       const order = i % 2 === 0 ? [publish, unpublish] : [unpublish, publish];
       const rs = await Promise.all(order.map((f) => f(deps, a.token, t.tour_id)));
-      for (const r of rs) expect([200, 204]).toContain(r.status);
+      // A publish that unpublish cancelled answers 409.
+      for (const r of rs) expect([200, 204, 409]).toContain(r.status);
       expect(await count(deps, "public_object")).toBe(0);
       await expectConsistent(ctx);
       const status = (await tourRow(deps, t.tour_id)).status;
@@ -665,7 +680,7 @@ describe("races", () => {
     }
   });
 
-  it("unpublish landing between a publish's copies and its commit ends published and consistent", async () => {
+  it("unpublish landing between a publish's copies and its commit cancels the publish and leaves nothing public", async () => {
     const ctx = await setup();
     const { deps, a, publicKeys } = ctx;
     const t = await uploadTour(deps, a.token, v2);
@@ -681,10 +696,14 @@ describe("races", () => {
     const r = await publish(deps, a.token, t.tour_id);
     deps.pub.put = realPut;
     expect(unpublished!.status).toBe(204);
-    expect(r.status).toBe(200);
-    expect((await tourRow(deps, t.tour_id)).status).toBe("published");
-    expect(await publicKeys()).toHaveLength(3);
+    // Unpublish cancels a publish in progress: it can no longer commit, and the image it
+    // wrote after its rows were removed is deleted too.
+    expect(r.status).toBe(409);
+    expect(r.json.error).toBe("publish_cancelled");
+    expect((await tourRow(deps, t.tour_id)).status).toBe("draft");
+    expect(await publicKeys()).toEqual([]);
     expect(await count(deps, "public_object")).toBe(0);
+    expect(await count(deps, "publish_job")).toBe(0);
     await expectConsistent(ctx);
   });
 
@@ -819,15 +838,239 @@ describe("scope and secrets", () => {
   });
 });
 
-describe("limits", () => {
-  it("a 200-step tour publishes inside the per-request query and subrequest limits", async () => {
+describe("publishing in bounded steps", () => {
+  /** Uploads a tour of `n` small steps, in uploads of at most 200 (the manifest cap). */
+  async function bigTour(deps: Deps, token: string, n: number, fill = 0): Promise<string> {
+    let tourId: string | null = null;
+    for (let at = 0; at < n; at += 200) {
+      const m = manyStepManifest(Math.min(200, n - at));
+      m.title = `Part ${at / 200 + 1}`;
+      const t: { tour_id: string } = await uploadTour(deps, token, m, tourId === null ? { kind: "new" } : { kind: "chapter", tour_id: tourId }, fill + at / 200);
+      tourId = t.tour_id;
+    }
+    return tourId!;
+  }
+
+  it("a large tour publishes over several calls, each copying at most COPY_BATCH images, and goes live only on the last", async () => {
     const ctx = await setup();
-    const { deps, a, calls, publicKeys } = ctx;
-    const m = manyStepManifest(200);
-    const t = await uploadTour(deps, a.token, m);
-    // Counts D1 calls (a batch is one query) and checks every statement against D1's own caps.
+    const { deps, a, publicKeys } = ctx;
+    const tourId = await bigTour(deps, a.token, 60);
+    const first = await publish(deps, a.token, tourId);
+    expect(first.status).toBe(202);
+    expect(first.json).toEqual({ status: "in_progress", publish_id: expect.stringMatching(/^pub_[0-9a-f]{24}$/), done: COPY_BATCH, total: 60 });
+    expect(COPY_BATCH).toBe(12);
+    // Nothing is live yet: no snapshot, no served image, the tour is still a draft.
+    expect(await snapshotRow(deps, tourId)).toBeNull();
+    expect((await tourRow(deps, tourId)).status).toBe("draft");
+    const id = first.json.publish_id as string;
+    const seen = [first];
+    let r = first;
+    while (r.status === 202) {
+      r = await resume(deps, a.token, tourId, id);
+      seen.push(r);
+    }
+    expect(seen.map((x) => x.json.done ?? "done")).toEqual([12, 24, 36, 48, "done"]);
+    const tour = await tourRow(deps, tourId);
+    expect(r.status).toBe(200);
+    expect(r.json).toEqual({ slug: tour.slug, url: `/t/${tour.slug}`, steps: 60 });
+    expect(tour.status).toBe("published");
+    expect(await publicKeys()).toHaveLength(60);
+    expect(await count(deps, "publish_job")).toBe(0);
+    expect(await count(deps, "public_object")).toBe(0);
+    // Asking again with the same id answers the same and does nothing more.
+    const again = await resume(deps, a.token, tourId, id);
+    expect(again.status).toBe(200);
+    expect(again.json).toEqual(r.json);
+    expect(await publicKeys()).toHaveLength(60);
+    await expectConsistent(ctx);
+  }, 120_000);
+
+  it("viewers keep the previous version, images included, until the final call commits the new one", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const tourId = await bigTour(deps, a.token, 30);
+    expect((await publishAll(deps, a.token, tourId)).last.status).toBe(200);
+    const before = await snapshotRow(deps, tourId);
+    const oldKeys = await liveKeys(deps, tourId);
+    const r1 = await publish(deps, a.token, tourId);
+    const r2 = await resume(deps, a.token, tourId, r1.json.publish_id);
+    expect([r1.status, r2.status]).toEqual([202, 202]);
+    expect(await snapshotRow(deps, tourId)).toEqual(before);
+    for (const k of oldKeys) expect((await send(deps, "GET", "/p/" + k.slice(2))).status).toBe(200);
+    // The images copied so far are not served: no live snapshot names them.
+    const pending = await deps.db.all<{ image_key: string }>("SELECT image_key FROM public_object WHERE state = 'pending' AND copied = 1");
+    expect(pending).toHaveLength(24);
+    for (const p of pending.slice(0, 3)) expect((await send(deps, "GET", "/p/" + p.image_key.slice(2))).status).toBe(404);
+    const r3 = await resume(deps, a.token, tourId, r1.json.publish_id);
+    expect(r3.status).toBe(200);
+    expect(await snapshotRow(deps, tourId)).not.toEqual(before);
+    for (const k of await liveKeys(deps, tourId)) expect(oldKeys).not.toContain(k);
+    await expectConsistent(ctx);
+  }, 120_000);
+
+  it("a publish stopped half-way leaves the published version alone, and its copies are swept later", async () => {
+    const ctx = await setup();
+    const { deps, a, publicKeys } = ctx;
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const tourId = await bigTour(deps, a.token, 40);
+    await publishAll(deps, a.token, tourId);
+    const before = await snapshotRow(deps, tourId);
+    const live = await liveKeys(deps, tourId);
+    const r1 = await publish(deps, a.token, tourId);
+    await resume(deps, a.token, tourId, r1.json.publish_id);
+    // The client goes away. The half-copied images are recorded as pending, nothing else changed.
+    expect(await snapshotRow(deps, tourId)).toEqual(before);
+    expect(await count(deps, "public_object")).toBe(40);
+    expect((await publicKeys()).length).toBe(40 + 24);
+    await expectConsistent(ctx);
+    // Within the stale period the same publish can be resumed where it stopped.
+    now += STALE_PUBLISH_MS - 1000;
+    const resumed = await resume(deps, a.token, tourId, r1.json.publish_id);
+    expect(resumed.json.done).toBe(36);
+    // Once it has made no progress for the stale period, any request in the workspace sweeps it.
+    now += STALE_PUBLISH_MS + 1;
+    const other = await uploadTour(deps, a.token, v2, { kind: "new" }, 99);
+    expect((await publish(deps, a.token, other.tour_id)).status).toBe(200);
+    expect(await snapshotRow(deps, tourId)).toEqual(before);
+    expect(await count(deps, "public_object")).toBe(0);
+    expect(await count(deps, "publish_job")).toBe(0);
+    // Only the stopped publish's images went: the live ones and the other tour's stay.
+    expect((await publicKeys()).sort()).toEqual([...live, ...(await liveKeys(deps, other.tour_id))].sort());
+    // Continuing the swept publish is refused; a new publish starts over and finishes.
+    const late = await resume(deps, a.token, tourId, r1.json.publish_id);
+    expect(late.status).toBe(409);
+    expect(late.json.error).toBe("publish_cancelled");
+    expect((await publishAll(deps, a.token, tourId)).last.status).toBe(200);
+    await expectConsistent(ctx);
+  }, 120_000);
+
+  it("calls arriving twice at once copy the same images and end with one snapshot and no stray objects", async () => {
+    const ctx = await setup();
+    const { deps, a, publicKeys } = ctx;
+    const tourId = await bigTour(deps, a.token, 30);
+    const r1 = await publish(deps, a.token, tourId);
+    const id = r1.json.publish_id as string;
+    for (;;) {
+      const rs = await Promise.all([resume(deps, a.token, tourId, id), resume(deps, a.token, tourId, id)]);
+      for (const r of rs) expect([200, 202]).toContain(r.status);
+      if (rs.every((r) => r.status === 200)) {
+        expect(rs[0].json).toEqual(rs[1].json);
+        break;
+      }
+    }
+    expect(await publicKeys()).toHaveLength(30);
+    expect(await count(deps, "public_object")).toBe(0);
+    await expectConsistent(ctx);
+  }, 120_000);
+
+  it("two first calls at once start one publish, and the second joins it", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const tourId = await bigTour(deps, a.token, 30);
+    const [x, y] = await Promise.all([publish(deps, a.token, tourId), publish(deps, a.token, tourId)]);
+    expect([x.status, y.status]).toEqual([202, 202]);
+    expect(x.json.publish_id).toBe(y.json.publish_id);
+    expect(await count(deps, "publish_job")).toBe(1);
+    expect(await count(deps, "public_object")).toBe(30);
+    // A later call without an id joins the publish in progress too.
+    const z = await publish(deps, a.token, tourId);
+    expect(z.json.publish_id).toBe(x.json.publish_id);
+    expect((await publishAll(deps, a.token, tourId)).last.status).toBe(200);
+    await expectConsistent(ctx);
+  }, 120_000);
+
+  it("a draft that changes mid-publish does not mix: the publish finishes the version it started from", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const tourId = await bigTour(deps, a.token, 30);
+    const r1 = await publish(deps, a.token, tourId);
+    const more = clone(v2);
+    more.title = "Added mid-publish";
+    await uploadTour(deps, a.token, more, { kind: "chapter", tour_id: tourId }, 50);
+    await deps.db.run("UPDATE step SET caption = 'edited mid-publish' WHERE tour_id = ?", [tourId]);
+    let r = r1;
+    while (r.status === 202) r = await resume(deps, a.token, tourId, r1.json.publish_id);
+    expect(r.json.steps).toBe(30);
+    const snap = (await snapshotOf(deps, tourId))!;
+    expect(snap.chapters.map((c) => c.title)).toEqual(["Part 1"]);
+    expect(stepsOf(snap).every((s) => s.caption !== "edited mid-publish")).toBe(true);
+    await expectConsistent(ctx);
+    // The next publish takes the new chapter and the edits.
+    expect((await publishAll(deps, a.token, tourId)).last.json.steps).toBe(33);
+    const next = (await snapshotOf(deps, tourId))!;
+    expect(next.chapters.map((c) => c.title)).toEqual(["Part 1", "Added mid-publish"]);
+    expect(stepsOf(next).every((s) => s.caption === "edited mid-publish")).toBe(true);
+    await expectConsistent(ctx);
+  }, 120_000);
+
+  it("unpublish during a publish cancels it: nothing goes live and nothing of it is left", async () => {
+    const ctx = await setup();
+    const { deps, a, publicKeys } = ctx;
+    const tourId = await bigTour(deps, a.token, 40);
+    await publishAll(deps, a.token, tourId);
+    const r1 = await publish(deps, a.token, tourId);
+    await resume(deps, a.token, tourId, r1.json.publish_id);
+    expect((await unpublish(deps, a.token, tourId)).status).toBe(204);
+    expect(await publicKeys()).toEqual([]);
+    expect(await count(deps, "public_object")).toBe(0);
+    expect(await count(deps, "publish_job")).toBe(0);
+    const late = await resume(deps, a.token, tourId, r1.json.publish_id);
+    expect(late.status).toBe(409);
+    expect(late.json.error).toBe("publish_cancelled");
+    expect((await tourRow(deps, tourId)).status).toBe("draft");
+    expect(await snapshotRow(deps, tourId)).toBeNull();
+    expect(await publicKeys()).toEqual([]);
+    await expectConsistent(ctx);
+  }, 120_000);
+
+  it("an id that does not name the publish in progress or the live one is refused, and a malformed body is 400", async () => {
+    const ctx = await setup();
+    const { deps, a, b } = ctx;
+    const tourId = await bigTour(deps, a.token, 30);
+    const r1 = await publish(deps, a.token, tourId);
+    const stranger = "pub_" + "0".repeat(24);
+    expect((await resume(deps, a.token, tourId, stranger)).status).toBe(409);
+    expect((await resume(deps, b.token, tourId, r1.json.publish_id)).status).toBe(404);
+    for (const body of ["{", "[]", '{"publish_id": 5}', '{"publish_id": "pub_x"}']) {
+      const r = await send(deps, "POST", `/api/v1/tours/${tourId}/publish`, { token: a.token, body });
+      expect(r.status, body).toBe(400);
+    }
+    // None of that disturbed the publish in progress.
+    expect((await resume(deps, a.token, tourId, r1.json.publish_id)).json.done).toBe(24);
+  }, 120_000);
+
+  it("a copy that fails half-way stops the whole publish and deletes only what it made", async () => {
+    const ctx = await setup();
+    const { deps, a, publicKeys } = ctx;
+    const tourId = await bigTour(deps, a.token, 40);
+    await publishAll(deps, a.token, tourId);
+    const before = await snapshotRow(deps, tourId);
+    const live = await liveKeys(deps, tourId);
+    const r1 = await publish(deps, a.token, tourId);
+    const realGet = deps.drafts.get.bind(deps.drafts);
+    let n = 0;
+    deps.drafts.get = async (k) => {
+      if (++n === 5) throw new Error("bucket unavailable");
+      return realGet(k);
+    };
+    const r2 = await resume(deps, a.token, tourId, r1.json.publish_id);
+    deps.drafts.get = realGet;
+    expect(r2.status).toBe(500);
+    expect(r2.json.error).toBe("publish_failed");
+    expect(await snapshotRow(deps, tourId)).toEqual(before);
+    expect((await publicKeys()).sort()).toEqual(live);
+    expect(await count(deps, "public_object")).toBe(0);
+    expect(await count(deps, "publish_job")).toBe(0);
+    expect((await resume(deps, a.token, tourId, r1.json.publish_id)).status).toBe(409);
+    await expectConsistent(ctx);
+  }, 120_000);
+
+  it("every statement stays inside D1's caps on parameters and SQL length", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const tourId = await bigTour(deps, a.token, 400);
     const real: Db = deps.db;
-    let dbCalls = 0;
     let maxParams = 0;
     let maxSql = 0;
     const track = (sql: string, params?: Value[]) => {
@@ -835,27 +1078,119 @@ describe("limits", () => {
       maxSql = Math.max(maxSql, sql.length);
     };
     deps.db = {
-      all: (s, p) => (dbCalls++, track(s, p), real.all(s, p)),
-      first: (s, p) => (dbCalls++, track(s, p), real.first(s, p)),
-      run: (s, p) => (dbCalls++, track(s, p), real.run(s, p)),
-      batch: (stmts: Stmt[]) => (dbCalls++, stmts.forEach((st) => track(st.sql, st.params)), real.batch(stmts)),
+      all: (s, p) => (track(s, p), real.all(s, p)),
+      first: (s, p) => (track(s, p), real.first(s, p)),
+      run: (s, p) => (track(s, p), real.run(s, p)),
+      batch: (stmts: Stmt[]) => (stmts.forEach((st) => track(st.sql, st.params)), real.batch(stmts)),
     };
-    for (let round = 0; round < 2; round++) {
-      dbCalls = 0;
-      const before = calls();
-      const r = await publish(deps, a.token, t.tour_id);
-      expect(r.status).toBe(200);
-      expect(r.json.steps).toBe(200);
-      expect(calls() - before).toBeLessThanOrEqual(1000); // D1 and R2 subrequests together
-      expect(dbCalls).toBeLessThanOrEqual(50); // D1 queries per invocation on the free plan
-    }
+    const { last, calls } = await publishAll(deps, a.token, tourId);
+    expect(last.status).toBe(200);
+    expect(last.json.steps).toBe(400);
+    expect(calls).toHaveLength(Math.ceil(400 / COPY_BATCH));
+    expect((await unpublish(deps, a.token, tourId)).status).toBe(204);
+    deps.db = real;
     expect(maxParams).toBeLessThanOrEqual(100);
     expect(maxSql).toBeLessThanOrEqual(100_000);
-    expect(await publicKeys()).toHaveLength(200);
-    dbCalls = 0;
-    expect((await unpublish(deps, a.token, t.tour_id)).status).toBe(204);
-    expect(dbCalls).toBeLessThanOrEqual(50);
+  }, 300_000);
+
+  it("a fresh start after a publish abandoned for longer than the stale period begins a new publish in that same request", async () => {
+    const ctx = await setup();
+    const { deps, a, publicKeys } = ctx;
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const tourId = await bigTour(deps, a.token, 30);
+    const first = await publish(deps, a.token, tourId);
+    expect(first.json).toMatchObject({ status: "in_progress", done: 12, total: 30 });
+    now += 16 * 60_000;
+    const fresh = await publish(deps, a.token, tourId);
+    expect(fresh.status).toBe(202);
+    expect(fresh.json.publish_id).not.toBe(first.json.publish_id);
+    expect(fresh.json.done).toBeGreaterThan(0);
+    // The abandoned publish's rows and images are gone; only the new one's are pending.
+    const pending = await deps.db.all<{ publish_id: string }>("SELECT DISTINCT publish_id FROM public_object WHERE state = 'pending'");
+    expect(pending).toEqual([{ publish_id: fresh.json.publish_id }]);
+    expect(await count(deps, "publish_job")).toBe(1);
+    expect((await resume(deps, a.token, tourId, first.json.publish_id)).status).toBe(409);
+    let r = fresh;
+    while (r.status === 202) r = await resume(deps, a.token, tourId, fresh.json.publish_id);
+    expect(r.status).toBe(200);
+    expect(await publicKeys()).toHaveLength(30);
+    expect(await count(deps, "public_object")).toBe(0);
+    await expectConsistent(ctx);
+  }, 120_000);
+
+  it("a fresh start finding a running publish of an older draft cancels it and starts from the current draft", async () => {
+    const ctx = await setup();
+    const { deps, a, publicKeys } = ctx;
+    const tourId = await bigTour(deps, a.token, 30);
+    const old = await publish(deps, a.token, tourId);
+    const more = clone(v2);
+    more.title = "Added after the first call";
+    await uploadTour(deps, a.token, more, { kind: "chapter", tour_id: tourId }, 60);
+    const fresh = await publish(deps, a.token, tourId);
+    expect(fresh.status).toBe(202);
+    expect(fresh.json.publish_id).not.toBe(old.json.publish_id);
+    expect(fresh.json.total).toBe(33);
+    expect((await resume(deps, a.token, tourId, old.json.publish_id)).status).toBe(409);
+    let r = fresh;
+    while (r.status === 202) r = await resume(deps, a.token, tourId, fresh.json.publish_id);
+    expect(r.json.steps).toBe(33);
+    expect((await snapshotOf(deps, tourId))!.chapters.map((c) => c.title)).toEqual(["Part 1", "Added after the first call"]);
+    expect(await publicKeys()).toHaveLength(33);
+    expect(await count(deps, "public_object")).toBe(0);
+    await expectConsistent(ctx);
+  }, 120_000);
+
+  it("a fresh start finding a running publish of the current draft joins it", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const tourId = await bigTour(deps, a.token, 30);
+    const one = await publish(deps, a.token, tourId);
+    const two = await publish(deps, a.token, tourId);
+    expect(two.json.publish_id).toBe(one.json.publish_id);
+    expect(two.json.done).toBe(24);
+  }, 120_000);
+
+  it("a call marks only the images it copied and keeps the publish alive on its job row", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const tourId = await bigTour(deps, a.token, 40);
+    const first = await publish(deps, a.token, tourId);
+    const created = await deps.db.all<{ created_at: number }>("SELECT DISTINCT created_at FROM public_object WHERE state = 'pending'");
+    // Each call within the stale period keeps the publish alive, however long it takes in all.
+    for (let i = 0; i < 2; i++) {
+      now += STALE_PUBLISH_MS - 1000;
+      const r = await resume(deps, a.token, tourId, first.json.publish_id);
+      expect(r.status).toBe(202);
+    }
+    expect(await deps.db.all("SELECT DISTINCT created_at FROM public_object WHERE state = 'pending'")).toEqual(created);
+    expect((await deps.db.first<{ touched_at: number }>("SELECT touched_at FROM publish_job"))!.touched_at).toBe(now);
+    expect(await count(deps, "public_object WHERE copied = 1")).toBe(36);
+  }, 120_000);
+});
+
+describe("housekeeping on other requests", () => {
+  it("listing tours or creating an upload clears an abandoned publish of the workspace, and never another workspace's", async () => {
+    const ctx = await setup();
+    const { deps, a, b, publicKeys } = ctx;
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const mine = (await uploadTour(deps, a.token, manyStepManifest(30))).tour_id;
+    const theirs = (await uploadTour(deps, b.token, manyStepManifest(30), { kind: "new" }, 3)).tour_id;
+    await publish(deps, a.token, mine);
+    await publish(deps, b.token, theirs);
+    expect(await publicKeys()).toHaveLength(24);
+    now += STALE_PUBLISH_MS + 60_000;
+    expect((await send(deps, "GET", "/api/v1/tours", { token: a.token })).status).toBe(200);
+    expect(await count(deps, "publish_job")).toBe(1);
+    expect(await publicKeys()).toHaveLength(12); // B's half-done publish is B's to clear
+    expect((await send(deps, "POST", "/api/v1/uploads", { token: b.token, body: JSON.stringify({ manifest: v2, target: { kind: "new" } }), headers: { "content-type": "application/json" } })).status).toBe(201);
     expect(await publicKeys()).toEqual([]);
+    expect(await count(deps, "public_object")).toBe(0);
+    expect(await count(deps, "publish_job")).toBe(0);
+    await expectConsistent(ctx);
   }, 120_000);
 });
 
