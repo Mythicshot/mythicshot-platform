@@ -1,7 +1,9 @@
 /// <reference types="vite/client" />
 // Checks on the provider guides in docs/hosting and on the Fly.io template that can be
 // made without an account: every guide exists, follows the shared outline and says at
-// its top that it is unverified; no guide names a hostname outside a short allow-list or
+// its top that it is unverified (the shared cPanel hosting guide is not written from a
+// provider's pages: it says at its top what was run on real hosting and what was not,
+// and is checked against the script it describes); no guide names a hostname outside a short allow-list or
 // an address outside the documentation ranges; links between docs resolve; the server guides install the
 // way the Docker runbook does; and deploy/fly/fly.toml parses, holds no secret, and
 // agrees with the Dockerfile and the compose file on the port, the data path and the
@@ -12,7 +14,10 @@ import { describe, expect, it } from "vitest";
 import dockerfile from "../Dockerfile?raw";
 import composeYml from "../deploy/docker-compose.yml?raw";
 import flyToml from "../deploy/fly/fly.toml?raw";
+import cpanelSh from "../deploy/cpanel/cpanel.sh?raw";
 import installSh from "../deploy/install.sh?raw";
+import packageJson from "../package.json?raw";
+import packageCpanelTs from "../scripts/package-cpanel.ts?raw";
 import appTs from "../src/app.ts?raw";
 
 const HOSTING = import.meta.glob("../docs/hosting/*.md", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
@@ -33,6 +38,8 @@ const INDEX = "docs/hosting/README.md";
 const FLY = "docs/hosting/fly.md";
 const SERVER_GUIDES = ["docs/hosting/digitalocean.md", "docs/hosting/aws-lightsail.md", "docs/hosting/azure.md", "docs/hosting/linode.md", "docs/hosting/namecheap.md"];
 const GUIDES = [...SERVER_GUIDES, FLY];
+/** The guide for shared cPanel hosting: no provider, no prices and no external pages, so it has its own checks below. */
+const CPANEL = "docs/hosting/cpanel.md";
 
 /** Headings every guide has, without their step numbers. */
 const SHARED_HEADINGS = ["What you need and what it costs", "Open the setup wizard", "Backups", "Updates", "Delete everything to stop paying", "Pages this guide relies on"];
@@ -61,7 +68,7 @@ const ALLOWED_HOSTS = new Set([
 ]);
 
 /** Last labels that are file extensions, not top-level domains. */
-const FILE_EXTENSIONS = new Set(["sh", "md", "yml", "yaml", "json", "ts", "js", "sqlite", "tar", "gz", "toml", "pem", "env", "html"]);
+const FILE_EXTENSIONS = new Set(["sh", "md", "yml", "yaml", "json", "ts", "js", "cjs", "sqlite", "tar", "gz", "tgz", "toml", "pem", "env", "html", "old", "txt"]);
 
 function isPlaceholderHost(host: string): boolean {
   return /(^|\.)example\.(com|net|org)$/.test(host) || /(^|\.)fly\.dev$/.test(host);
@@ -223,7 +230,7 @@ function scriptVocabulary(): Set<string> {
 describe("the hosting guides", () => {
   it("exist: the chooser and one guide per provider", () => {
     for (const p of [INDEX, ...GUIDES]) expect(hosting[p], p).toBeTypeOf("string");
-    expect(Object.keys(hosting).sort()).toEqual([INDEX, ...GUIDES].sort());
+    expect(Object.keys(hosting).sort()).toEqual([INDEX, ...GUIDES, CPANEL].sort());
   });
 
   it("every guide has the shared headings", () => {
@@ -342,7 +349,7 @@ describe("the hosting guides", () => {
     for (const [p, text] of Object.entries(hosting)) {
       const urls = [...text.matchAll(/\]\(([a-z]+:[^)\s]+)\)/g)].map((m) => new URL(m[1]));
       for (const u of urls) expect(u.protocol, `${p}: ${u.href}`).toBe("https:");
-      if (p !== INDEX) expect(urls.length, p).toBeGreaterThanOrEqual(10);
+      if (p !== INDEX && p !== CPANEL) expect(urls.length, p).toBeGreaterThanOrEqual(10);
     }
     // Each guide links its own provider's pages, not another's.
     const hosts: Record<string, RegExp> = {
@@ -411,6 +418,143 @@ describe("the hosting guides", () => {
       expect(last, p).toMatch(/> \[!WARNING\]\n> .*(cannot be undone|cannot be recovered|irretrievable|irreversible)/);
     }
     for (const p of SERVER_GUIDES) expect(hosting[p], p).toMatch(/> \[!WARNING\]\n> .*still billed|does not stop the bill/);
+  });
+});
+
+describe("the shared cPanel hosting guide", () => {
+  const guide = hosting[CPANEL];
+  const lines = codeLines(guide);
+  /** The commands and options cpanel.sh's parse_args accepts, without the short forms and the `name=value` spellings. */
+  const vocabulary = (): { commands: string[]; flags: string[] } => {
+    const body = cpanelSh.match(/^parse_args\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    const words = [...new Set([...body.matchAll(/^ {6,8}([a-z| -]+)\)/gm)].flatMap((m) => m[1].split("|").map((s) => s.trim())).filter(Boolean))];
+    return { commands: words.filter((w) => /^[a-z]+$/.test(w)), flags: words.filter((w) => /^--[a-z-]+$/.test(w) && w !== "--help") };
+  };
+
+  it("says at its top what was run on real hosting and what was only tested against stand-ins", () => {
+    const top = guide.split("\n").slice(0, 8).join("\n");
+    expect(top.split("\n").slice(0, 4).join("\n")).toContain("> [!WARNING]\n> Partly verified.");
+    expect(top).toMatch(/Partly verified/);
+    expect(top).toMatch(/done by hand on one real shared cPanel account, at one provider/);
+    expect(top).toMatch(/`cpanel\.sh`[^\n]*only been tested[^\n]*stand-ins/);
+    expect(top).toMatch(/The software is not public yet/);
+    expect(top).toMatch(/from the owner/);
+    // The closing section keeps the two sides apart, and names the script's tests.
+    expect(sections(guide)[sections(guide).length - 1]).toBe("What has been run where");
+    const last = guide.slice(guide.indexOf("## What has been run where"));
+    expect(last).toMatch(/\*\*Run by hand on real hosting,\*\*/);
+    expect(last).toMatch(/\*\*Tested only on a development computer,\*\* never on real hosting/);
+    expect(last).toContain("](../../deploy/cpanel/test-cpanel.sh)");
+  });
+
+  it("links no external page, so none that was not opened, and names no provider", () => {
+    expect([...guide.matchAll(/\]\(([a-z]+:[^)\s]+)\)/g)]).toEqual([]);
+    expect(guide).not.toMatch(/https?:\/\/(?!tours\.example\.com\b)/);
+    for (const p of SERVER_GUIDES) {
+      const provider = hosting[p].match(/^# Host on (?:an? )?(\S+)/)?.[1] ?? "";
+      expect(provider.length, p).toBeGreaterThan(2);
+      expect(guide.toLowerCase(), provider).not.toContain(provider.toLowerCase());
+    }
+  });
+
+  it("every section has an entry in its table of contents", () => {
+    const toc = guide.match(/^## Contents\n\n([\s\S]*?)\n\n## /m)?.[1] ?? "";
+    const listed = [...toc.matchAll(/^- \[([^\]]+)\]\(#([^)]+)\)$/gm)].map((m) => m[1]);
+    const have = [...split(guide).prose.matchAll(/^## +(.+?) *$/gm)].map((m) => m[1]).filter((h) => h !== "Contents");
+    expect(listed).toEqual(have);
+    for (const h of ["What you need", "Create the subdomain", "Upload and unpack the archive", "Install the platform", "Read the setup code", "Open the setup wizard", "HTTPS", "Updates", "Backups", "Restore from a backup", "Roll back an update", "Troubleshooting"]) {
+      expect(sections(guide), h).toContain(h);
+    }
+  });
+
+  it("every cpanel.sh command and option the guide names exists, and every one the script has is in the guide", () => {
+    const { commands, flags } = vocabulary();
+    expect([...commands].sort()).toEqual(["backup", "install", "status", "update"]);
+    expect([...flags].sort()).toEqual(["--allow-downgrade", "--app-root", "--domain", "--dry-run", "--node", "--yes"]);
+    const named = new Set<string>();
+    for (const l of lines) {
+      for (const m of l.matchAll(/cpanel\.sh((?: +(?:--[a-z][a-z-]*|[a-z]+(?=\s|$)|tours\.example\.com|<[a-z]+>))*)/g)) {
+        for (const w of m[1].trim().split(/ +/).filter((x) => /^(--)?[a-z-]+$/.test(x))) named.add(w);
+      }
+    }
+    for (const w of named) expect([...commands, ...flags], `cpanel.sh ${w}`).toContain(w);
+    for (const c of commands) expect(named, `cpanel.sh ${c}`).toContain(c);
+    const words = new Set(lines.flatMap((l) => l.split(/\s+/)));
+    for (const f of flags) expect(named.has(f) || words.has(f), `cpanel.sh ${f}`).toBe(true);
+    // The script's own usage text names every one of them too.
+    const usage = cpanelSh.match(/^usage\(\) \{\n([\s\S]*?)^USAGE$/m)?.[1] ?? "";
+    for (const w of [...commands, ...flags]) expect(usage, w).toContain(w);
+  });
+
+  it("the defaults, paths and commands it gives are the script's", () => {
+    expect(cpanelSh).toMatch(/^readonly DEFAULT_APP_ROOT=apps\/tours$/m);
+    expect(cpanelSh).toMatch(/^readonly DEFAULT_NODE=24$/m);
+    expect(guide).toContain("The default is `apps/tours`");
+    expect(guide).toContain("`/home/you/apps/tours-data`");
+    expect(guide).toContain("`/home/you/apps/tours-config.env`");
+    expect(lines).toContain("./cpanel.sh install --domain tours.example.com");
+    expect(lines).toContain("./cpanel.sh install --domain tours.example.com --dry-run");
+    expect(lines).toContain("./cpanel.sh update");
+    // The package step, the create command and the health address are the real ones.
+    expect(cpanelSh).toContain("npm ci --omit=dev --ignore-scripts");
+    expect(guide).toContain("`npm ci --omit=dev --ignore-scripts`");
+    expect(cpanelSh).toContain("cloudlinux-selector create --json --interpreter nodejs");
+    expect(guide).toContain("`cloudlinux-selector create`");
+    expect(cpanelSh).toContain('"https://$DOMAIN/healthz"');
+    expect(appTs).toContain('app.get("/healthz"');
+    expect(lines).toContain("curl https://tours.example.com/healthz");
+    // The rollback commands the guide shows are the ones the script prints, with the guide's paths.
+    const body = cpanelSh.match(/^print_rollback\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    const printed = [...body.matchAll(/info "((?:cd|rm -rf|tar -xzf|source|touch) [^"]*)"/g)].map((m) => m[1]);
+    expect(printed).toHaveLength(6);
+    const fill = (s: string) =>
+      s
+        .replace("$APP_DIR", "/home/you/apps/tours")
+        .replace("$ACTIVATE", "/home/you/nodevenv/apps/tours/24/bin/activate")
+        .replace("$LAST_BACKUP", "/home/you/backups/tours-<date>-<time>")
+        .replace("$ROLLBACK_RESTORE", "package.json package-lock.json app.cjs cpanel.sh VERSION");
+    for (const cmd of printed) expect(lines, cmd).toContain(fill(cmd));
+  });
+
+  it("the archive it names is the one the packager writes, by the command package.json has", () => {
+    expect(packageCpanelTs).toContain("`demo-platform-${version}-cpanel.tgz`");
+    expect(packageCpanelTs).toContain('join(root, "dist", "cpanel")');
+    expect(guide).toContain("`dist/cpanel/demo-platform-<version>-cpanel.tgz`");
+    expect((JSON.parse(packageJson) as { scripts: Record<string, string> }).scripts["package:cpanel"]).toBe("node scripts/package-cpanel.ts");
+    expect(lines).toContain("npm run package:cpanel");
+    expect(lines).toContain("tar -xzf ~/demo-platform-<version>-cpanel.tgz -C ~/tours-release");
+  });
+
+  it("reaches the setup wizard, reads the code from the settings file and never shows one", () => {
+    expect(guide).toContain("https://tours.example.com/setup");
+    expect(guide).toMatch(/> \[!WARNING\]\n> Whoever enters the setup code first becomes the owner/);
+    expect(guide).toMatch(/> \[!WARNING\]\n> The API token works like a password/);
+    expect(guide).toMatch(/The script never prints the setup code/);
+    expect(lines).toContain("grep '^SETUP_CODE=' ~/apps/tours-config.env");
+    expect(guide).not.toMatch(/SETUP_CODE=[^\s`'<]/);
+  });
+
+  it("warns where data can be lost or a secret exposed, in one line each", () => {
+    const part = (from: string, to: string) => guide.slice(guide.search(new RegExp(`^## \\d+\\. ${from}$`, "m")), guide.search(new RegExp(`^## \\d+\\. ${to}$`, "m")));
+    expect(part("Upload and unpack the archive", "Install the platform")).toMatch(/> \[!WARNING\]\n> Do not upload or unpack the archive inside `public_html`/);
+    expect(part("Backups", "Restore from a backup")).toMatch(/> \[!WARNING\]\n> A backup that stays on the hosting is lost with the hosting account/);
+    expect(part("Restore from a backup", "Roll back an update")).toMatch(/> \[!WARNING\]\n> A restore puts the data back as it was when the backup was made/);
+    expect(part("Roll back an update", "Troubleshooting")).toMatch(/> \[!WARNING\]\n> If the new version already changed the database/);
+    for (const m of guide.matchAll(/^> \[!(?:WARNING|NOTE)\]\n((?:> .*\n)+)/gm)) expect(m[1].trim().split("\n"), m[1]).toHaveLength(1);
+    for (const section of guide.split(/^## /m)) expect((section.match(/^> \[!WARNING\]$/gm) ?? []).length, section.split("\n")[0]).toBeLessThanOrEqual(2);
+  });
+
+  it("no paragraph is wrapped: a line of prose is never followed directly by another", () => {
+    const rows = split(guide).prose.split("\n");
+    const plain = (r: string) => r !== "" && !/^(#|\||> |- |\d+\. )/.test(r);
+    rows.forEach((row, i) => {
+      if (plain(row)) expect(plain(rows[i + 1] ?? ""), `wrapped paragraph at: ${row.slice(0, 60)}`).toBe(false);
+    });
+  });
+
+  it("the chooser and the Namecheap VPS guide point to it", () => {
+    expect(hosting[INDEX]).toContain("](cpanel.md)");
+    expect(hosting["docs/hosting/namecheap.md"]).toContain("](cpanel.md)");
   });
 });
 

@@ -23,7 +23,7 @@ Both guided commands say each step before doing it, are safe to run twice, never
 3. On the server, run `sudo bash install.sh`. If it installs Docker first, it then stops and asks for the image: load it with `sudo docker load -i demo-platform.tar` and run `sudo bash install.sh` again.
 4. Open `https://tours.example.com/setup` and enter the setup code the script printed.
 
-The full steps, with what you need before you start, backup, restore, moving servers and troubleshooting, are in the [Docker runbook](docs/runbook-docker.md). Step-by-step guides for specific providers (DigitalOcean, AWS Lightsail, Azure, Akamai/Linode, Namecheap VPS and Fly.io) are in [docs/hosting](docs/hosting/README.md).
+The full steps, with what you need before you start, backup, restore, moving servers and troubleshooting, are in the [Docker runbook](docs/runbook-docker.md). Step-by-step guides for specific providers (DigitalOcean, AWS Lightsail, Azure, Akamai/Linode, Namecheap VPS and Fly.io), and one for shared cPanel hosting without Docker, are in [docs/hosting](docs/hosting/README.md).
 
 ### Quick start: Cloudflare
 
@@ -134,6 +134,8 @@ npm run typecheck
 
 `npm run test:container` (Bash and a local Docker engine) builds the image and checks it end to end, including the compose stack with Caddy in front on `localhost` with its internal certificate. Real certificate issuance needs a public domain and is not part of it.
 
+`npm run test:node` also covers the shared cPanel hosting route: `test/node-cpanel-app.test.ts` starts the startup file with Node, `test/node-cpanel-package.test.ts` builds the archive and reads it back, and `test/node-cpanel-script.test.ts` runs `deploy/cpanel/test-cpanel.sh`, which runs the install script against stand-ins for the hosting's commands. That last one needs Bash (on Windows, the one that comes with Git) and is skipped with the reason where there is none. No hosting is contacted.
+
 ### Run locally on the Workers runtime
 
 Create the tables in the local database first; without them `/healthz` still answers, but setup and every API route fail. Nothing here touches a Cloudflare account.
@@ -188,6 +190,7 @@ The container stack's `.env`, written by `install.sh`, also holds `DOMAIN`, `ACM
 | `src/node/` | SQLite and folder adapters, migrations, the HTTP server, the database backup |
 | `Dockerfile`, `deploy/` | The container image, the compose stack with Caddy, the install script and their tests |
 | `scripts/setup-cloudflare.ts` | The guided Cloudflare setup, `npm run setup:cloudflare` |
+| `deploy/cpanel/`, `scripts/package-cpanel.ts` | Shared cPanel hosting: the startup file, the install script and its tests, and the archive builder, `npm run package:cpanel` |
 | `migrations/` | SQL migrations, one set for both targets |
 | `docs/` | The two hosting runbooks |
 | `test/contract/` | Adapter contract suites run against both targets |

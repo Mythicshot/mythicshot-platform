@@ -1,7 +1,7 @@
 # Hosting guides
 
 > [!WARNING]
-> Draft: Not yet verified on a real account. These guides are written from each provider's documentation and from the code in this repository. Nothing in them has been run on a real account yet.
+> Draft: Not yet verified on a real account. The provider guides in the table below are written from each provider's documentation and from the code in this repository, and nothing in them has been run on a real account yet. The [shared cPanel hosting guide](cpanel.md) is the one exception, and only in part: its first lines say what was run on real hosting and what was not.
 
 > [!NOTE]
 > The software is not public yet. There is no published image and no public repository, so every guide starts from a copy of this repository from the owner. The server guides also need Docker on your own computer to build the image.
@@ -27,6 +27,12 @@ The two runbooks cover what the guides above build on:
 |---|---|
 | [Docker on Debian](../runbook-docker.md) | You already have a Debian server, at any provider or at home. The server guides above follow this runbook for the install itself. |
 | [Cloudflare](../runbook-cloudflare.md) | Your domain is on Cloudflare, or you are willing to move it there. No server and no disk. |
+
+One more route needs no server of your own and no Docker:
+
+| Guide | Use it when |
+|---|---|
+| [Shared cPanel hosting](cpanel.md) | You already pay for shared hosting whose cPanel has "Setup Node.js App", with SSH access. The platform runs as a Node.js app in your hosting account, installed by a script from one archive. The guide names no prices. |
 
 ## What every route has in common
 
