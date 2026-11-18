@@ -9,8 +9,10 @@
 //
 // The server publishes a large tour over several requests (each copies a bounded number of
 // images and answers 202 with its progress), so the script calls again, naming the publish,
-// until it is live, printing the progress. If it is interrupted, running the same command
-// again within 15 minutes continues the same publish; after that a new one starts.
+// until it is live, printing the progress. If it stops (interrupted, a lost connection, a
+// 429 or 5xx answer), running the same command again within 15 minutes continues the same
+// publish, as long as no new chapter was uploaded meanwhile; otherwise that same run starts
+// a new publish from the current draft and the half-done one is cleaned up.
 import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -23,6 +25,10 @@ const PAUSE_MS = 250;
 const MAX_STALLED_CALLS = 3;
 /** A hard stop, far above the 34 calls the largest tour takes. */
 const MAX_CALLS = 200;
+const AGAIN = {
+  publish: "Run the same command again to resume the publish where it stopped.",
+  unpublish: "Run the same command again to finish removing the images.",
+};
 const USAGE = "usage: node scripts/publish.ts <server> <tour_id> [--unpublish]\n  the token is read from DEMO_PLATFORM_TOKEN or asked for at a prompt";
 
 export type Io = {
@@ -97,7 +103,7 @@ export async function runPublish(argv: string[], io: Io): Promise<number> {
         redirect: "error",
       });
     } catch {
-      io.err(call === 1 ? `Could not reach ${server}.` : `Lost the connection to ${server}. Run the same command again to continue where it stopped.`);
+      io.err(call === 1 ? `Could not reach ${server}.` : `Lost the connection to ${server}. ${AGAIN[action]}`);
       return 1;
     }
     let body: Record<string, unknown> | null = null;
@@ -128,7 +134,7 @@ export async function runPublish(argv: string[], io: Io): Promise<number> {
       stalled = progress > lastDone ? 0 : stalled + 1;
       lastDone = Math.max(lastDone, progress);
       if (stalled >= MAX_STALLED_CALLS || call >= MAX_CALLS) {
-        io.err(`The server stopped making progress (${done ?? "?"} of ${total ?? "?"} after ${MAX_STALLED_CALLS + 1} calls). Run the same command again later to continue.`);
+        io.err(`The server stopped making progress (${done ?? "?"} of ${total ?? "?"} after ${MAX_STALLED_CALLS + 1} calls). ${AGAIN[action]}`);
         return 1;
       }
       await io.sleep(PAUSE_MS);
@@ -137,7 +143,8 @@ export async function runPublish(argv: string[], io: Io): Promise<number> {
     if (!res.ok) {
       const code = typeof body?.error === "string" ? body.error : "error";
       const detail = typeof body?.detail === "string" ? `: ${body.detail}` : "";
-      io.err(`${action} failed with HTTP ${res.status} (${code})${detail}`);
+      const retryable = res.status === 429 || res.status >= 500;
+      io.err(`${action} failed with HTTP ${res.status} (${code})${detail}${retryable ? `. ${AGAIN[action]}` : ""}`);
       return 1;
     }
     if (unpublish) {

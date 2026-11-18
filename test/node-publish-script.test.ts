@@ -91,7 +91,22 @@ describe("the publish script", () => {
     s.intercept(async () => stuck());
     expect(await runPublish(["https://tours.example.com", s.t.tour_id], s.io({ DEMO_PLATFORM_TOKEN: s.a.token }))).toBe(1);
     expect(s.seen).toHaveLength(4);
-    expect(s.err.at(-1)).toBe("The server stopped making progress (12 of 30 after 4 calls). Run the same command again later to continue.");
+    expect(s.err.at(-1)).toBe("The server stopped making progress (12 of 30 after 4 calls). Run the same command again to resume the publish where it stopped.");
+  });
+
+  it("a 5xx or 429 answer half-way says that running the command again resumes, and it does", async () => {
+    const s = await setup(manySteps(30));
+    s.intercept(async (n) => (n === 2 ? new Response(JSON.stringify({ error: "internal" }), { status: 503 }) : undefined));
+    expect(await runPublish(["https://tours.example.com", s.t.tour_id], s.io({ DEMO_PLATFORM_TOKEN: s.a.token }))).toBe(1);
+    expect(s.err.at(-1)).toBe("publish failed with HTTP 503 (internal). Run the same command again to resume the publish where it stopped.");
+    s.intercept(async (n) => (n === 4 ? new Response(JSON.stringify({ error: "too_many" }), { status: 429 }) : undefined));
+    s.out.length = 0;
+    expect(await runPublish(["https://tours.example.com", s.t.tour_id], s.io({ DEMO_PLATFORM_TOKEN: s.a.token }))).toBe(1);
+    expect(s.out[0]).toBe("Copying images: 24 of 30 done");
+    expect(s.err.at(-1)).toMatch(/HTTP 429 .*Run the same command again to resume/);
+    s.intercept(null);
+    expect(await runPublish(["https://tours.example.com", s.t.tour_id], s.io({ DEMO_PLATFORM_TOKEN: s.a.token }))).toBe(0);
+    expect(s.out.at(-1)).toMatch(/^Published 30 steps/);
   });
 
   it("reports a publish that was cancelled half-way", async () => {
