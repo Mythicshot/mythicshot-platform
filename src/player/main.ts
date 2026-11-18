@@ -18,7 +18,8 @@ type Box4 = [number, number, number, number];
 type Pt = [number, number];
 type Avoid = { x0: number; y0: number; x1: number; y1: number };
 type Zoomed = { k: number; tx: number; ty: number };
-type CardInfo = { title: string; body: string; next: string; point: Pt | null; placement: string; caption: boolean };
+/** `picked` is true when the card points at a spot chosen for it (anchor "point"), not the hotspot. */
+type CardInfo = { title: string; body: string; next: string; point: Pt | null; picked: boolean; placement: string; caption: boolean };
 type Via = "" | "back" | "next" | "hotspot" | "key" | "auto" | "menu" | "open";
 
 const SVG = "http://www.w3.org/2000/svg";
@@ -183,7 +184,8 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
     return cardStyle === "auto" ? (prefersDark.matches ? "dark" : "light") : cardStyle;
   }
   function applyScheme(): void {
-    const scheme = style() === "light" ? "light" : "dark";
+    // Compact follows Light's colours, as the recorder's preview does.
+    const scheme = style() === "dark" ? "dark" : "light";
     root.dataset.scheme = scheme;
     // "auto" is a calm tint of the page colour toward the accent.
     css.setProperty("--backdrop", backdrop ?? mix(scheme === "light" ? "#eeede8" : "#131518", accent, 0.06));
@@ -200,9 +202,7 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
   const ctaEl = cta ? linkEl(cta, "dp-cta") : null;
   const chaptersBtn = button("dp-chapters", "Chapters", () => act({ type: "menu" }, "menu"));
   chaptersBtn.setAttribute("aria-label", "Chapters menu");
-  head.append(headText);
-  if (ctaEl) head.append(ctaEl);
-  head.append(chaptersBtn);
+  head.append(headText, chaptersBtn);
 
   const bodyEl = el("div", "dp-body");
 
@@ -265,6 +265,11 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
   endCard.append(endActions);
 
   const stage = el("div", "dp-stage");
+  // While a new card is still entering (and inert), focus rests here: a stable, visible
+  // region, so a Tab or a second Enter in that moment never starts again from the top.
+  stage.tabIndex = -1;
+  stage.setAttribute("role", "region");
+  stage.setAttribute("aria-label", "Tour");
   const frame = el("div", "dp-frame");
   const view = el("div", "dp-view");
   const shot = el("img", "dp-shot");
@@ -288,6 +293,9 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
   bar.setAttribute("aria-hidden", "true");
   const scrim = el("div", "dp-scrim");
   frame.append(view, bar, scrim);
+  // The always-on button sits in the picture's top corner on a step (moving to the other
+  // corner when the spotlight is there) and at the top of the chapter menu.
+  if (ctaEl) frame.append(ctaEl);
   const card = el("div", "dp-card");
   card.setAttribute("role", "group");
   card.hidden = true;
@@ -381,10 +389,10 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
           const y = p && pct(p.y);
           point = p && x !== null && y !== null ? [x, y] : null;
         } else if (anchor === "hotspot") point = click(st);
-        return { title: t, body: b, next: line(c.next_label, 24) || "Next", point, placement: pick(c.placement, ["auto", "top", "bottom", "left", "right"] as const, "auto"), caption: false };
+        return { title: t, body: b, next: line(c.next_label, 24) || "Next", point, picked: anchor === "point" && !!point, placement: pick(c.placement, ["auto", "top", "bottom", "left", "right"] as const, "auto"), caption: false };
       }
     }
-    return { title: "", body: para(st.caption, 300), next: "Next", point: click(st), placement: "auto", caption: true };
+    return { title: "", body: para(st.caption, 300), next: "Next", point: click(st), picked: false, placement: "auto", caption: true };
   }
 
   function size(): { w: number; h: number } {
@@ -447,6 +455,16 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
     } else return null;
     r = { x0: Math.max(0, r.x0), y0: Math.max(0, r.y0), x1: Math.min(sz.w, r.x1), y1: Math.min(sz.h, r.y1) };
     return r.x1 > r.x0 && r.y1 > r.y0 ? r : null;
+  }
+  /**
+   * A spot picked for the card, in displayed pixels after zoom, while it is on the picture:
+   * the card points at it and still keeps clear of the spotlight. Null for the hotspot or no anchor.
+   */
+  function aimFor(z: Zoomed, sz: { w: number; h: number }, c: CardInfo | null): { x: number; y: number } | null {
+    if (!c || !c.picked || !c.point) return null;
+    const x = (c.point[0] / 100) * sz.w * z.k + z.tx;
+    const y = (c.point[1] / 100) * sz.h * z.k + z.ty;
+    return x >= 0 && x <= sz.w && y >= 0 && y <= sz.h ? { x, y } : null;
   }
   const overlaps = (a: Avoid | null, x: number, y: number, w: number, h: number) => !!a && x < a.x1 && x + w > a.x0 && y < a.y1 && y + h > a.y0;
 
@@ -649,7 +667,8 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
       first = next;
       card.setAttribute("aria-label", `Step ${sc.step + 1} of ${n}`);
     }
-    const palette = style() === "compact" ? "dark" : style();
+    // A compact tour follows Light's colours, so its panels and caption boxes use the light card.
+    const palette = style() === "compact" ? "light" : style();
     card.className = "dp-card now" + (cardKind === "compact" ? " compact" : cardKind ? " " + palette : "") + (cardKind === "panel" ? " panel" : "") + (cardData?.caption ? " caption" : "");
     card.replaceChildren(...kids);
     card.hidden = !cardKind;
@@ -673,11 +692,14 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
       card.classList.remove("now");
     } else card.classList.add("in");
     card.inert = false;
-    if (pendingFocus && card.contains(pendingFocus)) pendingFocus.focus({ preventScroll: true });
+    // Hand focus over only if it is still resting on the stage (or was lost): a viewer who
+    // tabbed on meanwhile keeps their place.
+    const resting = document.activeElement === stage || !usable(document.activeElement);
+    if (pendingFocus && card.contains(pendingFocus) && resting) pendingFocus.focus({ preventScroll: true });
     pendingFocus = null;
   }
 
-  function placeCard(sz: { w: number; h: number }, avoid: Avoid | null): void {
+  function placeCard(sz: { w: number; h: number }, avoid: Avoid | null, aim: { x: number; y: number } | null): void {
     if (!cardKind) return;
     const W = sz.w;
     const H = sz.h;
@@ -689,7 +711,7 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
     let y = 0;
     let side: string;
     if (cardKind === "guide" && cardData) {
-      const p = TourCore.placeCard(W, H, w, h, avoid, cardData.placement);
+      const p = TourCore.placeCard(W, H, w, h, avoid, cardData.placement, aim ?? undefined);
       ({ x, y, side } = p);
     } else if (cardKind === "compact") {
       x = 8;
@@ -719,13 +741,16 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
       const dir = ({ bottom: "up", top: "down", right: "toleft", left: "toright" } as Record<string, string>)[side];
       notch.hidden = !dir || !avoid;
       if (dir && avoid) {
+        // The notch points at the picked spot when there is one, else at the middle of the box.
+        const tx = aim ? aim.x : (avoid.x0 + avoid.x1) / 2;
+        const ty = aim ? aim.y : (avoid.y0 + avoid.y1) / 2;
         notch.className = "dp-notch " + dir;
         if (dir === "up" || dir === "down") {
           notch.style.top = "";
-          notch.style.left = Math.max(16, Math.min(w - 28, (avoid.x0 + avoid.x1) / 2 - x - 6)) + "px";
+          notch.style.left = Math.max(16, Math.min(w - 28, tx - x - 6)) + "px";
         } else {
           notch.style.left = "";
-          notch.style.top = Math.max(14, Math.min(h - 26, (avoid.y0 + avoid.y1) / 2 - y - 6)) + "px";
+          notch.style.top = Math.max(14, Math.min(h - 26, ty - y - 6)) + "px";
         }
       }
     }
@@ -746,7 +771,11 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
     }
     view.style.transform = t;
     const avoid = onStep() ? avoidFor(p.step, z, sz, cardData) : null;
-    placeCard(sz, avoid);
+    placeCard(sz, avoid, avoid && cardKind === "guide" ? aimFor(z, sz, cardData) : null);
+    if (ctaEl && ctaEl.parentElement === frame && !ctaEl.hidden) {
+      // Top right, unless the spotlight is there: then top left.
+      ctaEl.classList.toggle("left", overlaps(avoid, sz.w - ctaEl.offsetWidth - 12, 12, ctaEl.offsetWidth, ctaEl.offsetHeight));
+    }
     if (!animate) {
       void view.offsetWidth;
       view.style.transition = "";
@@ -784,8 +813,11 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
     else if (sc.kind === "end") t = (endActions.firstElementChild as HTMLElement | null) ?? endTitle;
     else if (cardKind) t = nav.via === "back" && backBtn && !backBtn.disabled ? backBtn : nav.via === "next" && nextBtn ? nextBtn : defaultFocus;
     if (!t) return;
-    if (card.contains(t) && card.inert) pendingFocus = t;
-    else t.focus({ preventScroll: true });
+    if (card.contains(t) && card.inert) {
+      // The card is still entering: hold focus on the stage, then hand it over once it can take it.
+      pendingFocus = t;
+      if (!stage.hidden) stage.focus({ preventScroll: true });
+    } else t.focus({ preventScroll: true });
   }
 
   function announce(text: string): void {
@@ -816,7 +848,15 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
     // Header and footer.
     chapterName.textContent = sc.kind === "step" || sc.kind === "chapter-end" ? chapterTitle(sc.chapter) : "";
     chaptersBtn.hidden = chapters.length < 2 || sc.kind === "menu" || sc.kind === "cover";
-    if (ctaEl) ctaEl.hidden = !(sc.kind === "step" || sc.kind === "menu");
+    if (ctaEl) {
+      ctaEl.hidden = !(sc.kind === "step" || sc.kind === "menu");
+      const home = sc.kind === "menu" ? menu : frame;
+      if (ctaEl.parentElement !== home) {
+        ctaEl.classList.remove("left");
+        if (home === menu) menu.prepend(ctaEl);
+        else frame.append(ctaEl);
+      }
+    }
     hint.hidden = sc.kind !== "step";
     const inChapter = sc.kind === "step" || sc.kind === "chapter-end";
     where.hidden = !inChapter || chapters.length < 2;

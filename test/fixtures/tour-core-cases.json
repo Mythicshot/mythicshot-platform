@@ -22,7 +22,20 @@
     {"name": "edge 5: spotlight in the bottom right corner", "image": [800, 500], "card": [260, 120], "avoid": [700, 420, 800, 500], "placement": "auto", "expect": {"x": 532, "y": 288, "side": "top"}},
     {"name": "tie: a fit within 0.001 px counts in both languages", "image": [800, 500], "card": [260, 120], "avoid": [300, 100, 500, 360.00001], "placement": "bottom", "expect": {"x": 270, "y": 372.00001, "side": "bottom"}},
     {"name": "non-finite 1: NaN in the box docks the card", "image": [800, 500], "card": [260, 120], "avoid": ["NaN", 100, 500, 160], "placement": "auto", "expect": {"x": 0, "y": 500, "side": "docked"}},
-    {"name": "non-finite 2: Infinity in the box docks the card", "image": [800, 500], "card": [260, 120], "avoid": [300, 100, 500, "Infinity"], "placement": "auto", "expect": {"x": 0, "y": 500, "side": "docked"}}
+    {"name": "non-finite 2: Infinity in the box docks the card", "image": [800, 500], "card": [260, 120], "avoid": [300, 100, 500, "Infinity"], "placement": "auto", "expect": {"x": 0, "y": 500, "side": "docked"}},
+    {"name": "aim 1: a spot picked inside the spotlight moves the card along its side", "image": [800, 500], "card": [260, 120], "avoid": [300, 100, 500, 160], "aim": [320, 130], "placement": "auto", "expect": {"x": 190, "y": 172, "side": "bottom"}},
+    {"name": "aim 2: a spot above the spotlight puts the card above the spot", "image": [800, 500], "card": [260, 120], "avoid": [300, 300, 500, 400], "aim": [450, 200], "placement": "auto", "expect": {"x": 320, "y": 68, "side": "top"}},
+    {"name": "aim 3: a spot right of the spotlight puts the card right of the spot", "image": [800, 500], "card": [260, 120], "avoid": [100, 150, 300, 350], "aim": [450, 250], "placement": "auto", "expect": {"x": 462, "y": 190, "side": "right"}},
+    {"name": "aim 4: the asked side still comes first", "image": [800, 500], "card": [260, 120], "avoid": [300, 100, 500, 160], "aim": [320, 130], "placement": "left", "expect": {"x": 28, "y": 70, "side": "left"}},
+    {"name": "aim 5: a spot whose side has no room falls back to the order, still centred on the spot", "image": [800, 500], "card": [260, 120], "avoid": [300, 200, 500, 300], "aim": [400, 120], "placement": "auto", "expect": {"x": 270, "y": 312, "side": "bottom"}},
+    {"name": "aim 6: a spot that is not finite is ignored", "image": [800, 500], "card": [260, 120], "avoid": [300, 100, 500, 160], "aim": ["NaN", 130], "placement": "auto", "expect": {"x": 270, "y": 172, "side": "bottom"}},
+    {"name": "far 1: desktop, a spot far from the spotlight: beside the spotlight, pointing at the spot", "image": [800, 500], "card": [260, 120], "avoid": [50, 50, 150, 150], "aim": [750, 450], "placement": "auto", "expect": {"x": 162, "y": 372, "side": "right"}},
+    {"name": "far 2: phone, a spot far below the spotlight", "image": [390, 844], "card": [320, 180], "avoid": [40, 100, 200, 200], "aim": [300, 700], "placement": "auto", "expect": {"x": 62, "y": 212, "side": "bottom"}},
+    {"name": "far 3: desktop, a spot in the far top-left corner", "image": [800, 500], "card": [260, 120], "avoid": [600, 350, 750, 450], "aim": [60, 40], "placement": "auto", "expect": {"x": 328, "y": 8, "side": "left"}},
+    {"name": "far 4: phone, a spot far above the spotlight", "image": [390, 844], "card": [320, 180], "avoid": [100, 600, 300, 700], "aim": [50, 60], "placement": "auto", "expect": {"x": 8, "y": 408, "side": "top"}},
+    {"name": "far 5: desktop, the spotlight leaves no room, so the card keeps clear of the spot alone", "image": [800, 500], "card": [260, 120], "avoid": [10, 10, 790, 490], "aim": [400, 250], "placement": "auto", "expect": {"x": 270, "y": 284, "side": "bottom"}},
+    {"name": "far 6: phone, the spotlight leaves no room, so the card keeps clear of the spot alone", "image": [390, 844], "card": [320, 180], "avoid": [20, 20, 370, 820], "aim": [195, 100], "placement": "auto", "expect": {"x": 35, "y": 134, "side": "bottom"}},
+    {"name": "far 7: nothing fits even around the spot, so the card docks", "image": [320, 180], "card": [240, 100], "avoid": [10, 10, 310, 170], "aim": [160, 90], "placement": "auto", "expect": {"x": 0, "y": 180, "side": "docked"}}
   ],
   "zoom": [
     {"name": "zoom 1", "view": [800, 500], "focus": [400, 250], "k": 1.18, "expect": {"tx": -72, "ty": -45}},
@@ -110,7 +123,11 @@
     {"name": "C1 controls are stripped, NEL included", "input": "a\u0085b\u009fc\u007f", "max": 80, "multiline": true, "expect": "abc"},
     {"name": "hostile markup is just characters", "input": "</script><img src=x onerror=alert(1)>", "max": 300, "multiline": true, "expect": "</script><img src=x onerror=alert(1)>"},
     {"name": "cut after trimming", "input": "   abcdef", "max": 3, "multiline": false, "expect": "abc"},
-    {"name": "tags and other astral format characters are stripped", "input": "a\udb40\udc41\ud834\udd73b", "max": 80, "multiline": false, "expect": "ab"}
+    {"name": "tags and other astral format characters are stripped", "input": "a\udb40\udc41\ud834\udd73b", "max": 80, "multiline": false, "expect": "ab"},
+    {"name": "line and paragraph separators become line breaks in a body", "input": "one\u2028two\u2029three", "max": 300, "multiline": true, "expect": "one\ntwo\nthree"},
+    {"name": "line and paragraph separators become spaces in a title", "input": "one\u2028two\u2029three", "max": 80, "multiline": false, "expect": "one two three"},
+    {"name": "a separator at either end is trimmed away", "input": "\u2029\u2028Hi\u2028", "max": 80, "multiline": true, "expect": "Hi"},
+    {"name": "a cut never leaves a trailing space or line break", "input": "ab \n\u2028cd", "max": 4, "multiline": true, "expect": "ab"}
   ],
   "color": [
     {"input": "#FFAA00", "expect": "#ffaa00"},

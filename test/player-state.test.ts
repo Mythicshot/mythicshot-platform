@@ -140,7 +140,8 @@ describe("player state", () => {
   });
 
   it("tick moves forward while autoplay runs and does nothing when paused or off", () => {
-    const on = reduce(tour, playing(), { type: "open", chapter: 0 });
+    // A link to a step (goto) is not a viewer's click, so autoplay keeps running.
+    const on = reduce(tour, playing(), { type: "goto", chapter: 0, step: 0 });
     expect(on.autoplay).toBe("running");
     expect(run(tour, on, "tick").screen).toEqual(step(0, 1));
     const paused = run(tour, on, "pause");
@@ -158,17 +159,35 @@ describe("player state", () => {
     expect(ended.screen).toEqual({ kind: "chapter-end", chapter: 1 });
     expect(ended.seen).toEqual([false, true]);
     expect(run(tour, ended, "tick", "tick")).toEqual(ended);
-    // Opening the next chapter from the panel plays it too.
-    expect(reduce(tour, ended, { type: "open", chapter: 0 }).autoplay).toBe("running");
+    // Still running on the panel: it holds there, and only the viewer moves on.
+    expect(ended.autoplay).toBe("running");
   });
 
-  it("next, back and hit turn autoplay off; pause and resume switch it; stop ends it", () => {
+  it("next, back, hit and opening a chapter pause autoplay until Play; ticks do not", () => {
     const on = reduce(tour, playing(), { type: "goto", chapter: 0, step: 1 });
-    for (const a of ["next", "back", "hit"] as const) expect(run(tour, on, a).autoplay, a).toBe("off");
+    expect(on.autoplay).toBe("running");
+    for (const a of ["next", "back", "hit"] as const) expect(run(tour, on, a).autoplay, a).toBe("paused");
+    expect(reduce(tour, on, { type: "open", chapter: 1 }).autoplay).toBe("paused");
+    // "Next: <chapter>" on the end panel is an open too.
+    const ended = run(tour, reduce(tour, playing(), { type: "goto", chapter: 1, step: 1 }), "tick");
+    expect(reduce(tour, ended, { type: "open", chapter: 0 }).autoplay).toBe("paused");
+    // Play brings it back, and a tick is not a manual step.
+    const resumed = run(tour, on, "next", "resume");
+    expect(resumed.autoplay).toBe("running");
+    expect(run(tour, resumed, "tick").autoplay).toBe("running");
+    // A paused tour does not move on a tick.
+    const paused = run(tour, on, "next");
+    expect(run(tour, paused, "tick")).toEqual(paused);
+  });
+
+  it("pause and resume switch autoplay; stop ends it for good; a tour without autoplay stays off", () => {
+    const on = reduce(tour, playing(), { type: "goto", chapter: 0, step: 1 });
+    expect(run(tour, on, "pause").autoplay).toBe("paused");
     expect(run(tour, on, "pause", "resume").autoplay).toBe("running");
     expect(run(tour, on, "stop").autoplay).toBe("off");
-    // Once off, resume does not bring it back.
-    expect(run(tour, on, "next", "resume").autoplay).toBe("off");
+    expect(run(tour, on, "stop", "resume").autoplay).toBe("off");
+    const off = reduce(tour, start(tour), { type: "open", chapter: 0 });
+    expect(run(tour, off, "next", "resume").autoplay).toBe("off");
   });
 
   it("autoplay never starts under reduced motion", () => {

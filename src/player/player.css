@@ -34,8 +34,13 @@ body { background: #eeede8; color: #1f232a; font: 15px/1.5 system-ui, -apple-sys
 .dp-chapter:empty { display: none; }
 .dp-chapters, .dp-play { flex: none; min-height: 34px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-2); font-size: 13px; font-weight: 600; transition: background-color .2s var(--ease); }
 .dp-chapters:hover, .dp-play:hover { background: var(--panel); }
-.dp-cta { flex: none; max-width: 42vw; padding: 7px 15px; border-radius: 999px; background: var(--accent); color: var(--on-accent) !important; font-size: 13px; font-weight: 650; line-height: 1.2; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 4px 14px var(--shade); }
+/* The always-on button: in the picture's top corner on a step, as in the recorder's preview; at the top of the menu. */
+.dp-cta { display: inline-block; max-width: calc(100% - 24px); padding: 7px 14px; border-radius: 999px; background: var(--accent); color: var(--on-accent) !important; font-size: 13px; font-weight: 600; line-height: 1.2; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 4px 16px rgba(0, 0, 0, .28); transition: opacity 280ms var(--ease); }
 .dp-cta:hover { filter: brightness(1.06); }
+.dp-frame > .dp-cta { position: absolute; top: 12px; right: 12px; z-index: 6; line-height: 1.2; }
+.dp-frame > .dp-cta.left { right: auto; left: 12px; }
+.dp-menu > .dp-cta { float: right; max-width: 45%; margin: 4px 0 10px 16px; }
+.dp-stage:focus { outline: none; }
 
 .dp-body { flex: 1; min-height: 0; display: flex; align-items: safe center; justify-content: center; padding: 16px; overflow: auto; touch-action: pan-y; }
 
@@ -79,7 +84,8 @@ body { background: #eeede8; color: #1f232a; font: 15px/1.5 system-ui, -apple-sys
 .dp-frame.anywhere { cursor: pointer; }
 .dp-view { position: relative; transform-origin: 0 0; transition: transform 550ms var(--ease); will-change: transform; }
 .dp-shot { display: block; max-width: calc(100vw - 32px); max-height: calc(100vh - 168px); max-height: calc(100dvh - 168px); }
-.dp-missing { display: flex; align-items: center; justify-content: center; padding: 16px; background: var(--panel-2); color: var(--muted); font-size: 13px; line-height: 1.4; text-align: center; }
+/* A missing or broken picture: a calm striped placeholder of the step's shape, as in the recorder's preview. */
+.dp-missing { display: flex; align-items: center; justify-content: center; padding: 16px; background: #1b1f27 repeating-linear-gradient(135deg, rgba(255, 255, 255, .03) 0 14px, transparent 14px 28px); color: #8e97a8; font-size: 13px; line-height: 1.4; text-align: center; }
 .dp-dim { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; opacity: 0; contain: strict; transition: opacity 400ms var(--ease); }
 .dp-dim.on { opacity: 1; }
 .dp-hole { position: absolute; border-radius: 3px; }
@@ -135,10 +141,13 @@ body { background: #eeede8; color: #1f232a; font: 15px/1.5 system-ui, -apple-sys
 .dp-notch.toleft { left: -7px; border-width: 0 0 1px 1px; }
 .dp-notch.toright { right: -7px; border-width: 1px 1px 0 0; }
 .dp-card.docked .dp-notch { display: none; }
-.dp-card.compact { display: flex; align-items: center; gap: 10px; padding: 9px 10px 9px 6px; border-radius: 12px; background: rgba(23, 26, 33, .94); border-color: rgba(255, 255, 255, .08); color: #eef0f4; box-shadow: 0 10px 30px rgba(0, 0, 0, .34); }
-.dp-card.compact .dp-c-body { flex: 1; min-width: 0; color: #cad0da; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* The compact bar: a light pill with the counter, the text and the button on one line, in Light's colours. */
+.dp-card.compact { display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 8px; border-radius: 999px; background: #fcfcfb; border-color: rgba(16, 22, 32, .08); color: #1c2028; box-shadow: 0 10px 30px rgba(8, 14, 24, .22), 0 2px 6px rgba(8, 14, 24, .1); }
+.dp-card.compact .dp-c-body { flex: 1; min-width: 0; color: #4b5361; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dp-card.compact strong { color: #12161d; }
+.dp-card.compact .dp-c-back { border-radius: 999px; }
 .dp-card.compact .dp-c-count { flex: none; }
-.dp-card.compact .dp-c-next { flex: none; padding: 7px 14px; }
+.dp-card.compact .dp-c-next { flex: none; padding: 7px 14px; border-radius: 999px; }
 .dp-card.panel { padding: 22px 24px 20px; text-align: center; }
 .dp-logo { display: block; max-width: 140px; max-height: 48px; margin: 0 auto 14px; }
 .dp-p-kicker { margin: 0 0 4px; font-size: 12px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
@@ -154,7 +163,8 @@ body { background: #eeede8; color: #1f232a; font: 15px/1.5 system-ui, -apple-sys
   .dp-head { padding: 8px 12px; }
   .dp-body { align-items: flex-start; padding: 12px; }
   .dp-shot { max-width: calc(100vw - 24px); }
-  .dp-cta { max-width: 34vw; padding: 6px 11px; font-size: 12px; }
+  .dp-frame > .dp-cta { top: 9px; right: 9px; padding: 5px 11px; font-size: 12px; }
+  .dp-frame > .dp-cta.left { left: 9px; }
   .dp-chapters { padding: 6px 11px; }
   .dp-list { grid-template-columns: 1fr; }
   .dp-endcard { padding: 24px 18px 20px; }
@@ -163,7 +173,7 @@ body { background: #eeede8; color: #1f232a; font: 15px/1.5 system-ui, -apple-sys
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dp-view, .dp-dim, .dp-hole.glide, .dp-card, .dp-scrim, .dp-bar-fill, .dp-menu, .dp-endcard, .dp-chapter-card, .dp-chapters, .dp-play { transition: none !important; }
+  .dp-view, .dp-dim, .dp-hole.glide, .dp-card, .dp-scrim, .dp-bar-fill, .dp-menu, .dp-endcard, .dp-chapter-card, .dp-chapters, .dp-play, .dp-cta { transition: none !important; }
   .dp-ring.pulse::after, .dp-ring.miss::after { animation: none; display: none; }
   .dp-chapter-card:hover { transform: none; }
 }

@@ -4,7 +4,8 @@
 type Side = "bottom" | "top" | "right" | "left" | "none" | "docked";
 type AvoidBox = { x0: number; y0: number; x1: number; y1: number };
 declare const TourCore: {
-  placeCard(imgW: number, imgH: number, cardW: number, cardH: number, avoid: AvoidBox | null, placement: string): { x: number; y: number; side: Side };
+  /** `aim` is a spot picked for the card: it points at it and keeps clear of the box and the spot. */
+  placeCard(imgW: number, imgH: number, cardW: number, cardH: number, avoid: AvoidBox | null, placement: string, aim?: { x: number; y: number }): { x: number; y: number; side: Side };
   zoomOffset(viewW: number, viewH: number, focusX: number, focusY: number, k: number): { tx: number; ty: number };
   parseBold(text: unknown): { text: string; bold: boolean }[];
   cleanText(s: unknown, max: number, multiline: boolean): string;

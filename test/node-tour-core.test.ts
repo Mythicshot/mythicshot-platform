@@ -7,8 +7,8 @@ import vm from "node:vm";
 import { describe, expect, it } from "vitest";
 
 /** Printed by `npm run sync:core`. A change to either file must come with a new hash here. */
-const CORE_SHA256 = "0e9ba28fc72dca5a5fd4e9ad71e9a84f55ea0a9b9779858888842a7e284eb89e";
-const CASES_SHA256 = "0bcc7adf14906a88a4410f2abb15f9a1b1894a841f3a48e4284707f579f93859";
+const CORE_SHA256 = "fb94624416ad0d6f9085659be4c48bcca956223c061566cf673f03331ce0f543";
+const CASES_SHA256 = "5d3d99b1ecd37b261d6269692fbc66a5d675a49a4046720ca15dd18daf9aecdb";
 
 const corePath = new URL("../src/player/vendor/tour-core.js", import.meta.url);
 const casesPath = new URL("./fixtures/tour-core-cases.json", import.meta.url);
@@ -39,7 +39,9 @@ describe("the vendored tour rules", () => {
     expect(Object.keys(cases).filter((k) => k !== "about").sort()).toEqual(["bold", "color", "place", "text", "url", "zoom"]);
     for (const c of cases.place) {
       const [x0, y0, x1, y1] = (c.avoid || []).map(n);
-      const p = TourCore.placeCard(c.image[0], c.image[1], c.card[0], c.card[1], c.avoid && { x0, y0, x1, y1 }, c.placement);
+      // A picked spot ("aim") is passed when the case has one, as the player does.
+      const aim = c.aim ? { x: n(c.aim[0]), y: n(c.aim[1]) } : undefined;
+      const p = TourCore.placeCard(c.image[0], c.image[1], c.card[0], c.card[1], c.avoid && { x0, y0, x1, y1 }, c.placement, aim);
       close(p.x, c.expect.x, `${c.name} x`);
       close(p.y, c.expect.y, `${c.name} y`);
       expect(p.side, c.name).toBe(c.expect.side);

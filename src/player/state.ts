@@ -105,8 +105,13 @@ function forward(tour: PageTour, s: State, chapter: number, step: number): State
   return { ...s, seen, screen };
 }
 
-/** A step the viewer took by hand ends autoplay for the rest of the visit. */
-const manual = (s: State): State => (s.autoplay === "off" ? s : { ...s, autoplay: "off" });
+/**
+ * Autoplay, as decided by the owner on 2026-11-17: it plays inside a chapter, holds on
+ * the chapter-end panel (a tick there does nothing), and any manual action by the viewer
+ * (Next, Back, the hotspot or a click anywhere, a chapter card, "Next: <chapter>") pauses
+ * it until they press Play again. Only reduced motion ("stop") turns it off for good.
+ */
+const manual = (s: State): State => (s.autoplay === "running" ? { ...s, autoplay: "paused" } : s);
 
 export function reduce(tour: PageTour, s: State, a: Action): State {
   const sc = s.screen;
@@ -114,8 +119,8 @@ export function reduce(tour: PageTour, s: State, a: Action): State {
     case "start":
       return sc.kind === "cover" ? { ...s, screen: afterCover(tour) } : s;
     case "open":
-      // Opening a chapter is not a step: autoplay, if on, plays it.
-      return validStep(tour, a.chapter, 0) ? { ...s, screen: { kind: "step", chapter: a.chapter, step: 0 } } : s;
+      // A chapter card or "Next: <chapter>" is a manual action too.
+      return validStep(tour, a.chapter, 0) ? { ...manual(s), screen: { kind: "step", chapter: a.chapter, step: 0 } } : s;
     case "goto":
       return validStep(tour, a.chapter, a.step) ? { ...s, screen: { kind: "step", chapter: a.chapter, step: a.step } } : s;
     case "next":
@@ -140,7 +145,7 @@ export function reduce(tour: PageTour, s: State, a: Action): State {
     case "resume":
       return s.autoplay === "paused" ? { ...s, autoplay: "running" } : s;
     case "stop":
-      return manual(s);
+      return s.autoplay === "off" ? s : { ...s, autoplay: "off" };
     case "menu":
       return chapters(tour).length > 0 ? { ...s, screen: { kind: "menu" } } : s;
     case "end":

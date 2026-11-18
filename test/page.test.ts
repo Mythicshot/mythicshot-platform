@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import type { Deps } from "../src/ports.ts";
 import { pageTour, type PageData } from "../src/page.ts";
+import { PLAYER_CSS_PATH, PLAYER_JS_PATH } from "../src/player/assets.ts";
 import type { Snapshot } from "../src/publish.ts";
 import { clone, fixtures, send, uploadTour, type Call, type Json } from "./bundle.ts";
 
@@ -61,8 +62,11 @@ describe("the player page", () => {
     expect(r.headers.get("content-type")).toBe("text/html; charset=utf-8");
     expect(data(r)).toEqual({ base: "", tour: pageTour(await snapshotOf(deps, tourId)) });
     expect(r.text).toContain('<main id="player">');
-    expect(r.text).toContain('<link rel="stylesheet" href="/player.css">');
-    expect(r.text).toContain('<script src="/player.js" defer></script>');
+    // The player's files are linked by content hash, so a page never runs another deploy's script.
+    expect(PLAYER_JS_PATH).toMatch(/^\/player\.[0-9a-f]{16}\.js$/);
+    expect(PLAYER_CSS_PATH).toMatch(/^\/player\.[0-9a-f]{16}\.css$/);
+    expect(r.text).toContain(`<link rel="stylesheet" href="${PLAYER_CSS_PATH}">`);
+    expect(r.text).toContain(`<script src="${PLAYER_JS_PATH}" defer></script>`);
 
     const withBase = await setup({ publicImageBase: IMAGE_BASE + "/" });
     const p = await published(withBase.deps, withBase.a.token, v3);
@@ -232,6 +236,87 @@ describe("the player page", () => {
     expect(r.text).toBe(unknown.text);
   });
 
+  it("a key the page does not know, at any depth, never reaches the page", async () => {
+    const { deps, a } = await setup();
+    const m = clone(v3);
+    m.steps[0].click = { x: 50, y: 50 };
+    const { tourId, slug } = await published(deps, a.token, m);
+    const clean = await snapshotOf(deps, tourId);
+    const planted: Json = clone(clean);
+    const MARK = "zzplanted";
+    const plant = (o: Json | null | undefined, where: string) => {
+      if (o === null || o === undefined) throw new Error(`nothing to plant in at ${where}`);
+      o[MARK + "_" + where] = MARK + " " + where;
+    };
+    plant(planted, "top");
+    for (const k of ["theme", "zoom", "cover", "cta", "end", "autoplay"]) plant(planted[k], k);
+    plant(planted.end.primary, "end_primary");
+    const ch = planted.chapters[0];
+    plant(ch, "chapter");
+    const [s1, s2] = ch.steps;
+    plant(s1, "step");
+    plant(s1.click, "click");
+    plant(s1.spotlight, "spotlight");
+    plant(s1.notes[0], "text_note");
+    plant(s1.card, "card");
+    plant(s2.notes[0], "bubble_note");
+    plant(s2.notes[0].tail, "tail");
+    plant(s2.card.point, "point");
+    await deps.db.run("UPDATE snapshot SET data = ? WHERE tour_id = ?", [JSON.stringify(planted), tourId]);
+    const r = await page(deps, slug);
+    expect(r.status).toBe(200);
+    expect(r.text).not.toContain(MARK);
+    expect(data(r).tour).toEqual(pageTour(clean));
+  });
+
+  it("the page copies every field it knows with its value unchanged", async () => {
+    const { deps, a } = await setup();
+    const { tourId, slug } = await published(deps, a.token, v3);
+    const snap = await snapshotOf(deps, tourId);
+    const tour = data(await page(deps, slug)).tour as unknown as Json;
+    // Everything but the chapter ids, which never leave the server.
+    const expected: Json = clone(snap);
+    for (const c of expected.chapters) delete c.id;
+    expect(tour).toEqual(expected);
+  });
+
+  it("a snapshot with a missing or mistyped part answers the same 404 and logs one line without content", async () => {
+    const { deps, a } = await setup();
+    const { tourId, slug } = await published(deps, a.token, v3);
+    const unknown = await page(deps, "abcdefghij");
+    const snap = await snapshotOf(deps, tourId);
+    const breakers: ((s: Json) => void)[] = [
+      (s) => (s.chapters = null),
+      (s) => (s.chapters[0] = null),
+      (s) => (s.chapters[0].steps = null),
+      (s) => (s.chapters[0].steps[1] = null),
+      (s) => (s.chapters[0].steps[0].notes = [null]),
+      (s) => (s.chapters[0].steps[0].click = "here"),
+      (s) => (s.chapters[0].steps[0].width = "1280"),
+      (s) => (s.chapters[0].steps[0].image = 42),
+      (s) => (s.theme = null),
+      (s) => (s.end.primary = { label: "x" }),
+      (s) => (s.title = 7),
+      (s) => (s.cover.logo = { key: "p/x.png" }),
+    ];
+    for (const [i, br] of breakers.entries()) {
+      const bad: Json = clone(snap);
+      bad.chapters[0].title = "SECRET-CONTENT";
+      br(bad);
+      await deps.db.run("UPDATE snapshot SET data = ? WHERE tour_id = ?", [JSON.stringify(bad), tourId]);
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const r = await page(deps, slug);
+      const lines = spy.mock.calls.map((c) => c.map(String).join(" "));
+      spy.mockRestore();
+      expect(r.status, `breaker ${i}`).toBe(404);
+      expect(r.text).toBe(unknown.text);
+      expect(lines, `breaker ${i}`).toHaveLength(1);
+      expect(lines[0]).not.toContain("SECRET");
+      expect(lines[0]).not.toContain(slug);
+      expect(lines[0]).not.toContain(tourId);
+    }
+  });
+
   it("without JavaScript the page shows the title and a plain message", async () => {
     const { deps, a } = await setup();
     const m = clone(v3);
@@ -268,7 +353,7 @@ describe("the player page", () => {
     const { slug } = await published(deps, a.token, v3);
     const html = (await page(deps, slug)).text.replace(DATA_BLOCK, "");
     const refs = [...html.matchAll(/\b(?:href|src|action|srcset|poster|data)\s*=\s*"([^"]*)"/gi)].map((x) => x[1]);
-    expect(refs.sort()).toEqual(["/player.css", "/player.js"]);
+    expect(refs.sort()).toEqual([PLAYER_CSS_PATH, PLAYER_JS_PATH].sort());
     expect(html).not.toContain("https://");
     expect(html).not.toMatch(/\sstyle\s*=|\son[a-z]+\s*=/i);
     // With the data block taken out, the player's own tag is the only script left.
