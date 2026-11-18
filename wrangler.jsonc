@@ -33,6 +33,18 @@
     //
     // `npm run setup:cloudflare` writes each install's copy of this file to
     // wrangler.deploy.jsonc (ignored by Git), with its own names, database id and address.
-    "PUBLIC_IMAGE_BASE": ""
+    "PUBLIC_IMAGE_BASE": "",
+    // TOURS_HOST and APP_HOST: both empty (the default): the app serves one address and
+    // checks no host name. Both set, as host names such as tours.example.com and
+    // app.example.com: tour pages and their pictures are served on the tours address
+    // only, the token API on both, and every other host name, the workers.dev address
+    // included, gets an empty 421. One without the other, a value that is not a host
+    // name, or the same name twice: every request answers 500 `misconfigured`, /healthz
+    // included, until the pair is fixed or emptied.
+    //
+    // `npm run setup:cloudflare` sets up one address: it writes both empty on a new install,
+    // and keeps what an install's own file (wrangler.deploy.jsonc) holds, as it is.
+    "TOURS_HOST": "",
+    "APP_HOST": ""
   }
 }
