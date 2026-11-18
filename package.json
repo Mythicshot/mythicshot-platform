@@ -1,6 +1,6 @@
 {
   "name": "demo-platform",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "Hosted platform for interactive product tours, on Cloudflare or in a container.",
   "type": "module",
@@ -18,8 +18,10 @@
     "test:node": "vitest run -c vitest.node.config.ts",
     "test": "npm run test:cf && npm run test:node",
     "test:container": "bash deploy/test-container.sh",
+    "test:cpanel": "bash deploy/cpanel/test-cpanel.sh",
     "build:player": "node scripts/build-player.ts",
     "setup:cloudflare": "node scripts/setup-cloudflare.ts",
+    "package:cpanel": "node scripts/package-cpanel.ts",
     "sync:core": "node scripts/sync-core.ts"
   },
   "dependencies": {

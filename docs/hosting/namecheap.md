@@ -8,6 +8,8 @@
 
 This guide takes you from no hosting to a running platform on one Namecheap VPS (a rented virtual server). It suits you best if your domain is registered at Namecheap already, because one account then holds both. The install itself is the [Docker runbook](../runbook-docker.md); this guide adds the Namecheap steps around it.
 
+This guide is for a VPS. For shared hosting with cPanel, at any provider, see the [shared cPanel hosting guide](cpanel.md) instead.
+
 Examples use `tours.example.com` for the platform's address, `203.0.113.10` for the server's IPv4 address and `2001:db8::10` for its IPv6 address. Put your own in their place.
 
 ## Contents
