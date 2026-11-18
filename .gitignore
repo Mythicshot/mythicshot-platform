@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .wrangler/
+wrangler.deploy.jsonc
+wrangler.deploy.jsonc.tmp
 .data/
 data/
 *.sqlite

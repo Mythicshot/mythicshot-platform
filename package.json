@@ -19,6 +19,7 @@
     "test": "npm run test:cf && npm run test:node",
     "test:container": "bash deploy/test-container.sh",
     "build:player": "node scripts/build-player.ts",
+    "setup:cloudflare": "node scripts/setup-cloudflare.ts",
     "sync:core": "node scripts/sync-core.ts"
   },
   "dependencies": {
