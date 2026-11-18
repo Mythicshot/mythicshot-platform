@@ -8,7 +8,7 @@ import type { Deps } from "../src/ports.ts";
 import { REPLACED_FILES_PER_CALL } from "../src/replace.ts";
 import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
-import { abort, clone, commit, count, createUpload, fixtures, logoPng, putLogo, putStep, send, sha256Hex, stepImage, type Call, type Json } from "./bundle.ts";
+import { abort, clone, commit, count, createUpload, fixtures, jpeg, logoPng, putLogo, putStep, send, sha256Hex, stepImage, type Call, type Json } from "./bundle.ts";
 
 const v2 = fixtures.v2 as Json;
 const T0 = 1_800_000_000_000;
@@ -137,7 +137,7 @@ describe("replace: creating the upload", { timeout: 60_000 }, () => {
     m.steps[3].width = 65;
     const created = await createReplace(deps, a.token, m, t, hashes);
     expect(created.status).toBe(201);
-    expect(created.json).toEqual({ upload_id: expect.stringMatching(/^up_[0-9a-f]{24}$/), steps: 4, have: [1, 2], settings: false });
+    expect(created.json).toEqual({ upload_id: expect.stringMatching(/^up_[0-9a-f]{24}$/), steps: 4, have: [1, 2], settings: true });
     const id = created.json.upload_id as string;
     expect(await deps.db.first<Json>("SELECT tour_id, replaces_chapter_id, base_revision FROM upload WHERE id = ?", [id])).toEqual({
       tour_id: t.tour_id, replaces_chapter_id: t.chapter_id, base_revision: null,
@@ -155,7 +155,7 @@ describe("replace: creating the upload", { timeout: 60_000 }, () => {
     const t = await uploadPics(deps, a.token, [1, 2, 3]);
     const created = await createReplace(deps, a.token, manifestOf([1, 2, 3]), t);
     expect(created.status).toBe(201);
-    expect(created.json).toEqual({ upload_id: expect.any(String), steps: 3, have: [], settings: false });
+    expect(created.json).toEqual({ upload_id: expect.any(String), steps: 3, have: [], settings: true });
     expect(await count(deps, "upload_step")).toBe(0);
   });
 
@@ -389,19 +389,6 @@ describe("replace: commit", { timeout: 60_000 }, () => {
     // The upload can still be finished.
     expect((await putStep(deps, a.token, id, 2, picture(m, 1, 9))).status).toBe(204);
     expect((await commit(deps, a.token, id)).status).toBe(201);
-  });
-
-  it("a logo is refused, as for any upload into an existing tour", async () => {
-    const { deps, a } = await setup();
-    const t = await uploadPics(deps, a.token, [1]);
-    const m = clone(fixtures.v3 as Json);
-    m.steps = [{ ...m.steps[0], image: "step-001.png", width: 64, height: 64, bytes: 120 }];
-    expect(m.cover.logo).toBeTruthy();
-    const created = await createReplace(deps, a.token, m, t);
-    expect(created.status).toBe(201);
-    const logo = await putLogo(deps, a.token, created.json.upload_id, logoPng());
-    expect(logo.status).toBe(409);
-    expect(logo.json.error).toBe("logo_not_used");
   });
 
   it("the pictures no step uses any more are recorded for removal and the reused ones are not", async () => {
@@ -1016,5 +1003,216 @@ describe("replace: removing the replaced pictures", { timeout: 120_000 }, () => 
     expect((await listTours(deps, a.token)).status).toBe(200);
     expect(await replacedKeys(deps)).toEqual([]);
     expect(await ctx.draftKeys()).toEqual([...(await stepKeys(deps, t.chapter_id)), ...(await stepKeys(deps, bt.chapter_id))].sort());
+  });
+});
+
+describe("replace: the tour's settings and logo travel with its first chapter", { timeout: 60_000 }, () => {
+  const v3 = fixtures.v3 as Json;
+  const SETTINGS = ["spotlight_dim", "theme", "zoom", "cover", "cta", "end_card", "autoplay", "logo_key", "logo_type"] as const;
+  const settingsOf = (tour: Json) => Object.fromEntries(SETTINGS.map((k) => [k, tour[k]]));
+  const newLogo = () => jpeg(64, 64, 900, 3);
+
+  /** A version 3 manifest (settings, cover and a PNG logo) of small steps with these pictures. */
+  function v3Of(pics: number[]): Json {
+    const m = clone(v3);
+    m.steps = pics.map((_, i) => ({ ...clone(v3.steps[0]), image: `step-${String(i + 1).padStart(3, "0")}.png`, width: 64, height: 64, bytes: 120 }));
+    return m;
+  }
+
+  /** The same with every setting changed, and a JPEG logo. */
+  function changed(pics: number[]): Json {
+    const m = v3Of(pics);
+    m.title = "Another name";
+    m.spotlight_dim = 40;
+    m.theme = { card_style: "light", accent: "#ff8800", hotspot: "dot", progress_bar: false, backdrop: "auto", spotlight_soft: false };
+    m.zoom = { enabled: false, percent: 130 };
+    m.cover = { title: "A new cover", body: "A new first sentence.", button: "Go", logo: "logo.jpg" };
+    m.cta = { label: "Talk to us", url: "https://tours.example.com/talk" };
+    m.end = { text: "The new end.", primary: null, secondary: { label: "Read more", url: "https://tours.example.com/more" }, replay: false };
+    m.autoplay = { enabled: true, seconds: 7 };
+    return m;
+  }
+
+  /** A new version 3 tour with its logo; committed. */
+  async function uploadV3(deps: Deps, token: string, pics: number[]): Promise<Target> {
+    const m = v3Of(pics);
+    const id = (await createUpload(deps, token, m)).json.upload_id as string;
+    for (let i = 0; i < pics.length; i++) expect((await putStep(deps, token, id, i + 1, picture(m, i, pics[i]))).status).toBe(204);
+    expect((await putLogo(deps, token, id, logoPng())).status).toBe(204);
+    const done = await commit(deps, token, id);
+    expect(done.status).toBe(201);
+    return done.json;
+  }
+
+  /** Creates a replace from `m` and sends every step the site lacks. Returns the create answer. */
+  async function startReplace(deps: Deps, token: string, t: Target, m: Json, pics: number[]): Promise<Call> {
+    const created = await createReplace(deps, token, m, t, await hashesOf(m, pics));
+    expect(created.status).toBe(201);
+    for (let i = 0; i < pics.length; i++) {
+      if (!created.json.have.includes(i + 1)) expect((await putStep(deps, token, created.json.upload_id, i + 1, picture(m, i, pics[i]))).status).toBe(204);
+    }
+    return created;
+  }
+
+  it("replacing the first chapter replaces the tour's theme, cover, buttons, end card and logo, and a publish shows them", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadV3(deps, a.token, [1, 2]);
+    await publishAll(deps, a.token, t.tour_id);
+    const before = { tour: await tourRow(deps, t.tour_id), snapshot: await snapshotRow(deps, t.tour_id) };
+    expect(before.tour.logo_type).toBe("png");
+    const m = changed([1, 3]);
+    const created = await startReplace(deps, a.token, t, m, [1, 3]);
+    expect(created.json).toEqual({ upload_id: expect.any(String), steps: 2, have: [1], settings: true });
+    const id = created.json.upload_id as string;
+    expect((await putLogo(deps, a.token, id, newLogo())).status).toBe(204);
+    expect((await putLogo(deps, a.token, id, newLogo())).status).toBe(409); // once only
+    const done = await commit(deps, a.token, id);
+    expect(done.status).toBe(201);
+    expect(done.json).toEqual({ tour_id: t.tour_id, chapter_id: t.chapter_id, steps: 2, publish: "ready" });
+
+    const tour = await tourRow(deps, t.tour_id);
+    expect(tour.spotlight_dim).toBe(40);
+    expect(JSON.parse(tour.theme)).toEqual(m.theme);
+    expect(JSON.parse(tour.zoom)).toEqual(m.zoom);
+    expect(JSON.parse(tour.cover)).toEqual(m.cover);
+    expect(JSON.parse(tour.cta)).toEqual(m.cta);
+    expect(JSON.parse(tour.end_card)).toEqual(m.end);
+    expect(JSON.parse(tour.autoplay)).toEqual(m.autoplay);
+    expect([tour.logo_key, tour.logo_type]).toEqual([`u/${id}/logo.jpg`, "jpg"]);
+    expect(await bytesOf(deps.drafts, tour.logo_key)).toEqual(newLogo());
+    // The previous logo's file went with the replaced pictures.
+    expect(await bytesOf(deps.drafts, before.tour.logo_key)).toBeNull();
+    expect(await count(deps, "replaced_object")).toBe(0);
+    expect(await ctx.draftKeys()).toEqual([...(await stepKeys(deps, t.chapter_id)), tour.logo_key].sort());
+    // Nothing public changed yet.
+    expect(await snapshotRow(deps, t.tour_id)).toEqual(before.snapshot);
+
+    await publishAll(deps, a.token, t.tour_id);
+    const snap = JSON.parse((await snapshotRow(deps, t.tour_id))!.data);
+    expect(snap).toMatchObject({ spotlight_dim: 40, theme: m.theme, zoom: m.zoom, cta: m.cta, end: m.end, autoplay: m.autoplay });
+    expect(snap.cover).toMatchObject({ title: "A new cover", body: "A new first sentence.", button: "Go" });
+    expect(snap.cover.logo).toMatch(/^p\/[0-9a-f]{32}\.jpg$/);
+    expect(await bytesOf(deps.pub, snap.cover.logo)).toEqual(newLogo());
+  });
+
+  it("replacing the first chapter with a manifest that has no logo removes the tour's logo and its file", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadV3(deps, a.token, [1, 2]);
+    const oldLogo = (await tourRow(deps, t.tour_id)).logo_key as string;
+    expect(await bytesOf(deps.drafts, oldLogo)).not.toBeNull();
+    const m = v3Of([1, 2]);
+    m.cover.logo = null;
+    const created = await startReplace(deps, a.token, t, m, [1, 2]);
+    expect(created.json).toMatchObject({ have: [1, 2], settings: true });
+    const refused = await putLogo(deps, a.token, created.json.upload_id, logoPng());
+    expect(refused.status).toBe(404); // the manifest names none
+    expect((await commit(deps, a.token, created.json.upload_id)).status).toBe(201);
+    const tour = await tourRow(deps, t.tour_id);
+    expect([tour.logo_key, tour.logo_type]).toEqual([null, null]);
+    expect(JSON.parse(tour.cover)).toEqual(m.cover);
+    expect(await bytesOf(deps.drafts, oldLogo)).toBeNull();
+    expect(await ctx.draftKeys()).toEqual((await stepKeys(deps, t.chapter_id)).sort());
+    expect(await count(deps, "replaced_object")).toBe(0);
+    await publishAll(deps, a.token, t.tour_id);
+    expect(JSON.parse((await snapshotRow(deps, t.tour_id))!.data).cover.logo).toBeNull();
+    // A manifest with no cover at all (an older recorder's) takes the cover away too.
+    const plain = await replaceChapter(deps, a.token, t, [1, 2]);
+    expect(plain.status).toBe(201);
+    expect((await tourRow(deps, t.tour_id)).cover).toBeNull();
+  });
+
+  it("replacing a later chapter keeps the tour's settings and refuses a logo", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadV3(deps, a.token, [1, 2]);
+    const later = await uploadPics(deps, a.token, [3, 4], "Second", t.tour_id);
+    const before = await tourRow(deps, t.tour_id);
+    const keys = await ctx.draftKeys();
+    const m = changed([3, 5]);
+    const created = await startReplace(deps, a.token, { tour_id: t.tour_id, chapter_id: later.chapter_id }, m, [3, 5]);
+    expect(created.json).toEqual({ upload_id: expect.any(String), steps: 2, have: [1], settings: false });
+    const logo = await putLogo(deps, a.token, created.json.upload_id, newLogo());
+    expect(logo.status).toBe(409);
+    expect(logo.json.error).toBe("logo_not_used");
+    expect(await bytesOf(deps.drafts, `u/${created.json.upload_id}/logo.jpg`)).toBeNull();
+    // The commit does not wait for a logo, and the tour's settings and logo are as they were.
+    const done = await commit(deps, a.token, created.json.upload_id);
+    expect(done.status).toBe(201);
+    const tour = await tourRow(deps, t.tour_id);
+    expect(settingsOf(tour)).toEqual(settingsOf(before));
+    expect(await bytesOf(deps.drafts, before.logo_key)).toEqual(logoPng());
+    expect((await ctx.draftKeys()).filter((k) => keys.includes(k))).toHaveLength(keys.length - 1); // one step picture went
+  });
+
+  it("the tour's title and link never change", async () => {
+    const { deps, a } = await setup();
+    const t = await uploadV3(deps, a.token, [1, 2]);
+    const live = await publishAll(deps, a.token, t.tour_id);
+    const before = await tourRow(deps, t.tour_id);
+    const m = changed([7]);
+    expect(m.title).not.toBe(before.title);
+    const created = await startReplace(deps, a.token, t, m, [7]);
+    expect((await putLogo(deps, a.token, created.json.upload_id, newLogo())).status).toBe(204);
+    expect((await commit(deps, a.token, created.json.upload_id)).status).toBe(201);
+    const tour = await tourRow(deps, t.tour_id);
+    expect([tour.title, tour.slug, tour.status, tour.published_at, tour.created_at]).toEqual([before.title, before.slug, "published", before.published_at, before.created_at]);
+    expect((await chapterRow(deps, t.chapter_id)).title).toBe("Send an invoice");
+    const again = await publishAll(deps, a.token, t.tour_id);
+    expect(again.json.url).toBe(live.json.url);
+    expect(JSON.parse((await snapshotRow(deps, t.tour_id))!.data).title).toBe("Send an invoice");
+    const listed = (await send(deps, "GET", "/api/v1/tours", { token: a.token })).json.tours[0];
+    expect([listed.title, listed.url]).toEqual(["Send an invoice", live.json.url]);
+  });
+
+  it("commit is 409 incomplete when a first-chapter replace names a logo that was not sent", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadV3(deps, a.token, [1, 2]);
+    const before = { tour: await tourRow(deps, t.tour_id), steps: await stepRows(deps, t.chapter_id), keys: await ctx.draftKeys() };
+    const state = async () => ({ tour: await tourRow(deps, t.tour_id), steps: await stepRows(deps, t.chapter_id), keys: await ctx.draftKeys() });
+    const m = changed([1, 2]);
+    const created = await startReplace(deps, a.token, t, m, [1, 2]);
+    const id = created.json.upload_id as string;
+    const r = await commit(deps, a.token, id);
+    expect(r.status).toBe(409);
+    expect(r.json).toEqual({ error: "incomplete", detail: "the logo has not been sent" });
+    expect(await state()).toEqual(before);
+    // A logo of the wrong type for its name is refused and still not sent.
+    expect((await putLogo(deps, a.token, id, logoPng())).status).toBe(400);
+    expect((await commit(deps, a.token, id)).status).toBe(409);
+    // An abort removes the new logo and nothing of the tour.
+    expect((await putLogo(deps, a.token, id, newLogo())).status).toBe(204);
+    expect(await ctx.draftKeys()).toHaveLength(before.keys.length + 1);
+    expect((await abort(deps, a.token, id)).status).toBe(204);
+    expect(await state()).toEqual(before);
+    // Sent, it commits.
+    const second = await startReplace(deps, a.token, t, m, [1, 2]);
+    expect((await putLogo(deps, a.token, second.json.upload_id, newLogo())).status).toBe(204);
+    expect((await commit(deps, a.token, second.json.upload_id)).status).toBe(201);
+    expect((await tourRow(deps, t.tour_id)).logo_key).toBe(`u/${second.json.upload_id}/logo.jpg`);
+  });
+
+  it("a publish in progress from the older draft still copies the previous logo", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadV3(deps, a.token, Array.from({ length: 30 }, (_, i) => i + 1));
+    const oldLogo = (await tourRow(deps, t.tour_id)).logo_key as string;
+    const started = await publish(deps, a.token, t.tour_id);
+    expect(started.status).toBe(202);
+    const m = changed([101]);
+    const created = await startReplace(deps, a.token, t, m, [101]);
+    expect((await putLogo(deps, a.token, created.json.upload_id, newLogo())).status).toBe(204);
+    expect((await commit(deps, a.token, created.json.upload_id)).status).toBe(201);
+    expect(await bytesOf(deps.drafts, oldLogo)).toEqual(logoPng());
+    let r = await resume(deps, a.token, t.tour_id, started.json.publish_id);
+    while (r.status === 202) r = await resume(deps, a.token, t.tour_id, r.json.publish_id);
+    expect(r.status).toBe(200);
+    const snap = JSON.parse((await snapshotRow(deps, t.tour_id))!.data);
+    expect(await bytesOf(deps.pub, snap.cover.logo)).toEqual(logoPng());
+    expect((await send(deps, "GET", "/api/v1/tours", { token: a.token })).status).toBe(200);
+    expect(await bytesOf(deps.drafts, oldLogo)).toBeNull();
+    expect(await ctx.draftKeys()).toHaveLength(2); // the new step and the new logo
   });
 });

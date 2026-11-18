@@ -211,8 +211,11 @@ describe("the call budget, route by route", () => {
     // An abort of it deletes none of the 200 pictures it points at.
     expect((await call(deps, "DELETE", `/api/v1/uploads/${same.json.upload_id}`, { token: a.token })).status).toBe(204);
     expect(await ctx.draftKeys()).toHaveLength(201);
-    // The same again, committed: nothing to send and nothing to remove.
+    // The same again, committed: no picture to send, and only the previous logo to remove
+    // (the chapter is the tour's first, so the settings and the logo come with it).
     const kept = await call(deps, "POST", "/api/v1/uploads", jsonBody({ manifest: big, target, sha256: hashes }));
+    expect(kept.json.settings).toBe(true);
+    expect(noted(await putLogo(deps, a.token, kept.json.upload_id, logoPng()), "PUT /api/v1/uploads/:id/logo").status).toBe(204);
     expect(noted(await commit(deps, a.token, kept.json.upload_id), COMMIT).status).toBe(201);
     expect(noted(await commit(deps, a.token, kept.json.upload_id), COMMIT).status).toBe(201); // repeated
     expect(await ctx.draftKeys()).toHaveLength(201);
@@ -224,21 +227,26 @@ describe("the call budget, route by route", () => {
     const changed = await call(deps, "POST", "/api/v1/uploads", jsonBody({ manifest: big, target, sha256: hashes.map((h: string) => h.replace(/^./, (c) => (c === "0" ? "1" : "0"))) }));
     expect(changed.json.have).toEqual([]);
     for (let n = 1; n <= 200; n++) noted(await putStep(deps, a.token, changed.json.upload_id, n, stepImage(big.steps[n - 1], 255 - (n % 50))), STEP);
+    expect(noted(await commit(deps, a.token, changed.json.upload_id), COMMIT).status).toBe(409); // the logo is still to come
+    expect(noted(await putLogo(deps, a.token, changed.json.upload_id, logoPng()), "PUT /api/v1/uploads/:id/logo").status).toBe(204);
     const done = noted(await commit(deps, a.token, changed.json.upload_id), COMMIT);
     expect(done.status).toBe(201);
     expect(done.json.steps).toBe(200);
     // 2 authentication, the upload, its stored steps, the batch, the answer, 3 to remove a page.
     expect(done.calls).toBe(9);
     expect(await ctx.draftKeys()).toHaveLength(201);
-    expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM replaced_object"))!.n).toBe(250);
+    // The 200 pictures and the previous logo went first; the rest of the page came from the leftovers.
+    expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM replaced_object"))!.n).toBe(251);
 
     // A second replace of the same chapter that commits too late: refused, within the budget.
     const late = await call(deps, "POST", "/api/v1/uploads", jsonBody({ manifest: big, target }));
     const winner = await call(deps, "POST", "/api/v1/uploads", jsonBody({ manifest: heavyManifest(1, "One"), target }));
     noted(await putStep(deps, a.token, winner.json.upload_id, 1, stepImage(big.steps[0], 3)), STEP);
+    for (const up of [winner, late]) expect((await putLogo(deps, a.token, up.json.upload_id, logoPng())).status).toBe(204);
     expect(noted(await commit(deps, a.token, winner.json.upload_id), COMMIT).status).toBe(201);
     for (let n = 1; n <= 200; n++) await putStep(deps, a.token, late.json.upload_id, n, stepImage(big.steps[n - 1], 9));
-    expect(noted(await commit(deps, a.token, late.json.upload_id), COMMIT).status).toBe(409);
+    const refused = noted(await commit(deps, a.token, late.json.upload_id), COMMIT);
+    expect([refused.status, refused.json.error]).toEqual([409, "chapter_changed"]);
     // The tour list removes a page of what is left.
     expect((await call(deps, "GET", "/api/v1/tours", { token: a.token })).status).toBe(200);
     expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM replaced_object"))!.n).toBe(0);

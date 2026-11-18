@@ -16,8 +16,9 @@
 // - A step claim left unfinished for STALE_CLAIM_MS (its request died) may be taken over
 //   by a resend. Each claim carries a random token, and only the current holder may mark
 //   the step stored or release it.
-// - Only an upload that makes a new tour takes a logo; an upload into an existing tour
-//   keeps that tour's logo and refuses one, so no logo object is ever left unrecorded.
+// - An upload that makes a new tour takes a logo, and so does one that replaces a tour's
+//   first chapter (it carries the tour's settings). Any other upload into an existing
+//   tour keeps that tour's logo and refuses one, so no logo object is ever left unrecorded.
 // - Every stored step records the SHA-256 of the bytes the server accepted, in the same
 //   statement that marks it stored, and commit copies it to the step. A hash is either
 //   that of the bytes in the store or null (unknown): a writer that lost its claim after
@@ -31,7 +32,7 @@ import { apiError, json, noContent, readCapped } from "./http.ts";
 import { LIMITS, parseManifest, type Manifest } from "./manifest.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 import { housekeeping } from "./publish.ts";
-import { chapterPictures, clearReplaced, findChapter, parseHashes, replaceAnswer, replaceStatements, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
+import { chapterPictures, clearReplaced, findChapter, firstChapterSql, parseHashes, replaceAnswer, replaceStatements, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, type ImageType } from "./sniff.ts";
 
 /** An upload older than this is swept by the workspace's next create. */
@@ -68,7 +69,12 @@ type UploadRow = {
   closing_at: number | null;
   /** The chapter this upload replaces, or null for a new tour or a new chapter. */
   replaces_chapter_id: string | null;
+  /** True for a replace of the tour's first chapter: it carries the tour's settings and logo. */
+  settings: boolean;
 };
+
+/** Whether this upload takes a logo: one that makes a new tour, or replaces a tour's first chapter. */
+const takesLogo = (up: UploadRow) => up.tour_id === null || up.settings;
 
 function extOf(name: string): ImageType {
   return name.endsWith(".png") ? "png" : "jpg";
@@ -91,10 +97,15 @@ const notFound = (what: string) => apiError(404, "not_found", `no such ${what}`)
 
 async function loadUpload(deps: Deps, auth: Auth, id: string): Promise<UploadRow | null> {
   if (!UPLOAD_ID.test(id)) return null;
-  return deps.db.first<UploadRow>(
-    "SELECT id, tour_id, manifest, logo_key, logo_bytes, closing_at, replaces_chapter_id FROM upload WHERE id = ? AND workspace_id = ?",
+  const row = await deps.db.first<Omit<UploadRow, "settings"> & { first: number }>(
+    `SELECT id, tour_id, manifest, logo_key, logo_bytes, closing_at, replaces_chapter_id,
+            (replaces_chapter_id IS NOT NULL AND ${firstChapterSql("upload.replaces_chapter_id", "upload.tour_id")}) AS first
+       FROM upload WHERE id = ? AND workspace_id = ?`,
     [id, auth.workspaceId],
   );
+  if (row === null) return null;
+  const { first, ...rest } = row;
+  return { ...rest, settings: first === 1 };
 }
 
 /** Every draft key this upload could have written: one per step, and the logo if its manifest names one. */
@@ -260,7 +271,7 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       if (hashes === null) return apiError(400, "bad_request", "sha256 must be a list of one lowercase hex SHA-256 (64 characters) per step");
     }
     let tourId: string | null = null;
-    let replaces: { chapterId: string; revision: string | null } | null = null;
+    let replaces: { chapterId: string; revision: string | null; first: boolean } | null = null;
     if (t.kind === "chapter") {
       const id = t.tour_id;
       if (typeof id !== "string" || !TOUR_ID.test(id)) return notFound("tour");
@@ -276,7 +287,7 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       if (!found.tour) return notFound("tour");
       if (!found.chapter) return notFound("chapter");
       tourId = id;
-      replaces = { chapterId, revision: found.revision };
+      replaces = { chapterId, revision: found.revision, first: found.first };
     }
 
     // Housekeeping only: whatever goes wrong in it, this request carries on.
@@ -324,8 +335,8 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     }
     if (replaces === null) return json(201, { upload_id: id, steps: parsed.manifest.steps.length });
     // `have`: the step numbers not to send. `settings`: whether this replace also carries
-    // the tour's settings and logo (never, here).
-    return json(201, { upload_id: id, steps: parsed.manifest.steps.length, have: reused.map((r) => r.n), settings: false });
+    // the tour's settings and logo, which it does when the chapter is the tour's first.
+    return json(201, { upload_id: id, steps: parsed.manifest.steps.length, have: reused.map((r) => r.n), settings: replaces.first });
   });
 
   app.put("/api/v1/uploads/:id/steps/:n", async (c) => {
@@ -446,7 +457,7 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     if (up === null || up.closing_at !== null) return notFound("upload");
     const m = JSON.parse(up.manifest) as Manifest;
     if (!m.cover?.logo) return apiError(404, "not_found", "this upload's manifest names no logo");
-    if (up.tour_id !== null) {
+    if (!takesLogo(up)) {
       await c.req.raw.body?.cancel().catch(() => {});
       return apiError(409, "logo_not_used", "an upload into an existing tour keeps that tour's logo; do not send one");
     }
@@ -504,8 +515,9 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     for (let n = 1; n <= m.steps.length; n++) {
       if (!have.has(n)) return apiError(409, "incomplete", `step ${n} has not been sent`);
     }
-    // Only a new tour takes the logo; an upload into an existing tour keeps that tour's.
-    if (up.tour_id === null && m.cover?.logo && (up.logo_key === null || up.logo_bytes === null)) {
+    // A new tour and a replace of a tour's first chapter take the logo; any other upload
+    // into an existing tour keeps that tour's.
+    if (takesLogo(up) && m.cover?.logo && (up.logo_key === null || up.logo_bytes === null)) {
       return apiError(409, "incomplete", "the logo has not been sent");
     }
 

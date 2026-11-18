@@ -16,6 +16,11 @@
 //   insert fails (NOT NULL) and the whole batch rolls back: two replaces of one chapter
 //   can never mix, and a replace built on pictures another replace took away never lands.
 // - A repeated commit finds its result by the chapter's revision.
+// - A replace of the tour's FIRST chapter (lowest position) also carries the tour's
+//   settings: the same batch replaces the tour's spotlight dim, theme, zoom, cover, button,
+//   end card, autoplay and logo from the manifest, and the upload takes a logo like a new
+//   tour's does. The previous logo goes to replaced_object. The title and slug never
+//   change. A replace of any other chapter leaves all of that alone and refuses a logo.
 // - The files of replaced_object are removed a page at a time (clearReplaced): by the
 //   commit that recorded them, and by the workspace's tour list. Files first, then rows,
 //   so a file is named by a row until it is gone. A publish copies from the draft keys of
@@ -40,7 +45,26 @@ const typeOf = (name: string): ImageType => (name.endsWith(".png") ? "png" : "jp
 const json01 = (v: unknown) => (v === null || v === undefined ? null : JSON.stringify(v));
 
 /** The part of an upload row a replace needs. */
-export type ReplaceUpload = { id: string; tour_id: string | null; replaces_chapter_id: string | null };
+export type ReplaceUpload = {
+  id: string;
+  tour_id: string | null;
+  replaces_chapter_id: string | null;
+  /** The key of the logo this upload stored, if any. */
+  logo_key: string | null;
+  /** Whether the replaced chapter is the tour's first, so the tour's settings and logo come with it. */
+  settings: boolean;
+};
+
+/**
+ * SQL that is true when the chapter `chapterId` of tour `tourId` (two SQL expressions) is
+ * the tour's first: no chapter of the tour comes before it in the order a publish reads
+ * them (position, then id). Chapters are never reordered or removed and a new one goes
+ * last, so the answer for a chapter never changes.
+ */
+export function firstChapterSql(chapterId: string, tourId: string): string {
+  return `NOT EXISTS (SELECT 1 FROM chapter fc JOIN chapter fo ON fo.tour_id = fc.tour_id AND (fo.position < fc.position OR (fo.position = fc.position AND fo.id < fc.id))
+                       WHERE fc.id = ${chapterId} AND fc.tour_id = ${tourId})`;
+}
 
 /** A picture a chapter has now whose bytes the server has hashed. */
 export type ChapterPicture = { image_key: string; image_type: ImageType; width: number; height: number; bytes: number; sha256: string };
@@ -62,16 +86,18 @@ export function parseHashes(value: unknown, steps: number): string[] | null {
 }
 
 /**
- * Whether the tour is this workspace's, whether the chapter is a chapter of it, and the
- * chapter's revision (the upload that last replaced it, or null). One statement.
+ * Whether the tour is this workspace's, whether the chapter is a chapter of it, the
+ * chapter's revision (the upload that last replaced it, or null), and whether it is the
+ * tour's first chapter. One statement.
  */
-export async function findChapter(deps: Deps, auth: Auth, tourId: string, chapterId: string): Promise<{ tour: boolean; chapter: boolean; revision: string | null }> {
-  const row = await deps.db.first<{ chapter_id: string | null; revision: string | null }>(
-    `SELECT c.id AS chapter_id, c.revision FROM tour t LEFT JOIN chapter c ON c.tour_id = t.id AND c.id = ?
+export async function findChapter(deps: Deps, auth: Auth, tourId: string, chapterId: string): Promise<{ tour: boolean; chapter: boolean; revision: string | null; first: boolean }> {
+  const row = await deps.db.first<{ chapter_id: string | null; revision: string | null; first: number }>(
+    `SELECT c.id AS chapter_id, c.revision, ${firstChapterSql("c.id", "t.id")} AS first FROM tour t LEFT JOIN chapter c ON c.tour_id = t.id AND c.id = ?
       WHERE t.id = ? AND t.workspace_id = ?`,
     [chapterId, tourId, auth.workspaceId],
   );
-  return { tour: row !== null, chapter: row !== null && row.chapter_id !== null, revision: row?.revision ?? null };
+  const chapter = row !== null && row.chapter_id !== null;
+  return { tour: row !== null, chapter, revision: row?.revision ?? null, first: chapter && row.first === 1 };
 }
 
 /**
@@ -131,6 +157,8 @@ export function reusedStatement(workspaceId: string, uploadId: string, reused: R
  * the chapter is still a chapter of that tour, and the chapter's revision is the one the
  * upload was created against. Each new step takes its key and hash from its upload_step
  * row: the upload's own key for a picture that was sent, the existing one for a reused step.
+ * With `up.settings` (the chapter is the tour's first) the tour's settings and logo are
+ * replaced from the manifest too, and the previous logo is recorded for removal.
  */
 export function replaceStatements(deps: Deps, auth: Auth, up: ReplaceUpload, m: Manifest): Stmt[] {
   const now = deps.now();
@@ -158,6 +186,25 @@ export function replaceStatements(deps: Deps, auth: Auth, up: ReplaceUpload, m: 
       params: [chapterId, tourId, ws],
     },
   ];
+  if (up.settings) {
+    // Both act only for the tour's first chapter, whatever the caller believed. The title
+    // and slug are not among the columns: an update never renames a tour or moves its link.
+    const first = firstChapterSql("?", "tour.id");
+    const logoType = m.cover?.logo ? typeOf(m.cover.logo) : null;
+    stmts.push({
+      sql: `INSERT OR IGNORE INTO replaced_object (tour_id, image_key, draft_version, created_at)
+            SELECT tour.id, tour.logo_key, tour.draft_version, ? FROM tour WHERE tour.id = ? AND tour.workspace_id = ? AND tour.logo_key IS NOT NULL AND ${first}`,
+      params: [now, tourId, ws, chapterId],
+    });
+    stmts.push({
+      sql: `UPDATE tour SET spotlight_dim = ?, theme = ?, zoom = ?, cover = ?, cta = ?, end_card = ?, autoplay = ?, logo_key = ?, logo_type = ?
+             WHERE tour.id = ? AND tour.workspace_id = ? AND ${first}`,
+      params: [
+        m.spotlight_dim, JSON.stringify(m.theme), JSON.stringify(m.zoom), json01(m.cover), json01(m.cta), json01(m.end), JSON.stringify(m.autoplay),
+        logoType === null ? null : up.logo_key, logoType, tourId, ws, chapterId,
+      ],
+    });
+  }
   m.steps.forEach((s, i) => {
     const sent = "FROM upload_step WHERE upload_id = ? AND n = ?";
     stmts.push({
