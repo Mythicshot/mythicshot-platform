@@ -36,6 +36,7 @@ import { apiError, json, readCapped } from "./http.ts";
 import { parseTitle } from "./manifest.ts";
 import { housekeeping } from "./publish.ts";
 import type { Deps, Stmt } from "./ports.ts";
+import { VERSION } from "./version.ts";
 
 const TOUR_ID = /^tour_[0-9a-f]{24}$/;
 const STEP_ID = /^st_[0-9a-f]{24}$/;
@@ -136,7 +137,7 @@ export function tourRoutes(app: Hono, deps: Deps): void {
     if (auth instanceof Response) return auth;
     const row = await deps.db.first<{ name: string }>("SELECT name FROM workspace WHERE id = ?", [auth.workspaceId]);
     if (row === null) return apiError(404, "not_found", "no such workspace");
-    return json(200, { workspace: row.name });
+    return json(200, { workspace: row.name, version: VERSION });
   });
 
   app.get("/api/v1/tours", async (c) => {
@@ -195,6 +196,13 @@ export function tourRoutes(app: Hono, deps: Deps): void {
     const owned = "SELECT id FROM tour WHERE id = ? AND workspace_id = ?";
     const ws = auth.workspaceId;
     // One batch, so the list, the live page and a publish about to go live never disagree.
+    // (A publish that has read the draft but not yet recorded its job takes the title from
+    // the tour row when it records it, so it cannot miss this either.)
+    // A longer title can take a snapshot that was just under MAX_SNAPSHOT_BYTES a little
+    // over it: by at most 200 characters, about 2,400 bytes escaped. That is harmless. The
+    // cap bounds the work of building a snapshot at the start of a publish, which this does
+    // not repeat; the database stores a value four times that size, and the page reads a
+    // snapshot of any size. The next publish measures the tour again with its new title.
     // A snapshot that is not JSON (the page answers 404 for it) is left as it is.
     await deps.db.batch([
       { sql: "UPDATE tour SET title = ?, updated_at = ? WHERE id = ? AND workspace_id = ?", params: [parsed.title, deps.now(), id, ws] },

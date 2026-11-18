@@ -247,6 +247,27 @@ describe("rename", { timeout: 60_000 }, () => {
     expect((await send(deps, "GET", r.json.url)).text).toContain("<title>New name</title>");
   });
 
+  it("a rename that lands while a publish is starting, after it read the draft, still goes live", async () => {
+    const { deps, a } = await setup();
+    const t = await uploadTour(deps, a.token, manyStepManifest(30, "Old name"));
+    const realBatch = deps.db.batch.bind(deps.db);
+    let raced: Call | null = null;
+    deps.db.batch = async (stmts) => {
+      // The publish has read the draft and built its snapshot; its job is not recorded yet.
+      if (raced === null && stmts[0].sql.startsWith("INSERT INTO publish_job")) raced = await rename(deps, a.token, t.tour_id, { title: "New name" });
+      return realBatch(stmts);
+    };
+    let r = await publish(deps, a.token, t.tour_id);
+    deps.db.batch = realBatch;
+    expect(raced!.status).toBe(200);
+    const id = r.json.publish_id as string;
+    while (r.status === 202) r = await resume(deps, a.token, t.tour_id, id);
+    expect(r.status).toBe(200);
+    expect((await snapshotOf(deps, t.tour_id))!.title).toBe("New name");
+    expect((await send(deps, "GET", r.json.url)).text).toContain("<title>New name</title>");
+    expect((await tourRow(deps, t.tour_id))!.title).toBe("New name");
+  });
+
   it("a snapshot that is not JSON does not stop a rename", async () => {
     const { deps, a } = await setup();
     const t = await uploadTour(deps, a.token, v2);

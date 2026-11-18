@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import type { Deps } from "../src/ports.ts";
+import { VERSION } from "../src/version.ts";
+import pkg from "../package.json" with { type: "json" };
 import { clone, fixtures, send, stepImage, uploadTour, type Json } from "./bundle.ts";
 
 const v2 = fixtures.v2 as Json;
@@ -115,13 +117,26 @@ describe("draft images", () => {
 });
 
 describe("me", () => {
+  it("me returns the server's version, which is package.json's, and only with a token", async () => {
+    const { deps } = await makeDeps();
+    const a = await seedWorkspace(deps, "Acme");
+    expect(VERSION, "set VERSION in src/version.ts to the version in package.json").toBe(pkg.version);
+    expect(VERSION).toMatch(/^[0-9]+[.][0-9]+[.][0-9]+/);
+    const r = await send(deps, "GET", "/api/v1/me", { token: a.token });
+    expect(r.json.version).toBe(pkg.version);
+    const anon = await send(deps, "GET", "/api/v1/me");
+    expect(anon.status).toBe(401);
+    expect(anon.text).not.toContain(pkg.version);
+    expect((await send(deps, "GET", "/healthz")).text).not.toContain(pkg.version);
+  });
+
   it("me returns the workspace name", async () => {
     const { deps } = await makeDeps();
     const a = await seedWorkspace(deps, "Acme </script> Tours");
     await seedWorkspace(deps, "Other");
     const r = await send(deps, "GET", "/api/v1/me", { token: a.token });
     expect(r.status).toBe(200);
-    expect(r.json).toEqual({ workspace: "Acme </script> Tours" });
+    expect(r.json).toEqual({ workspace: "Acme </script> Tours", version: VERSION });
     expect((await send(deps, "GET", "/api/v1/me")).status).toBe(401);
   });
 });

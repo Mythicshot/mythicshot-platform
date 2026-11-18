@@ -564,9 +564,12 @@ async function startPublish(deps: Deps, auth: Auth, tourId: string): Promise<Sta
       {
         // The tour id comes from the tour row itself, so a tour deleted since the draft was
         // read fails the batch (NOT NULL) instead of starting a publish no row records.
+        // The title is taken from the tour row here, not from the draft read above, so a
+        // rename that landed in between (it found no job to update) is not lost.
         sql: `INSERT INTO publish_job (tour_id, publish_id, data, steps, total, draft_version, created_at, touched_at)
-              VALUES ((SELECT id FROM tour WHERE id = ? AND workspace_id = ?), ?, ?, ?, ?, ?, ?, ?)`,
-        params: [tourId, auth.workspaceId, publishId, data, rows.length, copies.length, rows[0].draft_version, now, now],
+              VALUES ((SELECT id FROM tour WHERE id = ? AND workspace_id = ?), ?,
+                      json_set(?, '$.title', (SELECT title FROM tour WHERE id = ? AND workspace_id = ?)), ?, ?, ?, ?, ?)`,
+        params: [tourId, auth.workspaceId, publishId, data, tourId, auth.workspaceId, rows.length, copies.length, rows[0].draft_version, now, now],
       },
       {
         sql: `INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, source_key, seq, copied)
