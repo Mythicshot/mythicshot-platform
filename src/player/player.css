@@ -39,6 +39,7 @@ body { background: #eeede8; color: #1f232a; font: 15px/1.5 system-ui, -apple-sys
 .dp-cta:hover { filter: brightness(1.06); }
 .dp-frame > .dp-cta { position: absolute; top: 12px; right: 12px; z-index: 6; line-height: 1.2; }
 .dp-frame > .dp-cta.left { right: auto; left: 12px; }
+.dp-frame > .dp-cta.bottom { top: auto; bottom: 12px; }
 .dp-menu > .dp-cta { float: right; max-width: 45%; margin: 4px 0 10px 16px; }
 .dp-stage:focus { outline: none; }
 
@@ -165,6 +166,7 @@ body { background: #eeede8; color: #1f232a; font: 15px/1.5 system-ui, -apple-sys
   .dp-shot { max-width: calc(100vw - 24px); }
   .dp-frame > .dp-cta { top: 9px; right: 9px; padding: 5px 11px; font-size: 12px; }
   .dp-frame > .dp-cta.left { left: 9px; }
+  .dp-frame > .dp-cta.bottom { bottom: 9px; }
   .dp-chapters { padding: 6px 11px; }
   .dp-list { grid-template-columns: 1fr; }
   .dp-endcard { padding: 24px 18px 20px; }

@@ -12,6 +12,7 @@
 // cookie, no storage, no network request but the tour's own images.
 import type { PageChapter, PageData, PageStep, PageTour } from "../page.ts";
 import { allSeen, canHit, hashFor, nextUnseen, parseHash, reduce, start, type Action, type Screen, type State } from "./state.ts";
+import { ctaCorner } from "./layout.ts";
 import TourCore from "./vendor/tour-core.js";
 
 type Box4 = [number, number, number, number];
@@ -137,6 +138,8 @@ function boot(): void {
 function player(root: HTMLElement, tour: PageTour, base: string | null): void {
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)");
+  /** The narrow layout of player.css, where the always-on button sits 9 px from the edges instead of 12. */
+  const narrow = window.matchMedia("(max-width: 640px)");
   const ms = (n: number) => (reduced.matches ? 0 : n);
 
   const theme = obj(tour.theme) ?? {};
@@ -699,8 +702,9 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
     pendingFocus = null;
   }
 
-  function placeCard(sz: { w: number; h: number }, avoid: Avoid | null, aim: { x: number; y: number } | null): void {
-    if (!cardKind) return;
+  /** Places the card; returns its box over the picture, or null when there is none or it is docked under it. */
+  function placeCard(sz: { w: number; h: number }, avoid: Avoid | null, aim: { x: number; y: number } | null, dock = false): Avoid | null {
+    if (!cardKind) return null;
     const W = sz.w;
     const H = sz.h;
     const w = cardKind === "compact" ? W - 16 : Math.min(cardKind === "panel" ? 380 : 320, W - 16);
@@ -724,7 +728,7 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
       y = (H - h) / 2;
       side = "none";
     } else side = "docked";
-    if (h > H - 16) side = "docked";
+    if (h > H - 16 || dock) side = "docked";
     if (side === "docked") {
       // No room beside the box: the card goes under the picture at full width.
       card.style.width = W + "px";
@@ -754,6 +758,7 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
         }
       }
     }
+    return side === "docked" ? null : { x0: x, y0: y, x1: x + w, y1: y + h };
   }
 
   /** Geometry for the current state. `animate` is false on resize, so nothing travels. */
@@ -771,10 +776,20 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
     }
     view.style.transform = t;
     const avoid = onStep() ? avoidFor(p.step, z, sz, cardData) : null;
-    placeCard(sz, avoid, avoid && cardKind === "guide" ? aimFor(z, sz, cardData) : null);
+    const aim = avoid && cardKind === "guide" ? aimFor(z, sz, cardData) : null;
+    const cardBox = placeCard(sz, avoid, aim);
     if (ctaEl && ctaEl.parentElement === frame && !ctaEl.hidden) {
-      // Top right, unless the spotlight is there: then top left.
-      ctaEl.classList.toggle("left", overlaps(avoid, sz.w - ctaEl.offsetWidth - 12, 12, ctaEl.offsetWidth, ctaEl.offsetHeight));
+      // Top right, unless the spotlight or the card is there: then another corner. The
+      // button never covers the card or the card the button: if every corner would meet
+      // the card, the card docks under the picture instead.
+      const inset = narrow.matches ? 9 : 12;
+      let corner = ctaCorner(sz.w, sz.h, ctaEl.offsetWidth, ctaEl.offsetHeight, inset, cardBox, avoid);
+      if (corner === null) {
+        placeCard(sz, avoid, aim, true);
+        corner = ctaCorner(sz.w, sz.h, ctaEl.offsetWidth, ctaEl.offsetHeight, inset, null, avoid) ?? { left: false, bottom: false };
+      }
+      ctaEl.classList.toggle("left", corner.left);
+      ctaEl.classList.toggle("bottom", corner.bottom);
     }
     if (!animate) {
       void view.offsetWidth;
@@ -852,7 +867,7 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
       ctaEl.hidden = !(sc.kind === "step" || sc.kind === "menu");
       const home = sc.kind === "menu" ? menu : frame;
       if (ctaEl.parentElement !== home) {
-        ctaEl.classList.remove("left");
+        ctaEl.classList.remove("left", "bottom");
         if (home === menu) menu.prepend(ctaEl);
         else frame.append(ctaEl);
       }
