@@ -3,9 +3,8 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp } from "../app.ts";
 import { withBudget } from "../budget.ts";
-import { misdirected } from "../host-gate.ts";
 import type { Deps } from "../ports.ts";
-import { configFromEnv, isPathTarget } from "./config.ts";
+import { configFromEnv, guardTarget } from "./config.ts";
 import { APP_UID, prepareDataDir } from "./datadir.ts";
 import { NodeDb } from "./db.ts";
 import { NodeFileStore } from "./files.ts";
@@ -61,10 +60,9 @@ async function main(): Promise<void> {
   // call budget is logged here too. Building the route table per request is cheap.
   const serveOne = (req: Request) => withBudget(deps, req.method, async (d) => createApp(d).fetch(req));
   // With two addresses the host is read from the Host header only. A request line that
-  // carries a full address instead of a path would name its own host, so it is answered
-  // as a host this install does not serve. With one address nothing is checked, as before.
-  const twoAddresses = (config.hosts ?? null) !== null;
-  const fetchOne = (req: Request, env: { incoming: { url?: string } }) => (twoAddresses && !isPathTarget(env.incoming.url) ? misdirected() : serveOne(req));
+  // carries a full address instead of a path would name its own host, so the guard answers
+  // it as a host this install does not serve. With one address nothing is checked, as before.
+  const fetchOne = guardTarget(config.hosts, serveOne);
   const server = serve({ fetch: fetchOne, port, serverOptions: { headersTimeout: HEADERS_TIMEOUT_MS, requestTimeout: REQUEST_TIMEOUT_MS } }, (info) => {
     console.log(`listening on port ${info.port}`);
   });

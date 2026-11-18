@@ -42,7 +42,8 @@
     // name, or the same name twice: every request answers 500 `misconfigured`, /healthz
     // included, until the pair is fixed or emptied.
     //
-    // `npm run setup:cloudflare` always writes both empty; it sets up one address.
+    // `npm run setup:cloudflare` sets up one address: it writes both empty on a new install,
+    // and keeps what an install's own file (wrangler.deploy.jsonc) holds, as it is.
     "TOURS_HOST": "",
     "APP_HOST": ""
   }

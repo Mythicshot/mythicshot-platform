@@ -12,8 +12,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { makeDeps } from "#harness";
 import { createApp } from "../src/app.ts";
-import { misdirected } from "../src/host-gate.ts";
-import { isPathTarget } from "../src/node/config.ts";
+import { guardTarget } from "../src/node/config.ts";
 import type { Config } from "../src/ports.ts";
 
 const ENTRY = fileURLToPath(new URL("../src/node/entry.ts", import.meta.url));
@@ -39,19 +38,11 @@ function ask(port: number, host: string, target: string, headers: Record<string,
   });
 }
 
-/** The app behind a real server, wired as src/node/entry.ts wires it. */
+/** The app behind a real server, behind the same guard src/node/entry.ts puts in front of it. */
 async function listen(config: Partial<Config>): Promise<{ port: number; close: () => Promise<void> }> {
   const { deps } = await makeDeps(config);
-  const twoAddresses = (deps.config.hosts ?? null) !== null;
   const server: ServerType = await new Promise((resolve) => {
-    const s = serve(
-      {
-        fetch: (req: Request, env: { incoming: { url?: string } }) => (twoAddresses && !isPathTarget(env.incoming.url) ? misdirected() : createApp(deps).fetch(req)),
-        port: 0,
-        hostname: "127.0.0.1",
-      },
-      () => resolve(s),
-    );
+    const s = serve({ fetch: guardTarget(deps.config.hosts, (req) => createApp(deps).fetch(req)), port: 0, hostname: "127.0.0.1" }, () => resolve(s));
   });
   return { port: (server.address() as AddressInfo).port, close: () => new Promise((done) => server.close(() => done())) };
 }
@@ -153,9 +144,10 @@ function freePort(): Promise<number> {
   });
 }
 
-describe("the real Node startup with two addresses", () => {
+describe("the real Node startup", () => {
   const made: string[] = [];
   let child: ChildProcess | null = null;
+  let stderr = "";
   afterEach(async () => {
     if (child !== null && child.exitCode === null) {
       const gone = new Promise((done) => child!.once("exit", done));
@@ -166,16 +158,17 @@ describe("the real Node startup with two addresses", () => {
     for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   });
 
-  it("reads TOURS_HOST and APP_HOST, reports each role, and takes no host from the request target", async () => {
+  /** Starts src/node/entry.ts with these settings on a free port and waits until it listens. */
+  async function start(settings: Record<string, string>): Promise<number> {
     const root = mkdtempSync(join(tmpdir(), "dp-node-hosts-"));
     made.push(root);
     const port = await freePort();
+    stderr = "";
     child = spawn(process.execPath, [ENTRY], {
-      env: { ...baseEnv(), DATA_DIR: join(root, "data"), PORT: String(port), NODE_NO_WARNINGS: "1", TOURS_HOST: "Tours.Example.com.", APP_HOST: "app.example.com:443" },
+      env: { ...baseEnv(), DATA_DIR: join(root, "data"), PORT: String(port), NODE_NO_WARNINGS: "1", ...settings },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
-    let stderr = "";
     child.stderr!.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
     await new Promise<void>((resolve, reject) => {
       let stdout = "";
@@ -185,6 +178,11 @@ describe("the real Node startup with two addresses", () => {
       });
       child!.once("exit", (code) => reject(new Error(`the app stopped with code ${code}: ${stderr}`)));
     });
+    return port;
+  }
+
+  it("with two addresses reads TOURS_HOST and APP_HOST, reports each role, and takes no host from the request target", async () => {
+    const port = await start({ TOURS_HOST: "Tours.Example.com.", APP_HOST: "app.example.com:443" });
     expect((await ask(port, "tours.example.com", "/healthz")).body).toBe(AS_TOURS);
     expect((await ask(port, "APP.example.com", "/healthz")).body).toBe(AS_APP);
     expect((await ask(port, `127.0.0.1:${port}`, "/healthz")).body).toBe(NO_ROLE);
@@ -194,6 +192,16 @@ describe("the real Node startup with two addresses", () => {
       expect([421, 400], target).toContain(r.status);
       expect(r.body, target).not.toContain("address");
     }
+    expect(stderr).toBe("");
+  }, 90_000);
+
+  it("with one address answers an absolute request target as before", async () => {
+    const port = await start({});
+    const absolute = await ask(port, UNKNOWN, "http://tours.example.com/healthz");
+    expect(absolute.status).toBe(200);
+    expect(absolute.body).toBe(NO_ROLE);
+    expect((await ask(port, UNKNOWN, "http://tours.example.com/api/v1/me")).status).toBe(401);
+    expect((await ask(port, UNKNOWN, "/healthz")).body).toBe(NO_ROLE);
     expect(stderr).toBe("");
   }, 90_000);
 });

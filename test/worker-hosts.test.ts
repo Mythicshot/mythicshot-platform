@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Hosts, HostsResult } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
 
-type HostVars = { TOURS_HOST?: string; APP_HOST?: string };
+type HostVars = { TOURS_HOST?: unknown; APP_HOST?: unknown };
 type Entry = {
   hostsFromWorkerEnv(env: HostVars): HostsResult;
   depsFromEnv(env: Record<string, unknown>, hosts: Hosts | null): Deps;
@@ -65,6 +65,34 @@ describe("hostsFromWorkerEnv", () => {
 
   it("each bad pair gives its problem", () => {
     for (const [label, env, problem] of BAD_PAIRS) expect(entry.hostsFromWorkerEnv(env), label).toEqual({ ok: false, problem });
+  });
+});
+
+/** A var that is present but is not text (a JSON var, or a binding under that name) is never read as unset. */
+const NOT_TEXT: [string, HostVars, string][] = [
+  ["a number for the tours address", { TOURS_HOST: 42, APP_HOST: "app.example.com" }, BAD_TOURS],
+  ["an object for the app address", { TOURS_HOST: "tours.example.com", APP_HOST: { host: "made-up-app.example.com" } }, BAD_APP],
+  ["null for the tours address, the app address unset", { TOURS_HOST: null }, BAD_TOURS],
+  ["false for the app address, the tours address empty", { TOURS_HOST: "", APP_HOST: false }, BAD_APP],
+  ["a list for both", { TOURS_HOST: ["made-up-tours.example.com"], APP_HOST: ["made-up-app.example.com"] }, BAD_TOURS],
+];
+
+describe("a var that is present but not text", () => {
+  it("is a bad pair, not an unset one", () => {
+    for (const [label, env, problem] of NOT_TEXT) expect(entry.hostsFromWorkerEnv(env), label).toEqual({ ok: false, problem });
+  });
+
+  it("answers 500 misconfigured, health included, and logs the fixed line", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const [label, vars, problem] of NOT_TEXT) {
+      for (const url of ["https://tours.example.com/healthz", "https://tours.example.com/api/v1/me", "https://evil.example.net/t/abc"]) {
+        logged.mockClear();
+        const res = await entry.default.fetch(new Request(url), { ...bindings(), ...vars }, CTX);
+        expect(res.status, label).toBe(500);
+        expect(await res.text(), label).toBe('{"error":"misconfigured"}');
+        expect(logged.mock.calls, label).toEqual([[`hosts: ${problem}`]]);
+      }
+    }
   });
 });
 

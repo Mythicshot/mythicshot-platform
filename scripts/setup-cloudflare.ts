@@ -195,7 +195,22 @@ type Json = Record<string, any>;
  * `pending` is there while `domain` is confirmed but not yet attached by a deploy that
  * succeeded; `previous` is the address attached before it (null: none).
  */
-export type Install = { name: string; domain: string | null; databaseId: string | null; publicImageBase: string; pending?: { previous: string | null } };
+export type Install = {
+  name: string;
+  domain: string | null;
+  databaseId: string | null;
+  publicImageBase: string;
+  pending?: { previous: string | null };
+  /**
+   * TOURS_HOST and APP_HOST as the install's file holds them, when either is anything but
+   * empty: set by hand, since this command sets up one address. Kept exactly as found and
+   * never checked or shown here; the Worker itself reports a pair it cannot use.
+   */
+  hostVars?: Record<string, unknown>;
+};
+
+/** The two address vars this command keeps but never sets. */
+const HOST_VARS = ["TOURS_HOST", "APP_HOST"] as const;
 
 /** The comment line in wrangler.deploy.jsonc that records a confirmed address not attached yet. */
 const PENDING_LINE = /^\/\/ setup:cloudflare: address (\S+) confirmed, not attached yet; attached before: (\S+)$/m;
@@ -243,6 +258,9 @@ export function readInstall(root: string): Install | null {
     databaseId: typeof id === "string" && !/^0{8}-/.test(id) ? id : null,
     publicImageBase: typeof c.vars?.PUBLIC_IMAGE_BASE === "string" ? c.vars.PUBLIC_IMAGE_BASE : "",
   };
+  const hostVars: Record<string, unknown> = {};
+  for (const key of HOST_VARS) if (c.vars && Object.hasOwn(c.vars, key)) hostVars[key] = c.vars[key];
+  if (Object.values(hostVars).some((v) => v !== "")) install.hostVars = hostVars;
   const pending = readFileSync(path, "utf8").match(PENDING_LINE);
   if (pending) {
     const previous = pending[2] === "none" ? null : pending[2];
@@ -269,7 +287,9 @@ export function deployConfigText(root: string, install: Install & { databaseId: 
   c.workers_dev = true;
   if (install.domain) c.routes = [{ pattern: install.domain, custom_domain: true }];
   else delete c.routes;
-  c.vars = { ...(c.vars ?? {}), PUBLIC_IMAGE_BASE: install.publicImageBase };
+  // The two address vars stay empty, as in wrangler.jsonc, unless the install's own file
+  // had them set by hand: then they are written back exactly as they were.
+  c.vars = { ...(c.vars ?? {}), PUBLIC_IMAGE_BASE: install.publicImageBase, ...(install.hostVars ?? {}) };
   const pending =
     install.domain && install.pending
       ? `// setup:cloudflare: address ${install.domain} confirmed, not attached yet; attached before: ${install.pending.previous ?? "none"}\n`
@@ -277,7 +297,7 @@ export function deployConfigText(root: string, install: Install & { databaseId: 
   return (
     "// This install's Wrangler configuration, written by `npm run setup:cloudflare` from\n" +
     "// wrangler.jsonc. Ignored by Git; holds no secret. `update` rewrites it, keeping the\n" +
-    "// name, database id, address and PUBLIC_IMAGE_BASE.\n" +
+    "// name, database id, address, PUBLIC_IMAGE_BASE, TOURS_HOST and APP_HOST.\n" +
     pending +
     JSON.stringify(c, null, 2) +
     "\n"
@@ -757,6 +777,7 @@ async function setup(io: Io, o: Options): Promise<void> {
     domain,
     databaseId: databaseId ?? "00000000-0000-0000-0000-000000000000",
     publicImageBase: existing?.publicImageBase ?? "",
+    ...(existing?.hostVars ? { hostVars: existing.hostVars } : {}),
     ...(domain !== null && (newDomain || pendingBefore) ? { pending: { previous: newDomain ? attachedBefore : pendingBefore!.previous } } : {}),
   };
   const configChanged = writeConfig(io, o, deployConfigText(io.root, install));

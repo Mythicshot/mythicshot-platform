@@ -1,6 +1,8 @@
-// The Node target's settings, read from the environment. Pure: no file, no network and
-// no listener, so every setting can be tested without starting the app.
-import { resolveHosts } from "../hosts.ts";
+// The Node target's settings, read from the environment, and the guard it puts in front
+// of the app. Pure: no file, no network and no listener, so all of it can be tested
+// without starting the app.
+import { misdirected } from "../host-gate.ts";
+import { resolveHosts, type Hosts } from "../hosts.ts";
 import type { Config } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
 
@@ -29,4 +31,19 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
  */
 export function isPathTarget(target: string | undefined): boolean {
   return typeof target === "string" && target.startsWith("/");
+}
+
+/**
+ * The guard the Node target puts in front of the app. With two addresses, a request whose
+ * request line is not a path is answered as a host this install does not serve (an empty
+ * 421) and never reaches `serveOne`. With one address (`hosts` null or absent) every
+ * request is served, as before. `env` is what the server library hands over with each
+ * request; only the request line of the incoming message is read from it.
+ */
+export function guardTarget(
+  hosts: Hosts | null | undefined,
+  serveOne: (req: Request) => Response | Promise<Response>,
+): (req: Request, env: { incoming: { url?: string } }) => Response | Promise<Response> {
+  if ((hosts ?? null) === null) return (req) => serveOne(req);
+  return (req, env) => (isPathTarget(env.incoming.url) ? serveOne(req) : misdirected());
 }

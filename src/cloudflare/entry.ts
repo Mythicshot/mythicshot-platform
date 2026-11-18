@@ -1,6 +1,6 @@
 import { createApp } from "../app.ts";
 import { withBudget } from "../budget.ts";
-import { resolveHosts, type Hosts, type HostsResult } from "../hosts.ts";
+import { HOST_ROLES, resolveHosts, type Hosts, type HostsResult } from "../hosts.ts";
 import type { Deps } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
 import { D1Db } from "./db.ts";
@@ -12,10 +12,19 @@ type WorkerEnv = Env & { SETUP_CODE?: string };
 /**
  * The two addresses from the Worker's vars, TOURS_HOST and APP_HOST. Both empty or unset
  * is one-address mode; a pair that cannot be used gives its problem, a fixed line that
- * names the vars and never repeats a value.
+ * names the vars and never repeats a value. A var that is present but is not text (a JSON
+ * var, or a binding given that name) is a value that cannot be used, never an unset one:
+ * reading it as unset could quietly turn two addresses into one.
  */
-export function hostsFromWorkerEnv(env: { TOURS_HOST?: string; APP_HOST?: string }): HostsResult {
-  return resolveHosts({ tours: env.TOURS_HOST, app: env.APP_HOST });
+export function hostsFromWorkerEnv(env: { TOURS_HOST?: unknown; APP_HOST?: unknown }): HostsResult {
+  const vars = { tours: env.TOURS_HOST, app: env.APP_HOST };
+  for (const role of HOST_ROLES) {
+    const value = vars[role];
+    if (value !== undefined && typeof value !== "string") {
+      return { ok: false, problem: `${role.toUpperCase()}_HOST is not a host name. Write it like ${role}.example.com, without https:// and without a path.` };
+    }
+  }
+  return resolveHosts(vars as { tours?: string; app?: string });
 }
 
 /** `hosts` is what hostsFromWorkerEnv gave for this env: both addresses, or null for one-address mode. */
