@@ -453,3 +453,145 @@ describe("the setup-recovery SQL in the runbooks", () => {
     expect(await count(deps, "setup")).toBe(1);
   });
 });
+
+describe("the tunnel route", () => {
+  const TUNNEL = import.meta.glob(["../deploy/tunnel/docker-compose.yml", "../deploy/tunnel/caddy/Caddyfile", "../deploy/docker-compose.yml"], {
+    query: "?raw",
+    import: "default",
+    eager: true,
+  }) as Record<string, string>;
+  const compose = TUNNEL["../deploy/tunnel/docker-compose.yml"];
+  const caddyfile = TUNNEL["../deploy/tunnel/caddy/Caddyfile"];
+  const direct = TUNNEL["../deploy/docker-compose.yml"];
+  const runbook = docs[DOCKER];
+
+  /** The body of a here-document inside install.sh, by its end marker. */
+  function embedded(marker: string): string {
+    const m = installSh.match(new RegExp(`<<'${marker}'\\n([\\s\\S]*?)^${marker}$`, "m"));
+    if (!m) throw new Error(`no ${marker} in install.sh`);
+    return m[1];
+  }
+
+  /** One service's block of a compose file. */
+  function service(text: string, name: string): string {
+    const m = text.match(new RegExp(`^  ${name}:\\n((?:(?:    .*)?\\n)*)`, "m"));
+    if (!m) throw new Error(`no service ${name}`);
+    return m[1];
+  }
+
+  it("install.sh carries exact copies of the tunnel stack file and Caddyfile", () => {
+    expect(embedded("DP_TUNNEL_COMPOSE_END")).toBe(compose);
+    expect(embedded("DP_TUNNEL_CADDYFILE_END")).toBe(caddyfile);
+  });
+
+  it("publishes no port on the host and requests no certificate", () => {
+    expect(compose).not.toMatch(/^\s*(ports|expose|network_mode):/m);
+    expect(direct).toMatch(/^\s*ports:/m);
+    expect(caddyfile).toMatch(/^\tauto_https off$/m);
+    expect(caddyfile).toMatch(/^http:\/\/\{\$DOMAIN\} \{$/m);
+    expect(caddyfile).not.toContain("ACME_EMAIL");
+    expect(caddyfile).toContain('header Strict-Transport-Security "max-age=604800"');
+    expect(caddyfile).toContain("reverse_proxy app:3000");
+  });
+
+  it("pins cloudflared by digest and uses the same Caddy image as the direct stack", () => {
+    expect(service(compose, "cloudflared")).toMatch(/^    image: cloudflare\/cloudflared@sha256:[0-9a-f]{64}$/m);
+    const caddyImage = /^    image: (caddy@sha256:[0-9a-f]{64})$/m;
+    expect(service(compose, "caddy").match(caddyImage)?.[1]).toBe(service(direct, "caddy").match(caddyImage)?.[1]);
+  });
+
+  it("gives the token to cloudflared through TUNNEL_TOKEN only, never on a command line or to another service", () => {
+    const cf = service(compose, "cloudflared");
+    expect(cf).toContain("      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?TUNNEL_TOKEN is not set in .env}\n");
+    expect(cf).toContain("    command: tunnel --no-autoupdate --metrics 127.0.0.1:20241 run\n");
+    expect(cf).not.toContain("--token");
+    expect(compose).not.toMatch(/^\s*env_file:/m);
+    expect(compose.match(/^\s+TUNNEL_TOKEN:/gm)).toHaveLength(1);
+    for (const name of ["app", "caddy"]) expect(service(compose, name), name).not.toMatch(/^\s+TUNNEL_TOKEN/m);
+    expect(compose).not.toMatch(/eyJ[A-Za-z0-9+/_-]{20,}/);
+  });
+
+  it("cloudflared is healthy only while its own ready check passes", () => {
+    expect(service(compose, "cloudflared")).toContain('test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "ready"]');
+  });
+
+  it("the runbook, the installer and the stack file name the same service URL", () => {
+    const url = installSh.match(/^readonly TUNNEL_SERVICE_URL=(\S+)$/m)?.[1];
+    expect(url).toBe("http://caddy:80");
+    expect(runbook).toContain("```text\nhttp://caddy:80\n```");
+    expect(compose).toContain("service URL http://caddy:80");
+    expect(service(compose, "caddy")).not.toBe("");
+  });
+
+  it("the runbook covers the route end to end, with its warnings and its open points", () => {
+    for (const s of [
+      "## Behind a Cloudflare Tunnel",
+      "sudo bash install.sh install --tunnel",
+      "DEPLOY_MODE=tunnel",
+      "TUNNEL_TOKEN",
+      "### Switch between the direct and the tunnel route",
+      "### What is not yet confirmed",
+      "tunnel --no-autoupdate --metrics 127.0.0.1:20241 run",
+      "Provided Tunnel token is not valid.",
+    ]) expect(runbook, s).toContain(s);
+    const section = runbook.slice(runbook.indexOf("## Behind a Cloudflare Tunnel"), runbook.indexOf("## Troubleshooting by symptom"));
+    expect(section.match(/^> \[!WARNING\]$/gm)?.length).toBeGreaterThanOrEqual(3);
+    expect(section.match(/\*\*How to tell it worked:\*\*/g)?.length).toBeGreaterThanOrEqual(5);
+    expect(section).toMatch(/\*\*Unconfirmed:\*\* this route has not yet been run against a real tunnel/);
+    // The docs never show a token being typed after TUNNEL_TOKEN= on a command line.
+    for (const line of codeLines(runbook)) expect(line).not.toMatch(/TUNNEL_TOKEN=\S*eyJ/);
+  });
+
+  it("every message the troubleshooting table quotes for the tunnel route is one install.sh prints", () => {
+    for (const s of [
+      "this install is in direct mode",
+      "this install is in tunnel mode",
+      "the running stack was written for",
+      "that is not a tunnel token",
+      "cloudflared could not read the token",
+      "Cloudflare refused the tunnel's registration",
+      "cloudflared could not reach Cloudflare",
+      "what was pasted had more than one line",
+      "--new-token is for an install in tunnel mode",
+    ]) {
+      expect(runbook, s).toContain(s);
+      expect(installSh, s).toContain(s);
+    }
+  });
+
+  it("what the runbook says the tunnel route prints is what install.sh prints", () => {
+    for (const s of [
+      "The platform is running and its tunnel is connected to Cloudflare.",
+      "In Cloudflare's dashboard, the tunnel needs one published application (skip this if it is there already):",
+      "No port is published on this server; it is reached only through the tunnel, at https://",
+      "Tunnel token from the Cloudflare dashboard (what you paste is not shown):",
+      "How do visitors reach this server?",
+    ]) {
+      expect(runbook, s).toContain(s);
+      expect(installSh, s).toContain(s);
+    }
+  });
+});
+
+describe("a tunnel token that does not connect", () => {
+  const runbook = docs[DOCKER];
+
+  it("the runbook says a failed first tunnel install is put right by running the script again", () => {
+    expect(runbook).toContain("### If the tunnel does not connect");
+    expect(runbook).toContain("every run asks for the token again");
+    expect(runbook).toContain("printed once, at the end of the first run whose tunnel connects");
+    expect(runbook).not.toContain("On a first install it asks again");
+    expect(installSh).toContain("it asks for the tunnel token again");
+  });
+
+  it("the runbook's way to replace the token on a working install is --new-token, not an edit of .env", () => {
+    expect(runbook).toContain("sudo bash install.sh install --new-token");
+    expect(runbook).not.toMatch(/edit the `TUNNEL_TOKEN=` line/);
+    expect(runbook).toContain(".tunnel-pending");
+    expect(installSh).toContain('PENDING_FILE="$INSTALL_DIR/.tunnel-pending"');
+  });
+
+  it("starting the stack removes no container the script did not make", () => {
+    for (const line of installSh.split("\n")) if (/ up -d/.test(line)) expect(line).not.toContain("--remove-orphans");
+  });
+});

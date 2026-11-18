@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Installs and runs the demo platform on Debian: the app container behind Caddy, which
-# gets and renews the HTTPS certificate by itself.
+# Installs and runs the demo platform on Debian: the app container behind Caddy. In
+# direct mode (the default) Caddy gets and renews the HTTPS certificate by itself on
+# ports 80 and 443. In tunnel mode (--tunnel) no port is published: a cloudflared
+# container connects out to Cloudflare, which ends HTTPS and sends requests down the
+# tunnel.
 #
-#   sudo bash install.sh [install|update|backup|status|uninstall] [--dry-run] [--yes]
-#                        [--force] [--delete-data]
+#   sudo bash install.sh [install|update|backup|status|uninstall] [--tunnel|--direct]
+#                        [--new-token] [--dry-run] [--yes] [--force] [--delete-data]
 #
 # Pages checked on 2026-11-17 for what this script does:
 #   Debian releases (13 "trixie" is stable, 12 "bookworm" is oldstable):
@@ -15,14 +18,31 @@
 #   above no longer prints it, so it was read on 2026-11-17 from the key served at
 #     https://download.docker.com/linux/debian/gpg
 #   (fetched over HTTPS with TLS 1.2 or later, user ID "Docker Release (CE deb)").
+#   Tunnel mode, checked on 2026-11-17. The token in the TUNNEL_TOKEN variable,
+#   --no-autoupdate and --metrics:
+#     https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/cloudflared-parameters/run-parameters/
+#   The Host header reaches the service unchanged unless httpHostHeader is set:
+#     https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/cloudflared-parameters/origin-parameters/
+#   Outbound port 7844 and no inbound port:
+#     https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/
+#   What cloudflared 2026.11.1 prints was read from its source and by running the image
+#   with no network: "Provided Tunnel token is not valid." for a token it cannot
+#   decode, "Register tunnel error from server side" when Cloudflare refuses the
+#   registration, "error looking up Cloudflare edge IPs" when it cannot reach Cloudflare;
+#   `tunnel --metrics <address> ready` exits 0 only while a connection is up.
 #
-# Before running it, by hand: point the domain's DNS record at this server and open
-# ports 80 and 443 to it. Everything else is done here.
+# Before running it, by hand. Direct mode: point the domain's DNS record at this server
+# and open ports 80 and 443 to it. Tunnel mode: create the tunnel in Cloudflare's
+# dashboard, copy its token, and give the tunnel a published application for the domain
+# with the service URL http://caddy:80. Everything else is done here.
 #
 # Safety rules this script keeps:
-# - It never removes or overwrites the data folder, the .env file or a backup. The one
-#   exception is `uninstall --delete-data`, after the exact domain name is typed;
-#   --yes does not skip that.
+# - It never removes or overwrites the data folder, the .env file or a backup. The
+#   exceptions: `uninstall --delete-data`, after the exact domain name is typed (--yes
+#   does not skip that); and, in tunnel mode, the TUNNEL_TOKEN line of .env, which is
+#   replaced when a new token is given (--new-token, or while the tunnel has never
+#   connected). Every other line of .env, the setup code included, is carried over
+#   unchanged, and no copy of the old file is kept.
 # - The data folder is a new or empty folder outside the system folders, recorded in
 #   .env as its resolved path; later runs accept only that folder, and only while it
 #   still resolves to itself.
@@ -34,7 +54,18 @@
 #   it replaced are restored and files it created are removed again.
 # - The setup code is generated here, written only to .env (mode 600, root), printed
 #   once at the end of the run that made it, and never logged or passed as a command
-#   argument.
+#   argument. In tunnel mode it is printed once at the end of the first run whose
+#   tunnel connects, which may be a later run than the one that made it.
+# - A tunnel that has never connected is marked by the file .tunnel-pending in the
+#   install folder. While it is there, a run asks for the token again, so a wrong token
+#   is put right by running the script again.
+# - The tunnel token is read at a hidden prompt (or from the TUNNEL_TOKEN environment
+#   variable), checked for shape only, and written only to .env. It is never printed,
+#   never passed as a command argument and never written to the compose file or a
+#   backup archive; cloudflared's log lines are masked for it before they are shown.
+# - The mode is recorded in .env (DEPLOY_MODE=tunnel; no such line means direct). A run
+#   never switches an existing install to the other mode: --tunnel or --direct against
+#   the recorded mode is refused, with the steps to do it by hand.
 #
 # Tests: deploy/test-install.sh (runs this script in Debian containers with Docker
 # replaced by a stub). DP_ROOT, for those tests only, prefixes every system path.
@@ -52,6 +83,15 @@ readonly WAIT_SECONDS=120
 # up --wait-timeout and up --pull need Compose 2.17 or later; 2.20 leaves a margin.
 readonly MIN_COMPOSE=2.20.0
 readonly DOCKER_KEY_FPR=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+# What the tunnel's published application points at: Caddy, by its service name on the
+# stack's own network, over plain HTTP.
+readonly TUNNEL_SERVICE_URL=http://caddy:80
+
+# A token given in the environment is taken out of it at once: Compose prefers the
+# environment over .env, so a leftover value would override the recorded token, and no
+# child process needs it.
+ENV_TOKEN="${TUNNEL_TOKEN:-}"
+unset TUNNEL_TOKEN
 
 case "$0" in
   install.sh | */install.sh) SELF="$0" ;;
@@ -74,6 +114,7 @@ CADDY_DIR="$INSTALL_DIR/caddy"
 CADDYFILE="$CADDY_DIR/Caddyfile"
 BACKUP_DIR="$INSTALL_DIR/backups"
 LOCK_FILE="$INSTALL_DIR/.install.lock"
+PENDING_FILE="$INSTALL_DIR/.tunnel-pending"
 OS_RELEASE="$DP_ROOT/etc/os-release"
 KEYRING_DIR="$DP_ROOT/etc/apt/keyrings"
 KEYRING="$KEYRING_DIR/docker.asc"
@@ -85,7 +126,15 @@ DRY_RUN=0
 ASSUME_YES=0
 FORCE=0
 DELETE_DATA=0
+MODE_FLAG=""  # tunnel or direct, when --tunnel or --direct was given
+NEW_TOKEN=0
 
+MODE=""       # direct or tunnel
+TOKEN=""      # the tunnel token; never printed
+OLD_TOKEN=""  # the token .env held when this run began
+TOKEN_CHANGED=0
+PENDING=0     # 1 when this install's tunnel has never connected (PENDING_FILE was there)
+SECRET_EXTRA=0
 DOMAIN=""
 ACME_EMAIL=""
 DATA_DIR=""   # the resolved path as the host sees it, without DP_ROOT; stored in .env
@@ -123,6 +172,12 @@ Commands:
   uninstall   Stop and remove the containers. The data folder and backups stay.
 
 Options:
+  --tunnel        With install: run behind a Cloudflare Tunnel. No port is published and
+                  no certificate is requested; the tunnel token is asked for.
+  --direct        With install: publish ports 80 and 443 and get a certificate (the
+                  default at the question a first install asks).
+  --new-token     With install, on a tunnel install: ask for the tunnel token again and
+                  replace the one in .env.
   --dry-run       Print every command and file write without doing any.
   --yes           Do not ask "continue?" questions (never skips the data deletion check).
   --force         Try on a system other than Debian 13 or 12.
@@ -157,12 +212,25 @@ parse_args() {
       --yes | -y) ASSUME_YES=1 ;;
       --force) FORCE=1 ;;
       --delete-data) DELETE_DATA=1 ;;
+      --tunnel)
+        [ "$MODE_FLAG" != direct ] || usage_error "give only one of --tunnel and --direct"
+        MODE_FLAG=tunnel ;;
+      --direct)
+        [ "$MODE_FLAG" != tunnel ] || usage_error "give only one of --tunnel and --direct"
+        MODE_FLAG=direct ;;
+      --new-token) NEW_TOKEN=1 ;;
       -h | --help) usage; exit 0 ;;
       *) usage_error "unknown argument: $a" ;;
     esac
   done
   if [ "$DELETE_DATA" = 1 ] && [ "$COMMAND" != uninstall ]; then
     usage_error "--delete-data goes only with uninstall"
+  fi
+  if [ -n "$MODE_FLAG" ] && [ "$COMMAND" != install ]; then
+    usage_error "--tunnel and --direct go only with install; the other commands read the mode from .env"
+  fi
+  if [ "$NEW_TOKEN" = 1 ] && [ "$COMMAND" != install ]; then
+    usage_error "--new-token goes only with install"
   fi
 }
 
@@ -246,6 +314,13 @@ check_new_data_dir() {
   printf '%s\n' "$logical"
 }
 
+# The shape of a tunnel token: one word of base64 text that starts with eyJ, as the
+# base64 form of a JSON object does (cloudflared decodes the token as base64, then as
+# JSON). Shape only: whether Cloudflare accepts it shows when cloudflared connects.
+valid_token() {
+  [ "${#1}" -ge 100 ] && [ "${#1}" -le 2048 ] && [[ "$1" =~ ^eyJ[A-Za-z0-9+/_-]+={0,2}$ ]]
+}
+
 # An image reference such as demo-platform:latest or registry.example.com/x/y:1.2.
 valid_image() {
   [ "${#1}" -le 255 ] && [[ "$1" =~ ^[a-z0-9][a-z0-9._/:@-]*$ ]]
@@ -303,7 +378,9 @@ remove_own_tmpdir() {
 }
 
 # Undoes what a failed run created: files it made, and folders it made if empty. The
-# data folder goes only if empty; while it holds files, .env stays with it.
+# data folder goes only if empty; while it holds files, .env stays with it, and so does
+# the mark that the tunnel has never connected, which makes the next run ask for the
+# token again.
 undo_created() {
   local i p keep_env=0
   for p in ${CREATED[@]+"${CREATED[@]}"}; do
@@ -318,6 +395,7 @@ undo_created() {
     if [ "$p" = "$ENV_FILE" ] && [ "$keep_env" = 1 ]; then
       printf 'kept %s: the data folder it belongs to is not empty\n' "$p" >&2; continue
     fi
+    if [ "$p" = "$PENDING_FILE" ] && [ "$keep_env" = 1 ]; then continue; fi
     if [ -d "$p" ] && [ ! -L "$p" ]; then
       if safe_rmdir_empty "$p"; then printf 'removed %s (created by this failed run)\n' "$p" >&2
       else printf 'kept %s: it is not empty\n' "$p" >&2; fi
@@ -420,12 +498,87 @@ read_line() {
   printf -v "$__out" '%s' "$line"
 }
 
+# Reads one line without showing it, and keeps its last word: the token, also when the
+# whole install command from the dashboard was pasted. A paste can hold a line break:
+# on a terminal, whatever arrives right after the line is read too, hidden, and thrown
+# away, so that it cannot fall into the next question and be echoed there. SECRET_EXTRA
+# is 1 when such extra text was thrown away. Answers piped in are not a paste and are
+# left alone.
+read_secret() {
+  local __out="$1" line extra="" more=0
+  if [ ! -t 0 ] && { : </dev/tty; } 2>/dev/null; then
+    IFS= read -rs line </dev/tty || return 1
+    while IFS= read -rs -t 0.3 extra </dev/tty; do
+      [ -z "${extra//[[:space:]]/}" ] || more=1
+      extra=""
+    done
+  else
+    IFS= read -rs line || return 1
+    if [ -t 0 ]; then
+      while IFS= read -rs -t 0.3 extra; do
+        [ -z "${extra//[[:space:]]/}" ] || more=1
+        extra=""
+      done
+    fi
+  fi
+  # A last piece without a line end is in extra when the wait ran out.
+  [ -z "${extra//[[:space:]]/}" ] || more=1
+  SECRET_EXTRA="$more"
+  line="${line%"${line##*[![:space:]]}"}"
+  line="${line##*[[:space:]]}"
+  printf -v "$__out" '%s' "$line"
+}
+
 confirm() {
   local answer
   [ "$ASSUME_YES" = 1 ] && return 0
   printf '%s [y/N]: ' "$1" >&2
   read_line answer || return 1
   [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+ask_mode() {
+  local answer tries
+  printf 'How do visitors reach this server?\n' >&2
+  printf '  1  Directly: ports 80 and 443 are open to it and it gets its own HTTPS certificate\n' >&2
+  printf '  2  Through a Cloudflare Tunnel: no open ports, Cloudflare ends HTTPS\n' >&2
+  for tries in 1 2 3; do
+    printf 'Choice [1]: ' >&2
+    read_line answer || die "no answer given; run the script in a terminal"
+    case "${answer,,}" in
+      "" | 1 | direct) MODE=direct; return 0 ;;
+      2 | tunnel) MODE=tunnel; return 0 ;;
+    esac
+    warn "answer 1 or 2 (try $tries of 3)"
+  done
+  die "no valid choice given; nothing was changed"
+}
+
+# The token is never echoed: not while it is typed, and not in a refusal. With "keep",
+# an empty answer keeps the token already in TOKEN.
+ask_token() {
+  local keep="${1:-}" answer tries
+  local prompt='Tunnel token from the Cloudflare dashboard (what you paste is not shown): '
+  [ -z "$keep" ] || prompt='Tunnel token from the Cloudflare dashboard (what you paste is not shown; Enter keeps the one in .env): '
+  if [ -n "$ENV_TOKEN" ]; then
+    valid_token "$ENV_TOKEN" || die "the TUNNEL_TOKEN environment variable does not hold a tunnel token (one long word starting with eyJ); nothing was changed"
+    TOKEN="$ENV_TOKEN"
+    info "the tunnel token is taken from the TUNNEL_TOKEN environment variable"
+    return 0
+  fi
+  for tries in 1 2 3; do
+    printf '%s' "$prompt" >&2
+    read_secret answer || die "no answer given; run the script in a terminal"
+    printf '\n' >&2
+    if [ "$SECRET_EXTRA" = 1 ]; then
+      warn "what was pasted had more than one line, so none of it was taken: paste the token as one line (try $tries of 3)"
+      continue
+    fi
+    if [ -n "$keep" ] && [ -z "$answer" ]; then info "keeping the token in .env"; return 0; fi
+    if valid_token "$answer"; then TOKEN="$answer"; return 0; fi
+    warn "that is not a tunnel token: paste the long word starting with eyJ, or the install command that ends with it (try $tries of 3)"
+  done
+  die "no valid tunnel token given; nothing was changed"
 }
 
 ask_domain() {
@@ -636,7 +789,8 @@ check_dns() {
 # ---------------------------------------------------------------- configuration
 
 read_env_file() {
-  local line key value have_code=0
+  local line key value have_code=0 mode=""
+  TOKEN=""
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in "" | "#"*) continue ;; esac
     key="${line%%=*}"
@@ -647,10 +801,31 @@ read_env_file() {
       DATA_DIR) DATA_DIR="$value" ;;
       APP_IMAGE) IMAGE="$value" ;;
       SETUP_CODE) [ -z "$value" ] || have_code=1 ;;
+      DEPLOY_MODE) mode="$value" ;;
+      TUNNEL_TOKEN) TOKEN="$value" ;;
     esac
   done <"$ENV_FILE"
+  # No DEPLOY_MODE line is direct mode: that is every .env written before tunnel mode
+  # existed, and what direct mode still writes.
+  case "$mode" in
+    "" | direct) MODE=direct ;;
+    tunnel) MODE=tunnel ;;
+    *) die "$ENV_FILE has a DEPLOY_MODE that is neither direct nor tunnel; fix it by hand, nothing was changed" ;;
+  esac
   valid_domain "$DOMAIN" || die "$ENV_FILE has no valid DOMAIN; fix it by hand, nothing was changed"
-  valid_email "$ACME_EMAIL" || die "$ENV_FILE has no valid ACME_EMAIL; fix it by hand, nothing was changed"
+  if [ "$MODE" = tunnel ]; then
+    if ! valid_token "$TOKEN"; then
+      # An install run that is about to ask for the token anyway goes on without one.
+      if [ "$COMMAND" = install ] && { [ -e "$PENDING_FILE" ] || [ "$NEW_TOKEN" = 1 ]; }; then
+        TOKEN=""
+      else
+        die "$ENV_FILE says DEPLOY_MODE=tunnel but has no TUNNEL_TOKEN of the right shape (one long word starting with eyJ); nothing was changed. Give it a new one with: sudo bash $SELF install --new-token"
+      fi
+    fi
+  else
+    TOKEN=""
+    valid_email "$ACME_EMAIL" || die "$ENV_FILE has no valid ACME_EMAIL; fix it by hand, nothing was changed"
+  fi
   valid_data_dir "$DATA_DIR" || die "$ENV_FILE has a DATA_DIR ($DATA_DIR) that cannot be a data folder; nothing was changed"
   valid_image "$IMAGE" || die "$ENV_FILE has no valid APP_IMAGE; fix it by hand, nothing was changed"
   [ "$have_code" = 1 ] || die "$ENV_FILE has no SETUP_CODE; fix it by hand, nothing was changed"
@@ -674,17 +849,99 @@ load_or_ask_config() {
     say "Reading the earlier answers from $ENV_FILE"
     read_env_file
     check_recorded_data strict
-    info "domain $DOMAIN, email $ACME_EMAIL, data folder $DATA_DIR, image $IMAGE"
+    if [ -n "$MODE_FLAG" ] && [ "$MODE_FLAG" != "$MODE" ]; then refuse_mode_switch; fi
+    if [ "$NEW_TOKEN" = 1 ] && [ "$MODE" != tunnel ]; then
+      die "--new-token is for an install in tunnel mode; this install is in direct mode and has no tunnel token. Nothing was changed."
+    fi
+    if [ "$MODE" = tunnel ]; then
+      info "tunnel mode, domain $DOMAIN, data folder $DATA_DIR, image $IMAGE"
+    else
+      info "domain $DOMAIN, email $ACME_EMAIL, data folder $DATA_DIR, image $IMAGE"
+    fi
+    refuse_other_modes_stack
+    if [ "$MODE" = tunnel ]; then renew_token; fi
     return 0
   fi
   FIRST_RUN=1
-  say "Three questions"
+  say "A few questions"
+  if [ -n "$MODE_FLAG" ]; then MODE="$MODE_FLAG"; else ask_mode; fi
   ask_domain
-  ask_email
+  if [ "$MODE" = tunnel ]; then ask_token; else ask_email; fi
   ask_data_dir
   DATA_PATH="$DP_ROOT$DATA_DIR"
   IMAGE="${APP_IMAGE:-$DEFAULT_APP_IMAGE}"
   valid_image "$IMAGE" || die "APP_IMAGE is not a valid image name"
+}
+
+# On an existing tunnel install: asks for the token again when the tunnel has never
+# connected (so a wrong token is put right by running the script again) or when
+# --new-token was given. Otherwise the token in .env stays, whatever the environment
+# holds.
+renew_token() {
+  OLD_TOKEN="$TOKEN"
+  [ ! -e "$PENDING_FILE" ] || PENDING=1
+  if [ "$PENDING" = 1 ] || [ "$NEW_TOKEN" = 1 ]; then
+    if [ "$PENDING" = 1 ]; then
+      say "The tunnel of this install has never connected, so the tunnel token is asked for again"
+    else
+      say "Replacing the tunnel token"
+    fi
+    if valid_token "$OLD_TOKEN"; then ask_token keep; else ask_token; fi
+    [ "$TOKEN" = "$OLD_TOKEN" ] || TOKEN_CHANGED=1
+  elif [ -n "$ENV_TOKEN" ]; then
+    warn "TUNNEL_TOKEN is set in the environment, but this install already has a token that connected, so it is not taken. To replace the token: sudo bash $SELF install --new-token"
+  fi
+}
+
+# Rewrites .env with one line changed, TUNNEL_TOKEN, and every other line as it was.
+# The new file is complete before it takes the old one's place; no copy of the old
+# file is kept, so no file but .env ever holds a token.
+replace_env_token() {
+  local new="$1" tmp line found=0
+  valid_token "$new" || die "no tunnel token to write"
+  if [ "$DRY_RUN" = 1 ]; then info "would replace the TUNNEL_TOKEN line of $ENV_FILE"; return 0; fi
+  tmp="$(mktemp -- "$INSTALL_DIR/.env.new.XXXXXX")"
+  TMP_FILES+=("$tmp")
+  guard_path "$tmp"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      TUNNEL_TOKEN=*) [ "$found" = 1 ] || printf 'TUNNEL_TOKEN=%s\n' "$new"; found=1 ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <"$ENV_FILE" >"$tmp"
+  [ "$found" = 1 ] || printf 'TUNNEL_TOKEN=%s\n' "$new" >>"$tmp"
+  chmod 600 -- "$tmp"
+  chown 0:0 -- "$tmp"
+  safe_mv "$tmp" "$ENV_FILE"
+}
+
+# An existing install is never switched to the other mode by a flag: the two modes
+# differ in what is open to the internet, so the change is made by hand, step by step.
+refuse_mode_switch() {
+  local env="$LOGICAL_INSTALL_DIR/.env"
+  if [ "$MODE" = direct ]; then
+    die "this install is in direct mode (ports 80 and 443, its own certificate), recorded in $env; --tunnel does not switch it. Nothing was changed. To switch by hand, keeping the data and the setup code: 1. stop it: sudo bash $SELF uninstall  2. as root, add two lines to $env with an editor: DEPLOY_MODE=tunnel and TUNNEL_TOKEN=<the tunnel token>  3. start it: sudo bash $SELF install  4. close ports 80 and 443 on the firewall or router. The runbook's section on switching routes has the details."
+  fi
+  die "this install is in tunnel mode (behind a Cloudflare Tunnel), recorded in $env; --direct does not switch it. Nothing was changed. To switch by hand, keeping the data and the setup code: 1. stop it: sudo bash $SELF uninstall  2. as root, edit $env: remove the DEPLOY_MODE and TUNNEL_TOKEN lines and add ACME_EMAIL=<your email>  3. point the DNS record at this server and open ports 80 and 443  4. start it: sudo bash $SELF install. The runbook's section on switching routes has the details."
+}
+
+# The mode of the stack file on disk: tunnel when it has a cloudflared service.
+stack_file_mode() {
+  if grep -q '^  cloudflared:' "$COMPOSE_FILE" 2>/dev/null; then echo tunnel; else echo direct; fi
+}
+
+# After .env was edited to the other mode: the stack written for the old mode must be
+# stopped first, so its Caddy does not pass for this mode's (it may hold ports 80 and
+# 443, or none) and a failed start has a consistent setup to go back to.
+refuse_other_modes_stack() {
+  [ -f "$COMPOSE_FILE" ] && compose_present || return 0
+  local was
+  was="$(stack_file_mode)"
+  [ "$was" != "$MODE" ] || return 0
+  # Asked of Docker by the project's label, not through the old stack file, which may
+  # no longer read with the edited .env.
+  [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null || true)" ] || return 0
+  die "$LOGICAL_INSTALL_DIR/.env now says $MODE mode, but the running stack was written for $was mode. Nothing was changed. Put .env back as it was, stop the stack with: sudo bash $SELF uninstall (the data, .env and the backups stay), make the edit again, and then run install."
 }
 
 require_installed() {
@@ -795,13 +1052,26 @@ EOF
 }
 
 write_env_file() {
+  if [ -e "$ENV_FILE" ] && [ "$TOKEN_CHANGED" = 1 ]; then
+    say "Replacing the tunnel token in $ENV_FILE (every other line stays as it is; the setup code does not change)"
+    replace_env_token "$TOKEN"
+    return 0
+  fi
   if [ -e "$ENV_FILE" ]; then
     say "Keeping $ENV_FILE as it is (the setup code does not change)"
     return 0
   fi
-  say "Writing $ENV_FILE (mode 600, root only) with a new setup code"
+  if [ "$MODE" = tunnel ]; then
+    say "Writing $ENV_FILE (mode 600, root only) with a new setup code and the tunnel token"
+  else
+    say "Writing $ENV_FILE (mode 600, root only) with a new setup code"
+  fi
   if [ "$DRY_RUN" = 1 ]; then
-    info "would write DOMAIN, ACME_EMAIL, DATA_DIR, APP_IMAGE and a new SETUP_CODE to $ENV_FILE"
+    if [ "$MODE" = tunnel ]; then
+      info "would write DOMAIN, DEPLOY_MODE, DATA_DIR, APP_IMAGE, a new SETUP_CODE and the TUNNEL_TOKEN to $ENV_FILE"
+    else
+      info "would write DOMAIN, ACME_EMAIL, DATA_DIR, APP_IMAGE and a new SETUP_CODE to $ENV_FILE"
+    fi
     return 0
   fi
   local tmp code
@@ -810,14 +1080,28 @@ write_env_file() {
   guard_path "$tmp"
   code="$(new_setup_code)"
   [[ "$code" =~ ^[0-9a-f]{32}$ ]] || die "could not read random bytes from /dev/urandom"
-  {
-    printf '# Written by install.sh. Root only: SETUP_CODE claims this install. Never share or commit.\n'
-    printf 'DOMAIN=%s\n' "$DOMAIN"
-    printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
-    printf 'DATA_DIR=%s\n' "$DATA_DIR"
-    printf 'APP_IMAGE=%s\n' "$IMAGE"
-    printf 'SETUP_CODE=%s\n' "$code"
-  } >"$tmp"
+  # printf is a shell builtin: neither the code nor the token is on a command line.
+  if [ "$MODE" = tunnel ]; then
+    valid_token "$TOKEN" || die "no tunnel token to write"
+    {
+      printf '# Written by install.sh. Root only: SETUP_CODE claims this install and TUNNEL_TOKEN runs its tunnel. Never share or commit.\n'
+      printf 'DOMAIN=%s\n' "$DOMAIN"
+      printf 'DEPLOY_MODE=tunnel\n'
+      printf 'DATA_DIR=%s\n' "$DATA_DIR"
+      printf 'APP_IMAGE=%s\n' "$IMAGE"
+      printf 'SETUP_CODE=%s\n' "$code"
+      printf 'TUNNEL_TOKEN=%s\n' "$TOKEN"
+    } >"$tmp"
+  else
+    {
+      printf '# Written by install.sh. Root only: SETUP_CODE claims this install. Never share or commit.\n'
+      printf 'DOMAIN=%s\n' "$DOMAIN"
+      printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
+      printf 'DATA_DIR=%s\n' "$DATA_DIR"
+      printf 'APP_IMAGE=%s\n' "$IMAGE"
+      printf 'SETUP_CODE=%s\n' "$code"
+    } >"$tmp"
+  fi
   code=""
   chmod 600 -- "$tmp"
   chown 0:0 -- "$tmp"
@@ -825,10 +1109,21 @@ write_env_file() {
   CREATED+=("$ENV_FILE")
   CODE_GENERATED=1
   safe_rm_file "$tmp"
+  if [ "$MODE" = tunnel ]; then
+    # Stays until the tunnel has connected once; see finish.
+    guard_path "$PENDING_FILE"
+    printf 'Written by install.sh: the tunnel of this install has not connected yet. Until it has, install asks for the tunnel token again. Removed by the first run that connects.\n' >"$PENDING_FILE"
+    chmod 600 -- "$PENDING_FILE"
+    CREATED+=("$PENDING_FILE")
+  fi
 }
 
 install_stack_files() {
-  say "Writing $COMPOSE_FILE and $CADDYFILE (the domain and email come from .env)"
+  if [ "$MODE" = tunnel ]; then
+    say "Writing $COMPOSE_FILE and $CADDYFILE for tunnel mode (no published ports; the domain and the token come from .env)"
+  else
+    say "Writing $COMPOSE_FILE and $CADDYFILE (the domain and email come from .env)"
+  fi
   if [ "$DRY_RUN" = 1 ]; then
     local f
     for f in "$COMPOSE_FILE" "$CADDYFILE"; do
@@ -838,34 +1133,87 @@ install_stack_files() {
     return 0
   fi
   [ -e "$COMPOSE_FILE" ] || COMPOSE_CREATED=1
-  stage_file "$COMPOSE_FILE" 0600 < <(compose_file_content)
+  if [ "$MODE" = tunnel ]; then
+    stage_file "$COMPOSE_FILE" 0600 < <(tunnel_compose_file_content)
+  else
+    stage_file "$COMPOSE_FILE" 0600 < <(compose_file_content)
+  fi
   local staged_compose="$STAGED"
   run docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged_compose" config --quiet \
     || die "the new compose file does not validate; nothing was replaced"
   STAGED="$staged_compose"
   commit_file "$COMPOSE_FILE" "$INSTALL_DIR"
-  stage_file "$CADDYFILE" 0600 < <(caddyfile_content)
+  if [ "$MODE" = tunnel ]; then
+    stage_file "$CADDYFILE" 0600 < <(tunnel_caddyfile_content)
+  else
+    stage_file "$CADDYFILE" 0600 < <(caddyfile_content)
+  fi
   commit_file "$CADDYFILE" "$CADDY_DIR"
   CADDY_CHANGED="$COMMITTED"
+}
+
+# Shows cloudflared's last log lines, masked for the token, and says in plain words what
+# the known ones mean. The messages matched here are cloudflared's own (see the top of
+# this file); the text Cloudflare adds after a refused registration is not relied on.
+explain_tunnel_failure() {
+  local logs
+  say "cloudflared's last log lines"
+  info "\$ ${DC[*]} logs --no-color --tail 40 cloudflared"
+  logs="$("${DC[@]}" logs --no-color --tail 40 cloudflared 2>&1 || true)"
+  if [ -n "$TOKEN" ]; then logs="${logs//"$TOKEN"/<tunnel token hidden>}"; fi
+  printf '%s\n' "$logs"
+  case "$logs" in
+    *"Provided Tunnel token is not valid"*)
+      warn "cloudflared could not read the token: what was given is not a complete tunnel token. Copy it again from the tunnel's page in Cloudflare's dashboard (the long word starting with eyJ, to its very end)." ;;
+    *"Register tunnel error from server side"* | *Unauthorized*)
+      warn "Cloudflare refused the tunnel's registration. The token is most likely for a tunnel that was deleted, or was refreshed in the dashboard since it was copied. Copy the current token from the tunnel's page and try again." ;;
+    *"error looking up Cloudflare edge IPs"* | *"edge discovery"* | *"network is unreachable"* | *"i/o timeout"*)
+      warn "cloudflared could not reach Cloudflare. This server needs outbound access to Cloudflare on port 7844 (TCP and UDP) and working DNS; no inbound port is needed. Check the firewall and try again." ;;
+    *)
+      warn "the tunnel did not connect within ${WAIT_SECONDS}s; the lines above are cloudflared's own account of why." ;;
+  esac
 }
 
 start_stack() {
   local caddy_was_running=0
   if stack_running caddy; then caddy_was_running=1; fi
-  say "Starting the platform: pulling any image not on this server yet, then waiting up to ${WAIT_SECONDS}s for it to report healthy"
+  if [ "$MODE" = tunnel ]; then
+    say "Starting the platform: pulling any image not on this server yet, then waiting up to ${WAIT_SECONDS}s for the app to report healthy and the tunnel to connect"
+  else
+    say "Starting the platform: pulling any image not on this server yet, then waiting up to ${WAIT_SECONDS}s for it to report healthy"
+  fi
   if ! run "${DC[@]}" up -d --pull missing --wait --wait-timeout "$WAIT_SECONDS"; then
     warn "the platform did not start"
+    if [ "$MODE" = tunnel ]; then explain_tunnel_failure; fi
     if [ "$COMPOSE_CREATED" = 1 ]; then
       say "The app's last log lines"
       run "${DC[@]}" logs --tail 50 app || true
       say "Taking the half-started stack down again"
       run "${DC[@]}" down || warn "could not take the stack down"
+      if [ "$MODE" = tunnel ]; then
+        die "starting failed; see the log lines above. Run this script again: it asks for the tunnel token again, and prints the setup code once the tunnel has connected. The files this run created are removed below; .env stays if the app has already written to the data folder."
+      fi
       die "starting failed; see the log lines above. The files this run created are removed below."
     fi
-    if [ "${#REPLACED[@]}" -gt 0 ]; then
+    local token_put_back=0
+    if [ "$TOKEN_CHANGED" = 1 ] && [ "$PENDING" = 0 ] && valid_token "$OLD_TOKEN"; then
+      say "Putting the previous token back into $ENV_FILE: it connected before"
+      replace_env_token "$OLD_TOKEN"
+      token_put_back=1
+    fi
+    if [ "${#REPLACED[@]}" -gt 0 ] || [ "$token_put_back" = 1 ]; then
       say "Putting back the files this run replaced and starting the previous setup"
       restore_replaced
       run "${DC[@]}" up -d || warn "the previous setup did not start either"
+    fi
+    if [ "$token_put_back" = 1 ]; then
+      die "starting failed with the new token. The previous token is back in $ENV_FILE; the data folder and the backups were not changed. See the logs with: ${DC[*]} logs"
+    fi
+    if [ "$MODE" = tunnel ] && [ "$PENDING" = 1 ]; then
+      die "starting failed. Run this script again: it asks for the tunnel token again. The data folder and the backups were not changed. See the logs with: ${DC[*]} logs"
+    fi
+    if [ "$MODE" = tunnel ]; then
+      die "starting failed. The data folder, $ENV_FILE and the backups were not changed. If the token is the cause, replace it with: sudo bash $SELF install --new-token. See the logs with: ${DC[*]} logs"
     fi
     die "starting failed. The data folder, $ENV_FILE and the backups were not changed. See the logs with: ${DC[*]} logs"
   fi
@@ -877,8 +1225,19 @@ start_stack() {
 
 finish() {
   if [ "$DRY_RUN" = 1 ]; then say "Dry run finished: nothing was changed"; return 0; fi
-  printf '\nThe platform is running at https://%s\n' "$DOMAIN"
-  if [ "$CODE_GENERATED" = 1 ]; then
+  if [ "$MODE" = tunnel ]; then
+    printf '\nThe platform is running and its tunnel is connected to Cloudflare.\n'
+    printf "\nIn Cloudflare's dashboard, the tunnel needs one published application (skip this if it is there already):\n"
+    printf '  Hostname:     %s\n' "$DOMAIN"
+    printf '  Service URL:  %s\n' "$TUNNEL_SERVICE_URL"
+    printf 'No port is published on this server; it is reached only through the tunnel, at https://%s\n' "$DOMAIN"
+  else
+    printf '\nThe platform is running at https://%s\n' "$DOMAIN"
+  fi
+  # The tunnel has connected: the mark that it never did goes, and a setup code that a
+  # failed earlier run made without printing it is printed now, once.
+  if [ "$MODE" = tunnel ] && [ -e "$PENDING_FILE" ]; then safe_rm_file "$PENDING_FILE"; fi
+  if [ "$CODE_GENERATED" = 1 ] || [ "$PENDING" = 1 ]; then
     local line code=""
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in SETUP_CODE=*) code="${line#SETUP_CODE=}" ;; esac
@@ -893,12 +1252,21 @@ finish() {
 
 cmd_install() {
   say "Installing the demo platform"
-  info "Do these by hand first: point the domain's DNS record at this server and open ports 80 and 443 to it."
   load_or_ask_config
+  if [ "$MODE" = tunnel ]; then
+    info "Tunnel mode. Do these by hand, in Cloudflare's dashboard: create the tunnel, and give it a published application for $DOMAIN with the service URL $TUNNEL_SERVICE_URL."
+  else
+    info "Do these by hand first: point the domain's DNS record at this server and open ports 80 and 443 to it."
+  fi
   if [ "$FIRST_RUN" = 1 ]; then
     say "About to install"
     info "domain:      $DOMAIN"
-    info "email:       $ACME_EMAIL"
+    if [ "$MODE" = tunnel ]; then
+      info "reached:     through a Cloudflare Tunnel; no port is published"
+      info "token:       given (not shown)"
+    else
+      info "email:       $ACME_EMAIL"
+    fi
     info "data folder: $DATA_DIR"
     info "image:       $IMAGE"
     info "folder:      $LOGICAL_INSTALL_DIR"
@@ -916,8 +1284,13 @@ cmd_install() {
     info "Docker with the Compose plugin is not installed yet; it is installed below"
     check_conflicting_packages
   fi
-  check_ports
-  check_dns
+  if [ "$MODE" = tunnel ]; then
+    say "Tunnel mode: no port is published, so ports 80 and 443 and the DNS record are not checked"
+    info "the DNS record for $DOMAIN belongs to the tunnel and is managed in Cloudflare's dashboard, not here"
+  else
+    check_ports
+    check_dns
+  fi
   if [ "$docker_missing" = 1 ]; then
     make_dir "$INSTALL_DIR" 0700 0
     install_docker
@@ -976,7 +1349,11 @@ cmd_update() {
   take_lock
   local digests
   digests="$(docker image inspect --format '{{len .RepoDigests}}' "$IMAGE" 2>/dev/null || true)"
-  if [ "$digests" = 0 ]; then
+  if [ "$digests" = 0 ] && [ "$MODE" = tunnel ]; then
+    say "Pulling newer Caddy and cloudflared images"
+    info "APP_IMAGE $IMAGE was loaded on this server by hand, so it is not pulled; load a newer one with docker load before running update"
+    run "${DC[@]}" pull caddy cloudflared || die "pulling failed; nothing was changed"
+  elif [ "$digests" = 0 ]; then
     say "Pulling a newer Caddy image"
     info "APP_IMAGE $IMAGE was loaded on this server by hand, so it is not pulled; load a newer one with docker load before running update"
     run "${DC[@]}" pull caddy || die "pulling failed; nothing was changed"
@@ -987,7 +1364,10 @@ cmd_update() {
   say "Backing up before restarting"
   do_backup
   say "Restarting on the new images (waiting up to ${WAIT_SECONDS}s for health)"
-  run "${DC[@]}" up -d --wait --wait-timeout "$WAIT_SECONDS" || die "the platform did not report healthy. The data folder and $ENV_FILE were not changed, and the backup above holds the state before the update. See: ${DC[*]} logs"
+  if ! run "${DC[@]}" up -d --wait --wait-timeout "$WAIT_SECONDS"; then
+    if [ "$MODE" = tunnel ]; then explain_tunnel_failure; fi
+    die "the platform did not report healthy. The data folder and $ENV_FILE were not changed, and the backup above holds the state before the update. See: ${DC[*]} logs"
+  fi
   say "Updated"
 }
 
@@ -1010,9 +1390,23 @@ cmd_status() {
   else
     info "the app container is not running"
   fi
+  if [ "$MODE" = tunnel ]; then
+    # healthy means cloudflared holds a connection to Cloudflare.
+    say "Health check of the tunnel (cloudflared)"
+    id="$("${DC[@]}" ps -q cloudflared 2>/dev/null || true)"
+    if [ -n "$id" ]; then
+      docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no health check{{end}}' "$id" || true
+      info "healthy means it is connected to Cloudflare. If it is not, see why with: ${DC[*]} logs cloudflared"
+    else
+      info "the cloudflared container is not running"
+    fi
+  fi
   say "Data folder"
   if [ -d "$DATA_PATH" ]; then du -sh -- "$DATA_PATH" || true; else warn "$DATA_DIR is missing"; fi
   info "address: https://$DOMAIN"
+  if [ "$MODE" = tunnel ]; then
+    info "mode: behind a Cloudflare Tunnel; no port is published. The tunnel's published application for $DOMAIN has the service URL $TUNNEL_SERVICE_URL"
+  fi
 }
 
 # Deletes the data folder only if it is still exactly the folder recorded at install
@@ -1067,14 +1461,22 @@ cmd_uninstall() {
   else
     info "To install again from scratch, move the settings aside first: mv $LOGICAL_INSTALL_DIR/.env $LOGICAL_INSTALL_DIR/.env.old"
   fi
-  info "settings:     $LOGICAL_INSTALL_DIR/.env (holds the setup code; root only)"
+  if [ "$MODE" = tunnel ]; then
+    info "settings:     $LOGICAL_INSTALL_DIR/.env (holds the setup code and the tunnel token; root only)"
+  else
+    info "settings:     $LOGICAL_INSTALL_DIR/.env (holds the setup code; root only)"
+  fi
   info "backups:      $LOGICAL_INSTALL_DIR/backups"
+  if [ "$MODE" = tunnel ]; then
+    info "The tunnel and its DNS record stay in your Cloudflare account, and the token in .env still runs it: delete the tunnel in Cloudflare's dashboard when you no longer need it."
+  fi
 }
 
 # ---------------------------------------------------------------- embedded stack files
 
-# Exact copies of deploy/docker-compose.yml and deploy/caddy/Caddyfile, so the script
-# works on its own; deploy/test-install.sh fails if they drift apart.
+# Exact copies of deploy/docker-compose.yml and deploy/caddy/Caddyfile (direct mode), so
+# the script works on its own; deploy/test-install.sh fails if they, or the tunnel
+# mode copies further down, drift apart from the files in deploy/.
 compose_file_content() {
   cat <<'DP_COMPOSE_END'
 # The container stack: the app behind Caddy, which ends HTTPS and is the only service
@@ -1156,6 +1558,125 @@ caddyfile_content() {
 	reverse_proxy app:3000
 }
 DP_CADDYFILE_END
+}
+
+# Exact copies of deploy/tunnel/docker-compose.yml and deploy/tunnel/caddy/Caddyfile,
+# written instead of the two above in tunnel mode.
+tunnel_compose_file_content() {
+  cat <<'DP_TUNNEL_COMPOSE_END'
+# The container stack behind a Cloudflare Tunnel: the app behind Caddy, and cloudflared,
+# which connects out to Cloudflare and hands each request to Caddy over plain HTTP on
+# the stack's own network. No service publishes a port on the host. Run from the folder
+# holding this file, a .env file and the caddy/ folder: docker compose up -d
+#
+# .env (mode 600, never committed) holds DOMAIN, DEPLOY_MODE=tunnel, DATA_DIR (a host
+# folder owned by id 1001), APP_IMAGE, SETUP_CODE and TUNNEL_TOKEN.
+#
+# In Cloudflare's dashboard the tunnel's published application for DOMAIN has the
+# service URL http://caddy:80
+
+# Docker's local log files, capped at three files of 10 MB per container.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  app:
+    image: ${APP_IMAGE:?APP_IMAGE is not set in .env}
+    environment:
+      # Named one by one instead of env_file: .env also holds TUNNEL_TOKEN, which only
+      # cloudflared may see.
+      SETUP_CODE: ${SETUP_CODE:?SETUP_CODE is not set in .env}
+      PUBLIC_IMAGE_BASE: ${PUBLIC_IMAGE_BASE:-}
+      # Paths and port inside the container; in .env, DATA_DIR is the folder on the host.
+      DATA_DIR: /data
+      PORT: "3000"
+    volumes:
+      # The data folder must already exist, owned by id 1001. Docker would otherwise
+      # create a missing one owned by root, which the app cannot write to.
+      - type: bind
+        source: ${DATA_DIR:?DATA_DIR is not set in .env}
+        target: /data
+        bind:
+          create_host_path: false
+    # No ports: the app is reached only through caddy on the stack's own network.
+    restart: unless-stopped
+    stop_grace_period: 10s
+    logging: *logging
+
+  caddy:
+    # caddy:2.11.9-alpine, pinned by the digest of its multi-platform index.
+    image: caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      # Read by the Caddyfile as {$DOMAIN}.
+      DOMAIN: ${DOMAIN:?DOMAIN is not set in .env}
+    # No ports: only cloudflared, on the stack's own network, reaches Caddy.
+    volumes:
+      # The folder is mounted, not the single Caddyfile, so edits and reloads apply.
+      - ./caddy:/etc/caddy:ro
+      - ./caddy-data:/data
+      - ./caddy-config:/config
+    logging: *logging
+
+  cloudflared:
+    # cloudflare/cloudflared:2026.11.1, pinned by the digest of its multi-platform index,
+    # read from Docker Hub on 2026-11-17. To refresh it, pick the newest version tag on
+    # Docker Hub and take the line "Digest:" that this prints:
+    #   docker buildx imagetools inspect cloudflare/cloudflared:<version>
+    # then change it here and in the copy inside install.sh.
+    image: cloudflare/cloudflared@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d
+    restart: unless-stopped
+    depends_on:
+      - caddy
+    # The token is not on this command line: cloudflared reads it from TUNNEL_TOKEN.
+    # The metrics address serves the health check below and is not reachable from
+    # outside the container.
+    command: tunnel --no-autoupdate --metrics 127.0.0.1:20241 run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?TUNNEL_TOKEN is not set in .env}
+    healthcheck:
+      # Succeeds once cloudflared holds a connection to Cloudflare.
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "ready"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      start_interval: 2s
+      retries: 3
+    logging: *logging
+DP_TUNNEL_COMPOSE_END
+}
+
+tunnel_caddyfile_content() {
+  cat <<'DP_TUNNEL_CADDYFILE_END'
+# Behind a Cloudflare Tunnel: Cloudflare ends HTTPS for DOMAIN, and cloudflared, the only
+# client that can reach this server, sends each request here as plain HTTP with the
+# visitor's Host header unchanged. DOMAIN comes from the stack's .env.
+{
+	# No certificate is requested and nothing listens on port 443.
+	auto_https off
+}
+
+http://{$DOMAIN} {
+	# Cloudflare sets X-Forwarded-Proto to the protocol the visitor used and overwrites
+	# a value the visitor sent, so a visitor on plain HTTP is sent to HTTPS here.
+	@plain header X-Forwarded-Proto http
+	redir @plain https://{host}{uri} 308
+
+	# Browsers keep to HTTPS for this host for one week. No subdomains, no preload list.
+	header Strict-Transport-Security "max-age=604800"
+
+	# Caddy passes the Host header through unchanged, which the setup wizard's
+	# same-origin check compares against the page's Origin. The app reads no forwarded
+	# address or scheme, so nothing a visitor sends in such a header is trusted.
+	reverse_proxy app:3000
+}
+DP_TUNNEL_CADDYFILE_END
 }
 
 # ---------------------------------------------------------------- main

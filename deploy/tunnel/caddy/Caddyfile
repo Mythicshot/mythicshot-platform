@@ -1,0 +1,22 @@
+# Behind a Cloudflare Tunnel: Cloudflare ends HTTPS for DOMAIN, and cloudflared, the only
+# client that can reach this server, sends each request here as plain HTTP with the
+# visitor's Host header unchanged. DOMAIN comes from the stack's .env.
+{
+	# No certificate is requested and nothing listens on port 443.
+	auto_https off
+}
+
+http://{$DOMAIN} {
+	# Cloudflare sets X-Forwarded-Proto to the protocol the visitor used and overwrites
+	# a value the visitor sent, so a visitor on plain HTTP is sent to HTTPS here.
+	@plain header X-Forwarded-Proto http
+	redir @plain https://{host}{uri} 308
+
+	# Browsers keep to HTTPS for this host for one week. No subdomains, no preload list.
+	header Strict-Transport-Security "max-age=604800"
+
+	# Caddy passes the Host header through unchanged, which the setup wizard's
+	# same-origin check compares against the page's Origin. The app reads no forwarded
+	# address or scheme, so nothing a visitor sends in such a header is trusted.
+	reverse_proxy app:3000
+}
