@@ -114,8 +114,8 @@ describe("the tour list", { timeout: 60_000 }, () => {
     const published = await publishAll(deps, a.token, live.tour_id);
     const slugOf = async (id: string) => (await tourRow(deps, id))!.slug as string;
     expect(await list(deps, a.token)).toEqual([
-      { id: live.tour_id, title: "Send an invoice", status: "published", slug: await slugOf(live.tour_id), url: published.json.url, chapters: 1, steps: 3, updated_at: T0 + 1000, published_at: T0 + 2000 },
-      { id: draft.tour_id, title: "Send an invoice", status: "draft", slug: await slugOf(draft.tour_id), url: null, chapters: 1, steps: 3, updated_at: T0, published_at: null },
+      { id: live.tour_id, title: "Send an invoice", status: "published", slug: await slugOf(live.tour_id), url: published.json.url, chapters: 1, steps: 3, updated_at: T0 + 1000, published_at: T0 + 2000, unpublished_changes: false },
+      { id: draft.tour_id, title: "Send an invoice", status: "draft", slug: await slugOf(draft.tour_id), url: null, chapters: 1, steps: 3, updated_at: T0, published_at: null, unpublished_changes: false },
     ]);
     expect(published.json.url).toBe(`/t/${await slugOf(live.tour_id)}`);
     // Unpublished again: a draft, with no link.

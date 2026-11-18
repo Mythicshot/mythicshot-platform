@@ -239,6 +239,62 @@ describe("publish", () => {
     expect((await snapshotRow(deps, t.tour_id))!.draft_version).toBe(2);
   });
 
+  it("publishing a published tour with a newer draft puts that draft live over the same link", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const listed = async () => (await send(deps, "GET", "/api/v1/tours", { token: a.token })).json.tours.find((x: Json) => x.id === t.tour_id) as Json;
+    const pageData = async (slug: string) => {
+      const r = await send(deps, "GET", `/t/${slug}`);
+      expect(r.status).toBe(200);
+      return JSON.parse(/<script type="application\/json" id="tour">([\s\S]*?)<\/script>/.exec(r.text)![1]) as Json;
+    };
+    const t = await uploadTour(deps, a.token, v2);
+    const first = await publish(deps, a.token, t.tour_id);
+    expect(first.status).toBe(200);
+    const more = clone(v2);
+    more.title = "Second chapter";
+    await uploadTour(deps, a.token, more, { kind: "chapter", tour_id: t.tour_id }, 7);
+    // The page is behind its draft: one chapter live, two in the draft.
+    expect((await pageData(first.json.slug)).tour.chapters).toHaveLength(1);
+    expect(await listed()).toMatchObject({ status: "published", slug: first.json.slug, url: first.json.url, chapters: 2, unpublished_changes: true });
+
+    const { last } = await publishAll(deps, a.token, t.tour_id);
+    expect(last.status).toBe(200);
+    expect(last.json).toEqual({ slug: first.json.slug, url: first.json.url, steps: 6 });
+    expect((await tourRow(deps, t.tour_id)).slug).toBe(first.json.slug);
+    const live = (await pageData(first.json.slug)).tour;
+    expect(live.chapters.map((c: Json) => c.title)).toEqual(["Send an invoice", "Second chapter"]);
+    expect(live.chapters.flatMap((c: Json) => c.steps)).toHaveLength(6);
+    expect(await listed()).toMatchObject({ status: "published", slug: first.json.slug, url: first.json.url, unpublished_changes: false });
+    await expectConsistent(ctx);
+  });
+
+  it("publishing a published tour with nothing waiting publishes the same draft again: same answer, same link, same content", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const listed = async () => (await send(deps, "GET", "/api/v1/tours", { token: a.token })).json.tours.find((x: Json) => x.id === t.tour_id) as Json;
+    const t = await uploadTour(deps, a.token, v2);
+    const first = await publish(deps, a.token, t.tour_id);
+    expect(first.status).toBe(200);
+    const before = (await snapshotOf(deps, t.tour_id))!;
+    const row = await snapshotRow(deps, t.tour_id);
+    expect((await listed()).unpublished_changes).toBe(false);
+
+    const again = await publish(deps, a.token, t.tour_id);
+    expect(again.status).toBe(200);
+    expect(again.json).toEqual(first.json);
+    // A new publish of the same draft: the same steps and text under new image names.
+    const after = (await snapshotOf(deps, t.tour_id))!;
+    const blank = (s: Snapshot) => JSON.parse(JSON.stringify(s), (_k, v) => (typeof v === "string" && PUBLIC_KEY.test(v) ? "p" : v));
+    expect(blank(after)).toEqual(blank(before));
+    const rowAfter = (await snapshotRow(deps, t.tour_id))!;
+    expect(rowAfter.publish_id).not.toBe(row!.publish_id);
+    expect(rowAfter.draft_version).toBe(row!.draft_version);
+    expect(await listed()).toMatchObject({ status: "published", slug: first.json.slug, url: first.json.url, unpublished_changes: false });
+    expect(await count(deps, "publish_job")).toBe(0);
+    await expectConsistent(ctx);
+  });
+
   it("an empty tour cannot be published", async () => {
     const { deps, a, publicKeys } = await setup();
     const id = "tour_" + "a".repeat(24);

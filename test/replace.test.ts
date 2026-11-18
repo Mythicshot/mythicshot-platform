@@ -478,6 +478,25 @@ describe("replace: what is public", { timeout: 60_000 }, () => {
     expect((await publishAll(deps, a.token, t.tour_id)).json.steps).toBe(2);
   });
 
+  it("the tour list says a replaced chapter is waiting until it is published", async () => {
+    const { deps, a } = await setup();
+    const waiting = async () => (await send(deps, "GET", "/api/v1/tours", { token: a.token })).json.tours.find((x: Json) => x.id === t.tour_id).unpublished_changes;
+    const t = await uploadPics(deps, a.token, [1, 2]);
+    // Replacing a chapter of a draft leaves nothing waiting: nothing is public.
+    expect((await replaceChapter(deps, a.token, t, [1, 3])).status).toBe(201);
+    expect(await waiting()).toBe(false);
+    const first = await publishAll(deps, a.token, t.tour_id);
+    expect(await waiting()).toBe(false);
+    expect((await replaceChapter(deps, a.token, t, [1, 4])).json.publish).toBe("ready");
+    expect(await waiting()).toBe(true);
+    // A second replace on top is still waiting.
+    expect((await replaceChapter(deps, a.token, t, [5])).json.publish).toBe("ready");
+    expect(await waiting()).toBe(true);
+    const second = await publishAll(deps, a.token, t.tour_id);
+    expect(second.json).toEqual({ slug: first.json.slug, url: first.json.url, steps: 1 });
+    expect(await waiting()).toBe(false);
+  });
+
   it("a draft tour stays a draft and the answer says draft", async () => {
     const { deps, a } = await setup();
     const t = await uploadPics(deps, a.token, [1, 2]);
