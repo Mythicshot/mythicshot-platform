@@ -18,6 +18,10 @@
 //   the step stored or release it.
 // - Only an upload that makes a new tour takes a logo; an upload into an existing tour
 //   keeps that tour's logo and refuses one, so no logo object is ever left unrecorded.
+// - Every stored step records the SHA-256 of the bytes the server accepted, in the same
+//   statement that marks it stored, and commit copies it to the step. A hash is either
+//   that of the bytes in the store or null (unknown): a writer that lost its claim after
+//   writing its object clears it, since which bytes the store kept cannot be told.
 import type { Hono } from "hono";
 import { newId, newSlug, requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
@@ -140,6 +144,14 @@ async function committed(deps: Deps, auth: Auth, uploadId: string): Promise<{ to
   return row === null ? null : { tour_id: row.tour_id, chapter_id: row.chapter_id, steps: row.steps };
 }
 
+/** The lowercase hex SHA-256 of `bytes`. Web Crypto, so not a storage or database call. */
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>));
+  let s = "";
+  for (const b of digest) s += b.toString(16).padStart(2, "0");
+  return s;
+}
+
 const json01 = (v: unknown) => (v === null || v === undefined ? null : JSON.stringify(v));
 
 /** The commit's statements. Each insert of a tour or chapter takes a value only an open upload of this workspace supplies, so it fails (NOT NULL) once the upload is closing or gone. */
@@ -177,12 +189,13 @@ function commitStatements(deps: Deps, auth: Auth, up: UploadRow, m: Manifest, to
   }
   m.steps.forEach((s, i) => {
     stmts.push({
-      sql: `INSERT INTO step (id, tour_id, chapter_id, position, image_key, image_type, width, height, bytes, click_x, click_y, spotlight, notes, card, advance, zoom)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      // The hash is the one recorded when the step's bytes were stored ('' never reaches a step).
+      sql: `INSERT INTO step (id, tour_id, chapter_id, position, image_key, image_type, width, height, bytes, click_x, click_y, spotlight, notes, card, advance, zoom, sha256)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT nullif(sha256, '') FROM upload_step WHERE upload_id = ? AND n = ?))`,
       params: [
         newId("st"), tourId, chapterId, i, stepKey(up.id, i + 1, extOf(s.image)), extOf(s.image), s.width, s.height, s.bytes,
         s.click?.x ?? null, s.click?.y ?? null, json01(s.spotlight), JSON.stringify(s.notes), json01(s.card), s.advance,
-        s.zoom === null ? null : s.zoom ? 1 : 0,
+        s.zoom === null ? null : s.zoom ? 1 : 0, up.id, i + 1,
       ],
     });
   });
@@ -287,6 +300,7 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     if (!checked.ok) return apiError(400, "bad_image", `step ${n}: ${checked.error}`);
 
     const key = stepKey(up.id, n, type);
+    const hash = await sha256Hex(data);
     const token = claimToken();
     const claimedAt = deps.now();
     const openUpload = "SELECT id FROM upload WHERE id = ? AND workspace_id = ? AND closing_at IS NULL";
@@ -305,7 +319,7 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       // Take over a claim whose request died: only while it is still unfinished and stale,
       // in one statement, so of two resends at most one wins.
       const takeover = await deps.db.run(
-        `UPDATE upload_step SET claim = ?, claimed_at = ?, image_key = ?, bytes = ?
+        `UPDATE upload_step SET claim = ?, claimed_at = ?, image_key = ?, bytes = ?, sha256 = NULL
           WHERE upload_id = ? AND n = ? AND stored_at IS NULL AND (claimed_at IS NULL OR claimed_at <= ?) AND upload_id IN (${openUpload})`,
         [token, claimedAt, key, data.byteLength, up.id, n, claimedAt - STALE_CLAIM_MS, up.id, auth.workspaceId],
       );
@@ -320,17 +334,31 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       if (released.changes === 1) await deps.drafts.delete([key]).catch(() => {});
       throw err;
     }
+    // The hash goes in with stored_at, in one statement. A hash already there is the mark
+    // of a writer that lost this claim and wrote the key anyway (see below): then which
+    // bytes the store kept is not known, and the hash stays unknown.
     const done = await deps.db.run(
-      `UPDATE upload_step SET stored_at = ? WHERE upload_id = ? AND n = ? AND claim = ? AND upload_id IN (${openUpload})`,
-      [deps.now(), up.id, n, token, up.id, auth.workspaceId],
+      `UPDATE upload_step SET stored_at = ?, sha256 = CASE WHEN sha256 IS NULL THEN ? ELSE NULL END
+        WHERE upload_id = ? AND n = ? AND claim = ? AND upload_id IN (${openUpload})`,
+      [deps.now(), hash, up.id, n, token, up.id, auth.workspaceId],
     );
     if (done.changes === 0) {
       // Either a resend took the claim over (the key is now its holder's), or the upload
       // was committed after that holder finished, or it was aborted. Only in the last case
-      // is the object nobody's, and only then is it removed.
+      // is the object nobody's, and only then is it removed. In the other two this request
+      // wrote the key after losing it and may have replaced the holder's bytes, so the
+      // hash recorded for the key is made unknown: '' until the holder marks the step
+      // stored (which turns it into null), null once it has.
+      const taken = () => apiError(409, "already_sent", `step ${n} was taken over by a later send`);
       const holder = await deps.db.first("SELECT 1 AS x FROM upload_step WHERE upload_id = ? AND n = ?", [up.id, n]);
-      if (holder !== null || (await committed(deps, auth, up.id)) !== null) {
-        return apiError(409, "already_sent", `step ${n} was taken over by a later send`);
+      if (holder !== null) {
+        await deps.db.run("UPDATE upload_step SET sha256 = CASE WHEN stored_at IS NULL THEN '' ELSE NULL END WHERE upload_id = ? AND n = ?", [up.id, n]);
+        return taken();
+      }
+      const prior = await committed(deps, auth, up.id);
+      if (prior !== null) {
+        await deps.db.run("UPDATE step SET sha256 = NULL WHERE tour_id = ? AND image_key = ?", [prior.tour_id, key]);
+        return taken();
       }
       await deps.drafts.delete([key]);
       return notFound("upload");

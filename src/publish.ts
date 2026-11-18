@@ -464,16 +464,19 @@ async function stopPublish(deps: Deps, tourId: string, publishId: string, writte
 function commitStatements(auth: Auth, tourId: string, publishId: string, justCopied: string[], now: number, graceMs: number): Stmt[] {
   return [
     {
-      sql: `INSERT INTO snapshot (tour_id, data, published_at, publish_id, steps)
+      // draft_version is the draft the job's snapshot was built from, so a later replace of a
+      // chapter can tell whether the draft holds other changes that were never published.
+      sql: `INSERT INTO snapshot (tour_id, data, published_at, publish_id, steps, draft_version)
             VALUES (?, (SELECT j.data FROM publish_job j
                          WHERE j.publish_id = ? AND j.tour_id = ?
                            AND (SELECT count(*) FROM public_object o
                                  WHERE o.publish_id = ? AND o.state = 'pending' AND o.tour_id = ?
                                    AND (o.copied = 1 OR o.image_key IN (SELECT value FROM json_each(?)))) = j.total
                            AND EXISTS (SELECT 1 FROM tour WHERE id = ? AND workspace_id = ?)),
-                    ?, ?, (SELECT steps FROM publish_job WHERE publish_id = ?))
-            ON CONFLICT (tour_id) DO UPDATE SET data = excluded.data, published_at = excluded.published_at, publish_id = excluded.publish_id, steps = excluded.steps`,
-      params: [tourId, publishId, tourId, publishId, tourId, keyList(justCopied), tourId, auth.workspaceId, now, publishId, publishId],
+                    ?, ?, (SELECT steps FROM publish_job WHERE publish_id = ?), (SELECT draft_version FROM publish_job WHERE publish_id = ?))
+            ON CONFLICT (tour_id) DO UPDATE SET data = excluded.data, published_at = excluded.published_at, publish_id = excluded.publish_id, steps = excluded.steps,
+                                                draft_version = excluded.draft_version`,
+      params: [tourId, publishId, tourId, publishId, tourId, keyList(justCopied), tourId, auth.workspaceId, now, publishId, publishId, publishId],
     },
     {
       sql: "INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, delete_after) SELECT image_key, tour_id, ?, 'retired', ?, ? FROM snapshot_object WHERE tour_id = ?",
