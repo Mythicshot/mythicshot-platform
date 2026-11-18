@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
-import { checkServer, runPublish, type Io } from "../scripts/publish.ts";
+import { checkServer, runPublish, USER_AGENT, type Io } from "../scripts/publish.ts";
 import { clone, fixtures, uploadTour, type Json } from "./bundle.ts";
 
 async function setup(manifest: Json = fixtures.v2 as Json) {
@@ -9,7 +9,7 @@ async function setup(manifest: Json = fixtures.v2 as Json) {
   const a = await seedWorkspace(ctx.deps, "A");
   const t = await uploadTour(ctx.deps, a.token, manifest);
   const app = createApp(ctx.deps);
-  const seen: { url: string; auth: string | null; body: string }[] = [];
+  const seen: { url: string; auth: string | null; body: string; ua: string | null }[] = [];
   const out: string[] = [];
   const err: string[] = [];
   const pauses: number[] = [];
@@ -23,7 +23,7 @@ async function setup(manifest: Json = fixtures.v2 as Json) {
     fetch: (async (input: string | URL | Request, init?: RequestInit) => {
       const req = new Request(input, init);
       const body = await req.clone().text();
-      seen.push({ url: req.url, auth: req.headers.get("authorization"), body });
+      seen.push({ url: req.url, auth: req.headers.get("authorization"), body, ua: req.headers.get("user-agent") });
       const instead = before ? await before(seen.length) : undefined;
       return instead ?? app.fetch(req);
     }) as typeof fetch,
@@ -47,6 +47,8 @@ describe("the publish script", () => {
     const s = await setup();
     expect(await runPublish(["https://tours.example.com/", s.t.tour_id], s.io({ DEMO_PLATFORM_TOKEN: s.a.token }))).toBe(0);
     expect(s.seen[0]).toMatchObject({ url: `https://tours.example.com/api/v1/tours/${s.t.tour_id}/publish`, auth: "Bearer " + s.a.token });
+    // A descriptive User-Agent on every call, for the Browser Integrity Check on workers.dev.
+    for (const c of s.seen) expect(c.ua).toBe(USER_AGENT);
     expect(s.out[0]).toMatch(/^Published 3 steps: https:\/\/tours\.example\.com\/t\/[a-z2-7]{10}$/);
     expect(await s.deps.db.first("SELECT status FROM tour")).toEqual({ status: "published" });
     expect(await runPublish(["https://tours.example.com", s.t.tour_id, "--unpublish"], s.io({ DEMO_PLATFORM_TOKEN: s.a.token }))).toBe(0);
