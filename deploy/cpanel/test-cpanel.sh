@@ -1,20 +1,45 @@
 #!/usr/bin/env bash
 # Tests deploy/cpanel/cpanel.sh without any hosting, the way deploy/test-install.sh
-# tests install.sh: each test gets a sandbox with its own home folder and a bin folder
-# of stand-ins for cloudlinux-selector, npm, node, sqlite3, curl and touch, put in front
-# of PATH. The stand-ins record what would be run; the tests assert on that record, on
-# what the script printed and on the files it wrote. Nothing here opens a network
-# connection, and no root and no container is needed.
+# tests install.sh. On the host it starts one disposable official Debian 13 container
+# and one Debian 12 container (no network, this folder mounted read-only, an ordinary
+# user, removed afterwards) and runs this same file inside each. Inside, each test gets
+# a sandbox with its own home folder and a bin folder of stand-ins for
+# cloudlinux-selector, npm, node, sqlite3, curl and touch, put in front of PATH. The
+# stand-ins record what would be run; the tests assert on that record, on what the
+# script printed and on the files it wrote.
 #
 # Not covered here, only on real hosting: the real cloudlinux-selector, the real Node.js
 # environment and its npm, Passenger's restart, the real sqlite3 tool and the hosting's
-# web server and certificate in front of /healthz.
+# web server and certificate in front of /healthz. The Debian images have no Node.js, so
+# the one test that copies a real database with a real Node.js is skipped there;
+# test/node-cpanel-script.test.ts runs that test on the developer's computer.
 #
-# Usage: bash deploy/cpanel/test-cpanel.sh [test_name ...]   (env: JOBS=<tests at a time>)
-# `npm run test:node` runs it through test/node-cpanel-script.test.ts.
+# Usage: bash deploy/cpanel/test-cpanel.sh [test_name ...]    (env: DEBIAN_IMAGES="debian:13 debian:12")
+#        bash deploy/cpanel/test-cpanel.sh --inside [test_name ...]   (here, without a container; env: JOBS)
 set -euo pipefail
-export LC_ALL=C
 
+# ================================================================ host side
+
+if [ "${1:-}" != "--inside" ]; then
+  export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+  cd "$(dirname "$0")"
+  host_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+  SRC="$(host_path "$PWD")"
+  status=0
+  for image in ${DEBIAN_IMAGES:-debian:13 debian:12}; do
+    echo
+    echo "######## $image"
+    # --init: a real PID 1 that passes Ctrl-C on, so an interrupted run stops. The tests
+    # run as an ordinary user, as on shared hosting.
+    docker run --rm --init --network none --user 1000:1000 -v "$SRC:/src:ro" "$image" bash /src/test-cpanel.sh --inside "$@" || status=1
+  done
+  exit "$status"
+fi
+shift
+
+# ================================================================ the tests
+
+export LC_ALL=C
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
 SCRIPT="$HERE/cpanel.sh"
 APP_CJS="$HERE/app.cjs"
@@ -53,9 +78,26 @@ new_sandbox() {
   DATA="$H/apps/tours-data"
   SETTINGS="$H/apps/tours-config.env"
   BACKUPS="$H/backups"
+  ACTIVATE="$H/nodevenv/apps/tours/24/bin/activate"
   REL="$T/release"
   make_release "$REL" 0.1.1
 }
+
+# Sends a signal to the script under test from inside a stand-in it started: to the
+# outermost process that was started as .../cpanel.sh, found by walking up from here.
+# shellcheck disable=SC2016 # the text is a function for the stand-ins, expanded when they run
+SIGNAL_THE_SCRIPT='
+signal_the_script() {
+  local p=$PPID target="" n=0 next
+  while [ "$n" -lt 5 ] && [ -r "/proc/$p/cmdline" ]; do
+    if tr "\0" " " <"/proc/$p/cmdline" | grep -q "/cpanel\.sh "; then target=$p; fi
+    next="$(awk "/^PPid:/ {print \$2}" "/proc/$p/status" 2>/dev/null)"
+    [ -n "$next" ] || next="$(cat "/proc/$p/ppid" 2>/dev/null)"
+    [ -n "$next" ] && [ "$next" != 0 ] && [ "$next" != 1 ] || break
+    p=$next; n=$((n + 1))
+  done
+  [ -z "$target" ] || kill -s "$1" "$target"
+}'
 
 write_stubs() {
   local b="$1"
@@ -77,25 +119,39 @@ mkdir -p "$HOME/$root" "$HOME/nodevenv/$root/$version/bin"
 printf 'export STUB_VENV=%s/%s\n' "$root" "$version" >"$HOME/nodevenv/$root/$version/bin/activate"
 echo '{"result": "success", "timestamp": 1.0}'
 EOF
-  cat >"$b/npm" <<'EOF'
-#!/bin/bash
+  {
+    printf '#!/bin/bash\n%s\n' "$SIGNAL_THE_SCRIPT"
+    cat <<'EOF'
 printf 'npm[venv=%s cwd=%s] %s\n' "${STUB_VENV:-none}" "$PWD" "$*" >>"$STUB_LOG"
 [ "${STUB_NPM_FAIL:-0}" != 1 ] || { echo "npm error code ENOSPC" >&2; exit 1; }
+# STUB_NPM_REPLACES_LINK=1: like an npm that removes a node_modules link and makes a folder.
+if [ "${STUB_NPM_REPLACES_LINK:-0}" = 1 ]; then rm -rf node_modules; fi
 mkdir -p node_modules
+# STUB_NPM_SIGNAL=<signal>: the script is interrupted while the packages are installed.
+[ -z "${STUB_NPM_SIGNAL:-}" ] || signal_the_script "$STUB_NPM_SIGNAL"
+exit 0
 EOF
-  cat >"$b/node" <<'EOF'
-#!/bin/bash
+  } >"$b/npm"
+  {
+    printf '#!/bin/bash\n%s\n' "$SIGNAL_THE_SCRIPT"
+    cat <<'EOF'
 # Called as: node -e <program> <database> <copy>. The program text is not recorded.
-printf 'node[venv=%s] %s <program> %s %s\n' "${STUB_VENV:-none}" "$1" "$3" "$4" >>"$STUB_LOG"
+printf 'node[venv=%s umask=%s] %s <program> %s %s\n' "${STUB_VENV:-none}" "$(umask)" "$1" "$3" "$4" >>"$STUB_LOG"
 [ "${STUB_NODE_FAIL:-0}" != 1 ] || { echo "Error: database is locked" >&2; exit 1; }
-printf 'SQLite format 3\0(stand-in copy by node)\n' >"$4"
+[ "${STUB_NODE_WRITES_NOTHING:-0}" = 1 ] || printf 'SQLite format 3\0(stand-in copy by node)\n' >"$4"
+# STUB_NODE_SIGNAL=<signal>: the script is interrupted while the backup is made.
+[ -z "${STUB_NODE_SIGNAL:-}" ] || signal_the_script "$STUB_NODE_SIGNAL"
+exit 0
 EOF
+  } >"$b/node"
   cat >"$b/sqlite3" <<'EOF'
 #!/bin/bash
 printf 'sqlite3 %s\n' "$*" >>"$STUB_LOG"
 [ "${STUB_SQLITE_FAIL:-0}" != 1 ] || { echo "Error: unable to open database file" >&2; exit 1; }
-target="${2#.backup \'}"; target="${target%\'}"
-[ "${STUB_SQLITE_WRITES_NOTHING:-0}" = 1 ] || printf 'SQLite format 3\0(stand-in copy by sqlite3)\n' >"$target"
+case "$2" in
+  "PRAGMA integrity_check;") echo "${STUB_INTEGRITY:-ok}" ;;
+  .backup*) target="${2#.backup \'}"; target="${target%\'}"; printf 'SQLite format 3\0(stand-in copy by sqlite3)\n' >"$target" ;;
+esac
 EOF
   cat >"$b/curl" <<'EOF'
 #!/bin/bash
@@ -134,37 +190,61 @@ make_release() {
   printf '%s\n' "$v" >"$d/VERSION"
 }
 
-# Runs a release's cpanel.sh in the sandbox: cpanel_in <release> <stdin text> <args...>;
-# sets RC, OUT, ERR. The health check does not wait between tries.
-cpanel_in() {
-  local rel="$1" input="$2"; shift 2
+# Runs a command line in the sandbox: cpanel_raw <stdin text> <command...>; sets RC,
+# OUT, ERR. The health check does not wait between tries.
+cpanel_raw() {
+  local input="$1"; shift
   OUT="$T/out"; ERR="$T/err"
   set +e
   printf '%s' "$input" | env HOME="$H" PATH="$T/bin:$PATH" STUB_LOG="$LOG" STUB_STATE="$STATE" \
-    CPANEL_HEALTH_WAIT=0 bash "$rel/cpanel.sh" "$@" >"$OUT" 2>"$ERR"
+    CPANEL_HEALTH_WAIT=0 "$@" >"$OUT" 2>"$ERR"
   RC=$?
   set -e
 }
+# A release's cpanel.sh: cpanel_in <release> <stdin text> <args...>.
+cpanel_in() { local rel="$1" input="$2"; shift 2; cpanel_raw "$input" bash "$rel/cpanel.sh" "$@"; }
 cpanel() { cpanel_in "$REL" "$@"; }
 
 fresh_install() { cpanel "" install --domain "$DOMAIN" --yes; [ "$RC" = 0 ] || { cat "$OUT" "$ERR"; die "fresh install failed"; }; }
-# The app has run: it wrote its database (with a WAL beside it), a draft and a public file.
+# The app has run: it wrote its database (with a WAL beside it), a draft and a public
+# file. app_has_run [data folder].
 app_has_run() {
-  mkdir -p "$DATA/drafts/u1" "$DATA/public/t1"
-  printf 'SQLite format 3\0(the live database)\n' >"$DATA/db.sqlite"
-  printf 'not yet in the main file\n' >"$DATA/db.sqlite-wal"
-  echo draft >"$DATA/drafts/u1/step-001.png"
-  echo published >"$DATA/public/t1/step-001.png"
+  local d="${1:-$DATA}"
+  mkdir -p "$d/drafts/u1" "$d/public/t1"
+  printf 'SQLite format 3\0(the live database)\n' >"$d/db.sqlite"
+  printf 'not yet in the main file\n' >"$d/db.sqlite-wal"
+  echo draft >"$d/drafts/u1/step-001.png"
+  echo published >"$d/public/t1/step-001.png"
+}
+# What the steps done by hand leave: the files, the settings, the data and the Node.js
+# environment, but no VERSION file, no cpanel.sh and no state file. Version 0.1.0.
+hand_install() {
+  make_release "$T/hand" 0.1.0
+  mkdir -p "$APP" "$DATA" "$H/nodevenv/apps/tours/24/bin"
+  cp -R "$T/hand/dist" "$T/hand/migrations" "$T/hand/package.json" "$T/hand/package-lock.json" "$T/hand/app.cjs" "$APP/"
+  echo 'export STUB_VENV=apps/tours/24' >"$ACTIVATE"
+  printf 'DATA_DIR=%s\nSETUP_CODE=a-code-made-by-hand-0123456789\n' "$DATA" >"$SETTINGS"
+  app_has_run
 }
 setup_code() { sed -n 's/^SETUP_CODE=//p' "$SETTINGS"; }
 # The setup code appears nowhere in what the run printed or in any stand-in's command line.
 code_not_shown() { local c; c="$(setup_code)"; [ -n "$c" ] && ! grep -qF -- "$c" "$OUT" "$ERR" "$LOG"; }
 backup_dirs() { find "$BACKUPS" -mindepth 1 -maxdepth 1 2>/dev/null | sort; }
 only_backup() { [ "$(backup_dirs | wc -l | tr -d ' ')" = 1 ] || die "expected exactly one backup folder, got: $(backup_dirs | tr '\n' ' ')"; backup_dirs; }
-# Every path under the home folder with its type, and every file's checksum.
-snapshot() { (cd "$H" && find . | sort && find . -type f -exec sha256sum {} + | sort); }
+# Every path under a folder with its type, and every file's checksum.
+tree_of() { (cd "$1" && find . | sort && find . -type f -exec sha256sum {} + | sort); }
+snapshot() { tree_of "$H"; }
 # The stand-in calls, by program name, in the order they were made.
 calls() { sed 's/[[ ].*//' "$LOG" | tr '\n' ' '; }
+# The rollback commands a run printed, one per line, as a person would copy them.
+rollback_lines() { sed -n "s/^    \\(cd '.*\\)\$/\\1/p" "$OUT"; }
+# Pastes them into a shell on the hosting, one by one, whatever each one returns.
+paste_rollback() {
+  local line
+  while IFS= read -r line; do
+    env HOME="$H" PATH="$T/bin:$PATH" STUB_LOG="$LOG" STUB_STATE="$STATE" bash -c "$line" >/dev/null 2>&1 || true
+  done <"$1"
+}
 
 die() { printf '      %s\n' "$*"; exit 1; }
 skip() { printf '      SKIP: %s\n' "$*"; exit 77; }
@@ -173,10 +253,15 @@ has() { grep -qF -- "$2" "$1"; }
 hasnt() { ! grep -qF -- "$2" "$1"; }
 
 # Runs one test in its own shell, leaving its output and exit code in files. The tests
-# share nothing (each makes its own sandbox), so several run at a time.
+# share nothing (each makes its own sandbox), so several run at a time. The subshell is
+# not part of a condition, so `set -e` holds inside it: any command of a test that
+# fails, with or without `expect`, fails the test.
 start_test() {
-  local name="$1" rc=0
-  ( set -e; "$name" ) >"$WORK/out.$name" 2>&1 || rc=$?
+  local name="$1" rc
+  set +e
+  ( set -e; "$name" ) >"$WORK/out.$name" 2>&1
+  rc=$?
+  set -e
   echo "$rc" >"$WORK/rc.$name"
 }
 
@@ -185,13 +270,13 @@ report_test() {
   rc="$(cat "$WORK/rc.$name" 2>/dev/null || echo 1)"
   if [ "$rc" = 0 ]; then
     PASSES=$((PASSES + 1)); printf 'PASS  %s\n' "$name"
+    # A skipped check inside a test that otherwise ran is shown too.
+    grep 'SKIP:' "$WORK/out.$name" || true
   elif [ "$rc" = 77 ]; then
     SKIPS=$((SKIPS + 1)); printf 'SKIP  %s\n' "$name"; grep 'SKIP:' "$WORK/out.$name" || true
   else
     FAILS=$((FAILS + 1)); printf 'FAIL  %s\n' "$name"; sed 's/^/      /' "$WORK/out.$name" | tail -n 25
   fi
-  # A skipped check inside a test that otherwise ran is shown too.
-  if [ "$rc" = 0 ]; then grep 'SKIP:' "$WORK/out.$name" || true; fi
 }
 
 # ---------------------------------------------------------------- arguments
@@ -205,8 +290,7 @@ test_arguments_are_checked() {
              "install --domain 203.0.113.10" "install --domain tours.example.com --node latest" "install --domain tours.example.com --node 24.1" \
              "install --domain tours.example.com --app-root /abs/tours" "install --domain tours.example.com --app-root ../tours" \
              "install --domain tours.example.com --app-root apps/../x" "install --domain tours.example.com --app-root apps/.hidden" \
-             "install --domain tours.example.com --app-root public_html/tours" "install --domain tours.example.com --app-root public_html" \
-             "install --domain tours.example.com --app-root www/tours" "install --domain tours.example.com --app-root apps/tours/" \
+             "install --domain tours.example.com --app-root apps/tours/" \
              "status --allow-downgrade" "install --domain tours.example.com --allow-downgrade" "backup --app-root"; do
     # shellcheck disable=SC2086
     cpanel "" $bad
@@ -222,6 +306,26 @@ test_arguments_are_checked() {
   cpanel "" --help
   expect "--help exits 0" test "$RC" = 0
   expect "--help lists the commands" has "$OUT" "install"
+}
+
+test_app_root_inside_a_web_folder_is_refused() {
+  new_sandbox
+  local before; before="$(snapshot)"
+  local root
+  # public_html and www, and the folders hosting names after a domain it serves.
+  for root in public_html public_html/tours www www/tours tours.example.com tours.example.com/app example.com/apps/tours sub.domain.example.org; do
+    cpanel "" install --domain "$DOMAIN" --app-root "$root" --yes
+    [ "$RC" = 2 ] || die "accepted (exit $RC): $root"
+    has "$ERR" "the app folder must be outside the folders the web server serves" || die "no reason given for: $root"
+    cpanel "" status --app-root "$root"
+    [ "$RC" = 2 ] || die "status accepted (exit $RC): $root"
+  done
+  expect "no stand-in was called" test ! -s "$LOG"
+  expect "nothing was written" test "$(snapshot)" = "$before"
+  # A dot further down the path is an ordinary folder name.
+  cpanel "" install --domain "$DOMAIN" --app-root apps/tours.v2 --yes
+  expect "a dot below the first folder is accepted (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "its settings file is beside it" test -f "$H/apps/tours.v2-config.env"
 }
 
 # ---------------------------------------------------------------- install
@@ -255,6 +359,7 @@ test_install_happy_path() {
   expect "names the setup address" has "$OUT" "https://$DOMAIN/setup"
   expect "reports health as ok" has "$OUT" "health: ok"
   expect "no backup is made by install" test ! -e "$BACKUPS"
+  expect "no staged copy and no update marker is left" test ! -e "$APP/dist.new" -a ! -e "$APP/migrations.new" -a ! -e "$APP/.cpanel-update"
 }
 
 test_install_never_shows_the_setup_code() {
@@ -294,6 +399,7 @@ test_install_file_modes() {
   expect "the data folder is mode 700" test "$(mode_of "$DATA")" = 700
   # The web server must be able to see the restart file, as after an install by hand.
   expect "the app folder is not closed to the web server" test "$(mode_of "$APP")" = 755
+  expect "the build is not closed to the web server" test "$(mode_of "$APP/dist")" = 755
   expect "the restart folder is not closed to the web server" test "$(mode_of "$APP/tmp")" = 755
   expect "the script stays runnable" test -x "$APP/cpanel.sh"
   expect "the state file is an ordinary file" test "$(mode_of "$APP/.cpanel-install")" = 644
@@ -316,12 +422,13 @@ test_install_refuses_over_an_existing_install() {
 
 test_install_refuses_over_an_install_made_by_hand() {
   new_sandbox
-  # What the steps done by hand leave: no VERSION and no state file.
-  mkdir -p "$APP/dist/node"; echo "// by hand" >"$APP/dist/node/entry.js"
+  hand_install
+  local before; before="$(snapshot)"
   cpanel "" install --domain "$DOMAIN" --yes
   expect "exit code non-zero" test "$RC" != 0
   expect "points to update" has "$ERR" "update"
   expect "no stand-in was called" test ! -s "$LOG"
+  expect "nothing was changed" test "$(snapshot)" = "$before"
 }
 
 test_install_keeps_an_existing_settings_file_and_data_folder() {
@@ -347,7 +454,7 @@ test_install_stops_when_the_hosting_refuses_the_app() {
     expect "$mode: exit code non-zero" test "$RC" != 0
     expect "$mode: says the app was not created" has "$ERR" "did not create the Node.js app"
     expect "$mode: shows what the hosting answered" has "$OUT" "already"
-    expect "$mode: no file was copied" test ! -e "$APP/dist"
+    expect "$mode: no file was copied" test ! -e "$APP/dist" -a ! -e "$APP/dist.new"
     expect "$mode: no settings file was written" test ! -e "$SETTINGS"
     expect "$mode: nothing ran after the refusal" test "$(calls)" = "cloudlinux-selector "
   done
@@ -356,7 +463,7 @@ test_install_stops_when_the_hosting_refuses_the_app() {
 test_install_without_the_hosting_command() {
   new_sandbox
   rm "$T/bin/cloudlinux-selector"
-  command -v cloudlinux-selector >/dev/null 2>&1 && skip "this system has a real cloudlinux-selector"
+  if command -v cloudlinux-selector >/dev/null 2>&1; then skip "this system has a real cloudlinux-selector"; fi
   cpanel "" install --domain "$DOMAIN" --yes
   expect "exit code non-zero" test "$RC" != 0
   expect "names the missing command" has "$ERR" "cloudlinux-selector command was not found"
@@ -432,14 +539,35 @@ test_install_with_another_app_root_and_node_version() {
   expect "npm runs in that app's environment" grep -qF "npm[venv=sites/demo/22 cwd=$H/sites/demo]" "$LOG"
   expect "the default folder is untouched" test ! -e "$APP"
   # The other commands find it again, and the remembered Node version, by the app root.
-  mkdir -p "$H/sites/demo-data"; printf 'SQLite format 3\0\n' >"$H/sites/demo-data/db.sqlite"
+  app_has_run "$H/sites/demo-data"
   : >"$LOG"
-  CPANEL_TEST_NO_SQLITE3=1 cpanel "" backup --app-root sites/demo
-  expect "backup succeeds" test "$RC" = 0
+  cpanel "" backup --app-root sites/demo
+  expect "backup succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
   expect "the backup is named after the app" test "$(find "$BACKUPS" -maxdepth 1 -name "demo-*" | wc -l | tr -d " ")" = 1
-  expect "node runs in the remembered environment" grep -qF "node[venv=sites/demo/22]" "$LOG"
+  expect "node runs in the remembered environment" grep -qF "node[venv=sites/demo/22 " "$LOG"
   cpanel "" status
   expect "status of the default folder: nothing installed" has "$ERR" "nothing is installed"
+}
+
+test_hints_can_be_typed_as_they_are() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  # Started as "bash cpanel.sh" in the archive's folder: the hint says the same.
+  ( cd "$REL" && cpanel_raw "" bash cpanel.sh install --domain "$DOMAIN" --yes; has "$ERR" "use: bash cpanel.sh update --app-root apps/tours" ) || die "hint for: bash cpanel.sh"
+  # Started as "./cpanel.sh": the hint says the same.
+  ( cd "$REL" && cpanel_raw "" ./cpanel.sh install --domain "$DOMAIN" --yes; has "$ERR" "use: ./cpanel.sh update --app-root apps/tours" ) || die "hint for: ./cpanel.sh"
+  # Started by its full path from somewhere else: the hint carries the path.
+  ( cd "$T" && cpanel_raw "" "$REL/cpanel.sh" install --domain "$DOMAIN" --yes; has "$ERR" "use: $REL/cpanel.sh update --app-root apps/tours" ) || die "hint for a full path"
+  # The installed copy runs from its own folder, as the guide has it.
+  ( cd "$APP" && cpanel_raw "" ./cpanel.sh status; [ "$RC" = 0 ] ) || die "status from the installed copy"
+  make_release "$T/new" 0.2.0
+  ( cd "$T/new" && STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel_raw "" ./cpanel.sh update --yes; has "$OUT" "Check again at any time with: ./cpanel.sh status --app-root apps/tours" ) || die "status hint"
+  if [ "$MODES" = 1 ]; then
+    # A copy that is not marked runnable is named with bash in front.
+    chmod -x "$REL/cpanel.sh"
+    ( cd "$REL" && cpanel_raw "" bash ./cpanel.sh install --domain "$DOMAIN" --yes; has "$ERR" "use: bash ./cpanel.sh update --app-root apps/tours" ) || die "hint for a copy that is not runnable"
+  fi
 }
 
 # ---------------------------------------------------------------- dry run
@@ -472,7 +600,8 @@ test_dry_run_changes_nothing() {
   done
   cpanel_in "$T/new" "" update --dry-run
   expect "update: shows the backup step" has "$OUT" "would copy the database"
-  expect "update: shows the move" has "$OUT" "would move dist to dist.old and migrations to migrations.old"
+  expect "update: shows the staging" has "$OUT" "would copy this archive's dist and migrations to $APP/dist.new"
+  expect "update: shows the move" has "$OUT" "move dist to dist.old and migrations to migrations.old"
   expect "update: says it was a dry run" has "$OUT" "Dry run: nothing was changed"
   expect "update: the installed version is still the old one" test "$(cat "$APP/VERSION")" = 0.1.1
 }
@@ -486,14 +615,15 @@ test_update_backs_up_then_replaces() {
   make_release "$T/new" 0.2.0
   local settings_sum data_sum
   settings_sum="$(sha256sum <"$SETTINGS")"
-  data_sum="$(cd "$DATA" && find . -type f -exec sha256sum {} + | sort | sha256sum)"
+  data_sum="$(tree_of "$DATA")"
   : >"$LOG"
   cpanel_in "$T/new" "" update --yes
   expect "exit code 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
-  expect "backup, then packages, then restart, then health" test "$(calls)" = "sqlite3 npm touch curl "
+  expect "backup, then packages, then restart, then health" test "$(calls)" = "node npm touch curl "
   local b; b="$(only_backup)"
   expect "the backup holds the version from before the update" test "$(tar -xzOf "$b/app.tgz" VERSION)" = 0.1.1
   expect "the backup holds the build from before the update" test "$(tar -xzOf "$b/app.tgz" dist/node/entry.js)" = "// build 0.1.1"
+  expect "the backup holds the database" test -s "$b/db.sqlite"
   expect "the new build is in place" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.2.0"
   expect "the new migrations are in place" test "$(cat "$APP/migrations/0001_init.sql")" = "-- schema of 0.2.0"
   expect "the previous build is kept as dist.old" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.1"
@@ -506,15 +636,17 @@ test_update_backs_up_then_replaces() {
   expect "packages are installed in the app's environment" grep -qxF "npm[venv=apps/tours/24 cwd=$APP] ci --omit=dev --ignore-scripts" "$LOG"
   expect "health is asked at the remembered domain" grep -qE "^curl .*https://$DOMAIN/healthz$" "$LOG"
   expect "the settings file is untouched" test "$(sha256sum <"$SETTINGS")" = "$settings_sum"
-  expect "the data folder is untouched" test "$(cd "$DATA" && find . -type f -exec sha256sum {} + | sort | sha256sum)" = "$data_sum"
+  expect "the data folder is untouched" test "$(tree_of "$DATA")" = "$data_sum"
   expect "the domain is still remembered" grep -qxF "DOMAIN=$DOMAIN" "$APP/.cpanel-install"
   expect "says it is updated" has "$OUT" "Updated to version 0.2.0"
   expect "no rollback steps after a good update" hasnt "$OUT" "To go back"
+  expect "no staged copy and no update marker is left" test ! -e "$APP/dist.new" -a ! -e "$APP/migrations.new" -a ! -e "$APP/.cpanel-update"
 }
 
 test_update_replaces_older_old_copies() {
   new_sandbox
   fresh_install
+  app_has_run
   make_release "$T/v2" 0.2.0
   make_release "$T/v3" 0.3.0
   cpanel_in "$T/v2" "" update --yes
@@ -532,21 +664,21 @@ test_update_replaces_older_old_copies() {
 
 test_update_stops_when_the_backup_fails() {
   local how
-  for how in STUB_SQLITE_FAIL STUB_SQLITE_WRITES_NOTHING; do
+  for how in STUB_NODE_FAIL STUB_NODE_WRITES_NOTHING; do
     new_sandbox
     fresh_install
     app_has_run
     make_release "$T/new" 0.2.0
-    local before; before="$(cd "$APP" && find . | sort && find . -type f -exec sha256sum {} + | sort)"
+    local before; before="$(tree_of "$APP")"
     : >"$LOG"
     export "$how=1"
     cpanel_in "$T/new" "" update --yes
     unset "$how"
     expect "$how: exit code non-zero" test "$RC" != 0
     expect "$how: says the backup failed and nothing changed" has "$ERR" "the backup failed, so the update did not start; nothing was changed"
-    expect "$how: the app folder is unchanged" test "$(cd "$APP" && find . | sort && find . -type f -exec sha256sum {} + | sort)" = "$before"
+    expect "$how: the app folder is unchanged" test "$(tree_of "$APP")" = "$before"
     expect "$how: no dist.old was made" test ! -e "$APP/dist.old"
-    expect "$how: nothing ran after the failed backup" test "$(calls)" = "sqlite3 "
+    expect "$how: nothing ran after the failed backup" test "$(calls)" = "node "
     expect "$how: no half-made backup folder is left" test -z "$(backup_dirs)"
   done
 }
@@ -597,43 +729,57 @@ test_update_reports_a_failed_health_check_with_rollback_commands() {
   expect "says so in the summary" has "$OUT" "Version 0.2.0 is in place, but the health check did not pass"
   expect "does not claim success" hasnt "$OUT" "Updated to version"
   local b; b="$(only_backup)"
-  local line
-  for line in "cd $APP" "rm -rf dist && mv dist.old dist" "rm -rf migrations && mv migrations.old migrations" \
-              "tar -xzf $b/app.tgz package.json package-lock.json app.cjs cpanel.sh VERSION" \
-              "source $H/nodevenv/apps/tours/24/bin/activate && npm ci --omit=dev --ignore-scripts" \
-              "touch $APP/tmp/restart.txt"; do
-    expect "prints the rollback command: $line" grep -qxF "    $line" "$OUT"
-  done
+  rollback_lines >"$T/rollback"
+  # Each command stands alone: it changes into the app folder itself, quoted, and is
+  # guarded so that a second paste does nothing.
+  local want="cd '$APP' && [ -d dist.old ] && rm -rf dist && mv dist.old dist
+cd '$APP' && [ -d migrations.old ] && rm -rf migrations && mv migrations.old migrations
+cd '$APP' && tar -xzf '$b/app.tgz' package.json package-lock.json app.cjs cpanel.sh VERSION
+cd '$APP' && source '$ACTIVATE' && npm ci --omit=dev --ignore-scripts
+cd '$APP' && rm -f .cpanel-update && touch tmp/restart.txt"
+  expect "prints exactly these rollback commands (got: $(cat "$T/rollback"))" test "$(cat "$T/rollback")" = "$want"
   expect "says nothing was rolled back" has "$OUT" "Nothing was rolled back for you"
   expect "it did not roll back by itself: the new build is in place" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.2.0"
   expect "it did not roll back by itself: dist.old is still there" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.1"
   expect "the setup code is not shown" code_not_shown
 
-  # The printed commands, run as printed, bring the previous version back.
-  ( cd "$APP" && rm -rf dist && mv dist.old dist && rm -rf migrations && mv migrations.old migrations \
-      && tar -xzf "$b/app.tgz" package.json package-lock.json app.cjs cpanel.sh VERSION )
+  # The printed commands, pasted as printed, bring the previous version back.
+  : >"$LOG"
+  paste_rollback "$T/rollback"
+  local after; after="$(tree_of "$APP")"
   expect "after the commands: the previous build" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.1.1"
   expect "after the commands: the previous migrations" test "$(cat "$APP/migrations/0001_init.sql")" = "-- schema of 0.1.1"
   expect "after the commands: the previous version" test "$(cat "$APP/VERSION")" = 0.1.1
   expect "after the commands: the previous package.json" cmp -s "$REL/package.json" "$APP/package.json"
   expect "after the commands: no .old copy is left" test ! -e "$APP/dist.old" -a ! -e "$APP/migrations.old"
+  expect "after the commands: packages installed and the app restarted" test "$(calls)" = "npm touch "
+  # Pasted a second time, they destroy nothing: the build that is running stays.
+  paste_rollback "$T/rollback"
+  expect "pasted twice: the app folder is as after the first time" test "$(tree_of "$APP")" = "$after"
+  expect "pasted twice: the build is still there" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.1.1"
+  # And the install is an ordinary one again: the next update works.
+  cpanel_in "$T/new" "" update --yes
+  expect "an update after the rollback succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
 }
 
 test_update_reports_failed_packages_with_rollback_commands() {
   new_sandbox
   fresh_install
+  app_has_run
   make_release "$T/new" 0.2.0
   : >"$LOG"
   STUB_NPM_FAIL=1 cpanel_in "$T/new" "" update --yes
   expect "exit code non-zero" test "$RC" != 0
   expect "says what failed" has "$ERR" "installing the packages failed"
-  expect "prints the rollback commands" has "$OUT" "rm -rf dist && mv dist.old dist"
-  expect "the app was not restarted" test "$(calls)" = "npm "
+  expect "prints the rollback commands" has "$OUT" "[ -d dist.old ] && rm -rf dist && mv dist.old dist"
+  expect "the app was not restarted" test "$(calls)" = "node npm "
+  expect "the update is still marked as under way" test -f "$APP/.cpanel-update"
 }
 
 test_update_must_run_from_a_new_archive() {
   new_sandbox
   fresh_install
+  app_has_run
   local before; before="$(snapshot)"
   : >"$LOG"
   cpanel_in "$APP" "" update --yes
@@ -651,6 +797,7 @@ test_update_must_run_from_a_new_archive() {
 test_update_asks_first() {
   new_sandbox
   fresh_install
+  app_has_run
   make_release "$T/new" 0.2.0
   local before; before="$(snapshot)"
   : >"$LOG"
@@ -664,38 +811,260 @@ test_update_asks_first() {
 
 test_update_takes_over_an_install_made_by_hand() {
   new_sandbox
-  # What the steps done by hand leave: the files, the settings and the Node.js
-  # environment, but no VERSION file and no state file.
-  make_release "$T/hand" 0.1.0
-  mkdir -p "$APP" "$DATA" "$H/nodevenv/apps/tours/24/bin"
-  cp -R "$T/hand/dist" "$T/hand/migrations" "$T/hand/package.json" "$T/hand/package-lock.json" "$T/hand/app.cjs" "$APP/"
-  echo 'export STUB_VENV=apps/tours/24' >"$H/nodevenv/apps/tours/24/bin/activate"
-  printf 'DATA_DIR=%s\nSETUP_CODE=a-code-made-by-hand-0123456789\n' "$DATA" >"$SETTINGS"
-  app_has_run
+  hand_install
+  local before; before="$(snapshot)"
   # An older archive is still refused: the version is read from package.json.
   make_release "$T/older" 0.0.9
   cpanel_in "$T/older" "" update --yes --domain "$DOMAIN"
   expect "a downgrade of a hand-made install is refused" has "$ERR" "older than the installed 0.1.0"
-  # Without a domain the update goes through but cannot vouch for the result.
+  # Without a domain the result could not be checked, so nothing is started.
   cpanel "" update --yes
   expect "no domain: exit code non-zero" test "$RC" != 0
-  expect "no domain: the check is reported as not made" has "$OUT" "health: NOT CHECKED"
-  expect "no domain: says how to give it" has "$OUT" "--domain <name>"
-  expect "no domain: does not claim success" hasnt "$OUT" "Updated to version"
-  expect "no domain: curl was never called" test "$(grep -c '^curl ' "$LOG")" = 0
-  expect "no domain: the new build is in place" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.1.1"
-  # The rollback commands remove what the hand-made install never had.
-  expect "rollback removes the files that were not there before" grep -qxF "    rm -f cpanel.sh VERSION" "$OUT"
-  expect "rollback restores the files that were" grep -qE "^    tar -xzf .*/app.tgz package.json package-lock.json app.cjs$" "$OUT"
-  # With the domain given once, it is remembered.
-  make_release "$T/new" 0.2.0
-  cpanel_in "$T/new" "" update --yes --domain "$DOMAIN"
+  expect "no domain: says to pass it" has "$ERR" "update --domain <name>"
+  expect "no domain: says nothing was changed" has "$ERR" "nothing was changed"
+  expect "no domain: nothing was called, not even a backup" test ! -s "$LOG"
+  expect "no domain: nothing was changed" test "$(snapshot)" = "$before"
+  # With the domain given once, it goes through and the domain is remembered.
+  cpanel "" update --yes --domain "$DOMAIN"
   expect "with --domain: succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "with --domain: the new build is in place" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.1.1"
+  expect "with --domain: the hand-made build is kept" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.0"
   expect "with --domain: remembered" grep -qxF "DOMAIN=$DOMAIN" "$APP/.cpanel-install"
+  make_release "$T/new" 0.2.0
+  cpanel_in "$T/new" "" update --yes
+  expect "the next update needs no --domain (stderr: $(cat "$ERR"))" test "$RC" = 0
   cpanel "" status
   expect "status uses the remembered domain" has "$OUT" "health: ok"
   expect "the hand-made settings file is untouched" grep -qxF "SETUP_CODE=a-code-made-by-hand-0123456789" "$SETTINGS"
   expect "the hand-made code is never shown" hasnt "$OUT" "a-code-made-by-hand"
+}
+
+test_rollback_of_a_hand_made_install_removes_what_it_never_had() {
+  new_sandbox
+  hand_install
+  STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel "" update --yes --domain "$DOMAIN"
+  expect "exit code non-zero" test "$RC" != 0
+  local b; b="$(only_backup)"
+  expect "removes the files that were not there before" grep -qxF "    cd '$APP' && rm -f cpanel.sh VERSION" "$OUT"
+  expect "restores the files that were" grep -qxF "    cd '$APP' && tar -xzf '$b/app.tgz' package.json package-lock.json app.cjs" "$OUT"
+  rollback_lines >"$T/rollback"
+  paste_rollback "$T/rollback"
+  paste_rollback "$T/rollback"
+  expect "the hand-made build is back" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.1.0"
+  expect "the hand-made package.json is back" cmp -s "$T/hand/package.json" "$APP/package.json"
+  expect "the files it never had are gone" test ! -e "$APP/VERSION" -a ! -e "$APP/cpanel.sh"
+}
+
+# ---------------------------------------------------------------- an interrupted update
+
+# What an update that was cut off after its first rename leaves, on an install that had
+# no state file before: the script's own marker and state file, the old build as
+# dist.old, and no dist.
+test_interrupted_first_update_of_a_hand_made_install_is_still_an_install() {
+  new_sandbox
+  hand_install
+  STUB_NPM_FAIL=1 cpanel "" update --yes --domain "$DOMAIN"
+  expect "the cut-off update exits non-zero" test "$RC" != 0
+  local first; first="$(only_backup)"
+  expect "the state file was written before anything was moved" grep -qxF "DOMAIN=$DOMAIN" "$APP/.cpanel-install"
+  expect "the update is marked as under way" test -f "$APP/.cpanel-update"
+  rm -rf "$APP/dist"
+  expect "the old build is dist.old" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.0"
+
+  cpanel "" status
+  expect "status: found (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "status: does not say nothing is installed" hasnt "$ERR" "nothing is installed"
+  expect "status: says an update was cut off" has "$OUT" "an update was cut off before it finished"
+  cpanel "" backup
+  expect "backup: works (stderr: $(cat "$ERR"))" test "$RC" = 0
+  : >"$LOG"
+  cpanel "" install --domain "$DOMAIN" --yes
+  expect "install: refuses" test "$RC" != 0
+  expect "install: points to update, not to a second create" has "$ERR" "already holds an install"
+  expect "install: the hosting was not asked to create the app again" test ! -s "$LOG"
+
+  # Even with neither of the script's files, the build that was moved aside counts.
+  mv "$APP/.cpanel-update" "$T/kept-marker"; mv "$APP/.cpanel-install" "$T/kept-state"
+  cpanel "" status
+  expect "dist.old alone is still an install" test "$RC" = 0
+  mv "$T/kept-marker" "$APP/.cpanel-update"; mv "$T/kept-state" "$APP/.cpanel-install"
+
+  # Running the update again finishes it, with the old build still the way back.
+  cpanel "" update --yes
+  expect "the second run succeeds without --domain (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "says it resumes" has "$OUT" "An earlier update was cut off"
+  expect "the new build is in place" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.1.1"
+  expect "dist.old is still the hand-made build" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.0"
+  expect "migrations.old is still the hand-made one" test "$(cat "$APP/migrations.old/0001_init.sql")" = "-- schema of 0.1.0"
+  expect "the marker is cleared" test ! -e "$APP/.cpanel-update"
+  expect "the first backup is still there" test -f "$first/app.tgz"
+}
+
+# The same on an install that has a state file, cut off while the new dist was only half
+# there: running update again must not delete dist.old, and must not move the half-made
+# dist into its place.
+test_rerun_after_an_interrupted_update_keeps_the_last_good_build() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  STUB_NPM_FAIL=1 cpanel_in "$T/new" "" update --yes
+  expect "the cut-off update exits non-zero" test "$RC" != 0
+  local first; first="$(only_backup)"
+  # Half a build: the entry file never arrived.
+  rm "$APP/dist/node/entry.js"
+  echo "half-made" >"$APP/dist/node/partial.js"
+
+  # A second run that fails again still names the first backup as the way back: it
+  # holds the files of the version that ran, the later one holds the half-made state.
+  STUB_NPM_FAIL=1 cpanel_in "$T/new" "" update --yes
+  expect "the second cut-off run exits non-zero" test "$RC" != 0
+  expect "dist.old is still the last good build" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.1"
+  expect "migrations.old is still the last good one" test "$(cat "$APP/migrations.old/0001_init.sql")" = "-- schema of 0.1.1"
+  expect "the half-made build was not kept anywhere" test -z "$(find "$APP" -name partial.js)"
+  expect "the rollback names the backup from before the first run" grep -qxF "    cd '$APP' && tar -xzf '$first/app.tgz' package.json package-lock.json app.cjs cpanel.sh VERSION" "$OUT"
+  expect "that backup holds the version that ran" test "$(tar -xzOf "$first/app.tgz" VERSION)" = 0.1.1
+
+  cpanel_in "$T/new" "" update --yes
+  expect "the third run succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "the new build is whole" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.2.0"
+  expect "dist.old is still the last good build" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.1"
+  expect "the marker is cleared" test ! -e "$APP/.cpanel-update"
+  expect "no staged copy is left" test ! -e "$APP/dist.new" -a ! -e "$APP/migrations.new"
+
+  # A marker with nothing moved yet (cut off right after it was written) loses nothing either.
+  make_release "$T/v3" 0.3.0
+  printf 'BACKUP=%s\nRESTORE=package.json package-lock.json app.cjs cpanel.sh VERSION\nREMOVE=\n' "$first" >"$APP/.cpanel-update"
+  rm -rf "$APP/dist.old" "$APP/migrations.old"
+  cpanel_in "$T/v3" "" update --yes
+  expect "resuming with nothing moved succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "the build that ran became dist.old" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.2.0"
+  expect "the new build is in place" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.3.0"
+}
+
+test_a_signal_in_the_middle_of_an_update_prints_the_way_back() {
+  new_sandbox
+  [ -r "/proc/$$/cmdline" ] || skip "this system has no /proc to find the script's process with"
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  local sig
+  # Not INT: these tests run in the background, where a shell starts with INT ignored,
+  # and a signal that is ignored at the start cannot be caught. The script handles INT
+  # with the same line as the two tried here.
+  for sig in TERM HUP; do
+    : >"$LOG"
+    STUB_NPM_SIGNAL="$sig" cpanel_in "$T/new" "" update --yes
+    expect "$sig: exit code 130 (got $RC; stderr: $(cat "$ERR"))" test "$RC" = 130
+    expect "$sig: says it was interrupted" has "$ERR" "interrupted"
+    expect "$sig: says the files were being replaced" has "$OUT" "cut off after it began to replace the app files"
+    expect "$sig: says how to finish" has "$OUT" "run the update again: it resumes"
+    expect "$sig: prints the way back" has "$OUT" "cd '$APP' && [ -d dist.old ] && rm -rf dist && mv dist.old dist"
+    expect "$sig: the app was not restarted" test "$(calls)" = "node npm "
+    expect "$sig: the update is still marked as under way" test -f "$APP/.cpanel-update"
+    expect "$sig: dist.old is the last good build" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.1"
+    expect "$sig: no half-made backup folder is left" test -z "$(find "$BACKUPS" -name '*.partial')"
+  done
+  expect "the script handles INT like TERM and HUP" has "$REL/cpanel.sh" "trap on_signal INT TERM HUP"
+  # The way back, as printed after the last signal, works.
+  rollback_lines >"$T/rollback"
+  paste_rollback "$T/rollback"
+  expect "after the commands: the previous build" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.1.1"
+  expect "after the commands: the previous version" test "$(cat "$APP/VERSION")" = 0.1.1
+  expect "after the commands: the marker is gone" test ! -e "$APP/.cpanel-update"
+  # And so does going forward instead.
+  cpanel_in "$T/new" "" update --yes
+  expect "the update then goes through (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "the new build is in place" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.2.0"
+}
+
+test_a_signal_before_anything_was_moved_leaves_the_app_alone() {
+  new_sandbox
+  [ -r "/proc/$$/cmdline" ] || skip "this system has no /proc to find the script's process with"
+  fresh_install
+  app_has_run
+  local before; before="$(tree_of "$APP")"
+  make_release "$T/new" 0.2.0
+  # The script is interrupted while the backup's database copy is made.
+  STUB_NODE_SIGNAL=TERM cpanel_in "$T/new" "" update --yes
+  expect "exit code 130 (got $RC; stderr: $(cat "$ERR"))" test "$RC" = 130
+  expect "says it was interrupted" has "$ERR" "interrupted"
+  expect "says the app files were not touched" has "$OUT" "The app files were not touched"
+  expect "prints no rollback" hasnt "$OUT" "To go back"
+  expect "the app folder is unchanged" test "$(tree_of "$APP")" = "$before"
+  expect "no half-made backup folder is left" test -z "$(find "$BACKUPS" -name '*.partial')"
+}
+
+# ---------------------------------------------------------------- the data folder
+
+test_the_data_folder_is_the_one_the_settings_file_names() {
+  new_sandbox
+  # The settings file of this install points somewhere else than <app-root>-data.
+  local elsewhere="$H/storage/tours"
+  mkdir -p "$H/apps"
+  printf '# moved to the big disk\nSETUP_CODE=a-code-that-must-stay-private-0123\n  DATA_DIR="%s"\r\nDATA_DIR=/a/second/line/is/ignored\n' "$elsewhere" >"$SETTINGS"
+  cpanel "" install --domain "$DOMAIN" --yes
+  expect "install succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "install made the folder the settings file names" test -d "$elsewhere"
+  expect "install did not make the default folder" test ! -e "$DATA"
+  app_has_run "$elsewhere"
+  echo "only-here" >"$elsewhere/drafts/u1/marker.png"
+  : >"$LOG"
+  cpanel "" backup
+  expect "backup succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+  local b; b="$(only_backup)"
+  expect "the database copied is the one in that folder" grep -qF " $elsewhere/db.sqlite $b.partial/db.sqlite" "$LOG"
+  expect "the drafts copied are the ones in that folder" test -f "$b/drafts/u1/marker.png"
+  expect "the backup holds a database" test -s "$b/db.sqlite"
+  expect "no other line of the settings file is shown" hasnt "$OUT" "a-code-that-must-stay-private"
+  expect "nor on stderr or a command line" test "$(cat "$ERR" "$LOG" | grep -c 'a-code-that-must-stay-private')" = 0
+  cpanel "" status
+  expect "status names that folder" has "$OUT" "data folder:    $elsewhere, "
+  make_release "$T/new" 0.2.0
+  cpanel_in "$T/new" "" update --yes
+  expect "update succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "update says which data folder it leaves alone" has "$OUT" "data folder:    $elsewhere (not touched)"
+  expect "the update's backup holds the drafts of that folder" test "$(find "$BACKUPS" -name marker.png | wc -l | tr -d ' ')" = 2
+}
+
+test_update_and_backup_stop_when_the_data_cannot_be_found() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  cp "$SETTINGS" "$T/settings"
+  local what before
+  for what in "no settings file" "no DATA_DIR line" "a relative DATA_DIR" "a DATA_DIR that does not exist" "no database"; do
+    cp "$T/settings" "$SETTINGS"; app_has_run
+    case "$what" in
+      "no settings file") rm "$SETTINGS" ;;
+      "no DATA_DIR line") grep -v '^DATA_DIR=' "$T/settings" >"$SETTINGS" ;;
+      "a relative DATA_DIR") sed 's|^DATA_DIR=.*|DATA_DIR=apps/tours-data|' "$T/settings" >"$SETTINGS" ;;
+      "a DATA_DIR that does not exist") sed "s|^DATA_DIR=.*|DATA_DIR=$H/apps/moved-away|" "$T/settings" >"$SETTINGS" ;;
+      "no database") rm "$DATA/db.sqlite" "$DATA/db.sqlite-wal" ;;
+    esac
+    before="$(snapshot)"
+    : >"$LOG"
+    cpanel_in "$T/new" "" update --yes
+    expect "$what: update exits non-zero" test "$RC" != 0
+    expect "$what: update says nothing was changed" has "$ERR" "nothing was changed"
+    expect "$what: update does not report success" hasnt "$OUT" "Updated to version"
+    [ ! -f "$SETTINGS" ] || expect "$what: update does not show the setup code" code_not_shown
+    cpanel "" backup
+    expect "$what: backup exits non-zero" test "$RC" != 0
+    expect "$what: backup does not report a backup" hasnt "$OUT" "Backup written"
+    [ ! -f "$SETTINGS" ] || expect "$what: backup does not show the setup code" code_not_shown
+    expect "$what: nothing was called" test ! -s "$LOG"
+    expect "$what: nothing was changed, and no backup folder was written" test "$(snapshot)" = "$before"
+  done
+  cp "$T/settings" "$SETTINGS"; app_has_run
+  rm "$SETTINGS"; cpanel "" backup
+  expect "names the missing settings file" has "$ERR" "the settings file $SETTINGS is missing"
+  cp "$T/settings" "$SETTINGS"; rm "$DATA/db.sqlite"; cpanel "" backup
+  expect "names the missing database and where the folder came from" has "$ERR" "there is no database at $DATA/db.sqlite (DATA_DIR is read from $SETTINGS)"
+  cpanel "" status
+  expect "status still works" test "$RC" = 0
+  expect "and says there is no database" has "$OUT" "none at $DATA/db.sqlite yet"
 }
 
 # ---------------------------------------------------------------- backup
@@ -710,9 +1079,16 @@ test_backup_contents() {
   local b; b="$(only_backup)"
   expect "the folder is named <app>-<date>-<time>" test "$(basename "$b" | grep -cE '^tours-[0-9]{8}-[0-9]{6}$')" = 1
   expect "prints the folder" has "$OUT" "Backup written: $b"
-  expect "the database is copied by sqlite3's own backup" grep -qxF "sqlite3 $DATA/db.sqlite .backup '$b.partial/db.sqlite'" "$LOG"
-  expect "the copy is what sqlite3 wrote, not a file copy of the live database" grep -qa "stand-in copy by sqlite3" "$b/db.sqlite"
+  expect "the database is copied by the app's Node.js, inside its environment, closed to others" grep -qxF \
+    "node[venv=apps/tours/24 umask=0077] -e <program> $DATA/db.sqlite $b.partial/db.sqlite" "$LOG"
+  expect "the sqlite3 tool is not used while Node.js is there" test "$(grep -c '^sqlite3' "$LOG")" = 0
+  expect "the copy is what node wrote, not a file copy of the live database" grep -qa "stand-in copy by node" "$b/db.sqlite"
   expect "the live WAL file is not copied beside it" test ! -e "$b/db.sqlite-wal"
+  # The program handed to node is SQLite's own consistent copy, then a check of the copy.
+  expect "the program uses node:sqlite" has "$REL/cpanel.sh" 'require("node:sqlite")'
+  expect "the program uses VACUUM INTO" has "$REL/cpanel.sh" 'VACUUM INTO ?'
+  expect "the program checks the copy" has "$REL/cpanel.sh" 'copy.prepare("PRAGMA integrity_check")'
+  expect "the script never copies the database file with cp" test "$(grep -cE '^[^#]*\bcp\b[^#]*db\.sqlite' "$REL/cpanel.sh")" = 0
   expect "drafts are copied" cmp -s "$DATA/drafts/u1/step-001.png" "$b/drafts/u1/step-001.png"
   expect "public files are copied" cmp -s "$DATA/public/t1/step-001.png" "$b/public/t1/step-001.png"
   expect "the app files are archived" test "$(tar -tzf "$b/app.tgz" | grep -cxE 'dist/node/entry.js|migrations/0001_init.sql|package.json|package-lock.json|app.cjs|cpanel.sh|VERSION|.cpanel-install')" = 8
@@ -720,7 +1096,7 @@ test_backup_contents() {
   expect "the app archive holds no settings" test "$(tar -xzOf "$b/app.tgz" | grep -cF -- "$(setup_code)")" = 0
   expect "the settings file is in the backup" cmp -s "$SETTINGS" "$b/tours-config.env"
   expect "the setup code is not shown" code_not_shown
-  expect "only the database tool was called" test "$(calls)" = "sqlite3 "
+  expect "only the database tool was called" test "$(calls)" = "node "
   expect "the live data is untouched" grep -qa "the live database" "$DATA/db.sqlite"
   if [ "$MODES" = 1 ]; then
     expect "the backup folder is mode 700" test "$(mode_of "$b")" = 700
@@ -729,6 +1105,12 @@ test_backup_contents() {
   else
     echo "      SKIP: mode checks (this file system does not keep Unix file modes)"
   fi
+  : >"$LOG"
+  STUB_NODE_FAIL=1 cpanel "" backup
+  expect "a failing copy fails the backup" test "$RC" != 0
+  expect "says so" has "$ERR" "the backup failed; no backup folder was written"
+  expect "the sqlite3 tool is not tried behind a Node.js that failed" test "$(calls)" = "node "
+  expect "no second folder and no half-made one" test "$(backup_dirs)" = "$b"
 }
 
 test_backup_modes_with_an_open_umask() {
@@ -745,28 +1127,41 @@ test_backup_modes_with_an_open_umask() {
   expect "nothing in the backup is open to others" test -z "$(open_to_others "$b")"
 }
 
-test_backup_uses_the_apps_node_when_sqlite3_is_missing() {
+test_backup_falls_back_to_sqlite3_only_without_node() {
   new_sandbox
   fresh_install
   app_has_run
-  rm "$T/bin/sqlite3"
+  rm "$T/bin/node"
+  if command -v node >/dev/null 2>&1; then skip "this system has a real node, so the app's Node.js cannot be made to look missing"; fi
   : >"$LOG"
-  CPANEL_TEST_NO_SQLITE3=1 cpanel "" backup
+  cpanel "" backup
   expect "exit code 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
   local b; b="$(only_backup)"
-  expect "node is run inside the app's Node.js environment, with the database and the copy" grep -qxF \
-    "node[venv=apps/tours/24] -e <program> $DATA/db.sqlite $b.partial/db.sqlite" "$LOG"
-  expect "the copy is what node wrote, not a file copy of the live database" grep -qa "stand-in copy by node" "$b/db.sqlite"
-  expect "says why node is used" has "$OUT" "sqlite3 tool is not installed"
-  # The program handed to node is SQLite's own consistent copy.
-  expect "the program uses node:sqlite" has "$REL/cpanel.sh" 'require("node:sqlite")'
-  expect "the program uses VACUUM INTO" has "$REL/cpanel.sh" 'VACUUM INTO ?'
-  expect "the script never copies the database file with cp" test "$(grep -cE '^[^#]*\bcp\b[^#]*db\.sqlite' "$REL/cpanel.sh")" = 0
-  : >"$LOG"
-  STUB_NODE_FAIL=1 CPANEL_TEST_NO_SQLITE3=1 cpanel "" backup
-  expect "a failing copy fails the backup" test "$RC" != 0
-  expect "says so" has "$ERR" "the backup failed; no backup folder was written"
-  expect "no second folder and no half-made one" test "$(backup_dirs)" = "$b"
+  expect "the copy is made by sqlite3's own backup" grep -qxF "sqlite3 $DATA/db.sqlite .backup '$b.partial/db.sqlite'" "$LOG"
+  expect "the copy is then checked" grep -qxF "sqlite3 $b.partial/db.sqlite PRAGMA integrity_check;" "$LOG"
+  expect "copy first, check second, nothing else" test "$(calls)" = "sqlite3 sqlite3 "
+  expect "the copy is what sqlite3 wrote" grep -qa "stand-in copy by sqlite3" "$b/db.sqlite"
+  expect "says why sqlite3 is used" has "$OUT" "the app's Node.js was not found"
+  local how
+  for how in "STUB_INTEGRITY=*** in database main ***" "STUB_SQLITE_FAIL=1"; do
+    : >"$LOG"
+    # shellcheck disable=SC2163 # the variable holds NAME=value
+    export "$how"
+    cpanel "" backup
+    unset "${how%%=*}"
+    expect "$how: the backup fails" test "$RC" != 0
+    expect "$how: says so" has "$ERR" "the backup failed; no backup folder was written"
+    expect "$how: no second folder and no half-made one" test "$(backup_dirs)" = "$b"
+  done
+  STUB_INTEGRITY="*** in database main ***" cpanel "" backup
+  expect "a copy that fails the check is named as such" has "$ERR" "the copy did not pass the integrity check"
+  # With neither tool there is no safe way to copy, and the script says so.
+  rm "$T/bin/sqlite3"
+  if command -v sqlite3 >/dev/null 2>&1; then return 0; fi
+  cpanel "" backup
+  expect "neither tool: the backup fails" test "$RC" != 0
+  expect "neither tool: says why" has "$ERR" "neither the app's Node.js"
+  expect "neither tool: no file copy was made instead" test "$(backup_dirs)" = "$b"
 }
 
 test_backup_with_real_node_copies_a_live_wal_database() {
@@ -795,7 +1190,7 @@ test_backup_with_real_node_copies_a_live_wal_database() {
   while [ ! -e "$T/ready" ] && [ "$i" -lt 200 ]; do sleep 0.1; i=$((i + 1)); done
   [ -e "$T/ready" ] || { : >"$T/stop"; die "the process holding the database did not start"; }
   expect "the row is still only in the WAL" test -s "$DATA/db.sqlite-wal"
-  CPANEL_TEST_NO_SQLITE3=1 cpanel "" backup
+  cpanel "" backup
   : >"$T/stop"; wait "$holder" || true
   expect "the backup succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
   local b; b="$(only_backup)"
@@ -803,18 +1198,12 @@ test_backup_with_real_node_copies_a_live_wal_database() {
   expect "the copy holds the row that was only in the WAL" test \
     "$(node -e 'const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1], { readOnly: true }); console.log(db.prepare("SELECT v FROM t").get().v); db.close();' "$(native "$b/db.sqlite")")" = "only in the WAL"
   [ "$MODES" = 0 ] || expect "the copy is mode 600" test "$(mode_of "$b/db.sqlite")" = 600
-}
-
-test_backup_before_the_app_ever_started() {
-  new_sandbox
-  fresh_install
-  : >"$LOG"
+  # A file that is not a whole database is not passed off as a backup.
+  rm -f "$DATA/db.sqlite-wal" "$DATA/db.sqlite-shm"
+  printf 'SQLite format 3\0 but nothing else of a database' >"$DATA/db.sqlite"
   cpanel "" backup
-  expect "exit code 0" test "$RC" = 0
-  expect "says there is no database yet" has "$OUT" "no database at $DATA/db.sqlite yet"
-  expect "no database tool was called" test ! -s "$LOG"
-  local b; b="$(only_backup)"
-  expect "the app files and settings are still backed up" test -f "$b/app.tgz" -a -f "$b/tours-config.env"
+  expect "a damaged database fails the backup" test "$RC" != 0
+  expect "no folder is written for it" test "$(backup_dirs)" = "$b"
 }
 
 test_backups_never_overwrite_each_other() {
@@ -828,6 +1217,29 @@ test_backups_never_overwrite_each_other() {
   cpanel "" backup --app-root apps/none
   expect "backup of nothing is refused" test "$RC" != 0
   expect "says nothing is installed" has "$ERR" "nothing is installed"
+}
+
+# ---------------------------------------------------------------- packages
+
+test_a_node_modules_link_that_npm_replaces_is_reported() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  # Some hosting keeps node_modules as a link into the app's Node.js environment.
+  local target="$H/nodevenv/apps/tours/24/lib/node_modules"
+  mkdir -p "$target"
+  rm -rf "$APP/node_modules"; ln -s "$target" "$APP/node_modules"
+  [ -L "$APP/node_modules" ] || skip "this system cannot make a symbolic link"
+  make_release "$T/v2" 0.2.0
+  cpanel_in "$T/v2" "" update --yes
+  expect "update succeeds" test "$RC" = 0
+  expect "a link that npm kept is left alone" test -L "$APP/node_modules"
+  expect "and nothing is said about it" hasnt "$ERR" "was a link"
+  make_release "$T/v3" 0.3.0
+  STUB_NPM_REPLACES_LINK=1 cpanel_in "$T/v3" "" update --yes
+  expect "update still succeeds" test "$RC" = 0
+  expect "a link that npm replaced is reported" has "$ERR" "node_modules was a link into the Node.js environment before npm ci and is a plain folder now"
+  expect "the script did not put it back by guessing" test ! -L "$APP/node_modules"
 }
 
 # ---------------------------------------------------------------- status
@@ -853,6 +1265,7 @@ test_status() {
   mkdir -p "$BACKUPS/tours-20991231-235959" "$BACKUPS/tours-20991231-235960.partial" "$BACKUPS/other-20991231-235959"
   cpanel "" status
   expect "the newest whole backup of this app" grep -qE "^    last backup: +$BACKUPS/tours-20991231-235959$" "$OUT"
+  expect "the earlier one exists too" test -d "$first"
 
   STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel "" status
   expect "a failed check is reported as failed" has "$OUT" "health: FAILED"
@@ -861,7 +1274,7 @@ test_status() {
   rm "$SETTINGS"
   cpanel "" status
   expect "a missing settings file is named" has "$OUT" "$SETTINGS is MISSING"
-  [ -n "$first" ]
+  expect "and the data folder is reported as not known" has "$OUT" "data folder:    NOT KNOWN"
 }
 
 test_status_when_nothing_is_installed() {
@@ -876,7 +1289,7 @@ test_status_without_curl_is_honest() {
   new_sandbox
   fresh_install
   rm "$T/bin/curl"
-  command -v curl >/dev/null 2>&1 && skip "this system has a real curl, which the test must not call"
+  if command -v curl >/dev/null 2>&1; then skip "this system has a real curl, which the test must not call"; fi
   cpanel "" status
   expect "reports the check as not made" has "$OUT" "health: NOT CHECKED"
   expect "and not as ok" hasnt "$OUT" "health: ok"
@@ -885,11 +1298,12 @@ test_status_without_curl_is_honest() {
 # ---------------------------------------------------------------- run
 
 [ -f "$SCRIPT" ] || { echo "missing $SCRIPT" >&2; exit 1; }
-echo "== cpanel.sh on $(uname -s) with bash ${BASH_VERSION%%(*}"
+OS_NAME="$(sed -n 's/^PRETTY_NAME="\(.*\)"$/\1/p' /etc/os-release 2>/dev/null || true)"
+echo "== cpanel.sh on ${OS_NAME:-$(uname -s)} with bash ${BASH_VERSION%%(*}"
 [ "$MODES" = 1 ] || echo "   file modes are not kept on this file system: mode checks are skipped"
 if [ "$#" -gt 0 ]; then TESTS="$*"; else TESTS="$(declare -F | awk '{print $3}' | grep '^test_')"; fi
 # JOBS tests at a time (default: one per processor). Starting a program is slow under
-# Git Bash on Windows, so there the file takes minutes rather than seconds.
+# Git Bash on Windows, so there the whole file takes minutes rather than seconds.
 JOBS="${JOBS:-$( (nproc || getconf _NPROCESSORS_ONLN || echo 2) 2>/dev/null | head -n 1)}"
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || JOBS=2
 n=0

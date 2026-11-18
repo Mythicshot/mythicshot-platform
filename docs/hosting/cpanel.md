@@ -40,7 +40,7 @@ Where things end up on the hosting, with the default settings:
 | Path | What it is |
 |---|---|
 | `/home/you/apps/tours` | The app: `dist`, `migrations`, `package.json`, `package-lock.json`, `app.cjs`, `cpanel.sh` and `VERSION` |
-| `/home/you/apps/tours-data` | The data: `db.sqlite`, `drafts` and `public` |
+| `/home/you/apps/tours-data` | The data: `db.sqlite`, `drafts` and `public`. The install writes this path to the settings file as `DATA_DIR`, and every later command reads it from there |
 | `/home/you/apps/tours-config.env` | The settings file, holding the data folder and the setup code. Only your account can read it |
 | `/home/you/backups` | One folder per backup |
 
@@ -145,12 +145,14 @@ Options, for when the defaults do not fit:
 
 | Option | What it does |
 |---|---|
-| `--app-root <path>` | Another app folder, relative to your home folder. The default is `apps/tours`. The data folder and the settings file are named after it: `apps/demo` gets `apps/demo-data` and `apps/demo-config.env`. Give the same option to every later command |
+| `--app-root <path>` | Another app folder, relative to your home folder. The default is `apps/tours`. The data folder and the settings file are named after it: `apps/demo` gets `apps/demo-data` and `apps/demo-config.env`. The script refuses a folder the web server serves: `public_html`, `www`, or a path that starts with a folder named after a domain. Give the same option to every later command |
 | `--node <major>` | Another Node.js version than 24. The platform needs 24 or later |
 | `--yes` | Do not ask before starting |
 | `--dry-run` | Print what would be done and change nothing |
 
 **How to tell it worked:** the script ends with a line saying the version is installed and answers at `https://tours.example.com`. If it says the health check did not pass, the platform may still be fine: on a new subdomain the certificate is often not ready yet. See [step 8](#8-https), then check again.
+
+The `status` command is how you check at any time. It shows the installed version, the folders, the size of the data folder, the newest backup and the health, and it changes nothing.
 
 ```sh
 ./cpanel.sh status
@@ -164,11 +166,7 @@ The setup code is one line in the settings file. The script does not show it, so
 2. Select the file `tours-config.env` and open it with **View** or **Edit**.
 3. Copy what follows `SETUP_CODE=` on that line. Change nothing and close the file without saving.
 
-Over SSH, this prints the same line to your own terminal.
-
-```sh
-grep '^SETUP_CODE=' ~/apps/tours-config.env
-```
+If you prefer SSH, open the file in a text editor there, such as `nano ~/apps/tours-config.env`, and leave without saving. Do not print the file or the line with a command such as `cat` or `grep`: the code would stay in the terminal's scrollback and in anything that records the session.
 
 > [!WARNING]
 > Whoever enters the setup code first becomes the owner of the platform. Keep it private until you finish [step 7](#7-open-the-setup-wizard), and do not paste it into a chat or a ticket.
@@ -238,15 +236,18 @@ cd ~/tours-release
 
 What the update does, in this order:
 
-1. It makes a backup, as in [step 10](#10-backups). If the backup fails, it stops and changes nothing.
-2. It moves the running `dist` and `migrations` folders to `dist.old` and `migrations.old`, replacing the copies an earlier update left there.
-3. It copies the new files in, installs the packages, restarts the app and asks the health address.
+1. It makes a backup, as in [step 10](#10-backups). If the backup fails, or there is no database to back up, it stops and changes nothing.
+2. It copies the new `dist` and `migrations` folders beside the running ones, as `dist.new` and `migrations.new`. The running app is not touched yet.
+3. It renames, back to back: the running folders become `dist.old` and `migrations.old`, replacing the copies an earlier, finished update left there, and the new ones take their place.
+4. It copies the other new files in, installs the packages, restarts the app and asks the health address.
 
 The data folder and the settings file are not touched. The update must be run from the newly unpacked archive, not from the copy of the script in the app folder.
 
 The script refuses an archive that is older than the installed version, because an older version may not start on a database a newer one has changed. `--allow-downgrade` overrides that; make sure you know why you need it.
 
-If the platform was first installed by hand, without this script, the first update needs the address once: add `--domain tours.example.com`. The script remembers it afterwards.
+The update refuses to start when it does not know the address, because it could not check the result. That is the case once, when the platform was first installed by hand, without this script: add `--domain tours.example.com`. The script remembers it afterwards.
+
+**If an update is cut off,** by Ctrl-C or a dropped SSH connection, the script prints the commands to go back, when it still can. Either way, run the same update again: it notices the unfinished one, keeps `dist.old` and `migrations.old` from before it as the way back, and finishes. Until then, `./cpanel.sh status` says that an update was cut off.
 
 **How to tell it worked:** the script ends with "Updated to version" and the address. If it says the health check did not pass, it prints the commands to go back; see [step 12](#12-roll-back-an-update).
 
@@ -262,10 +263,12 @@ It writes a new folder, `/home/you/backups/tours-<date>-<time>`, and prints its 
 
 | In the backup | What it is |
 |---|---|
-| `db.sqlite` | A consistent copy of the database, made by SQLite itself while the app keeps running: with the `sqlite3` tool where the hosting has it, otherwise with the app's own Node.js |
+| `db.sqlite` | A consistent copy of the database, made by SQLite itself while the app keeps running and then checked for damage. The app's own Node.js makes it; the `sqlite3` tool is used only where that Node.js is not found |
 | `drafts` and `public` | The uploaded and the published images |
 | `app.tgz` | The app files as they are now, without the installed packages |
 | `tours-config.env` | A copy of the settings file, with the setup code in it |
+
+The script finds the data folder through the `DATA_DIR` line of the settings file. If the settings file is missing, has no such line, or there is no database in that folder, the backup stops and writes nothing, so a backup folder that exists always holds the data.
 
 2. Copy the backup folder to your own computer: in cPanel's **File Manager**, compress the folder and download it, or use `scp` from your computer.
 
@@ -324,30 +327,26 @@ cd ~/apps/tours && ./cpanel.sh status
 
 ## 12. Roll back an update
 
-When the health check fails after an update, the script does not undo anything by itself. It prints the commands that bring the previous version back, with your own paths filled in. They look like this:
+When the health check fails after an update, the script does not undo anything by itself. It prints the commands that bring the previous version back, with your own paths filled in. Each one is a single line that goes to the app folder itself and does nothing when its work is already done, so you can paste them one by one, and pasting one twice does no harm. They look like this:
 
 ```sh
-cd /home/you/apps/tours
+cd '/home/you/apps/tours' && [ -d dist.old ] && rm -rf dist && mv dist.old dist
 ```
 
 ```sh
-rm -rf dist && mv dist.old dist
+cd '/home/you/apps/tours' && [ -d migrations.old ] && rm -rf migrations && mv migrations.old migrations
 ```
 
 ```sh
-rm -rf migrations && mv migrations.old migrations
+cd '/home/you/apps/tours' && tar -xzf '/home/you/backups/tours-<date>-<time>/app.tgz' package.json package-lock.json app.cjs cpanel.sh VERSION
 ```
 
 ```sh
-tar -xzf /home/you/backups/tours-<date>-<time>/app.tgz package.json package-lock.json app.cjs cpanel.sh VERSION
+cd '/home/you/apps/tours' && source '/home/you/nodevenv/apps/tours/24/bin/activate' && npm ci --omit=dev --ignore-scripts
 ```
 
 ```sh
-source /home/you/nodevenv/apps/tours/24/bin/activate && npm ci --omit=dev --ignore-scripts
-```
-
-```sh
-touch /home/you/apps/tours/tmp/restart.txt
+cd '/home/you/apps/tours' && rm -f .cpanel-update && touch tmp/restart.txt
 ```
 
 Use the commands the script printed, not the ones above: yours name the right backup folder. Before you roll back, read [step 13](#13-troubleshooting): a failed health check right after an update is often the certificate or a slow start, not the new version.
@@ -374,6 +373,8 @@ cd ~/apps/tours && ./cpanel.sh status
 | `cloudlinux-selector command was not found` | The hosting has no **Setup Node.js App**, or does not offer its command over SSH. Ask your hosting provider |
 | The install says the hosting did not create the Node.js app | The line above it shows the hosting's own answer. Often an app for this folder or domain exists already: remove it in **Setup Node.js App**, or choose another folder with `--app-root`, and run the install again |
 | The script says the app's Node.js environment was not found | The app runs on another Node.js version than the script expects. Add `--node` with the version shown in **Setup Node.js App** |
+| An update or a backup stops, saying there is no database | The script looks in the folder the `DATA_DIR` line of the settings file names. If the platform has never been opened, open its address once so that it writes its database, and try again. Otherwise `DATA_DIR` points at the wrong folder |
+| `./cpanel.sh status` says an update was cut off | Unpack the archive of that update again if needed and run `./cpanel.sh update` from it; see [step 9](#9-updates) |
 | The setup wizard says the setup code is not right | Copy the code again from the settings file, without spaces around it, as in [step 6](#6-read-the-setup-code) |
 
 `./cpanel.sh status` shows the installed version, the folders, the size of the data folder, the newest backup and the health in one place. It changes nothing.
@@ -394,6 +395,14 @@ cd ~/apps/tours && ./cpanel.sh status
 - The archive from `npm run package:cpanel`. Its contents are checked by tests; it has not been unpacked on hosting.
 - The `app.cjs` in the archive. It is tested by starting it with Node.js, not under Passenger.
 - The database copy for backups. The copy made with Node.js was run against a real database in use on a development computer; the copy made with the `sqlite3` tool was only run against a stand-in.
+- Resuming an update that was cut off, and the commands to go back. Both were run against stand-ins, with the cut made at the points the tests can reach.
 - The restore steps in [step 11](#11-restore-from-a-backup), and the labels of cPanel's pages and buttons throughout, which are written from memory of cPanel and may differ at your provider.
+
+**Not yet confirmed on real hosting,** in the order to check them on the first real run:
+
+1. What `npm ci` does to `node_modules` in the app folder. Some hosting keeps it as a link into the app's Node.js environment, and whether `npm ci` keeps that link, and whether **Setup Node.js App** minds when it does not, is not known. The script changes nothing about it: it only prints a warning when a link was there before `npm ci` and a plain folder is there after. If you see that warning, check that the app still starts and that its page in **Setup Node.js App** still opens without an error.
+2. That `cloudlinux-selector create` answers the way the script expects when it succeeds and when it refuses.
+3. That the app's Node.js environment is at `/home/you/nodevenv/apps/tours/24/bin/activate` right after the script creates the app.
+4. That the hosting's Bash runs the script: it was run with Bash 5.2 only.
 
 The files this guide describes are [deploy/cpanel/cpanel.sh](../../deploy/cpanel/cpanel.sh), [deploy/cpanel/app.cjs](../../deploy/cpanel/app.cjs) and [scripts/package-cpanel.ts](../../scripts/package-cpanel.ts).

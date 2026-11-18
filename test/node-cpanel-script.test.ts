@@ -1,8 +1,10 @@
-// Runs deploy/cpanel/test-cpanel.sh, the tests of the cPanel script against stand-ins
-// for the hosting's commands, as part of `npm run test:node`. Every test function in
-// that file is checked by name here, so a test that is removed, renamed or no longer run
-// fails this file. Where there is no usable Bash the whole file is skipped with the
-// reason; no hosting, no network and no container is involved either way.
+// The cPanel script's tests are a Bash file, deploy/cpanel/test-cpanel.sh, run in Debian
+// containers by `npm run test:cpanel`. Those containers have no Node.js, so the one test
+// that needs a real one runs here instead, as part of `npm run test:node`: the backup's
+// database copy, made by the script with this computer's Node.js from a real database
+// that another process holds open in WAL mode. Everything else in that test is a
+// stand-in; no hosting, no network and no container is involved. Where there is no
+// usable Bash the test is skipped with the reason.
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -11,6 +13,7 @@ import { describe, expect, it } from "vitest";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const HARNESS = "deploy/cpanel/test-cpanel.sh";
+const TEST = "test_backup_with_real_node_copies_a_live_wal_database";
 
 /** A Bash that runs POSIX scripts here, or the reason there is none. */
 function findBash(): { bash: string } | { reason: string } {
@@ -31,42 +34,18 @@ function findBash(): { bash: string } | { reason: string } {
 }
 
 const found = findBash();
-const names = [...readFileSync(join(ROOT, HARNESS), "utf8").matchAll(/^(test_[a-z0-9_]+)\(\) \{$/gm)].map((m) => m[1]);
 
-describe.skipIf("reason" in found)(`the cPanel script against stand-ins${"reason" in found ? ` (skipped: ${found.reason})` : ""}`, () => {
-  // One run of the whole file; each test below reads its own line from the output.
-  let output = "";
-  let status: number | null = null;
-  const run = () => {
-    if (output !== "") return;
-    const r = spawnSync((found as { bash: string }).bash, [HARNESS], { cwd: ROOT, encoding: "utf8", timeout: 1_800_000, windowsHide: true });
-    output = `${r.stdout}\n${r.stderr}`;
-    status = r.status;
-  };
-
-  it("the file has tests", () => {
-    expect(names.length).toBeGreaterThanOrEqual(25);
+describe("the cPanel script's backup with a real Node.js", () => {
+  it("the Bash file still has the test this file runs", () => {
+    expect(readFileSync(join(ROOT, HARNESS), "utf8")).toMatch(new RegExp(`^${TEST}\\(\\) \\{$`, "m"));
   });
 
-  it("the whole file passes", () => {
-    run();
-    expect(output).toMatch(/^\d+ passed, 0 failed, \d+ skipped$/m);
-    expect(status, output).toBe(0);
-  }, 1_800_000);
-
-  for (const name of names) {
-    it(name.replace(/^test_/, "").replace(/_/g, " "), (ctx) => {
-      run();
-      const line = output.split(/\r?\n/).find((l) => /^(PASS|FAIL|SKIP) {2}/.test(l) && l.slice(6) === name);
-      expect(line, `${name} was not run\n${output}`).toBeDefined();
-      if (line?.startsWith("SKIP")) {
-        const at = output.indexOf(line);
-        return ctx.skip(output.slice(at).split(/\r?\n/)[1]?.trim() || "skipped by the Bash file");
-      }
-      // On a failure, show what the Bash file printed for this test.
-      const at = output.indexOf(line as string);
-      const detail = output.slice(at).split(/\r?\n/).slice(0, 30).join("\n");
-      expect(line?.startsWith("PASS"), detail).toBe(true);
-    }, 1_800_000);
-  }
+  it.skipIf("reason" in found)(`copies a database in use, row in the WAL included, and checks the copy${"reason" in found ? ` (skipped: ${found.reason})` : ""}`, () => {
+    const r = spawnSync((found as { bash: string }).bash, [HARNESS, "--inside", TEST], { cwd: ROOT, encoding: "utf8", timeout: 280_000, windowsHide: true });
+    const output = `${r.stdout}\n${r.stderr}`;
+    // Run, and passed: not skipped inside the Bash file for want of a Node.js.
+    expect(output).toContain(`PASS  ${TEST}`);
+    expect(output).toMatch(/^1 passed, 0 failed, 0 skipped$/m);
+    expect(r.status, output).toBe(0);
+  }, 300_000);
 });

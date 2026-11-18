@@ -134,7 +134,9 @@ npm run typecheck
 
 `npm run test:container` (Bash and a local Docker engine) builds the image and checks it end to end, including the compose stack with Caddy in front on `localhost` with its internal certificate. Real certificate issuance needs a public domain and is not part of it.
 
-`npm run test:node` also covers the shared cPanel hosting route: `test/node-cpanel-app.test.ts` starts the startup file with Node, `test/node-cpanel-package.test.ts` builds the archive and reads it back, and `test/node-cpanel-script.test.ts` runs `deploy/cpanel/test-cpanel.sh`, which runs the install script against stand-ins for the hosting's commands. That last one needs Bash (on Windows, the one that comes with Git) and is skipped with the reason where there is none. No hosting is contacted.
+`npm run test:cpanel` (Bash and a local Docker engine) tests the shared cPanel hosting script, `deploy/cpanel/cpanel.sh`: it runs `deploy/cpanel/test-cpanel.sh` in a Debian 13 and a Debian 12 container without network, where the script runs against stand-ins for the hosting's commands. No hosting is contacted. It is not part of `npm test`.
+
+`npm run test:node` covers the rest of that route: `test/node-cpanel-app.test.ts` starts the startup file with Node, `test/node-cpanel-package.test.ts` builds the archive and reads it back, and `test/node-cpanel-script.test.ts` runs the one test of the Bash file that needs a real Node, the backup's copy of a database in use. That one needs Bash (on Windows, the one that comes with Git) and is skipped with the reason where there is none.
 
 ### Run locally on the Workers runtime
 

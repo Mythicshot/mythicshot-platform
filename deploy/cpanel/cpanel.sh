@@ -11,7 +11,8 @@
 #   ~/apps/tours             the app: dist/, migrations/, package.json, package-lock.json,
 #                            app.cjs, cpanel.sh, VERSION, and .cpanel-install (the
 #                            domain and Node version; nothing secret)
-#   ~/apps/tours-data        db.sqlite, drafts/, public/
+#   ~/apps/tours-data        db.sqlite, drafts/, public/ (install writes this path to
+#                            the settings file; later commands read it from there)
 #   ~/apps/tours-config.env  the settings, DATA_DIR and SETUP_CODE, mode 600. It sits
 #                            beside the app folder, outside it and outside the web root.
 #   ~/backups/tours-<YYYYMMDD-HHMMSS>   one folder per backup, mode 700
@@ -24,12 +25,21 @@
 # Safety rules this script keeps:
 # - The setup code is made here from /dev/urandom, written only to the settings file and
 #   never printed, logged or passed as a command argument. The script tells where the
-#   file is; the person reads the code there.
+#   file is; the person reads the code there. Of the settings file, the script reads
+#   only the DATA_DIR line.
 # - It never removes or overwrites the data folder, the settings file or a backup. An
 #   existing settings file or data folder is kept as it is, also by install.
-# - update takes a backup first and stops if the backup fails. It keeps the previous
-#   dist and migrations as dist.old and migrations.old, and it never rolls back by
-#   itself: when the new version does not answer, it prints the commands to do so.
+# - update takes a backup first and stops if the backup fails; a backup without the
+#   database is a failed backup. The database is copied by SQLite itself and the copy is
+#   checked (PRAGMA integrity_check).
+# - update stages the new dist and migrations beside the running ones (dist.new,
+#   migrations.new) and then renames, back to back: the running ones become dist.old and
+#   migrations.old. While that is under way the file .cpanel-update marks it. As long as
+#   the marker is there, dist.old and migrations.old are never removed: running update
+#   again resumes, with them as the way back. An interrupted update (Ctrl-C, a dropped
+#   connection) prints the commands to go back.
+# - update never rolls back by itself: when the new version does not answer, it prints
+#   the commands to do so, each safe to paste and to paste twice.
 # - The health check asks https://<domain>/healthz, because shared hosting routes by
 #   host name and the app does not answer on 127.0.0.1. A check that fails or cannot be
 #   made is reported as such, never as success.
@@ -39,8 +49,7 @@
 # Every outside command (cloudlinux-selector, npm, node, sqlite3, curl, and touch for
 # the restart file) is found through PATH, so the tests put stand-ins in front.
 # CPANEL_HEALTH_TRIES and CPANEL_HEALTH_WAIT (seconds) change how long the health check
-# keeps trying; the default is 6 tries, 5 seconds apart. CPANEL_TEST_NO_SQLITE3=1, for
-# the tests only, makes the script behave as if the sqlite3 tool were not installed.
+# keeps trying; the default is 6 tries, 5 seconds apart.
 
 set -euo pipefail
 umask 077
@@ -49,13 +58,16 @@ export LC_ALL=C
 readonly DEFAULT_APP_ROOT=apps/tours
 readonly DEFAULT_NODE=24
 readonly STATE_NAME=.cpanel-install
-# What the archive holds besides VERSION, and so what the app folder is made of.
+readonly MARKER_NAME=.cpanel-update
+# What the archive holds, and so what the app folder is made of.
 readonly RELEASE_DIRS="dist migrations"
 readonly RELEASE_FILES="package.json package-lock.json app.cjs cpanel.sh VERSION"
 
+# How to run this script again, as it was started: hints the script prints can be typed
+# as they are, from the folder the person is in.
 case "$0" in
-  cpanel.sh | */cpanel.sh) SELF="$0" ;;
-  *) SELF=./cpanel.sh ;;
+  */*) if [ -x "$0" ]; then SELF="$0"; else SELF="bash $0"; fi ;;
+  *) SELF="bash $0" ;;
 esac
 
 COMMAND=""
@@ -70,18 +82,23 @@ SRC_DIR=""
 APP_DIR=""
 APP_NAME=""
 DATA_DIR=""
+DATA_PROBLEM=""
 SETTINGS=""
 STATE_FILE=""
+MARKER=""
 BACKUP_ROOT=""
 ACTIVATE=""
 LAST_BACKUP=""
 PARTIAL_BACKUP=""
 HEALTH=""
 HEALTH_NOTE=""
+RESUME=0
+STAGED=0
+MOVED=0
+ROLLBACK_BACKUP=""
 ROLLBACK_RESTORE=""
 ROLLBACK_REMOVE=""
-MOVED_DIST=0
-MOVED_MIGRATIONS=0
+NODE_ENV_UMASK=022
 
 # ---------------------------------------------------------------- messages
 
@@ -104,8 +121,9 @@ Commands:
 
 Options:
   --app-root <path>   The app folder, relative to your home folder (default apps/tours).
+                      It must be outside the folders the web server serves.
   --domain <name>     The address the app answers on, such as tours.example.com. Needed
-                      for install; update and status remember it.
+                      for install; update remembers it.
   --node <major>      The Node.js version to run on (default 24).
   --yes               Do not ask "continue?" questions.
   --dry-run           Print what would be done and change nothing.
@@ -155,7 +173,7 @@ parse_args() {
   done
   [ -z "$want" ] || usage_error "$want needs a value"
   [ -n "$COMMAND" ] || usage_error "give a command: install, update, backup or status"
-  valid_app_root "$APP_ROOT" || usage_error "--app-root must be a folder path relative to your home folder, made of letters, digits, dots, hyphens and underscores, and outside public_html: $APP_ROOT"
+  valid_app_root "$APP_ROOT" || usage_error "--app-root must be a folder path relative to your home folder, made of letters, digits, dots, hyphens and underscores, and the app folder must be outside the folders the web server serves (public_html, www, or a folder named after a domain): $APP_ROOT"
   [ -z "$DOMAIN" ] || valid_domain "$DOMAIN" || usage_error "--domain must be a host name in lowercase, such as tours.example.com, without https:// and without a path"
   [ -z "$NODE_MAJOR" ] || [[ "$NODE_MAJOR" =~ ^[1-9][0-9]?$ ]] || usage_error "--node must be a major version number, such as 24"
   if [ "$ALLOW_DOWNGRADE" = 1 ] && [ "$COMMAND" != update ]; then usage_error "--allow-downgrade goes only with update"; fi
@@ -165,14 +183,16 @@ parse_args() {
 # ---------------------------------------------------------------- validation
 
 # A relative path of plain names. No name starts with a dot, so "." and ".." cannot
-# appear, and the web root is refused: the settings file is written beside the app
-# folder and must never be reachable from the web.
+# appear. The folders a web server serves are refused, because the settings file is
+# written beside the app folder and must never be reachable from the web: public_html
+# and www, and any path whose first folder has a dot in its name, which is how hosting
+# names the web folder of an added domain (example.com, tours.example.com).
 valid_app_root() {
   local p="$1"
   [ "${#p}" -le 200 ] || return 1
   [[ "$p" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$ ]] || return 1
-  case "$p" in
-    public_html | public_html/* | www | www/* | nodevenv | nodevenv/* | backups | backups/*) return 1 ;;
+  case "${p%%/*}" in
+    public_html | www | nodevenv | backups | *.*) return 1 ;;
   esac
 }
 
@@ -215,7 +235,7 @@ resolve_paths() {
     /*) ;;
     *) die "HOME must be an absolute path" ;;
   esac
-  # The paths below are put inside quotes in commands this script prints and runs.
+  # The paths below are put inside single quotes in commands this script prints.
   # shellcheck disable=SC1003 # the backslash pattern is meant literally
   case "$HOME" in
     *"'"* | *'"'* | *'\'* | *'$'* | *'`'* | *$'\n'*) die "the home folder's path holds a quote, a backslash, a dollar sign or a line break; this script does not work there" ;;
@@ -223,21 +243,25 @@ resolve_paths() {
   SRC_DIR="$(cd "$(dirname "$0")" && pwd -P)" || die "cannot find the folder this script is in"
   APP_DIR="${HOME%/}/$APP_ROOT"
   APP_NAME="${APP_ROOT##*/}"
-  DATA_DIR="$APP_DIR-data"
   SETTINGS="$APP_DIR-config.env"
   STATE_FILE="$APP_DIR/$STATE_NAME"
+  MARKER="$APP_DIR/$MARKER_NAME"
   BACKUP_ROOT="${HOME%/}/backups"
 }
 
 # The folder holding the app, as the system resolves it; empty when it does not exist.
 app_dir_real() { if [ -d "$APP_DIR" ]; then (cd "$APP_DIR" && pwd -P); fi; }
 
-installed() { [ -f "$APP_DIR/dist/node/entry.js" ] || [ -f "$STATE_FILE" ]; }
+# An install is there when its build is, or the build an update moved aside, or one of
+# the two files this script leaves: an interrupted update must still be found.
+installed() {
+  [ -f "$APP_DIR/dist/node/entry.js" ] || [ -f "$APP_DIR/dist.old/node/entry.js" ] || [ -f "$STATE_FILE" ] || [ -f "$MARKER" ]
+}
 
-# One value from the state file, which holds NAME=value lines. Never sourced.
-state_value() {
-  [ -f "$STATE_FILE" ] || return 0
-  sed -n "s/^$1=//p" "$STATE_FILE" | head -n 1
+# One value from a file of NAME=value lines this script wrote. Never sourced.
+value_in() {
+  [ -f "$1" ] || return 0
+  sed -n "s/^$2=//p" "$1" | head -n 1
 }
 
 # Fills in the domain and the Node version from the state file where the command line
@@ -245,11 +269,11 @@ state_value() {
 read_state() {
   local v
   if [ -z "$DOMAIN" ]; then
-    v="$(state_value DOMAIN)"
+    v="$(value_in "$STATE_FILE" DOMAIN)"
     if [ -n "$v" ] && valid_domain "$v"; then DOMAIN="$v"; fi
   fi
   if [ -z "$NODE_MAJOR" ]; then
-    v="$(state_value NODE)"
+    v="$(value_in "$STATE_FILE" NODE)"
     if [[ "$v" =~ ^[1-9][0-9]?$ ]]; then NODE_MAJOR="$v"; fi
   fi
 }
@@ -270,6 +294,36 @@ write_state() {
     } >"$STATE_FILE.new"
     mv -f -- "$STATE_FILE.new" "$STATE_FILE"
   )
+}
+
+# Reads the data folder from the settings file: the DATA_DIR line and no other line.
+# Sets DATA_DIR, or DATA_PROBLEM and a non-zero status. The value is taken as app.cjs
+# takes it: spaces around the line and one pair of quotes around the value are dropped.
+read_data_dir() {
+  local v
+  DATA_DIR=""
+  DATA_PROBLEM=""
+  if [ ! -f "$SETTINGS" ]; then DATA_PROBLEM="the settings file $SETTINGS is missing"; return 1; fi
+  if [ ! -r "$SETTINGS" ]; then DATA_PROBLEM="the settings file $SETTINGS cannot be read"; return 1; fi
+  v="$(sed -n 's/^[[:space:]]*DATA_DIR=//p' "$SETTINGS" | head -n 1 | tr -d '\r')"
+  v="${v%"${v##*[![:space:]]}"}"
+  case "$v" in
+    \"*\") v="${v#\"}"; v="${v%\"}" ;;
+    \'*\') v="${v#\'}"; v="${v%\'}" ;;
+  esac
+  case "$v" in
+    /*) DATA_DIR="${v%/}"; [ -n "$DATA_DIR" ] || { DATA_PROBLEM="DATA_DIR in $SETTINGS must not be /"; return 1; } ;;
+    "") DATA_PROBLEM="the settings file $SETTINGS has no DATA_DIR= line"; return 1 ;;
+    *) DATA_PROBLEM="DATA_DIR in $SETTINGS is not an absolute path"; return 1 ;;
+  esac
+}
+
+# The data folder of an existing install, with its database. Stops otherwise: a backup
+# or an update that cannot find the data must not go on as if there were none.
+require_data() {
+  read_data_dir || die "$DATA_PROBLEM, so the data folder is not known; nothing was changed. The file must hold a line DATA_DIR=<the data folder's full path>"
+  [ -d "$DATA_DIR" ] || die "the data folder $DATA_DIR, named by DATA_DIR in $SETTINGS, does not exist; nothing was changed"
+  [ -f "$DATA_DIR/db.sqlite" ] || die "there is no database at $DATA_DIR/db.sqlite (DATA_DIR is read from $SETTINGS); nothing was changed. The app writes it the first time it starts: if it never has, open its address once and try again; if it has, DATA_DIR points at the wrong folder"
 }
 
 # The version in a folder: its VERSION file, or the version line of its package.json
@@ -322,7 +376,7 @@ in_node_env() {
   info "\$ source $ACTIVATE && cd $APP_DIR && ${q% }"
   [ "$DRY_RUN" = 1 ] && return 0
   (
-    umask 022
+    umask "$NODE_ENV_UMASK"
     set +eu
     # shellcheck source=/dev/null
     . "$ACTIVATE" || exit 1
@@ -331,9 +385,28 @@ in_node_env() {
   )
 }
 
+# True when the app's Node.js environment is there and has a node program.
+node_env_has_node() {
+  [ -f "$ACTIVATE" ] || return 1
+  (
+    set +eu
+    # shellcheck source=/dev/null
+    . "$ACTIVATE" >/dev/null 2>&1 || exit 1
+    command -v node >/dev/null 2>&1
+  )
+}
+
 install_packages() {
+  local was_link=0
   say "Installing the app's packages (npm ci, without development packages and without install scripts)"
-  in_node_env npm ci --omit=dev --ignore-scripts
+  # Some hosting keeps the app's node_modules as a link into the Node.js environment.
+  # Whether npm ci keeps that link has not been confirmed on real hosting, so this is
+  # only watched and reported, never changed.
+  if [ -L "$APP_DIR/node_modules" ]; then was_link=1; fi
+  in_node_env npm ci --omit=dev --ignore-scripts || return 1
+  if [ "$was_link" = 1 ] && [ ! -L "$APP_DIR/node_modules" ]; then
+    warn "$APP_DIR/node_modules was a link into the Node.js environment before npm ci and is a plain folder now. If cPanel's \"Setup Node.js App\" page complains about it, see the guide's list of things not yet confirmed on real hosting"
+  fi
 }
 
 restart_app() {
@@ -398,20 +471,26 @@ health_hints() {
 
 # ---------------------------------------------------------------- backup
 
-have_sqlite3() { [ "${CPANEL_TEST_NO_SQLITE3:-0}" != 1 ] && command -v sqlite3 >/dev/null 2>&1; }
-
 # A consistent copy of a database that may be in use and in WAL mode: SQLite itself
-# reads one snapshot and writes the copy. A plain file copy could be torn.
+# reads one snapshot and writes the copy (a plain file copy could be torn), and the copy
+# is then checked with PRAGMA integrity_check. The app's own Node.js does it; the
+# sqlite3 tool is used only where that Node.js is not there.
 copy_database() {
-  local from="$1" to="$2"
-  if have_sqlite3; then
+  local from="$1" to="$2" check
+  if node_env_has_node; then
+    info "copying with the app's Node.js (VACUUM INTO), then checking the copy (PRAGMA integrity_check)"
+    # shellcheck disable=SC2016 # the program text is for Node, not for the shell
+    NODE_ENV_UMASK=077 in_node_env node -e 'const { DatabaseSync } = require("node:sqlite"); const [from, to] = process.argv.slice(1); const db = new DatabaseSync(from, { timeout: 5000 }); try { db.prepare("VACUUM INTO ?").run(to); } finally { db.close(); } const copy = new DatabaseSync(to, { readOnly: true }); let rows; try { rows = copy.prepare("PRAGMA integrity_check").all(); } finally { copy.close(); } if (rows.length !== 1 || Object.values(rows[0])[0] !== "ok") { console.error("the copy did not pass the integrity check"); process.exit(1); }' "$from" "$to" || return 1
+  elif command -v sqlite3 >/dev/null 2>&1; then
+    info "the app's Node.js was not found at $ACTIVATE, so the copy is made with the sqlite3 tool"
     info "\$ sqlite3 $from \".backup '$to'\""
     sqlite3 "$from" ".backup '$to'" || return 1
+    info "\$ sqlite3 $to \"PRAGMA integrity_check;\""
+    check="$(sqlite3 "$to" "PRAGMA integrity_check;" 2>&1)" || { warn "the integrity check of the copy could not be run"; return 1; }
+    [ "$check" = ok ] || { warn "the copy did not pass the integrity check"; return 1; }
   else
-    info "the sqlite3 tool is not installed, so the copy is made with the app's Node.js (VACUUM INTO)"
-    [ -f "$ACTIVATE" ] || { warn "the app's Node.js environment was not found at $ACTIVATE"; return 1; }
-    # shellcheck disable=SC2016 # the program text is for Node, not for the shell
-    in_node_env node -e 'const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1], { timeout: 5000 }); try { db.prepare("VACUUM INTO ?").run(process.argv[2]); } finally { db.close(); }' "$from" "$to" || return 1
+    warn "neither the app's Node.js (looked for at $ACTIVATE) nor the sqlite3 tool is available to copy the database safely"
+    return 1
   fi
   # Whatever the tool reported, the copy must be there and be a database.
   [ -s "$to" ] || { warn "the database copy was not written"; return 1; }
@@ -425,8 +504,9 @@ remove_partial_backup() {
   PARTIAL_BACKUP=""
 }
 
-# Writes a backup folder and sets LAST_BACKUP. The folder gets its final name only when
-# every part was copied; a half-made one is removed.
+# Writes a backup folder and sets LAST_BACKUP. DATA_DIR is known and holds a database
+# (require_data). The folder gets its final name only when every part was copied; a
+# half-made one is removed.
 do_backup() {
   local ts dest n=1 d f
   local -a members=()
@@ -438,24 +518,21 @@ do_backup() {
     if [ -e "$APP_DIR/$f" ]; then members+=("$f"); fi
   done
   if [ "$DRY_RUN" = 1 ]; then
-    info "would copy the database $DATA_DIR/db.sqlite with SQLite's own backup, never a plain file copy"
+    info "would copy the database $DATA_DIR/db.sqlite with SQLite itself and check the copy; never a plain file copy"
     info "would copy $DATA_DIR/drafts and $DATA_DIR/public"
     info "would write app.tgz from $APP_DIR: ${members[*]:-nothing}"
     info "would copy the settings file $SETTINGS (mode 600)"
     LAST_BACKUP="$dest"
     return 0
   fi
+  [ -f "$DATA_DIR/db.sqlite" ] || { warn "there is no database at $DATA_DIR/db.sqlite"; return 1; }
   mkdir -p -- "$BACKUP_ROOT" || return 1
   PARTIAL_BACKUP="$dest.partial"
   mkdir -- "$PARTIAL_BACKUP" || { PARTIAL_BACKUP=""; return 1; }
   chmod 700 -- "$PARTIAL_BACKUP" || { remove_partial_backup; return 1; }
 
-  if [ -f "$DATA_DIR/db.sqlite" ]; then
-    info "the database"
-    copy_database "$DATA_DIR/db.sqlite" "$PARTIAL_BACKUP/db.sqlite" || { warn "copying the database failed"; remove_partial_backup; return 1; }
-  else
-    info "no database at $DATA_DIR/db.sqlite yet (the app writes it the first time it starts)"
-  fi
+  info "the database $DATA_DIR/db.sqlite"
+  copy_database "$DATA_DIR/db.sqlite" "$PARTIAL_BACKUP/db.sqlite" || { warn "copying the database failed"; remove_partial_backup; return 1; }
   for d in drafts public; do
     if [ -d "$DATA_DIR/$d" ]; then
       info "the $d folder"
@@ -466,11 +543,9 @@ do_backup() {
     info "the app files, as app.tgz: ${members[*]}"
     tar -czf "$PARTIAL_BACKUP/app.tgz" -C "$APP_DIR" -- "${members[@]}" || { warn "archiving the app files failed"; remove_partial_backup; return 1; }
   fi
-  if [ -f "$SETTINGS" ]; then
-    info "the settings file (it holds the setup code; kept at mode 600)"
-    cp -- "$SETTINGS" "$PARTIAL_BACKUP/$APP_NAME-config.env" || { warn "copying the settings file failed"; remove_partial_backup; return 1; }
-    chmod 600 -- "$PARTIAL_BACKUP/$APP_NAME-config.env" || { remove_partial_backup; return 1; }
-  fi
+  info "the settings file (it holds the setup code; kept at mode 600)"
+  cp -- "$SETTINGS" "$PARTIAL_BACKUP/$APP_NAME-config.env" || { warn "copying the settings file failed"; remove_partial_backup; return 1; }
+  chmod 600 -- "$PARTIAL_BACKUP/$APP_NAME-config.env" || { remove_partial_backup; return 1; }
   # Nothing in the backup is for anyone but this account.
   chmod -R go-rwx -- "$PARTIAL_BACKUP" || { remove_partial_backup; return 1; }
   mv -- "$PARTIAL_BACKUP" "$dest" || { remove_partial_backup; return 1; }
@@ -493,20 +568,38 @@ last_backup() {
 
 # ---------------------------------------------------------------- files
 
-# Copies this archive's files into the app folder. The folders must not be there.
-copy_release() {
+# Only these two names, inside the app folder, hold staged copies; they are this
+# script's own and are removed before staging again.
+remove_staged() { rm -rf -- "$APP_DIR/dist.new" "$APP_DIR/migrations.new"; }
+
+# Copies this archive's dist and migrations to dist.new and migrations.new in the app
+# folder. The running app is not touched by this.
+stage_release() {
   local f
   if [ "$DRY_RUN" = 1 ]; then
-    info "would copy into $APP_DIR: $RELEASE_DIRS $RELEASE_FILES"
+    info "would copy this archive's dist and migrations to $APP_DIR/dist.new and $APP_DIR/migrations.new"
     return 0
   fi
   (
     umask 022
     mkdir -p -- "$APP_DIR" || exit 1
+    rm -rf -- "$APP_DIR/dist.new" "$APP_DIR/migrations.new" || exit 1
     for f in $RELEASE_DIRS; do
-      [ ! -e "$APP_DIR/$f" ] || { warn "$APP_DIR/$f is in the way"; exit 1; }
-      cp -R -- "$SRC_DIR/$f" "$APP_DIR/$f" || exit 1
+      cp -R -- "$SRC_DIR/$f" "$APP_DIR/$f.new" || exit 1
     done
+  ) || return 1
+  STAGED=1
+}
+
+# Copies the archive's single files into the app folder.
+copy_release_files() {
+  local f
+  if [ "$DRY_RUN" = 1 ]; then
+    info "would copy into $APP_DIR: $RELEASE_FILES"
+    return 0
+  fi
+  (
+    umask 022
     for f in $RELEASE_FILES; do
       cp -f -- "$SRC_DIR/$f" "$APP_DIR/$f" || exit 1
     done
@@ -516,9 +609,34 @@ copy_release() {
 
 new_setup_code() { od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
 
-# Creates the data folder and the settings file, each only if it is not there yet.
-create_data_and_settings() {
+# Creates the settings file and the data folder, each only if it is not there yet. An
+# existing settings file decides where the data folder is.
+create_settings_and_data() {
   local code tmp
+  if [ -e "$SETTINGS" ]; then
+    info "the settings file $SETTINGS is already there and is kept as it is, with the setup code it holds"
+    read_data_dir || die "$DATA_PROBLEM. The file must hold a line DATA_DIR=<the data folder's full path>; put that right and finish with: $SELF update --yes --app-root $APP_ROOT"
+    [ "$DRY_RUN" = 1 ] || chmod 600 -- "$SETTINGS"
+  else
+    DATA_DIR="$APP_DIR-data"
+    if [ "$DRY_RUN" = 1 ]; then
+      info "would write the settings file $SETTINGS (mode 600) with DATA_DIR and a new setup code"
+    else
+      code="$(new_setup_code)"
+      [[ "$code" =~ ^[0-9a-f]{64}$ ]] || die "could not make a setup code from /dev/urandom"
+      tmp="$SETTINGS.new"
+      # printf is part of the shell, so the code is on no command line.
+      {
+        printf '# Settings of the tour platform in %s. Keep this file private.\n' "$APP_DIR"
+        printf 'DATA_DIR=%s\n' "$DATA_DIR"
+        printf 'SETUP_CODE=%s\n' "$code"
+      } >"$tmp"
+      chmod 600 -- "$tmp"
+      mv -- "$tmp" "$SETTINGS"
+      code=""
+      info "wrote the settings file $SETTINGS (mode 600)"
+    fi
+  fi
   if [ -d "$DATA_DIR" ]; then
     info "the data folder $DATA_DIR is already there and is kept as it is"
   elif [ "$DRY_RUN" = 1 ]; then
@@ -528,40 +646,21 @@ create_data_and_settings() {
     chmod 700 -- "$DATA_DIR"
     info "created the data folder $DATA_DIR (mode 700)"
   fi
-  if [ -e "$SETTINGS" ]; then
-    info "the settings file $SETTINGS is already there and is kept as it is, with the setup code it holds"
-    [ "$DRY_RUN" = 1 ] || chmod 600 -- "$SETTINGS"
-    return 0
-  fi
-  if [ "$DRY_RUN" = 1 ]; then
-    info "would write the settings file $SETTINGS (mode 600) with DATA_DIR and a new setup code"
-    return 0
-  fi
-  code="$(new_setup_code)"
-  [[ "$code" =~ ^[0-9a-f]{64}$ ]] || die "could not make a setup code from /dev/urandom"
-  tmp="$SETTINGS.new"
-  # printf is part of the shell, so the code is on no command line.
-  {
-    printf '# Settings of the tour platform in %s. Keep this file private.\n' "$APP_DIR"
-    printf 'DATA_DIR=%s\n' "$DATA_DIR"
-    printf 'SETUP_CODE=%s\n' "$code"
-  } >"$tmp"
-  chmod 600 -- "$tmp"
-  mv -- "$tmp" "$SETTINGS"
-  code=""
-  info "wrote the settings file $SETTINGS (mode 600)"
 }
 
 # ---------------------------------------------------------------- commands
 
 cmd_install() {
-  local version out rc=0
+  local version out rc=0 f
   if installed; then
     die "$APP_DIR already holds an install (version $(version_in "$APP_DIR" || true)). To put a newer version in its place use: $SELF update --app-root $APP_ROOT"
   fi
   check_source
   set_node_paths
   version="$(version_in "$SRC_DIR")"
+  for f in $RELEASE_DIRS; do
+    [ ! -e "$APP_DIR/$f" ] || die "$APP_DIR/$f is in the way: part of an earlier attempt. Remove it and run install again"
+  done
   if [ "$DRY_RUN" != 1 ]; then
     command -v cloudlinux-selector >/dev/null 2>&1 || die "the cloudlinux-selector command was not found. This script needs hosting with cPanel's \"Setup Node.js App\"; ask your hosting provider whether your plan has it and whether it works over SSH"
   fi
@@ -569,8 +668,8 @@ cmd_install() {
   say "Install version $version"
   info "address:        https://$DOMAIN"
   info "app folder:     $APP_DIR (Node.js $NODE_MAJOR)"
-  info "data folder:    $DATA_DIR"
   info "settings file:  $SETTINGS"
+  info "data folder:    $APP_DIR-data, unless an existing settings file names another"
   confirm "Create the Node.js app and install?" || die "stopped; nothing was changed"
 
   say "Creating the Node.js app"
@@ -590,12 +689,16 @@ cmd_install() {
   fi
 
   say "Copying the app files to $APP_DIR"
-  copy_release || die "copying the files failed. $APP_DIR may hold part of them; remove what was copied there and run install again"
+  stage_release || { remove_staged; die "copying the files failed; remove what was copied to $APP_DIR and run install again"; }
+  if [ "$DRY_RUN" != 1 ]; then
+    for f in $RELEASE_DIRS; do mv -- "$APP_DIR/$f.new" "$APP_DIR/$f"; done
+  fi
+  copy_release_files || die "copying the files failed; remove what was copied to $APP_DIR and run install again"
   write_state
-  say "Data folder and settings file"
-  create_data_and_settings
+  say "Settings file and data folder"
+  create_settings_and_data
   require_node_env
-  install_packages || die "installing the packages failed. The files are in place; when the cause is fixed, finish with: $SELF update --yes --app-root $APP_ROOT"
+  install_packages || die "installing the packages failed. The files are in place; when the cause is fixed, open the app's address once and finish with: $SELF update --yes --app-root $APP_ROOT"
   restart_app || die "could not touch the restart file; restart the app in cPanel's \"Setup Node.js App\""
 
   if [ "$DRY_RUN" = 1 ]; then
@@ -603,6 +706,7 @@ cmd_install() {
     say "Dry run: nothing was changed"
     return 0
   fi
+  rc=0
   if report_health; then
     say "Installed version $version, and it answers at https://$DOMAIN"
   else
@@ -612,80 +716,159 @@ cmd_install() {
   fi
   info "The settings file is $SETTINGS (only your account can read it)."
   info "The setup code is inside it, on the line that starts with SETUP_CODE=. It is not shown here on purpose."
-  info "Read it in cPanel's File Manager or with a text editor over SSH, then open https://$DOMAIN/setup and enter it."
+  info "Open the file in cPanel's File Manager or in a text editor, then open https://$DOMAIN/setup and enter the code."
   info "Whoever enters the setup code first becomes the owner, so keep it private."
   return "$rc"
 }
 
+# The commands that bring the previous version back. Each line stands alone, changes
+# into the app folder itself and does nothing when its work is already done, so the
+# lines can be pasted one by one, and pasted again.
 print_rollback() {
+  local cd="cd '$APP_DIR' &&"
   say "To go back to the version that ran before, run these commands"
-  info "cd $APP_DIR"
-  if [ "$MOVED_DIST" = 1 ]; then info "rm -rf dist && mv dist.old dist"; fi
-  if [ "$MOVED_MIGRATIONS" = 1 ]; then info "rm -rf migrations && mv migrations.old migrations"; fi
-  if [ -n "$ROLLBACK_REMOVE" ]; then info "rm -f $ROLLBACK_REMOVE"; fi
-  if [ -n "$ROLLBACK_RESTORE" ] && [ -n "$LAST_BACKUP" ]; then info "tar -xzf $LAST_BACKUP/app.tgz $ROLLBACK_RESTORE"; fi
-  info "source $ACTIVATE && npm ci --omit=dev --ignore-scripts"
-  info "touch $APP_DIR/tmp/restart.txt"
-  info "Nothing was rolled back for you. The backup from before the update is $LAST_BACKUP."
+  info "$cd [ -d dist.old ] && rm -rf dist && mv dist.old dist"
+  info "$cd [ -d migrations.old ] && rm -rf migrations && mv migrations.old migrations"
+  if [ -n "$ROLLBACK_REMOVE" ]; then info "$cd rm -f $ROLLBACK_REMOVE"; fi
+  if [ -n "$ROLLBACK_RESTORE" ] && [ -n "$ROLLBACK_BACKUP" ]; then info "$cd tar -xzf '$ROLLBACK_BACKUP/app.tgz' $ROLLBACK_RESTORE"; fi
+  info "$cd source '$ACTIVATE' && npm ci --omit=dev --ignore-scripts"
+  info "$cd rm -f $MARKER_NAME && touch tmp/restart.txt"
+  info "Nothing was rolled back for you. The backup from before the update is ${ROLLBACK_BACKUP:-not known; look in $BACKUP_ROOT}."
   info "If the new version already changed the database, the old version may not start on it: then also restore db.sqlite from that backup, as the guide's restore steps describe."
 }
 
-# Moves the running dist and migrations aside and copies this archive's files in.
-swap_release() {
-  local f
+write_marker() {
+  (
+    umask 022
+    {
+      printf '# An update by cpanel.sh was started and has not finished. While this file is\n'
+      printf '# here, dist.old and migrations.old are kept: running update again resumes.\n'
+      printf 'BACKUP=%s\n' "$ROLLBACK_BACKUP"
+      printf 'RESTORE=%s\n' "$ROLLBACK_RESTORE"
+      printf 'REMOVE=%s\n' "$ROLLBACK_REMOVE"
+    } >"$MARKER.new"
+    mv -f -- "$MARKER.new" "$MARKER"
+  )
+}
+
+# Only names of the archive's own files, in the archive's order.
+known_files() {
+  local f out=""
   for f in $RELEASE_FILES; do
-    if [ -e "$APP_DIR/$f" ]; then ROLLBACK_RESTORE="${ROLLBACK_RESTORE:+$ROLLBACK_RESTORE }$f"; else ROLLBACK_REMOVE="${ROLLBACK_REMOVE:+$ROLLBACK_REMOVE }$f"; fi
+    case " $1 " in *" $f "*) out="${out:+$out }$f" ;; esac
   done
-  if [ "$DRY_RUN" = 1 ]; then
-    info "would remove $APP_DIR/dist.old and $APP_DIR/migrations.old from an earlier update"
-    info "would move dist to dist.old and migrations to migrations.old"
-    copy_release
-    return 0
+  printf '%s' "$out"
+}
+
+# What the interrupted update recorded about the way back.
+read_marker() {
+  local b
+  b="$(value_in "$MARKER" BACKUP)"
+  case "$b" in
+    "$BACKUP_ROOT"/?*) if [ -f "$b/app.tgz" ]; then ROLLBACK_BACKUP="$b"; fi ;;
+  esac
+  ROLLBACK_RESTORE="$(known_files "$(value_in "$MARKER" RESTORE)")"
+  ROLLBACK_REMOVE="$(known_files "$(value_in "$MARKER" REMOVE)")"
+}
+
+# Puts a staged folder in place. The folder it replaces becomes <name>.old, unless an
+# interrupted update already left a <name>.old: that one is the last good copy and is
+# kept, and the folder in its place, which that update had begun, is dropped.
+swap_dir() {
+  local d="$1"
+  MOVED=1
+  if [ "$RESUME" = 1 ] && [ -e "$APP_DIR/$d.old" ]; then
+    rm -rf -- "${APP_DIR:?}/$d" || return 1
+  elif [ -e "$APP_DIR/$d" ]; then
+    mv -- "$APP_DIR/$d" "$APP_DIR/$d.old" || return 1
   fi
-  # Only these two names, inside the app folder, are ever removed.
-  rm -rf -- "$APP_DIR/dist.old" "$APP_DIR/migrations.old" || return 1
-  if [ -e "$APP_DIR/dist" ]; then mv -- "$APP_DIR/dist" "$APP_DIR/dist.old" || return 1; MOVED_DIST=1; fi
-  if [ -e "$APP_DIR/migrations" ]; then mv -- "$APP_DIR/migrations" "$APP_DIR/migrations.old" || return 1; MOVED_MIGRATIONS=1; fi
-  info "the previous version is kept as dist.old and migrations.old"
-  copy_release
+  mv -- "$APP_DIR/$d.new" "$APP_DIR/$d"
+}
+
+on_signal() {
+  trap - INT TERM HUP
+  printf '\n' >&2
+  warn "interrupted"
+  if [ "$MOVED" = 1 ]; then
+    info "The update was cut off after it began to replace the app files."
+    info "To finish it, run the update again: it resumes, and keeps dist.old and migrations.old as the way back."
+    print_rollback
+  elif [ "$STAGED" = 1 ]; then
+    remove_staged || true
+    info "The app files were not touched; the staged copies were removed."
+  elif [ "$COMMAND" = update ] || [ "$COMMAND" = backup ]; then
+    info "The app files were not touched."
+  fi
+  exit 130
 }
 
 cmd_update() {
-  local old new
+  local old new f
   installed || die "nothing is installed at $APP_DIR. For a first install use: $SELF install --domain <name> --app-root $APP_ROOT"
   check_source
   read_state
   set_node_paths
+  [ -n "$DOMAIN" ] || die "the address of this install is not recorded, so the update could not be checked afterwards; nothing was changed. Give it once and it is remembered: $SELF update --domain <name> --app-root $APP_ROOT"
   new="$(version_in "$SRC_DIR")"
   old="$(version_in "$APP_DIR" || true)"
   if [ -n "$old" ] && version_lt "$new" "$old" && [ "$ALLOW_DOWNGRADE" != 1 ]; then
     die "this archive is version $new, older than the installed $old; nothing was changed. An older version may not start on a database a newer one has changed. To do it anyway add --allow-downgrade"
   fi
+  require_data
   require_node_env
+  if [ -f "$MARKER" ]; then RESUME=1; fi
 
   say "Update ${old:-an install of unknown version} to $new"
+  if [ "$RESUME" = 1 ]; then info "An earlier update was cut off. This run finishes it; dist.old and migrations.old from before it are kept."; fi
+  info "address:        https://$DOMAIN"
   info "app folder:     $APP_DIR (Node.js $NODE_MAJOR)"
   info "data folder:    $DATA_DIR (not touched)"
   info "settings file:  $SETTINGS (not touched)"
-  if [ -n "$DOMAIN" ]; then info "address:        https://$DOMAIN"; else warn "no domain is recorded, so the health check cannot be made; add --domain <name> once"; fi
   confirm "Back up, replace the app files and restart?" || die "stopped; nothing was changed"
 
   do_backup || die "the backup failed, so the update did not start; nothing was changed"
+  if [ "$RESUME" = 1 ]; then
+    read_marker
+  else
+    ROLLBACK_BACKUP="$LAST_BACKUP"
+    for f in $RELEASE_FILES; do
+      if [ -e "$APP_DIR/$f" ]; then ROLLBACK_RESTORE="${ROLLBACK_RESTORE:+$ROLLBACK_RESTORE }$f"; else ROLLBACK_REMOVE="${ROLLBACK_REMOVE:+$ROLLBACK_REMOVE }$f"; fi
+    done
+  fi
 
   say "Putting version $new in place"
-  if ! swap_release; then
-    [ "$MOVED_DIST" = 0 ] && [ "$MOVED_MIGRATIONS" = 0 ] || print_rollback
-    die "replacing the app files failed part-way"
+  stage_release || { remove_staged; die "copying the new files beside the running ones failed; the app files were not touched"; }
+  if [ "$DRY_RUN" = 1 ]; then
+    info "would write $MARKER, then move dist to dist.old and migrations to migrations.old (replacing copies an earlier, finished update left) and move the new ones in"
+    copy_release_files
+    write_state
+  else
+    # From here on an interruption must leave something later runs recognise: the state
+    # file and the marker are written before anything is moved.
+    write_state
+    if [ "$RESUME" != 1 ]; then
+      rm -rf -- "$APP_DIR/dist.old" "$APP_DIR/migrations.old" || die "could not remove dist.old and migrations.old of an earlier update; the app files were not touched"
+      write_marker || die "could not write $MARKER; the app files were not touched"
+    fi
+    if ! { swap_dir dist && swap_dir migrations && copy_release_files; }; then
+      print_rollback
+      die "replacing the app files failed part-way. Run the update again to finish it, or go back with the commands above"
+    fi
+    info "the previous version is kept as dist.old and migrations.old"
   fi
-  write_state
   if ! install_packages; then
     print_rollback
-    die "installing the packages failed; the app was not restarted and may still be running the previous version from memory"
+    die "installing the packages failed; the app was not restarted and may still be running the previous version from memory. Run the update again to finish it, or go back with the commands above"
   fi
+  # The new files and their packages are in place: the update is no longer under way.
+  [ "$DRY_RUN" = 1 ] || rm -f -- "$MARKER"
   if ! restart_app; then
     print_rollback
     die "could not touch the restart file; restart the app in cPanel's \"Setup Node.js App\""
   fi
+  # The files are in place and the restart is asked for: an interruption from here on
+  # only stops the check.
+  trap - INT TERM HUP
   if [ "$DRY_RUN" = 1 ]; then
     report_health
     say "Dry run: nothing was changed"
@@ -706,6 +889,7 @@ cmd_backup() {
   installed || die "nothing is installed at $APP_DIR"
   read_state
   set_node_paths
+  require_data
   do_backup || die "the backup failed; no backup folder was written"
   if [ "$DRY_RUN" = 1 ]; then say "Dry run: nothing was changed"; fi
 }
@@ -720,13 +904,17 @@ cmd_status() {
   say "Status"
   info "version:        ${version:-unknown}"
   info "app folder:     $APP_DIR (app root $APP_ROOT, Node.js $NODE_MAJOR)"
-  if [ -d "$DATA_DIR" ]; then
+  if [ -f "$MARKER" ]; then info "update:         an update was cut off before it finished; run the update again from the unpacked archive to finish it"; fi
+  if [ -f "$SETTINGS" ]; then info "settings file:  $SETTINGS"; else info "settings file:  $SETTINGS is MISSING; the app cannot start without it"; fi
+  if ! read_data_dir; then
+    info "data folder:    NOT KNOWN: $DATA_PROBLEM"
+  elif [ -d "$DATA_DIR" ]; then
     size="$(du -sh -- "$DATA_DIR" 2>/dev/null | cut -f1 || true)"
     info "data folder:    $DATA_DIR, ${size:-size unknown}"
+    [ -f "$DATA_DIR/db.sqlite" ] || info "database:       none at $DATA_DIR/db.sqlite yet; the app writes it the first time it starts"
   else
     info "data folder:    $DATA_DIR is MISSING"
   fi
-  if [ -f "$SETTINGS" ]; then info "settings file:  $SETTINGS"; else info "settings file:  $SETTINGS is MISSING; the app cannot start without it"; fi
   info "last backup:    ${last:-none yet}"
   report_health || true
 }
@@ -737,6 +925,8 @@ main() {
   parse_args "$@"
   resolve_paths
   trap on_exit EXIT
+  # An interruption says what state the app files are in, and cleans up after itself.
+  trap on_signal INT TERM HUP
   case "$COMMAND" in
     install) cmd_install ;;
     update) cmd_update ;;

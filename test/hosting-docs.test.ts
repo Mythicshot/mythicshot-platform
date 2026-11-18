@@ -68,7 +68,7 @@ const ALLOWED_HOSTS = new Set([
 ]);
 
 /** Last labels that are file extensions, not top-level domains. */
-const FILE_EXTENSIONS = new Set(["sh", "md", "yml", "yaml", "json", "ts", "js", "cjs", "sqlite", "tar", "gz", "tgz", "toml", "pem", "env", "html", "old", "txt"]);
+const FILE_EXTENSIONS = new Set(["sh", "md", "yml", "yaml", "json", "ts", "js", "cjs", "sqlite", "tar", "gz", "tgz", "toml", "pem", "env", "html", "old", "new", "txt"]);
 
 function isPlaceholderHost(host: string): boolean {
   return /(^|\.)example\.(com|net|org)$/.test(host) || /(^|\.)fly\.dev$/.test(host);
@@ -445,6 +445,11 @@ describe("the shared cPanel hosting guide", () => {
     expect(last).toMatch(/\*\*Run by hand on real hosting,\*\*/);
     expect(last).toMatch(/\*\*Tested only on a development computer,\*\* never on real hosting/);
     expect(last).toContain("](../../deploy/cpanel/test-cpanel.sh)");
+    // What nobody has seen on real hosting yet is listed, the node_modules link first.
+    const open = last.slice(last.indexOf("**Not yet confirmed on real hosting,**"));
+    expect(open).toMatch(/^\*\*Not yet confirmed on real hosting,\*\*[^\n]*\n\n1\. What `npm ci` does to `node_modules` in the app folder\./);
+    expect(cpanelSh).toContain("node_modules was a link into the Node.js environment before npm ci and is a plain folder now");
+    expect((JSON.parse(packageJson) as { scripts: Record<string, string> }).scripts["test:cpanel"]).toBe("bash deploy/cpanel/test-cpanel.sh");
   });
 
   it("links no external page, so none that was not opened, and names no provider", () => {
@@ -505,15 +510,23 @@ describe("the shared cPanel hosting guide", () => {
     expect(lines).toContain("curl https://tours.example.com/healthz");
     // The rollback commands the guide shows are the ones the script prints, with the guide's paths.
     const body = cpanelSh.match(/^print_rollback\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
-    const printed = [...body.matchAll(/info "((?:cd|rm -rf|tar -xzf|source|touch) [^"]*)"/g)].map((m) => m[1]);
+    // Every one starts by changing into the app folder, quoted, so each stands alone.
+    expect(body).toContain(`local cd="cd '$APP_DIR' &&"`);
+    const printed = [...body.matchAll(/info "\$cd ([^"]*)"/g)].map((m) => m[1]);
     expect(printed).toHaveLength(6);
+    expect(printed[0]).toBe("[ -d dist.old ] && rm -rf dist && mv dist.old dist");
+    expect(printed[1]).toBe("[ -d migrations.old ] && rm -rf migrations && mv migrations.old migrations");
     const fill = (s: string) =>
+      "cd '/home/you/apps/tours' && " +
       s
-        .replace("$APP_DIR", "/home/you/apps/tours")
         .replace("$ACTIVATE", "/home/you/nodevenv/apps/tours/24/bin/activate")
-        .replace("$LAST_BACKUP", "/home/you/backups/tours-<date>-<time>")
-        .replace("$ROLLBACK_RESTORE", "package.json package-lock.json app.cjs cpanel.sh VERSION");
-    for (const cmd of printed) expect(lines, cmd).toContain(fill(cmd));
+        .replace("$ROLLBACK_BACKUP", "/home/you/backups/tours-<date>-<time>")
+        .replace("$ROLLBACK_RESTORE", "package.json package-lock.json app.cjs cpanel.sh VERSION")
+        .replace("$MARKER_NAME", ".cpanel-update");
+    expect(cpanelSh).toMatch(/^readonly MARKER_NAME=\.cpanel-update$/m);
+    // The one line left out is printed only for an install that lacked some files before.
+    for (const cmd of printed.filter((c) => !c.includes("$ROLLBACK_REMOVE"))) expect(lines, cmd).toContain(fill(cmd));
+    expect(printed.filter((c) => c.includes("$ROLLBACK_REMOVE"))).toEqual(["rm -f $ROLLBACK_REMOVE"]);
   });
 
   it("the archive it names is the one the packager writes, by the command package.json has", () => {
@@ -530,7 +543,10 @@ describe("the shared cPanel hosting guide", () => {
     expect(guide).toMatch(/> \[!WARNING\]\n> Whoever enters the setup code first becomes the owner/);
     expect(guide).toMatch(/> \[!WARNING\]\n> The API token works like a password/);
     expect(guide).toMatch(/The script never prints the setup code/);
-    expect(lines).toContain("grep '^SETUP_CODE=' ~/apps/tours-config.env");
+    // The code is read in the File Manager or an editor, never printed into a terminal.
+    for (const l of lines) expect(l, l).not.toMatch(/\b(grep|cat|less|more|head|tail|sed|awk)\b.*(SETUP_CODE|config\.env)/);
+    expect(lines).toContain("nano ~/apps/tours-config.env");
+    expect(guide).toMatch(/Do not print the file or the line/);
     expect(guide).not.toMatch(/SETUP_CODE=[^\s`'<]/);
   });
 

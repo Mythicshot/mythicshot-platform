@@ -18,6 +18,7 @@
     "test:node": "vitest run -c vitest.node.config.ts",
     "test": "npm run test:cf && npm run test:node",
     "test:container": "bash deploy/test-container.sh",
+    "test:cpanel": "bash deploy/cpanel/test-cpanel.sh",
     "build:player": "node scripts/build-player.ts",
     "setup:cloudflare": "node scripts/setup-cloudflare.ts",
     "package:cpanel": "node scripts/package-cpanel.ts",
