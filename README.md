@@ -79,11 +79,19 @@ npm run typecheck
 
 ### Run locally on the Workers runtime
 
+Create the tables in the local database first; without them `/healthz` still answers, but setup and every API route fail. Nothing here touches a Cloudflare account.
+
+```sh
+npx wrangler d1 migrations apply demo-platform --local
+```
+
+Copy `.dev.vars.example` to `.dev.vars` (ignored by Git) and put a generated code in it, as in step 9 of the [Cloudflare runbook](docs/runbook-cloudflare.md#9-set-the-setup-code). Then start the server.
+
 ```sh
 npx wrangler dev
 ```
 
-Then `curl http://localhost:8787/healthz` prints `{"ok":true}`. Put a local setup code, if needed, in `.dev.vars` (ignored by Git) as `SETUP_CODE=<your setup code>`.
+Then `curl http://localhost:8787/healthz` prints `{"ok":true}` and `/setup` opens the wizard. Leave `PUBLIC_IMAGE_BASE` empty locally: the app then serves published images itself on `/p/<name>` from the local public bucket. The local database and buckets live in `.wrangler/state`; delete that folder to start over.
 
 ### Run locally on Node
 

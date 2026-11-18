@@ -94,7 +94,7 @@ This creates the tables in the database. It asks you to confirm.
 npx wrangler d1 migrations apply demo-platform --remote
 ```
 
-**How to tell it worked:** it lists `0001_init.sql` and `0002_guide_cards.sql` as applied. Running it again says there is nothing to apply.
+**How to tell it worked:** it lists `0001_init.sql`, `0002_guide_cards.sql` and `0003_publish.sql` as applied. Running it again says there is nothing to apply.
 
 ## 6. Give the public bucket its hostname
 
@@ -112,7 +112,16 @@ Published tours load their images from the public bucket through a hostname of y
 
 The hostname must be on a zone in the same Cloudflare account as the bucket.
 
-**Unconfirmed:** the app reads `PUBLIC_IMAGE_BASE` today, but the published-tour pages that use it are still being built, so this step cannot be checked end to end yet.
+6. On the zone of `images.example.com`, add a response header transform rule that matches that hostname and sets these two headers on every response, the same ones the app sends when it serves images itself:
+
+```text
+X-Content-Type-Options: nosniff
+Content-Security-Policy: default-src 'none'; sandbox
+```
+
+The published-tour page builds each image address as `PUBLIC_IMAGE_BASE` plus `/p/<name>`, which is the object's key in the bucket, and its Content-Security-Policy allows images only from that origin. The value must be an `https://` address; anything else blocks every image.
+
+**Unconfirmed:** the dashboard path for the transform rule, and whether the zone's cache keeps serving an image after unpublish deletes it (images are sent with `Cache-Control: public, max-age=31536000, immutable`). Under `wrangler dev` there is no public bucket address, so this step can only be checked on a real deploy: leave `PUBLIC_IMAGE_BASE` empty locally.
 
 **How to tell it worked:** the custom domain shows as Active in the bucket's settings.
 
@@ -271,6 +280,9 @@ Cloudflare's [Workers pricing page](https://developers.cloudflare.com/workers/pl
 > Use above the free amounts is billed on paid plans; check both pricing pages before you rely on the free tier.
 
 **Unconfirmed:** whether R2 asks for a payment method before it can be used is not stated on the pages read.
+
+> [!WARNING]
+> On the Free plan one Worker request may make at most 50 subrequests, and every R2 and D1 call counts ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)). Publish reads and writes each image once, plus about ten database calls, so publishing a tour of more than about 19 steps fails on the Free plan.
 
 ## Troubleshooting by symptom
 
