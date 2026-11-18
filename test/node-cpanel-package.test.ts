@@ -123,7 +123,10 @@ describe("the cPanel archive", () => {
   it("holds no source, test, settings, dependency or leftover file", () => {
     for (const e of entries) {
       const p = e.path;
-      expect(p, p).not.toMatch(/(^|\/)(node_modules|src|test|tests|scripts|deploy|docs|\.git|\.wrangler|data|\.data)(\/|$)/);
+      expect(p, p).not.toMatch(/(^|\/)(node_modules|src|test|tests|scripts|deploy|\.git|\.wrangler|data|\.data)(\/|$)/);
+      // The repository's docs/ folder stays out. dist/docs/ is not it: that is the compiled
+      // src/docs/, the documentation page, which the test above holds to the source files.
+      expect(p.replace(/^dist\/docs\//, ""), p).not.toMatch(/(^|\/)docs(\/|$)/);
       expect(p, p).not.toMatch(/(^|\/)\.(env|dev\.vars)/);
       expect(p, p).not.toMatch(/\.(ts|map|sqlite|tgz|tar|gz|log)$/);
       expect(p, p).not.toMatch(/^dist\/(cpanel|cloudflare)(\/|$)/);
