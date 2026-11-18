@@ -39,11 +39,13 @@ import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, type ImageType } from "./sniff.
 export const UPLOAD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /** At most this many stale uploads are swept per create, to bound the work of one request. */
 const SWEEP_LIMIT = 5;
+/** The create body without a hash list: the manifest's cap plus room for the envelope around it. */
+const CREATE_BODY_BYTES = LIMITS.manifestBytes + 4096;
 /**
- * The create body: the manifest's cap, room for the envelope around it, and a fixed 14,000
- * bytes for the hash list of a replace (200 hashes of 64 characters, quoted and separated).
+ * The create body with the hash list of a replace: a fixed 14,000 bytes more (200 hashes
+ * of 64 characters, quoted and separated). Only a body that carries `sha256` may use them.
  */
-const CREATE_BODY_BYTES = LIMITS.manifestBytes + 4096 + 14_000;
+const CREATE_BODY_WITH_HASHES_BYTES = CREATE_BODY_BYTES + 14_000;
 /** Attempts at a fresh slug when a new tour's slug collides. */
 const SLUG_ATTEMPTS = 5;
 /** Open uploads per workspace when the config sets no other number. */
@@ -244,8 +246,8 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
   app.post("/api/v1/uploads", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
-    const raw = await readCapped(c.req.raw, CREATE_BODY_BYTES);
-    if (raw === "too_large") return apiError(413, "too_large", `the request is over ${CREATE_BODY_BYTES} bytes`);
+    const raw = await readCapped(c.req.raw, CREATE_BODY_WITH_HASHES_BYTES);
+    if (raw === "too_large") return apiError(413, "too_large", `the request is over ${CREATE_BODY_WITH_HASHES_BYTES} bytes`);
     let body: unknown;
     try {
       body = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw));
@@ -254,6 +256,8 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     }
     if (body === null || typeof body !== "object" || Array.isArray(body)) return apiError(400, "bad_request", "the body must be an object");
     const b = body as Record<string, unknown>;
+    // The larger cap is for the hash list alone: without one, the cap is what it always was.
+    if (!Object.hasOwn(b, "sha256") && raw.byteLength > CREATE_BODY_BYTES) return apiError(413, "too_large", `the request is over ${CREATE_BODY_BYTES} bytes`);
     if (!Object.hasOwn(b, "manifest")) return apiError(400, "bad_manifest", "manifest is required");
     const parsed = parseManifest(b.manifest);
     if (!parsed.ok) return apiError(400, "bad_manifest", parsed.error);

@@ -256,17 +256,42 @@ describe("replace: creating the upload", { timeout: 60_000 }, () => {
     expect(unknown.json.error).toBe("bad_target");
   });
 
-  it("the create body may be the largest manifest plus a full hash list, and no larger", async () => {
+  it("only a create with a hash list may be larger than before, and by no more than the list needs", async () => {
     const { deps, a } = await setup();
     const t = await uploadPics(deps, a.token, [1]);
     const m = manifestOf(Array.from({ length: 200 }, (_, i) => i));
     const sha256 = Array.from({ length: 200 }, (_, i) => i.toString(16).padStart(64, "0"));
-    const body = (pad: number) => JSON.stringify({ manifest: m, target: { kind: "replace", ...t }, sha256, pad: "x".repeat(pad) });
-    const room = 262_144 + 4096 + 14_000 - body(0).length;
-    expect((await send(deps, "POST", "/api/v1/uploads", { token: a.token, body: body(room), headers: JSON_HEADERS })).status).toBe(201);
-    const over = await send(deps, "POST", "/api/v1/uploads", { token: a.token, body: body(room + 1), headers: JSON_HEADERS });
+    const OLD = 262_144 + 4096;
+    const NEW = OLD + 14_000;
+    /** A create body of exactly `size` bytes: the padding is a field the server ignores. */
+    const post = (target: Json, size: number, hashes?: string[]) => {
+      const body = (pad: number) => JSON.stringify({ manifest: m, target, ...(hashes ? { sha256: hashes } : {}), pad: "x".repeat(pad) });
+      const text = body(size - body(0).length);
+      expect(text.length).toBe(size);
+      return send(deps, "POST", "/api/v1/uploads", { token: a.token, body: text, headers: JSON_HEADERS });
+    };
+    const replace = { kind: "replace", ...t };
+    // Without a hash list the cap is the one every upload always had, whatever the target.
+    for (const target of [{ kind: "new" }, { kind: "chapter", tour_id: t.tour_id }, replace]) {
+      const fits = await post(target, OLD);
+      expect(fits.status, target.kind).toBe(201);
+      expect((await abort(deps, a.token, fits.json.upload_id)).status).toBe(204);
+      const over = await post(target, OLD + 1);
+      expect(over.status, target.kind).toBe(413);
+      expect(over.json).toEqual({ error: "too_large", detail: `the request is over ${OLD} bytes` });
+    }
+    // With one, a replace has room for the list on top, and no more.
+    for (const size of [OLD + 1, NEW]) {
+      const fits = await post(replace, size, sha256);
+      expect(fits.status).toBe(201);
+      expect((await abort(deps, a.token, fits.json.upload_id)).status).toBe(204);
+    }
+    const over = await post(replace, NEW + 1, sha256);
     expect(over.status).toBe(413);
-    expect(over.json.error).toBe("too_large");
+    expect(over.json).toEqual({ error: "too_large", detail: `the request is over ${NEW} bytes` });
+    // A hash list does not buy another target the room.
+    expect((await post({ kind: "new" }, OLD + 1, sha256)).status).toBe(400);
+    expect(await count(deps, "upload")).toBe(0);
   });
 });
 
@@ -1285,5 +1310,83 @@ describe("replace: the tour's settings and logo travel with its first chapter", 
     expect((await send(deps, "GET", "/api/v1/tours", { token: a.token })).status).toBe(200);
     expect(await bytesOf(deps.drafts, oldLogo)).toBeNull();
     expect(await ctx.draftKeys()).toHaveLength(2); // the new step and the new logo
+  });
+});
+
+
+describe("replace: a publish that is starting", { timeout: 60_000 }, () => {
+  /** Runs `between` once, at the moment a publish has read the draft and is about to record its job. */
+  function atPublishStart(deps: Deps, between: () => Promise<void>): { ran: () => boolean; restore: () => void } {
+    const realBatch = deps.db.batch.bind(deps.db);
+    let ran = false;
+    deps.db.batch = async (stmts) => {
+      if (!ran && stmts[0].sql.startsWith("INSERT INTO publish_job")) {
+        ran = true;
+        await between();
+      }
+      return realBatch(stmts);
+    };
+    return { ran: () => ran, restore: () => (deps.db.batch = realBatch) };
+  }
+
+  it("a replace that commits while a publish is starting stops that publish before it copies anything", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadPics(deps, a.token, [1, 2, 3]);
+    const live = await publishAll(deps, a.token, t.tour_id);
+    const before = { snapshot: await snapshotRow(deps, t.tour_id), keys: await ctx.publicKeys() };
+    const old = await stepKeys(deps, t.chapter_id);
+    const { id } = await sendReplace(deps, a.token, t, [7, 8]);
+    let committed: Call | null = null;
+    const hook = atPublishStart(deps, async () => {
+      committed = await commit(deps, a.token, id);
+    });
+    const r = await publish(deps, a.token, t.tour_id);
+    hook.restore();
+    expect(hook.ran()).toBe(true);
+    expect(committed!.status).toBe(201);
+    // The replace removed the pictures that publish had read; it must not start on them.
+    for (const k of old) expect(await bytesOf(deps.drafts, k)).toBeNull();
+    expect(r.status).toBe(409);
+    expect(r.json.error).toBe("publish_busy");
+    expect(await count(deps, "publish_job")).toBe(0);
+    expect(await count(deps, "public_object")).toBe(0);
+    expect(await ctx.publicKeys()).toEqual(before.keys);
+    expect(await snapshotRow(deps, t.tour_id)).toEqual(before.snapshot);
+    expect((await send(deps, "GET", live.json.url)).status).toBe(200);
+    // Trying again, as the answer says, publishes the replaced chapter.
+    const again = await publishAll(deps, a.token, t.tour_id);
+    expect(again.json.steps).toBe(2);
+    expect(await count(deps, "public_object")).toBe(0);
+  });
+
+  it("a chapter uploaded while a publish is starting is published whole by the retry, never half", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadPics(deps, a.token, [1, 2]);
+    const hook = atPublishStart(deps, async () => {
+      await uploadPics(deps, a.token, [3, 4], "Second", t.tour_id);
+    });
+    const r = await publish(deps, a.token, t.tour_id);
+    hook.restore();
+    expect([r.status, r.json.error]).toEqual([409, "publish_busy"]);
+    expect(await ctx.publicKeys()).toEqual([]);
+    expect((await tourRow(deps, t.tour_id)).status).toBe("draft");
+    expect((await publishAll(deps, a.token, t.tour_id)).json.steps).toBe(4);
+  });
+
+  it("a tour deleted while its publish is starting answers 404 and nothing is written", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadPics(deps, a.token, [1, 2]);
+    const hook = atPublishStart(deps, async () => {
+      expect((await send(deps, "DELETE", `/api/v1/tours/${t.tour_id}`, { token: a.token })).status).toBe(200);
+    });
+    const r = await publish(deps, a.token, t.tour_id);
+    hook.restore();
+    expect(r.status).toBe(404);
+    expect(await ctx.publicKeys()).toEqual([]);
+    expect(await count(deps, "publish_job")).toBe(0);
+    expect(await count(deps, "public_object")).toBe(0);
   });
 });
