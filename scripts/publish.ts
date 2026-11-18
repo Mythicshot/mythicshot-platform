@@ -19,6 +19,11 @@ import { fileURLToPath } from "node:url";
 
 const TOKEN = /^dp_[0-9a-f]{40}$/;
 const TOUR_ID = /^tour_[0-9a-f]{24}$/;
+/**
+ * A descriptive User-Agent: Cloudflare's Browser Integrity Check, always on for workers.dev
+ * addresses, can refuse some default library User-Agents before the Worker runs.
+ */
+export const USER_AGENT = "demo-platform-publish/1";
 /** Pause between calls of one publish: long enough not to hammer the server, short enough that 34 calls (400 steps) take seconds. */
 const PAUSE_MS = 250;
 /** Calls in a row that may show no progress before the script gives up. */
@@ -98,7 +103,10 @@ export async function runPublish(argv: string[], io: Io): Promise<number> {
     try {
       res = await io.fetch(url, {
         method: "POST",
-        headers: publishId === null ? { authorization: `Bearer ${token}` } : { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        headers:
+          publishId === null
+            ? { authorization: `Bearer ${token}`, "user-agent": USER_AGENT }
+            : { authorization: `Bearer ${token}`, "user-agent": USER_AGENT, "content-type": "application/json" },
         body: publishId === null ? undefined : JSON.stringify({ publish_id: publishId }),
         redirect: "error",
       });

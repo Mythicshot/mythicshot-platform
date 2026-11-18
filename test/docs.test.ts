@@ -3,7 +3,8 @@
 // anchors resolve, every install.sh command and option the docs name exists and every
 // one the script has is documented, every environment variable the docs name is read by
 // the code, no hostname other than the placeholders and the vendor pages appears, and
-// the setup-recovery SQL both runbooks give does what they say on both targets.
+// the setup-recovery SQL both runbooks give does what they say on both targets. The same
+// two-way check holds for the modes and options of `npm run setup:cloudflare`.
 //
 // Files are read through Vite's ?raw imports, which work under both Vitest configs.
 import { describe, expect, it } from "vitest";
@@ -11,6 +12,7 @@ import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
 import type { Deps } from "../src/ports.ts";
 import installSh from "../deploy/install.sh?raw";
+import setupCloudflareTs from "../scripts/setup-cloudflare.ts?raw";
 
 const DOCS = import.meta.glob(["../README.md", "../LICENSE", "../docs/*.md"], {
   query: "?raw",
@@ -20,7 +22,7 @@ const DOCS = import.meta.glob(["../README.md", "../LICENSE", "../docs/*.md"], {
 
 /** Every file a doc may link to; only the keys are used. */
 const REPO_FILES = Object.keys(
-  import.meta.glob(["../*", "../deploy/**", "../docs/**", "../migrations/**", "../src/**", "../test/**"], { query: "?raw" }),
+  import.meta.glob(["../*", "../deploy/**", "../docs/**", "../migrations/**", "../scripts/**", "../src/**", "../test/**"], { query: "?raw" }),
 ).map((k) => k.replace(/^\.\.\//, ""));
 
 /** The code that reads environment variables, as text. */
@@ -45,6 +47,7 @@ const ALLOWED_HOSTS = new Set([
   "caddyserver.com",
   "www.debian.org",
   "r2.dev",
+  "workers.dev",
 ]);
 
 /** Last labels that are file extensions, not top-level domains. */
@@ -128,6 +131,33 @@ function docVocabulary(md: string): { commands: string[]; flags: string[] } {
   return { commands, flags };
 }
 
+/** A string list declared as `const NAME = [...]` in the setup command's source. */
+function setupList(name: string): string[] {
+  const body = setupCloudflareTs.match(new RegExp(`const ${name} = \\[([^\\]]*)\\]`))?.[1];
+  if (body === undefined) throw new Error(`no ${name} in scripts/setup-cloudflare.ts`);
+  return [...body.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+}
+
+/** The setup:cloudflare modes and options a doc names: the words after the command on each code line, skipping option values. */
+function setupDocVocabulary(md: string): { commands: string[]; flags: string[] } {
+  const valueFlags = setupList("VALUE_FLAGS");
+  const commands: string[] = [];
+  const flags: string[] = [];
+  for (const line of codeLines(md)) {
+    for (const m of line.matchAll(/(?:setup:cloudflare|setup-cloudflare\.ts)((?: +(?:--(?=\s|$)|--?[a-z][a-z-]*|[a-z][a-z0-9.-]*|<[a-z]+>)(?=\s|$))*)/g)) {
+      const words = m[1].trim().split(/ +/).filter((w) => w !== "" && w !== "--" && !w.startsWith("<"));
+      for (let i = 0; i < words.length; i++) {
+        const w = words[i];
+        if (w.startsWith("-")) {
+          flags.push(w);
+          if (valueFlags.includes(w)) i++;
+        } else commands.push(w);
+      }
+    }
+  }
+  return { commands, flags };
+}
+
 /** Environment variables the code reads. */
 function variablesRead(): Set<string> {
   const out = new Set<string>();
@@ -191,6 +221,24 @@ describe("the docs", () => {
       const top = docs[p].split("\n").slice(0, 12).join("\n");
       expect(top, p).toMatch(/not yet been (run|verified) end to end/i);
     }
+  });
+
+  it("each runbook keeps its Draft warning, as a callout, right under the title", () => {
+    const notices: Record<string, RegExp> = {
+      [DOCKER]: /^> \[!WARNING\]\n> Draft: this runbook has not yet been run end to end on a real server\./m,
+      [CLOUDFLARE]: /^> \[!WARNING\]\n> Draft: this runbook has not yet been run end to end on a real Cloudflare account\./m,
+    };
+    for (const [p, re] of Object.entries(notices)) {
+      const lines = docs[p].split("\n");
+      expect(lines[0], p).toMatch(/^# Runbook: /);
+      expect(lines.slice(1, 6).join("\n"), p).toMatch(re);
+      expect(docs[p], p).toMatch(/\*\*Unconfirmed\*\*/);
+    }
+  });
+
+  it("the Cloudflare runbook warns, in a callout, that attaching an address takes it over", () => {
+    expect(docs[CLOUDFLARE]).toMatch(/^> \[!WARNING\]\n> Attaching an address takes it over/m);
+    expect(docs[CLOUDFLARE]).not.toMatch(/delete that record first/);
   });
 
   it("every relative link and anchor resolves", () => {
@@ -293,6 +341,38 @@ describe("the docs", () => {
       if (!path.endsWith(".ts")) continue;
       for (const m of text.matchAll(/\benv\.([A-Z][A-Z0-9_]{2,})/g)) expect(named, `${path}: ${m[1]}`).toContain(m[1]);
     }
+  });
+
+  it("every setup:cloudflare mode and option the docs name exists in the command", () => {
+    const commands = setupList("COMMANDS");
+    const flags = setupList("FLAGS");
+    expect(commands).toEqual(["setup", "status", "update"]);
+    let named = 0;
+    for (const p of MARKDOWN) {
+      const v = setupDocVocabulary(docs[p]);
+      named += v.commands.length + v.flags.length;
+      for (const c of v.commands) expect(commands, `${p}: setup:cloudflare ${c}`).toContain(c);
+      for (const f of v.flags) expect(flags, `${p}: setup:cloudflare ${f}`).toContain(f);
+    }
+    expect(named).toBeGreaterThan(0);
+  });
+
+  it("every setup:cloudflare mode and option is documented in the Cloudflare runbook", () => {
+    const v = setupDocVocabulary(docs[CLOUDFLARE]);
+    const spans = new Set(codeSpans(split(docs[CLOUDFLARE]).prose));
+    for (const c of setupList("COMMANDS").filter((c) => c !== "setup")) expect(v.commands, `setup:cloudflare ${c}`).toContain(c);
+    expect(docs[CLOUDFLARE]).toContain("npm run setup:cloudflare");
+    for (const f of setupList("FLAGS")) expect(v.flags.includes(f) || spans.has(f), `setup:cloudflare ${f}`).toBe(true);
+  });
+
+  it("the README gives both routes side by side with their first command", () => {
+    const r = docs[README];
+    expect(r).toContain("npm run setup:cloudflare");
+    expect(r).toContain("sudo bash install.sh");
+  });
+
+  it("both runbooks say what you need before you start", () => {
+    for (const p of [DOCKER, CLOUDFLARE]) expect(anchors(docs[p]), p).toContain("what-you-need-before-you-start");
   });
 
   it("both runbooks reach the setup wizard and say to generate the setup code", () => {

@@ -11,6 +11,7 @@ Examples use `tours.example.com` for the platform's address, `203.0.113.10` and 
 
 ## Contents
 
+- [What you need before you start](#what-you-need-before-you-start)
 - [1. What to have ready](#1-what-to-have-ready)
 - [2. Create the DNS record](#2-create-the-dns-record)
 - [3. Open ports 80 and 443](#3-open-ports-80-and-443)
@@ -25,6 +26,13 @@ Examples use `tours.example.com` for the platform's address, `203.0.113.10` and 
 - [Behind a Cloudflare Tunnel](#behind-a-cloudflare-tunnel)
 - [Troubleshooting by symptom](#troubleshooting-by-symptom)
 - [Pages this runbook relies on](#pages-this-runbook-relies-on)
+
+## What you need before you start
+
+1. A server running Debian 13 or 12 that you can log in to over SSH with `sudo`, with a public IPv4 address or a router that can forward ports to it. [Step 1](#1-what-to-have-ready) has the details.
+2. A domain is required: one hostname for the platform, such as `tours.example.com`, at any DNS provider, where you can add an A record. Unlike the Cloudflare route, there is no free address to start on.
+3. A computer with Docker and a copy of this repository, to build the app image.
+4. About 30 minutes, plus however long your DNS provider takes to publish the new record. **Unconfirmed:** the timing is an estimate, not measured on a real server.
 
 ## 1. What to have ready
 

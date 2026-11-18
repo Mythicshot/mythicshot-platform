@@ -1,0 +1,56 @@
+# Fly.io template for the demo platform. Steps: docs/hosting/fly.md
+#
+# Copy this file to the top folder of the repository (next to the Dockerfile), change
+# `app` and `primary_region`, and deploy from there. Fly builds the image from the
+# repository's own Dockerfile; no published image is needed.
+#
+# The setup code is never written here. It is stored as a Fly secret, which Fly hands
+# to the app as an environment variable when the Machine starts.
+#
+# Every key below was checked on 2026-11-17 against Fly's reference:
+# https://docs.fly.io/reference/configuration
+
+# The app's name on Fly, which is also its fly.dev address. Pick your own.
+app = "tours-example"
+
+# Where the one Machine and its volume live. Codes: https://docs.fly.io/reference/regions
+primary_region = "iad"
+
+# The app shuts down cleanly on SIGTERM: it finishes open requests and closes the
+# database. Fly sends SIGINT unless told otherwise. Ten seconds matches the grace
+# period of the Docker install.
+kill_signal = "SIGTERM"
+kill_timeout = 10
+
+# The same two values the Dockerfile sets. They are repeated here so the port and the
+# mount below can be read against them in one file.
+[env]
+  DATA_DIR = "/data"
+  PORT = "3000"
+
+# Fly's proxy ends HTTPS on ports 80 and 443 and forwards to the app's port.
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # The Machine is never stopped when idle. See "Why the Machine never sleeps" in
+  # docs/hosting/fly.md. If the Machine was stopped some other way, a request starts it.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+
+  [[http_service.checks]]
+    grace_period = "20s"
+    interval = "30s"
+    timeout = "5s"
+    method = "GET"
+    path = "/healthz"
+
+# One volume holds everything the app writes: db.sqlite, drafts/ and public/.
+# The database is SQLite in WAL mode: one Machine, one volume, never more.
+[mounts]
+  source = "data"
+  destination = "/data"
+  initial_size = "1gb"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

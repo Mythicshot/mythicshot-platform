@@ -3,7 +3,7 @@
   "name": "demo-platform",
   "main": "src/cloudflare/entry.ts",
   "compatibility_date": "2026-11-17",
-  // Placeholders: an install sets its own database id and bucket names.
+  // Placeholders: an install sets its own database id and bucket names (in wrangler.deploy.jsonc).
   // SETUP_CODE is a secret (`wrangler secret put SETUP_CODE`, or .dev.vars locally), never a var.
   "d1_databases": [
     {
@@ -18,16 +18,21 @@
     { "binding": "PUB", "bucket_name": "demo-platform-public" }
   ],
   "vars": {
-    // PUBLIC_IMAGE_BASE: the https origin of the public bucket's custom domain (empty: the
-    // app serves published images itself on /p/<name>). The page reads it at render time.
+    // PUBLIC_IMAGE_BASE: empty (the default): the app serves published images itself on
+    // /p/<name>, through the PUB binding, on Workers exactly as locally; the bucket then
+    // needs no public access. Optionally, the https origin of the public bucket's own
+    // custom domain, for heavier use. The page reads it at render time.
     //
-    // REQUIRED ON CLOUDFLARE, NOT SET BY THE APP: the bucket's custom domain answers with
-    // whatever headers the zone gives it, and the app cannot set them. The install must add
-    // a response-header transform rule on that custom domain that sets
+    // ONLY WHEN SET: the bucket's custom domain answers with whatever headers the zone
+    // gives it, and the app cannot set them. The install must then add a response-header
+    // transform rule on that custom domain that sets
     //   X-Content-Type-Options: nosniff
     //   Content-Security-Policy: default-src 'none'; sandbox
     // on every response, matching what the app sends on /p/<name>. The Cloudflare runbook
-    // and the deploy task must carry this step.
+    // carries this as an optional step.
+    //
+    // `npm run setup:cloudflare` writes each install's copy of this file to
+    // wrangler.deploy.jsonc (ignored by Git), with its own names, database id and address.
     "PUBLIC_IMAGE_BASE": ""
   }
 }
