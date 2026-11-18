@@ -18,6 +18,7 @@ import {
   putStep,
   send,
   sendAll,
+  sha256Hex,
   stepImage,
   uploadTour,
   type Json,
@@ -502,6 +503,96 @@ describe("a step whose request died", () => {
   });
 });
 
+describe("picture hashes", () => {
+  it("a stored step records the SHA-256 of its bytes, and commit carries it to the step", async () => {
+    const { deps, a } = await setup();
+    const m = clone(v2);
+    // Steps 1 and 2 declare the same picture, so the same bytes are sent for both.
+    m.steps[1] = { ...clone(m.steps[0]), image: "step-002.png" };
+    const id = (await createUpload(deps, a.token, m)).json.upload_id as string;
+    const same = stepImage(m.steps[0], 5);
+    const third = stepImage(m.steps[2], 6);
+    expect((await putStep(deps, a.token, id, 1, same)).status).toBe(204);
+    expect((await putStep(deps, a.token, id, 2, same)).status).toBe(204);
+    expect((await putStep(deps, a.token, id, 3, third)).status).toBe(204);
+    const sent = await deps.db.all<Json>("SELECT n, sha256, reused FROM upload_step WHERE upload_id = ? ORDER BY n", [id]);
+    expect(sent).toEqual([
+      { n: 1, sha256: await sha256Hex(same), reused: 0 },
+      { n: 2, sha256: await sha256Hex(same), reused: 0 },
+      { n: 3, sha256: await sha256Hex(third), reused: 0 },
+    ]);
+    expect(sent[0].sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(sent[2].sha256).not.toBe(sent[0].sha256);
+    const done = await commit(deps, a.token, id);
+    expect(done.status).toBe(201);
+    const steps = await stepRows(deps, done.json.chapter_id);
+    expect(steps.map((s) => s.sha256)).toEqual(sent.map((s) => s.sha256));
+    // Each is the digest of what the drafts store holds under the step's key.
+    for (const s of steps) {
+      const file = (await deps.drafts.get(s.image_key))!;
+      expect(await sha256Hex(new Uint8Array(await new Response(file.body).arrayBuffer()))).toBe(s.sha256);
+    }
+  });
+
+  it("a step taken over after a stale claim records the hash of the bytes that were kept", async () => {
+    const { deps, a } = await setup();
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await createUpload(deps, a.token, v2)).json.upload_id as string;
+    await deps.db.run("INSERT INTO upload_step (upload_id, n, image_key, bytes, claim, claimed_at) VALUES (?, 1, ?, ?, ?, ?)", [
+      id, `u/${id}/step-001.png`, v2.steps[0].bytes, "dead-request", now,
+    ]);
+    now += 61_000;
+    const kept = stepImage(v2.steps[0], 9);
+    expect((await putStep(deps, a.token, id, 1, kept)).status).toBe(204);
+    const row = await deps.db.first<Json>("SELECT sha256, image_key FROM upload_step WHERE upload_id = ? AND n = 1", [id]);
+    expect(row!.sha256).toBe(await sha256Hex(kept));
+    const file = (await deps.drafts.get(row!.image_key))!;
+    expect(new Uint8Array(await new Response(file.body).arrayBuffer())).toEqual(kept);
+  });
+
+  it("a slow first writer that wrote over a taken-over step leaves its hash unknown, never a wrong one", async () => {
+    const { deps, a } = await setup();
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await createUpload(deps, a.token, v2)).json.upload_id as string;
+    const realPut = deps.drafts.put.bind(deps.drafts);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    deps.drafts.put = async (key, body, meta) => {
+      if (calls++ === 0) await gate; // the first writer stalls, then writes last
+      return realPut(key, body, meta);
+    };
+    const slow = putStep(deps, a.token, id, 1, stepImage(v2.steps[0], 1));
+    for (let i = 0; i < 200 && (await count(deps, "upload_step")) === 0; i++) await new Promise((r) => setTimeout(r, 5));
+    now += 61_000;
+    expect((await putStep(deps, a.token, id, 1, stepImage(v2.steps[0], 2))).status).toBe(204);
+    release();
+    expect((await slow).status).toBe(409);
+    // The store now holds the slow writer's bytes, so the hash of the later send is not kept.
+    const row = await deps.db.first<Json>("SELECT sha256, stored_at FROM upload_step WHERE upload_id = ? AND n = 1", [id]);
+    expect(row!.stored_at).not.toBeNull();
+    expect(row!.sha256).toBeNull();
+    await putStep(deps, a.token, id, 2, stepImage(v2.steps[1]));
+    await putStep(deps, a.token, id, 3, stepImage(v2.steps[2]));
+    const done = await commit(deps, a.token, id);
+    expect(done.status).toBe(201);
+    expect((await stepRows(deps, done.json.chapter_id)).map((s) => s.sha256 === null)).toEqual([true, false, false]);
+  });
+
+  it("storing a step still makes no more calls than before", async () => {
+    const { deps, a } = await setup();
+    const id = (await createUpload(deps, a.token, v2)).json.upload_id as string;
+    // 2 authentication, the upload, the step's claim state, the claim, the object, the mark.
+    const r = await putStep(deps, a.token, id, 1, stepImage(v2.steps[0]));
+    expect(r.status).toBe(204);
+    expect(r.calls).toBe(7);
+    // A second send is refused after 4.
+    expect((await putStep(deps, a.token, id, 1, stepImage(v2.steps[0]))).calls).toBe(4);
+  });
+});
+
 describe("step images", () => {
   it("PUT refuses a wrong length, an HTML body named .png, a JPEG sent for a .png step, n = 0 and n = N + 1", async () => {
     const { deps, a, draftKeys } = await setup();
@@ -633,7 +724,11 @@ describe("creating an upload", () => {
     const bad = await send(deps, "POST", "/api/v1/uploads", { token: a.token, body: "{not json" });
     expect(bad.status).toBe(400);
     expect((await send(deps, "POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ target: { kind: "new" } }) })).status).toBe(400);
-    expect((await createUpload(deps, a.token, v2, { kind: "replace" })).status).toBe(400);
+    const unknown = await createUpload(deps, a.token, v2, { kind: "swap" });
+    expect(unknown.status).toBe(400);
+    expect(unknown.json.error).toBe("bad_target");
+    // "replace" is a target now (test/replace.test.ts): without a tour it names none.
+    expect((await createUpload(deps, a.token, v2, { kind: "replace" })).status).toBe(404);
     expect((await createUpload(deps, a.token, v2, null)).status).toBe(400);
     expect((await createUpload(deps, a.token, v2, { kind: "chapter", tour_id: "tour_" + "0".repeat(24) })).status).toBe(404);
     expect((await createUpload(deps, a.token, v2, { kind: "chapter", tour_id: "../x" })).status).toBe(404);

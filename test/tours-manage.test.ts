@@ -6,7 +6,7 @@ import { SUBREQUEST_BUDGET } from "../src/budget.ts";
 import type { Deps } from "../src/ports.ts";
 import { STALE_PUBLISH_MS, type Snapshot } from "../src/publish.ts";
 import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
-import { clone, commit, count, createUpload, fixtures, putStep, send, sendAll, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
+import { clone, commit, count, createUpload, fixtures, putStep, send, sendAll, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 
 const v2 = fixtures.v2 as Json;
 const v3 = fixtures.v3 as Json;
@@ -377,6 +377,66 @@ describe("delete", { timeout: 60_000 }, () => {
     expect((await putStep(deps, a.token, partial, 1, stepImage(v2.steps[0], 4))).status).toBe(404);
     expect((await commit(deps, a.token, fresh)).status).toBe(201);
     expect((await commit(deps, a.token, elsewhere)).status).toBe(201);
+  });
+
+  it("deleting a tour also removes pictures a replace left for removal", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const t = await uploadTour(deps, a.token, v2, { kind: "new" }, 1);
+    const keep = await uploadTour(deps, a.token, v2, { kind: "new" }, 2);
+    const old = await draftKeysOf(deps, t.tour_id);
+    // The chapter is replaced, and the store cannot delete just then: the three old
+    // pictures stay in the store, each named by a row.
+    const realDelete = deps.drafts.delete.bind(deps.drafts);
+    deps.drafts.delete = async () => {
+      throw new Error("bucket unavailable");
+    };
+    const replaced = await uploadTour(deps, a.token, v2, { kind: "replace", tour_id: t.tour_id, chapter_id: t.chapter_id }, 3);
+    deps.drafts.delete = realDelete;
+    expect(replaced.chapter_id).toBe(t.chapter_id);
+    const left = (await deps.db.all<{ image_key: string }>("SELECT image_key FROM replaced_object WHERE tour_id = ? ORDER BY image_key", [t.tour_id])).map((r) => r.image_key);
+    expect(left).toEqual(old);
+    const keepDrafts = await draftKeysOf(deps, keep.tour_id);
+    expect(await ctx.draftKeys()).toHaveLength(9);
+
+    const r = await del(deps, a.token, t.tour_id);
+    expect([r.status, r.json]).toEqual([200, { deleted: true }]);
+    expect(await rowsOf(deps, t.tour_id)).toEqual(GONE);
+    expect(await count(deps, "replaced_object")).toBe(0);
+    // Neither the replaced pictures nor the current ones are left; the other tour's are.
+    expect(await ctx.draftKeys()).toEqual(keepDrafts);
+    expect((await del(deps, a.token, t.tour_id)).status).toBe(404);
+  });
+
+  it("deleting a tour with an open replace upload into it leaves no file behind", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadTour(deps, a.token, v2, { kind: "new" }, 1);
+    const keep = await uploadTour(deps, a.token, v2, { kind: "new" }, 2);
+    const keepDrafts = await draftKeysOf(deps, keep.tour_id);
+    // A replace that keeps the first picture, has sent the second and not yet the third.
+    const sha256 = await Promise.all(v2.steps.map((s: Json, i: number) => sha256Hex(stepImage(s, i === 0 ? 1 : 6))));
+    const created = await send(deps, "POST", "/api/v1/uploads", {
+      token: a.token,
+      body: JSON.stringify({ manifest: v2, target: { kind: "replace", tour_id: t.tour_id, chapter_id: t.chapter_id }, sha256 }),
+      headers: JSON_HEADERS,
+    });
+    expect(created.status).toBe(201);
+    expect(created.json.have).toEqual([1]);
+    const up = created.json.upload_id as string;
+    expect((await putStep(deps, a.token, up, 2, stepImage(v2.steps[1], 6))).status).toBe(204);
+    expect(await ctx.draftKeys()).toHaveLength(7);
+
+    const r = await del(deps, a.token, t.tour_id);
+    expect([r.status, r.json]).toEqual([200, { deleted: true }]);
+    expect(await rowsOf(deps, t.tour_id)).toEqual(GONE);
+    expect(await count(deps, "upload_step")).toBe(0);
+    expect(await ctx.draftKeys()).toEqual(keepDrafts);
+    // The upload is gone for its client too.
+    expect((await putStep(deps, a.token, up, 3, stepImage(v2.steps[2], 6))).status).toBe(404);
+    expect((await commit(deps, a.token, up)).status).toBe(404);
+    expect(await ctx.draftKeys()).toEqual(keepDrafts);
   });
 
   it("a published 200-step tour is deleted over several calls, each within the call budget, and is gone for every route after the first", async () => {

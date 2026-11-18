@@ -223,6 +223,22 @@ describe("publish", () => {
     await expectConsistent(ctx);
   });
 
+  it("a snapshot records the draft version it was built from, and a re-publish after a chapter upload records the new one", async () => {
+    const { deps, a } = await setup();
+    const t = await uploadTour(deps, a.token, v2);
+    expect((await publish(deps, a.token, t.tour_id)).status).toBe(200);
+    expect((await tourRow(deps, t.tour_id)).draft_version).toBe(1);
+    expect((await snapshotRow(deps, t.tour_id))!.draft_version).toBe(1);
+    const more = clone(v2);
+    more.title = "Second chapter";
+    await uploadTour(deps, a.token, more, { kind: "chapter", tour_id: t.tour_id }, 7);
+    // The upload alone changes the draft, not what the snapshot says it was built from.
+    expect((await tourRow(deps, t.tour_id)).draft_version).toBe(2);
+    expect((await snapshotRow(deps, t.tour_id))!.draft_version).toBe(1);
+    expect((await publish(deps, a.token, t.tour_id)).status).toBe(200);
+    expect((await snapshotRow(deps, t.tour_id))!.draft_version).toBe(2);
+  });
+
   it("an empty tour cannot be published", async () => {
     const { deps, a, publicKeys } = await setup();
     const id = "tour_" + "a".repeat(24);
@@ -763,6 +779,8 @@ describe("races", () => {
     const { sendAll, commit } = await import("./bundle.ts");
     const id = await sendAll(deps, a.token, more, { kind: "chapter", tour_id: t.tour_id }, 5);
     const [p, c] = await Promise.all([publish(deps, a.token, t.tour_id), commit(deps, a.token, id)]);
+    // A commit that lands after the publish read the draft and before it recorded its job
+    // makes the publish read the draft again in the same request, so it always succeeds.
     expect(p.status).toBe(200);
     expect(c.status).toBe(201);
     const snap = (await snapshotOf(deps, t.tour_id))!;

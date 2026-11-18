@@ -87,7 +87,7 @@ Every request carries `Authorization: Bearer <token>` and answers `404` for a to
 |---|---|
 | `POST /api/v1/tours/<id>/publish` with no body | Starts a publish, or joins the one in progress for the tour if it was built from the current draft; one built from an older draft is cancelled and a new one started. `202 {"status":"in_progress","publish_id":"pub_…","done":12,"total":60}`, or `200` at once for a small tour |
 | `POST /api/v1/tours/<id>/publish` with `{"publish_id":"pub_…"}` | Copies the next images (up to 12): `202` as above while more remain; `200 {"slug","url","steps"}` once the new version is live, and the same `200` on any repeat |
-| either, when that publish was stopped | `409 publish_cancelled`: the tour was unpublished, the publish failed or was abandoned, or a fresh start replaced it; publish again to start over. `409 publish_busy` means another start of the tour landed at the same moment: try again |
+| either, when that publish was stopped | `409 publish_cancelled`: the tour was unpublished, the publish failed or was abandoned, or a fresh start replaced it; publish again to start over. `409 publish_busy` means another start of the tour landed at the same moment, or the tour's draft changed twice (chapters uploaded or replaced) while this publish was starting; nothing was written: try again. A single such change does not show: the request starts again from the newer draft by itself |
 | `POST /api/v1/tours/<id>/unpublish` | `204` when the tour and all its public images are gone; `202` when the tour is unpublished but images remain to remove, so call again; a publish in progress is cancelled |
 
 A publish works from the draft as it was when the publish started: calls naming it keep driving that version, so a chapter uploaded meanwhile goes out with the next publish, never half of it with this one. `400 empty_tour` and `413 too_large` (more than 400 steps, or a snapshot over 512,000 bytes) come from the first request, before anything is copied.
@@ -108,11 +108,41 @@ A rename shows on the public page of a published tour at once, without publishin
 > [!warning] Delete cannot be undone
 > A deleted tour's steps, images and public page are gone for good; only a backup taken earlier brings them back.
 
-Delete removes the tour, its chapters and steps, its draft images and logo, its published images (also those a re-publish replaced that were still being served), and any unfinished upload into it. A large tour takes several requests, each removing up to 250 files. From the first request on, the tour is gone from the list, cannot be published or added to, and the server answers `404` for its public page and images; the later requests only remove files. If a request fails or the client stops half-way, send the same request again: it carries on where it stopped. Delete does not stop a publish in progress: let it finish, or unpublish the tour, which stops the publish, then delete. A publish with no progress for 15 minutes no longer counts.
+Delete removes the tour, its chapters and steps, its draft images and logo, its published images (also those a re-publish replaced that were still being served), the draft pictures a chapter replace took out of it that were not removed yet, and any unfinished upload into it. A large tour takes several requests, each removing up to 250 files. From the first request on, the tour is gone from the list, cannot be published or added to, and the server answers `404` for its public page and images; the later requests only remove files. If a request fails or the client stops half-way, send the same request again: it carries on where it stopped. Delete does not stop a publish in progress: let it finish, or unpublish the tour, which stops the publish, then delete. A publish with no progress for 15 minutes no longer counts.
 
 A repeated delete request after the tour is gone answers `404`, and the server cannot tell that from a tour that never existed. A client should treat `404` from a delete request as "gone": the tour is not there, which is what was asked for.
 
 Deleting removes the files from the server; it cannot reach copies that were already handed out. A browser that opened the public page in the last minute may show it once more from its own cache, and images a visitor already downloaded stay in that browser's cache (published images are sent with a one-year cache lifetime, because their names never change). A CDN or caching proxy in front of the server can keep serving both for as long as it holds them; purge it there if that matters. The same holds after an unpublish.
+
+### Replace a chapter
+
+Mythicshot updates a tour it published earlier by replacing one chapter over the same link. It uses the upload requests a new tour uses (create, one request per step image, commit, or abort), with the target `replace`. Each carries `Authorization: Bearer <token>` and acts only inside the token's workspace.
+
+A replace changes the draft only. The public page and its images stay exactly as they were until the tour is published again, and a draft stays a draft.
+
+| Request | Answer |
+|---|---|
+| `POST /api/v1/uploads` with `{"manifest":{…},"target":{"kind":"replace","tour_id":"tour_…","chapter_id":"ch_…"},"sha256":["<64 lowercase hex>",…]}` | `201 {"upload_id":"up_…","steps":14,"have":[1,4,5],"settings":false}`. `sha256` is optional: one SHA-256 per step of the manifest, in order, of the image the client would send. `have` lists the step numbers whose image the chapter already has, so the client does not send them; it is empty without `sha256`. `settings` is `true` when the chapter is the tour's first |
+| the same, refused | `404 not_found` with detail `no such tour` (unknown, another workspace's, or not an id) or `no such chapter` (not a chapter of that tour); `400 bad_request` for a `sha256` that is not exactly one 64-character lowercase hex text per step, or that comes with another target; `400 bad_manifest`, `413 too_large` and `429 too_many_uploads` as for any upload. A server older than 0.1.4 answers `400 bad_target` |
+| `PUT /api/v1/uploads/<id>/steps/<n>` with the image | `204`; `409 already_sent` for a step in `have`, or one sent before |
+| `PUT /api/v1/uploads/<id>/logo` with the logo | `204` when `settings` is `true` and the manifest names a logo; `404` when the manifest names no logo; `409 logo_not_used` when `settings` is `false` |
+| `POST /api/v1/uploads/<id>/commit` | `201 {"tour_id":"tour_…","chapter_id":"ch_…","steps":14,"publish":"ready"}`. The chapter keeps its id, title and position and now has exactly the manifest's steps |
+| the same, refused | `409 incomplete` while a step outside `have` (or a logo the upload must carry) has not been sent, and nothing changes; `409 chapter_changed` when another upload replaced the chapter since this one was created, and nothing changes: abort this upload and start again; `404` once the upload was aborted |
+| `DELETE /api/v1/uploads/<id>` | `204`. Removes only what this upload stored, never an image the chapter uses |
+
+The server finds the images a chapter already has by a SHA-256 it computed itself when each image was stored, and only when the step's declared type, width, height and byte count match too. A tour uploaded to a server older than 0.1.4 has no such record, so its first replace sends every image.
+
+`publish` in the commit's answer says what publishing the tour would do now:
+
+| `publish` | Meaning |
+|---|---|
+| `draft` | The tour is not published. Nothing is public and nothing needs publishing |
+| `ready` | The tour is published and the only changes that are not public yet are replaces of this chapter (this one, and any before it that were not published, for example because the publish after them failed). Publish it to put the update live |
+| `other_changes` | The tour is published and its draft holds more than replaces of this chapter that was never published: a chapter uploaded as a draft, a replace of another chapter that was not published, or, for a tour last published under a server older than 0.1.4, a chapter that was already waiting unpublished when the server was updated (the update to 0.1.4 records a published tour as fully public only when the published copy has every step of the draft; a rename since the last publish does not matter). Publishing would put all of it live, so Mythicshot uploads the update and leaves publishing to you |
+
+When `settings` is `true`, the commit also replaces the tour's theme, zoom, spotlight dim, cover, button, end card, autoplay and logo with the manifest's; a manifest that names no logo removes the tour's. When it is `false`, the tour keeps all of these. A replace never changes the tour's title or its link.
+
+Every request is safe to send again. A repeated create only makes another upload, which is removed by an abort or, left alone, after 24 hours. A repeated commit answers `201` with the same ids and steps, and with `publish` as it stands at that moment; once a later replace of the same chapter has been committed, it answers `404`, because the chapter no longer holds that upload's steps. Images the replace took out of the chapter are deleted from the server right after the commit, or with a later request if a publish of the older draft is still copying them.
 
 ## Develop
 

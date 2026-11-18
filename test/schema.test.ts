@@ -8,6 +8,7 @@ const TABLES = [
   "deleted_object",
   "public_object",
   "publish_job",
+  "replaced_object",
   "setup",
   "snapshot",
   "snapshot_object",
@@ -126,6 +127,22 @@ describe("schema", () => {
       deps.db.run("INSERT INTO chapter (id, tour_id, title, position) VALUES (?, ?, ?, ?)", ["ch_1", "tour_missing", "x", 0]),
     );
     expect(await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM user")).toEqual({ n: 0 });
+  });
+
+  it("a replaced picture's row cannot point at a tour that does not exist", async () => {
+    const { deps } = await makeDeps();
+    const { workspaceId } = await seedWorkspace(deps, "Acme");
+    await insertTour(deps, "tour_1", workspaceId, "abcdefghij");
+    const insert = (tourId: string, key: string) =>
+      deps.db.run("INSERT INTO replaced_object (tour_id, image_key, draft_version, created_at) VALUES (?, ?, 2, ?)", [tourId, key, NOW]);
+    await rejection(insert("tour_missing", "u/up_x/step-001.png"));
+    await insert("tour_1", "u/up_x/step-001.png");
+    // One row per picture of a tour, and the tour cannot go while a row names it.
+    expect(isUniqueViolation(await rejection(insert("tour_1", "u/up_x/step-001.png")))).toBe(true);
+    await rejection(deps.db.run("DELETE FROM tour WHERE id = 'tour_1'"));
+    expect(await deps.db.all("SELECT tour_id, image_key, draft_version FROM replaced_object")).toEqual([
+      { tour_id: "tour_1", image_key: "u/up_x/step-001.png", draft_version: 2 },
+    ]);
   });
 
   it("a workspace with rows cannot be deleted out from under them", async () => {
