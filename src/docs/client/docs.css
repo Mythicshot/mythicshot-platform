@@ -1,0 +1,8 @@
+/* The documentation page's own stylesheet. The reference viewer brings its own; this one
+   only takes away the parts of it the page replaces. */
+
+/* The viewer's title block and its authorise bar: the page has its own header and token box. */
+.swagger-ui .information-container,
+.swagger-ui .scheme-container {
+  display: none;
+}

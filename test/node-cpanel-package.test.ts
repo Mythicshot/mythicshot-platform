@@ -107,7 +107,7 @@ describe("the cPanel archive", () => {
     const dist = files.filter((e) => e.path.startsWith("dist/")).map((e) => e.path);
     // One compiled file for every source file of the Node build, and no other file.
     const sources = walk("src")
-      .filter((p) => p.endsWith(".ts") && !p.startsWith("src/cloudflare/") && p !== "src/player/main.ts" && !p.startsWith("src/player/vendor/"))
+      .filter((p) => p.endsWith(".ts") && !p.startsWith("src/cloudflare/") && p !== "src/player/main.ts" && !p.startsWith("src/player/vendor/") && !p.startsWith("src/docs/client/"))
       .map((p) => p.replace(/^src\//, "dist/").replace(/\.ts$/, ".js"));
     expect(dist.sort()).toEqual(sources.sort());
     expect(dist).toContain("dist/node/entry.js");

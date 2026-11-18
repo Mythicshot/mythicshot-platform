@@ -1,6 +1,6 @@
 // npm run package:cpanel: builds the Node target and writes one archive for shared
 // cPanel hosting, dist/cpanel/demo-platform-<version>-cpanel.tgz. Unpacked, it holds
-// exactly: dist/ (the compiled app, the player's script and stylesheet inside it),
+// exactly: dist/ (the compiled app, with the player's and the documentation page's files inside it),
 // migrations/, package.json, package-lock.json, app.cjs (the startup file), cpanel.sh
 // (install, update, backup, status) and VERSION. No source, no tests, no settings and no
 // node_modules: the hosting installs the two runtime packages itself with npm ci.
@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
+import { siteModule, viewerModule } from "./docs-bundle.ts";
 import { assetsModule } from "./player-bundle.ts";
 
 /** What the unpacked archive holds at its top level, and nothing else. */
@@ -126,6 +127,13 @@ export async function packageCpanel(opts: PackageOptions): Promise<PackageResult
   // file; a stale one would ship an old player.
   if (readFileSync(join(root, "src", "player", "assets.ts"), "utf8") !== (await assetsModule())) {
     throw new Error("src/player/assets.ts is out of date; run npm run build:player, commit the result and package again");
+  }
+  // The same for the documentation page: the viewer's files and our own, with the API description.
+  const docsModules: [string, string][] = [["viewer-assets.ts", viewerModule()], ["site-assets.ts", await siteModule()]];
+  for (const [name, current] of docsModules) {
+    if (readFileSync(join(root, "src", "docs", name), "utf8") !== current) {
+      throw new Error(`src/docs/${name} is out of date; run npm run build:docs, commit the result and package again`);
+    }
   }
 
   const stage = mkdtempSync(join(tmpdir(), "demo-platform-cpanel-"));

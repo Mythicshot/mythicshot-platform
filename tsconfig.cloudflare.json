@@ -30,6 +30,7 @@
     "src/node/**",
     "src/player/main.ts",
     "src/player/vendor/**",
+    "src/docs/client/**",
     "test/node-*.test.ts",
     "scripts/**",
     "test/harness.node.ts",
