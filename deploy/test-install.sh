@@ -110,8 +110,20 @@ case "$args" in
     touch "$STUB_STATE/pulled"; exit 0 ;;
 esac
 case "$args" in
+  *" config --quiet "*)
+    [ "${STUB_FAIL_CONFIG:-0}" != 1 ] || { echo "the compose file is not valid" >&2; exit 1; } ;;
   *" up "*)
     n=$(cat "$STUB_STATE/ups" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$STUB_STATE/ups"
+    # Like Compose, a start takes TUNNEL_TOKEN from its own environment before .env.
+    # up-tokens gets the token each start hands to cloudflared, up-env-tokens the one
+    # .env held at that moment. Neither file is under the root the tests search.
+    envfile=""; prev=""
+    for a in "$@"; do [ "$prev" != "--project-directory" ] || envfile="$a/.env"; prev="$a"; done
+    in_env="$(sed -n 's/^TUNNEL_TOKEN=//p' "$envfile" 2>/dev/null | tail -n 1)"
+    printf '%s\n' "${TUNNEL_TOKEN:-$in_env}" >>"$STUB_STATE/up-tokens"
+    printf '%s\n' "$in_env" >>"$STUB_STATE/up-env-tokens"
+    # STUB_UP_SIGNAL: the run is interrupted while the first start waits.
+    if [ -n "${STUB_UP_SIGNAL:-}" ] && [ "$n" = 1 ]; then kill -s "$STUB_UP_SIGNAL" "$PPID"; exit 130; fi
     # Like the real app, a started app writes its database into the data folder.
     # STUB_FAIL_UP=1: the app itself never turns healthy and writes nothing.
     # STUB_FAIL_UP=tunnel: the app is healthy and has written, then cloudflared fails.
@@ -228,6 +240,28 @@ $1
 tunnel_install() { install_sh "$TUNNEL_ANSWERS" install --tunnel --yes; [ "$RC" = 0 ] || { cat "$OUT" "$ERR"; die "tunnel install failed"; }; }
 # The token appears nowhere in what the run printed or in any stub's command line.
 token_not_shown() { ! grep -qF -- "$TOK" "$OUT" "$ERR" "$LOG"; }
+# Nor does a piece of either token: its first or last 12 characters.
+no_token_part_shown() {
+  ! grep -qF -e "${TOK:0:12}" -e "${TOK: -12}" -e "${TOK2:0:12}" -e "${TOK2: -12}" "$OUT" "$ERR" "$LOG"
+}
+env_token() { sed -n 's/^TUNNEL_TOKEN=//p' "$INST/.env"; }
+# The token the last start handed to cloudflared (see the docker stub).
+last_up_token() { tail -n 1 "$STATE/up-tokens"; }
+forget_starts() { rm -f "$STATE/ups" "$STATE/up-tokens" "$STATE/up-env-tokens"; : >"$LOG"; }
+# A mv that, with STUB_MV_SIGNAL set, interrupts the run at the moment the new .env
+# would take the old one's place, after noting the mode and owner of the new file.
+stub_mv() {
+  cat >"$T/bin/mv" <<'EOF'
+#!/bin/bash
+if [ -n "${STUB_MV_SIGNAL:-}" ] && [[ " $* " == *"/.env.new."* ]]; then
+  for a in "$@"; do case "$a" in */.env.new.*) stat -c '%a %u:%g' "$a" >"$STUB_STATE/env-tmp-mode" ;; esac; done
+  kill -s "$STUB_MV_SIGNAL" "$PPID"
+  exit 1
+fi
+exec /bin/mv "$@"
+EOF
+  chmod +x "$T/bin/mv"
+}
 
 die() { printf '      %s\n' "$*"; exit 1; }
 expect() { local msg="$1"; shift; "$@" || die "$msg"; }
@@ -1293,6 +1327,251 @@ test_tunnel_update_status_backup_uninstall() {
   expect "says the token stays in .env" has "$OUT" "tunnel token"
   expect "says the tunnel stays at Cloudflare" has "$OUT" "Cloudflare"
   expect "uninstall does not show the token" token_not_shown
+}
+
+# ---------------------------------------------------------------- tunnel mode: follow-ups
+
+test_new_token_is_saved_only_after_it_has_connected() {
+  new_sandbox
+  tunnel_install
+  local env_before; env_before="$(grep -v '^TUNNEL_TOKEN=' "$INST/.env")"
+  forget_starts
+  install_sh "$TOK2
+" install --new-token
+  expect "--new-token succeeds" test "$RC" = 0
+  expect "cloudflared was started on the new token" test "$(last_up_token)" = "$TOK2"
+  expect "while .env still held the old one" test "$(tail -n 1 "$STATE/up-env-tokens")" = "$TOK"
+  expect "the new token is in .env afterwards" test "$(env_token)" = "$TOK2"
+  expect "every other line of .env is unchanged" test "$(grep -v '^TUNNEL_TOKEN=' "$INST/.env")" = "$env_before"
+  expect ".env is still 600 root" test "$(stat -c '%a %u:%g' "$INST/.env")" = "600 0:0"
+  expect "no copy of .env was made" test "$(find "$R" -name '.env.*' | wc -l)" = 0
+  expect "says the token is saved only once it has connected" has "$OUT" "until the new one has connected"
+  expect "no part of a token is shown" no_token_part_shown
+  # The next plain run starts from .env alone, on the new token.
+  forget_starts
+  install_sh "" install
+  expect "the next run succeeds without input" test "$RC" = 0
+  expect "it starts on the token in .env" test "$(last_up_token) $(tail -n 1 "$STATE/up-env-tokens")" = "$TOK2 $TOK2"
+}
+
+test_new_token_run_that_fails_before_the_start_keeps_the_old_token() {
+  new_sandbox
+  tunnel_install
+  local before; before="$(snapshot)"
+  forget_starts
+  STUB_FAIL_CONFIG=1 install_sh "$TOK2
+" install --new-token
+  expect "the run fails" test "$RC" != 0
+  expect "every file, .env included, is as it was" test "$(snapshot)" = "$before"
+  expect "nothing was started or stopped" test "$(grep -cE ' (up|down) ' "$LOG")" = 0
+  expect "no part of a token is shown" no_token_part_shown
+}
+
+test_interrupted_new_token_keeps_the_old_token_and_the_site_running() {
+  local sig
+  for sig in TERM INT HUP; do
+    new_sandbox
+    tunnel_install
+    local env_sum; env_sum="$(sha256sum <"$INST/.env")"
+    forget_starts
+    STUB_UP_SIGNAL="$sig" install_sh "$TOK2
+" install --new-token
+    expect "$sig: the run stops with an error" test "$RC" != 0
+    expect "$sig: the new token was being tried" test "$(head -n 1 "$STATE/up-tokens")" = "$TOK2"
+    expect "$sig: .env is unchanged, the old token in it" test "$(sha256sum <"$INST/.env")" = "$env_sum"
+    expect "$sig: .env is still 600 root" test "$(stat -c '%a %u:%g' "$INST/.env")" = "600 0:0"
+    expect "$sig: no temporary file is left" test "$(find "$R" -name '.*.new.*' -o -name '.restore.*' | wc -l)" = 0
+    expect "$sig: the new token is in no file" test -z "$(grep -rlF -- "$TOK2" "$R")"
+    expect "$sig: the site is started again, once, on the old token" test "$(wc -l <"$STATE/up-tokens") $(last_up_token)" = "2 $TOK"
+    expect "$sig: not taken down" hasnt "$LOG" " down"
+    expect "$sig: says the new token was not saved" has "$ERR" "the new token was not saved"
+    expect "$sig: names the command to try again" has "$ERR" "sudo bash $SCRIPT install --new-token"
+    expect "$sig: not marked as never connected" test ! -e "$INST/.tunnel-pending"
+    expect "$sig: no part of a token is shown" no_token_part_shown
+    install_sh "" install
+    expect "$sig: the next plain run succeeds on the old token" test "$RC $(env_token)" = "0 $TOK"
+  done
+}
+
+test_new_token_interrupted_while_it_is_saved_keeps_the_old_token() {
+  new_sandbox
+  tunnel_install
+  stub_mv
+  local env_sum; env_sum="$(sha256sum <"$INST/.env")"
+  forget_starts
+  STUB_MV_SIGNAL=TERM install_sh "$TOK2
+" install --new-token
+  expect "the run stops with an error" test "$RC" != 0
+  expect "the new .env was private before it took the old one's place" test "$(cat "$STATE/env-tmp-mode")" = "600 0:0"
+  expect "the new token had connected before it was saved" test "$(head -n 1 "$STATE/up-tokens") $(head -n 1 "$STATE/up-env-tokens")" = "$TOK2 $TOK"
+  expect ".env is unchanged, the old token in it" test "$(sha256sum <"$INST/.env")" = "$env_sum"
+  expect ".env is still 600 root" test "$(stat -c '%a %u:%g' "$INST/.env")" = "600 0:0"
+  expect "the temporary file was removed on the way out" test "$(find "$R" -name '.env.*' | wc -l)" = 0
+  expect "the new token is in no file" test -z "$(grep -rlF -- "$TOK2" "$R")"
+  expect "the site is started again on the old token" test "$(last_up_token)" = "$TOK"
+  expect "says the new token was not saved" has "$ERR" "the new token was not saved"
+  expect "no part of a token is shown" no_token_part_shown
+}
+
+test_new_token_without_a_usable_answer_changes_nothing() {
+  new_sandbox
+  tunnel_install
+  local before input; before="$(snapshot)"
+  # No answer at all, then three answers that are not tokens.
+  for input in "" "one
+two
+three
+"; do
+    forget_starts
+    install_sh "$input" install --new-token
+    expect "the run stops" test "$RC" = 1
+    expect "every file is as it was" test "$(snapshot)" = "$before"
+    expect "nothing was started or stopped" test "$(grep -cE ' (up|down) ' "$LOG")" = 0
+    expect "says nothing was changed" has "$ERR" "Nothing was changed"
+    expect "says the site keeps its token" has "$ERR" "keeps running on the token it had"
+    expect "names the command to try again" has "$ERR" "sudo bash $SCRIPT install --new-token"
+    expect "no part of a token is shown" no_token_part_shown
+  done
+  # An empty paste keeps the token.
+  forget_starts
+  install_sh "
+" install --new-token
+  expect "an empty answer succeeds" test "$RC" = 0
+  expect "every file is as it was" test "$(snapshot)" = "$before"
+  expect "the site runs on the old token" test "$(last_up_token)" = "$TOK"
+  # A dry run with a new token starts nothing and saves nothing.
+  forget_starts
+  install_sh "$TOK2
+" install --new-token --dry-run
+  expect "a dry run succeeds" test "$RC" = 0
+  expect "a dry run changes no file" test "$(snapshot)" = "$before"
+  expect "a dry run starts nothing" test ! -e "$STATE/up-tokens"
+  expect "a dry run shows no part of a token" no_token_part_shown
+  # A new token that does not connect: not saved, and the message says what to run.
+  forget_starts
+  STUB_FAIL_UP=tunnel STUB_CF_LOG="cloudflared-1  | Provided Tunnel token is not valid." install_sh "$TOK2
+" install --new-token
+  expect "a token that does not connect fails" test "$RC" != 0
+  expect "every file is as it was" test "$(snapshot)" = "$before"
+  expect "the site is started again on the old token" test "$(wc -l <"$STATE/up-tokens") $(last_up_token)" = "2 $TOK"
+  expect "says the new token was not saved" has "$ERR" "the new token was not saved"
+  expect "names the command to try again" has "$ERR" "sudo bash $SCRIPT install --new-token"
+  expect "no part of a token is shown" no_token_part_shown
+}
+
+test_asking_for_the_token_again_says_what_happened_and_what_to_do() {
+  new_sandbox
+  STUB_FAIL_UP=tunnel STUB_CF_LOG="cloudflared-1  | Provided Tunnel token is not valid." install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
+  expect "the first run fails" test "$RC" != 0
+  expect "the failed run names the command to run next" has "$ERR" "Run: sudo bash $SCRIPT install"
+  expect "the failed run shows no part of the token" no_token_part_shown
+  # Three answers that are not tokens: nothing changes, and the message says what to run.
+  local before; before="$(snapshot)"
+  install_sh "one
+two
+three
+" install
+  expect "three bad answers stop" test "$RC" = 1
+  expect "every file is as it was" test "$(snapshot)" = "$before"
+  expect "says what happened" has "$OUT" "The last install here did not finish"
+  expect "says nothing was changed" has "$ERR" "Nothing was changed"
+  expect "names the command to try again" has "$ERR" "run: sudo bash $SCRIPT install"
+  # The right way out: the same command, and Enter keeps the stored token.
+  install_sh "
+" install
+  expect "the next run succeeds on an empty answer" test "$RC" = 0
+  expect "says what happened" has "$OUT" "The last install here did not finish: its tunnel never connected to Cloudflare, so the site cannot be reached yet"
+  expect "says what to do" has "$OUT" "Paste the tunnel token again at the question below"
+  expect "says Enter keeps the stored token" has "$OUT" "press Enter to keep the token already stored"
+  expect "uses no word for the script's own bookkeeping" test "$(cat "$OUT" "$ERR" | grep -ciE 'pending|marker')" = 0
+  expect "no part of a token is shown" no_token_part_shown
+  # On a working install, --new-token says what it is about to do.
+  install_sh "$TOK2
+" install --new-token
+  expect "--new-token succeeds" test "$RC" = 0
+  expect "says the old token stays until the new one works" has "$OUT" "The token in use now stays in"
+  expect "no part of a token is shown" no_token_part_shown
+}
+
+test_new_token_without_an_install_stops_early() {
+  new_sandbox
+  local before args; before="$(snapshot)"
+  for args in "--new-token" "--new-token --yes" "--tunnel --new-token --yes" "--new-token --dry-run"; do
+    # shellcheck disable=SC2086
+    TUNNEL_TOKEN="$TOK" install_sh "$TUNNEL_ANSWERS" install $args
+    expect "$args: refused" test "$RC" = 1
+    expect "$args: says nothing is installed here" has "$ERR" "nothing is installed on this machine"
+    expect "$args: names the command that installs in tunnel mode" has "$ERR" "run: sudo bash $SCRIPT install --tunnel"
+    expect "$args: says nothing was changed" has "$ERR" "Nothing was changed"
+    expect "$args: asks no question" test "$(grep -cE 'Domain name for the platform|Tunnel token from|Choice \[1\]|Continue' "$ERR")" = 0
+    expect "$args: runs no command" test ! -s "$LOG"
+    expect "$args: writes nothing" test "$(snapshot)" = "$before"
+    expect "$args: no part of a token is shown" no_token_part_shown
+  done
+  # On a direct install: refused before anything is looked at or run.
+  new_sandbox
+  fresh_install
+  before="$(snapshot)"
+  : >"$LOG"
+  TUNNEL_TOKEN="$TOK" install_sh "$TOK
+" install --new-token
+  expect "direct: refused" test "$RC" = 1
+  expect "direct: says this install is not in tunnel mode" has "$ERR" "this install is not in tunnel mode"
+  expect "direct: says nothing was changed" has "$ERR" "Nothing was changed"
+  expect "direct: names the command without the option" has "$ERR" "sudo bash $SCRIPT install"
+  expect "direct: runs no command" test ! -s "$LOG"
+  expect "direct: writes nothing" test "$(snapshot)" = "$before"
+  expect "direct: no part of a token is shown" no_token_part_shown
+}
+
+test_update_leaves_a_tunnel_that_never_connected_marked() {
+  new_sandbox
+  tunnel_install
+  # The state a run killed outright can leave: the stack files, and the mark.
+  printf 'x\n' >"$INST/.tunnel-pending"; chmod 600 "$INST/.tunnel-pending"
+  local code; code="$(setup_code)"
+  forget_starts
+  install_sh "" update
+  expect "update succeeds" test "$RC" = 0
+  expect "the mark is still there" test -f "$INST/.tunnel-pending"
+  expect "says at the start that the install is not finished" has "$ERR" "this install was never finished"
+  expect "the closing message says so again" test "$(tail -n 1 "$ERR" | grep -c 'this install is still not finished')" = 1
+  expect "and names the command" test "$(tail -n 1 "$ERR" | grep -cF "Run: sudo bash $SCRIPT install")" = 1
+  expect "update does not print the setup code" test "$(cat "$OUT" "$ERR" | grep -c -- "$code")" = 0
+  expect "update asks nothing" hasnt "$ERR" "Tunnel token from"
+  expect "no part of a token is shown" no_token_part_shown
+  install_sh "" update --dry-run
+  expect "a dry run of update succeeds" test "$RC" = 0
+  expect "a dry run leaves the mark" test -f "$INST/.tunnel-pending"
+  expect "a dry run repeats what to do" has "$ERR" "Run: sudo bash $SCRIPT install"
+  # An update whose tunnel does not connect: still marked, and the last line says what to do.
+  forget_starts
+  STUB_FAIL_UP=tunnel STUB_CF_LOG="cloudflared-1  | Provided Tunnel token is not valid." install_sh "" update
+  expect "an update that does not turn healthy fails" test "$RC" != 0
+  expect "the mark is still there" test -f "$INST/.tunnel-pending"
+  expect "the closing message repeats what to do" test "$(tail -n 1 "$ERR" | grep -cF "Run: sudo bash $SCRIPT install")" = 1
+  expect "no part of a token is shown" no_token_part_shown
+  # The command the message names finishes the install: it confirms the tunnel, removes
+  # the mark and prints the setup code once.
+  install_sh "
+" install
+  expect "install succeeds" test "$RC" = 0
+  expect "the mark is gone once the tunnel is confirmed" test ! -e "$INST/.tunnel-pending"
+  expect "the setup code is printed exactly once" test "$(grep -c -- "$code" "$OUT")" = 1
+  install_sh "" update
+  expect "update on the finished install succeeds" test "$RC" = 0
+  expect "and says nothing about an unfinished install" test "$(cat "$OUT" "$ERR" | grep -c 'not finished')" = 0
+  # After a first install that failed on the token, the stack file is gone: update stops,
+  # leaves the mark and says what to run.
+  new_sandbox
+  STUB_FAIL_UP=tunnel install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
+  expect "the first install fails" test "$RC" != 0
+  local before; before="$(snapshot)"
+  install_sh "" update
+  expect "update stops" test "$RC" = 1
+  expect "nothing changed, the mark included" test "$(snapshot)" = "$before"
+  expect "the closing message repeats what to do" test "$(tail -n 1 "$ERR" | grep -cF "Run: sudo bash $SCRIPT install")" = 1
+  expect "no part of a token is shown" no_token_part_shown
 }
 
 # ---------------------------------------------------------------- run
