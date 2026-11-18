@@ -622,6 +622,11 @@ describe("the shared cPanel hosting guide", () => {
     expect(steps[0].text).toMatch(/^First update to a version that has this section, without the `--app-domain` option/);
     expect(steps[0].text).toMatch(/An older version ignores the two lines/);
     expect(steps[0].text).toMatch(/Only then go on\.$/);
+    // Step 0's update is what makes the backup, and the guide says so there, before any restart.
+    expect(steps[0].text).toMatch(/That update makes a backup before it changes anything, as in \[step 10\]\(#10-backups\)/);
+    expect(part).not.toMatch(/Make a backup first/);
+    // The same-version update with the option replaces dist.old: the earlier version is then only in the backup.
+    expect(part).toMatch(/it replaces `dist\.old` with the version it found running, so when that is the version already installed, the copy of the version from before step 0 is then only in the backup that step 0 made\./);
     const first = steps.slice(1, 7);
     expect(first[0].text).toMatch(/^Create the subdomain `app\.example\.com`/);
     expect(first[1].text).toMatch(/^Attach it to the same Node\.js app\./);

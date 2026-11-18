@@ -166,7 +166,7 @@ With two addresses the platform knows two host names and the role of each: the t
 
 A host name that is neither of the two gets an empty `421` on every path except `/healthz`, whether the path exists or not: no body and no content type, so the answer says nothing about the site. The check reads no token and makes no database or storage call.
 
-The redirect is a `308` whose `Location` is `https://` (plain `http://` only when the tours host is a `localhost` name) plus the configured tours host plus the request's own path and query; nothing in it comes from a header. It is sent with `Cache-Control: no-store`, so a browser does not remember a wrong setting. The tours address never redirects, so a redirect cannot loop.
+The redirect is a `308` whose `Location` is `https://` (plain `http://` only when the tours host is a `localhost` name or `127.0.0.1`) plus the configured tours host plus the request's own path and query; nothing in it comes from a header. It is sent with `Cache-Control: no-store`, so a browser does not remember a wrong setting. The tours address never redirects, so a redirect cannot loop.
 
 `/healthz` answers on every host name, because a container's own health check asks by an internal name. Asked on the tours address it prints `{"ok":true,"address":"tours"}`, on the app address `{"ok":true,"address":"app"}`, and on any other name, or with one address, `{"ok":true}`. The install scripts use this to check that each address reaches the platform under its own name.
 

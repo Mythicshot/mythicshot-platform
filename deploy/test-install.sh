@@ -131,6 +131,28 @@ esac
 case "$args" in
   *" config --quiet "*)
     [ "${STUB_FAIL_CONFIG:-0}" != 1 ] || { echo "the compose file is not valid" >&2; exit 1; } ;;
+  *" config "*)
+    # Like Compose, prints the stack file as it reads it, values filled in from its own
+    # environment and then .env, secrets included. Only what the tests look at is
+    # modelled: the app's environment (in direct mode with every line of .env, as
+    # env_file gives it), and the token in cloudflared's. STUB_RENDER=wrong: a Compose
+    # that does not fill in TOURS_HOST the way the stack file means it.
+    val() { if [ -n "${!1+set}" ]; then printf '%s' "${!1}"; else sed -n "s/^$1=//p" "$pd/.env" 2>/dev/null | tail -n 1; fi; }
+    yaml() { if [ -n "$1" ]; then printf '%s' "$1"; else printf '""'; fi; }
+    d="$(val DOMAIN)"; a="$(val APP_DOMAIN)"
+    tours=""; [ -z "$a" ] || tours="$d"
+    if [ "${STUB_RENDER:-}" = wrong ]; then if [ -n "$a" ]; then tours="'\${DOMAIN}'"; else tours="'}'"; fi; fi
+    printf 'name: demo-platform\nservices:\n  app:\n    environment:\n'
+    if grep -q 'TUNNEL_TOKEN:?' "$cf"; then
+      printf '      SETUP_CODE: %s\n' "$(val SETUP_CODE)"
+    else
+      grep -E '^[A-Z_]+=' "$pd/.env" | grep -vE '^(DATA_DIR|TOURS_HOST|APP_HOST)=' | sed 's/^\([A-Z_]*\)=/      \1: /'
+    fi
+    printf '      APP_HOST: %s\n      DATA_DIR: /data\n      TOURS_HOST: %s\n' "$(yaml "$a")" "$(yaml "$tours")"
+    printf '    image: %s\n  caddy:\n    environment:\n      APP_DOMAIN: %s\n      DOMAIN: %s\n' "$(val APP_IMAGE)" "$(yaml "$a")" "$d"
+    if grep -q 'TUNNEL_TOKEN:?' "$cf"; then
+      printf '  cloudflared:\n    environment:\n      TUNNEL_TOKEN: %s\n' "$(val TUNNEL_TOKEN)"
+    fi ;;
   *" up "*)
     n=$(cat "$STUB_STATE/ups" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$STUB_STATE/ups"
     # Like Compose, a start takes TUNNEL_TOKEN from its own environment before .env.
@@ -962,6 +984,7 @@ test_dry_run_writes_nothing() {
   expect "prints the folder creation" has "$OUT" "install -d -m 0700 -o 1001 -g 1001"
   expect "prints the .env write" has "$OUT" "would write DOMAIN, ACME_EMAIL, DATA_DIR, APP_IMAGE and a new SETUP_CODE"
   expect "prints the start" grep -q 'up -d --pull missing --wait' "$OUT"
+  expect "says what it would check in the rendered stack file" has "$OUT" "would check that Docker Compose fills in the new stack file with TOURS_HOST and APP_HOST both empty for the app"
   expect "runs no apt-get, curl or compose up" test "$(grep -cE '^(apt-get|curl)| up | config ' "$LOG")" = 0
   expect "prints no setup code" test "$(grep -cE '[0-9a-f]{32}' "$OUT" "$ERR" | awk -F: '{s+=$2} END {print s}')" = 0
   # On an existing install too, for every command.
@@ -2309,6 +2332,7 @@ test_dry_run_with_app_domain_writes_nothing() {
   expect "the root is unchanged" test "$(snapshot)" = "$before"
   expect "prints the .env write with the app address" has "$OUT" "would write DOMAIN, APP_DOMAIN, ACME_EMAIL, DATA_DIR, APP_IMAGE and a new SETUP_CODE"
   expect "says it would ask both addresses" has "$OUT" "would ask https://$DOMAIN/healthz and https://$APP/healthz"
+  expect "says what it would check in the rendered stack file" has "$OUT" "would check that Docker Compose fills in the new stack file with TOURS_HOST=$DOMAIN and APP_HOST=$APP for the app"
   expect "runs no apt-get, curl or compose up" test "$(grep -cE '^(apt-get|curl)| up | config ' "$LOG")" = 0
   expect "prints no setup code" test "$(cat "$OUT" "$ERR" | grep -cE '[0-9a-f]{32}')" = 0
   new_sandbox
@@ -2317,6 +2341,7 @@ test_dry_run_with_app_domain_writes_nothing() {
   expect "tunnel dry run succeeds" test "$RC" = 0
   expect "tunnel: the root is unchanged" test "$(snapshot)" = "$before"
   expect "tunnel: prints the .env write with the app address" has "$OUT" "would write DOMAIN, APP_DOMAIN, DEPLOY_MODE, DATA_DIR, APP_IMAGE, a new SETUP_CODE and the TUNNEL_TOKEN"
+  expect "tunnel: says what it would check in the rendered stack file" has "$OUT" "would check that Docker Compose fills in the new stack file with TOURS_HOST=$DOMAIN and APP_HOST=$APP for the app"
   expect "tunnel: runs no curl or compose up" test "$(grep -cE '^curl| up | config ' "$LOG")" = 0
   expect "tunnel: the token is not shown" token_not_shown
   # On an existing two-address install, for every command.
@@ -2339,6 +2364,118 @@ test_dry_run_with_app_domain_writes_nothing() {
   install_sh "" install --dry-run
   expect "a dry run after the edit succeeds" test "$RC" = 0
   expect "and changes nothing" test "$(snapshot)" = "$before"
+}
+
+# ---------------------------------------------------------------- the rendered stack file
+
+# The sentence a run stops with when Compose does not fill in the two settings as expected.
+RENDER_SENTENCE='This version of Docker Compose does not read the two-address settings in the stack file the way this script expects, so nothing was changed. Update Docker Compose and run install again.'
+# How often the run rendered the staged stack file, with the project folder whose .env
+# the start uses.
+rendered_staged() { grep -cE "^docker compose --project-name demo-platform --project-directory $INST -f $INST/[^ ]+ config\$" "$LOG" || true; }
+# Neither the setup code nor a token is in what the run printed.
+no_secret_shown() {
+  local code; code="$(setup_code)"
+  [ -n "$code" ] && ! grep -qF -- "$code" "$OUT" "$ERR" && ! grep -qF -e "$TOK" -e "$TOK2" "$OUT" "$ERR"
+}
+
+test_rendered_addresses_empty_with_one_address_proceeds() {
+  new_sandbox
+  fresh_install
+  expect "direct: the staged stack file was rendered once, after it validated" test "$(rendered_staged) $(grep -n ' config' "$LOG" | head -n 1 | grep -c -- '--quiet')" = "1 1"
+  expect "direct: the start follows" test "$(grep -c ' up ' "$LOG")" = 1
+  expect "direct: nothing of the rendering reaches a file" test "$(grep -rlF -- "SETUP_CODE: $(setup_code)" "$R" "$T/out" "$T/err" | wc -l)" = 0
+  expect "direct: nothing of the rendering is printed" test "$(cat "$OUT" "$ERR" | grep -cE 'TOURS_HOST: |SETUP_CODE: ')" = 0
+  : >"$LOG"
+  install_sh "" install
+  expect "direct: a later run renders again and succeeds" test "$RC $(rendered_staged)" = "0 1"
+  expect "direct: a later run shows no secret" no_secret_shown
+  new_sandbox
+  tunnel_install
+  expect "tunnel: the staged stack file was rendered once" test "$(rendered_staged)" = 1
+  expect "tunnel: the start follows" test "$(grep -c ' up ' "$LOG")" = 1
+  expect "tunnel: the token is not shown" token_not_shown
+  expect "tunnel: nothing of the rendering is printed" test "$(cat "$OUT" "$ERR" | grep -cE 'TOURS_HOST: |SETUP_CODE: |TUNNEL_TOKEN: ')" = 0
+}
+
+test_rendered_addresses_are_both_names_with_two_addresses_proceeds() {
+  new_sandbox
+  two_install
+  expect "direct: the staged stack file was rendered once" test "$(rendered_staged)" = 1
+  expect "direct: the start follows" test "$(grep -c ' up ' "$LOG")" = 1
+  expect "direct: nothing of the rendering is printed" test "$(cat "$OUT" "$ERR" | grep -cE 'TOURS_HOST: |SETUP_CODE: ')" = 0
+  new_sandbox
+  tunnel_two_install
+  expect "tunnel: the staged stack file was rendered once" test "$(rendered_staged)" = 1
+  expect "tunnel: the start follows" test "$(grep -c ' up ' "$LOG")" = 1
+  expect "tunnel: the token is not shown" token_not_shown
+  # A new token on trial is in no file yet: the rendering gets it the way the start does.
+  forget_starts
+  install_sh "$TOK2
+" install --new-token
+  expect "new token: the run succeeds and rendered once" test "$RC $(rendered_staged)" = "0 1"
+  expect "new token: no part of a token is shown" no_token_part_shown
+}
+
+test_wrong_rendering_stops_with_nothing_replaced() {
+  local mode before
+  for mode in direct tunnel; do
+    # One address: an existing install, run again.
+    new_sandbox
+    if [ "$mode" = tunnel ]; then tunnel_install; else fresh_install; fi
+    before="$(snapshot)"
+    : >"$LOG"
+    STUB_RENDER=wrong install_sh "" install
+    expect "$mode, one address: the run stops" test "$RC" = 1
+    expect "$mode, one address: with the sentence, once" test "$(grep -cF -- "ERROR: $RENDER_SENTENCE" "$ERR")" = 1
+    expect "$mode, one address: nothing changed" test "$(snapshot)" = "$before"
+    expect "$mode, one address: nothing started or stopped" test "$(grep -cE ' (up|down|restart) ' "$LOG")" = 0
+    expect "$mode, one address: no secret shown" no_secret_shown
+    # Two addresses: the line added by hand; the two-address Caddyfile is not written.
+    printf 'APP_DOMAIN=%s\n' "$APP" >>"$INST/.env"
+    before="$(snapshot)"
+    : >"$LOG"
+    STUB_RENDER=wrong STUB_RESOLVE="$HERE" install_sh "" install
+    expect "$mode, two addresses: the run stops" test "$RC" = 1
+    expect "$mode, two addresses: with the sentence, once" test "$(grep -cF -- "ERROR: $RENDER_SENTENCE" "$ERR")" = 1
+    expect "$mode, two addresses: nothing changed" test "$(snapshot)" = "$before"
+    expect "$mode, two addresses: nothing started or stopped" test "$(grep -cE ' (up|down|restart) ' "$LOG")" = 0
+    expect "$mode, two addresses: no address is asked" test "$(grep -c healthz "$LOG")" = 0
+    expect "$mode, two addresses: no secret shown" no_secret_shown
+    expect "$mode, two addresses: nothing of the rendering is shown" test "$(cat "$OUT" "$ERR" | grep -cE 'TOURS_HOST: |SETUP_CODE: |TUNNEL_TOKEN: ')" = 0
+    # The same file rendered as expected: the run goes through.
+    STUB_RESOLVE="$HERE" install_sh "" install
+    expect "$mode: with the right rendering the same run succeeds" test "$RC" = 0
+  done
+  # A first install: what the run created is removed again, the setup code is not printed.
+  for mode in direct tunnel; do
+    new_sandbox
+    if [ "$mode" = tunnel ]; then
+      STUB_RENDER=wrong install_sh "$TUNNEL_ANSWERS" install --tunnel --yes "--app-domain=$APP"
+    else
+      STUB_RENDER=wrong STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes "--app-domain=$APP"
+    fi
+    expect "$mode, first install: the run stops with the sentence" test "$RC $(grep -cF -- "ERROR: $RENDER_SENTENCE" "$ERR")" = "1 1"
+    expect "$mode, first install: no .env, stack file or Caddyfile is left" test ! -e "$INST/.env" -a ! -e "$INST/docker-compose.yml" -a ! -e "$INST/caddy/Caddyfile"
+    expect "$mode, first install: nothing started" test "$(grep -c ' up ' "$LOG")" = 0
+    expect "$mode, first install: no setup code shown" test "$(cat "$OUT" "$ERR" | grep -cE '[0-9a-f]{32}')" = 0
+    expect "$mode, first install: the token is not shown" token_not_shown
+  done
+}
+
+# What install.sh takes out of a rendering: only the app's two settings, each exactly once.
+test_rendered_app_hosts_reads_only_the_apps_two_settings() {
+  new_sandbox
+  load_functions
+  local head=$'name: x\nservices:\n  app:\n    environment:\n      SETUP_CODE: secret\n'
+  expect "both empty" test "$(printf '%s      APP_HOST: ""\n      TOURS_HOST: ""\n' "$head" | rendered_app_hosts)" = "|"
+  expect "both names" test "$(printf '%s      APP_HOST: app.example.com\n      TOURS_HOST: tours.example.com\n    image: x\n' "$head" | rendered_app_hosts)" = "tours.example.com|app.example.com"
+  expect "quoted names" test "$(printf '%s      APP_HOST: "app.example.com"\n      TOURS_HOST: %stours.example.com%s\n' "$head" "'" "'" | rendered_app_hosts)" = "tours.example.com|app.example.com"
+  expect "a setting without a value is not an empty one" test "$(printf '%s      APP_HOST:\n      TOURS_HOST: ""\n' "$head" | rendered_app_hosts)" != "|"
+  expect "one missing: nothing" test "$(printf '%s      APP_HOST: ""\n' "$head" | rendered_app_hosts)" = ""
+  expect "another service's do not count" test "$(printf 'services:\n  caddy:\n    environment:\n      APP_HOST: ""\n      TOURS_HOST: ""\n' | rendered_app_hosts)" = ""
+  expect "another section of the app does not count" test "$(printf 'services:\n  app:\n    labels:\n      APP_HOST: ""\n      TOURS_HOST: ""\n' | rendered_app_hosts)" = ""
+  expect "nothing else is passed on" test "$(printf '%s      APP_HOST: ""\n      TOURS_HOST: ""\n' "$head" | rendered_app_hosts | grep -c secret)" = 0
 }
 
 # An app image from before two addresses answers /healthz without any role: the run

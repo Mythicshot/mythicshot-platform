@@ -779,6 +779,20 @@ describe("two addresses in the stack files", () => {
     expect(two).toMatch(/puts the old Caddyfile back but never changes `\.env`/);
     expect(two).toContain("remove the `APP_DOMAIN` line");
     expect(installSh).toMatch(/^# .*checked on Compose 5\.5\.1/m);
+    // The script checks the rendering itself on whatever Compose is installed, and the runbook quotes its sentence.
+    expect(two).toContain("so the script checks it itself on whatever Compose is installed");
+    expect(two).toMatch(/what the app would get as `TOURS_HOST` and `APP_HOST`: both empty with one address, the two names with two/);
+    const sentence = "This version of Docker Compose does not read the two-address settings in the stack file the way this script expects";
+    expect(two).toContain(sentence);
+    expect(installSh.split(sentence).length - 1).toBe(1);
+    expect(installSh).toContain(`${sentence}, so nothing was changed. Update Docker Compose and run install again.`);
+    // The warning about the moment without an answer is read before the step that restarts.
+    const warning = two.indexOf("> Step 6 restarts the app and Caddy");
+    expect(warning).toBeGreaterThan(-1);
+    expect(warning).toBeLessThan(two.indexOf("6. Run the install again."));
+    expect(warning).toBeGreaterThan(two.indexOf("5. Add this one line"));
+    // The redirect's scheme, as src/hosts.ts has it.
+    expect(docs[README]).toContain("(plain `http://` only when the tours host is a `localhost` name or `127.0.0.1`)");
     // The option's row in the table stays short and points to the section.
     const row = docs[DOCKER].split("\n").find((l) => l.startsWith("| `--app-domain=<name>` |")) ?? "";
     expect(row).toContain("](#two-addresses)");

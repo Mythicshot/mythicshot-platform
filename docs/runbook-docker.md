@@ -823,7 +823,7 @@ On this route the second address is one setting: the line `APP_DOMAIN` in `/opt/
 > [!WARNING]
 > Never change the `DOMAIN` line to make room for a second address: it is the name every published tour link and Mythicshot use, and the app address is always the new name.
 
-The way the stack file derives the two settings was checked on Docker Compose 5.5.1, not on the oldest version the script accepts; the script validates the new stack file before it replaces anything, so an older Compose that cannot read it stops the run with nothing changed.
+The way the stack file derives the two settings was checked on Docker Compose 5.5.1, not on the oldest version the script accepts, so the script checks it itself on whatever Compose is installed. It validates the new stack file before it replaces anything, then has Compose fill the file in and looks at what the app would get as `TOURS_HOST` and `APP_HOST`: both empty with one address, the two names with two. A Compose that cannot read the file, or fills the two settings in differently, stops the run with nothing changed and says "This version of Docker Compose does not read the two-address settings in the stack file the way this script expects"; update Docker Compose and run `install` again.
 
 ### What to have ready for two addresses
 
@@ -899,14 +899,14 @@ nano /opt/demo-platform/.env
 APP_DOMAIN=app.example.com
 ```
 
+> [!WARNING]
+> Step 6 restarts the app and Caddy, so the site does not answer for a moment; do it when that is acceptable, and check both addresses right after it.
+
 6. Run the install again. It reads the line, saves the old Caddyfile (and the stack file, if it is an older one) as `.bak-<date>-<time>`, writes the one for two addresses, starts the app with its two settings, restarts Caddy and checks both addresses.
 
 ```sh
 bash /home/you/install.sh install
 ```
-
-> [!WARNING]
-> Step 6 restarts the app and Caddy, so the site does not answer for a moment; do it when that is acceptable, and check both addresses right after it.
 
 If the line holds something that cannot be a second address, the run stops first, with `has an APP_DOMAIN that is not a valid host name or is the same as DOMAIN`, and nothing is changed. If the start fails after `APP_DOMAIN` was added by hand, the script puts the old Caddyfile back but never changes `.env`, so remove the `APP_DOMAIN` line (or put the earlier one back) and run `install` again.
 

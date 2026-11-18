@@ -113,9 +113,12 @@ readonly DEFAULT_APP_IMAGE=demo-platform:latest
 readonly WAIT_SECONDS=120
 # up --wait-timeout and up --pull need Compose 2.17 or later; 2.20 leaves a margin.
 # The stack files' two-address settings nest one variable in another
-# (${APP_DOMAIN:+${DOMAIN}}). That was checked on Compose 5.5.1, not on this minimum;
-# install_stack_files validates the new stack file with the installed Compose before it
-# replaces anything, so a Compose that cannot read it stops the run with nothing changed.
+# (${APP_DOMAIN:+${DOMAIN}}). That was checked on Compose 5.5.1, not on this minimum,
+# so the script checks it itself on whatever Compose is installed: install_stack_files
+# validates the new stack file and then has Compose render it, and requires the app's
+# TOURS_HOST and APP_HOST to come out as meant (check_rendered_addresses). A Compose
+# that cannot read the file, or fills the two in differently, stops the run before
+# anything is replaced.
 readonly MIN_COMPOSE=2.20.0
 readonly DOCKER_KEY_FPR=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
 # What the tunnel's published application points at: Caddy, by its service name on the
@@ -1379,6 +1382,11 @@ install_stack_files() {
       if [ -e "$f" ]; then info "would compare $f and, if it differs, save it as .bak-<timestamp> and replace it"
       else info "would write $f"; fi
     done
+    if [ -n "$APP_DOMAIN" ]; then
+      info "would check that Docker Compose fills in the new stack file with TOURS_HOST=$DOMAIN and APP_HOST=$APP_DOMAIN for the app, before it replaces anything"
+    else
+      info "would check that Docker Compose fills in the new stack file with TOURS_HOST and APP_HOST both empty for the app, before it replaces anything"
+    fi
     return 0
   fi
   [ -e "$COMPOSE_FILE" ] || COMPOSE_CREATED=1
@@ -1390,11 +1398,50 @@ install_stack_files() {
   local staged_compose="$STAGED"
   with_trial_token run docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged_compose" config --quiet \
     || die "the new compose file does not validate; nothing was replaced"
+  check_rendered_addresses "$staged_compose"
   STAGED="$staged_compose"
   commit_file "$COMPOSE_FILE" "$INSTALL_DIR"
   stage_file "$CADDYFILE" 0600 < <(caddyfile_for_install)
   commit_file "$CADDYFILE" "$CADDY_DIR"
   CADDY_CHANGED="$COMMITTED"
+}
+
+# Stops the run, before anything is replaced, unless the installed Compose fills in the
+# staged stack file with the app's TOURS_HOST and APP_HOST exactly as this script means
+# them: both empty with one address, DOMAIN and APP_DOMAIN with two. Compose renders the
+# file with the project folder, and so the .env, that the start uses, and with a token on
+# trial the way the start gets it. The rendering holds the setup code and the token: it
+# goes down a pipe to rendered_app_hosts and nowhere else, never to the terminal or a
+# file, and what comes back is compared and never printed.
+check_rendered_addresses() {
+  local staged="$1" want="|" got
+  [ -z "$APP_DOMAIN" ] || want="$DOMAIN|$APP_DOMAIN"
+  info "asking Docker Compose how it fills in the new stack file's two address settings (what it prints is read here and not shown)"
+  got="$(with_trial_token docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged" config 2>/dev/null | rendered_app_hosts)" || got=""
+  [ "$got" = "$want" ] \
+    || die "This version of Docker Compose does not read the two-address settings in the stack file the way this script expects, so nothing was changed. Update Docker Compose and run install again."
+}
+
+# Reads a rendered stack file (the output of docker compose config) and prints the app
+# service's two settings as "<TOURS_HOST>|<APP_HOST>", quotes taken off; nothing unless
+# each is under services, app, environment exactly once. A setting without a value is
+# not an empty one. No other part of what is read is passed on.
+rendered_app_hosts() {
+  awk -v sq="'" '
+    { sub(/\r$/, "") }
+    /^[^ ]/ { top = $0; svc = ""; sec = ""; next }
+    /^  [^ ]/ { svc = $0; sec = ""; next }
+    /^    [^ ]/ { sec = $0; next }
+    top == "services:" && svc == "  app:" && sec == "    environment:" && /^      (TOURS_HOST|APP_HOST):( |$)/ {
+      key = $1; sub(/:$/, "", key)
+      val = $0; sub(/^      [A-Z_]+:/, "", val); gsub(/^ +| +$/, "", val)
+      first = substr(val, 1, 1); last = substr(val, length(val), 1)
+      if (length(val) >= 2 && first == last && (first == "\"" || first == sq)) val = substr(val, 2, length(val) - 2)
+      else if (val == "") val = "(no value)"
+      seen[key]++; value[key] = val
+    }
+    END { if (seen["TOURS_HOST"] == 1 && seen["APP_HOST"] == 1) printf "%s|%s\n", value["TOURS_HOST"], value["APP_HOST"] }
+  '
 }
 
 # The Caddyfile for this install's mode and its one or two addresses.
