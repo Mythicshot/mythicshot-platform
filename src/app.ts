@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { docsRoutes } from "./docs/page.ts";
 import { hostGate } from "./host-gate.ts";
 import { requestHost, roleOf } from "./hosts.ts";
 import type { Deps } from "./ports.ts";
@@ -24,6 +25,7 @@ export function createApp(deps: Deps): Hono {
   });
 
   setupRoutes(app, deps);
+  docsRoutes(app, deps);
   uploadRoutes(app, deps);
   tourRoutes(app, deps);
   publishRoutes(app, deps);

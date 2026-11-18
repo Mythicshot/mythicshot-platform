@@ -1,6 +1,6 @@
 {
   "name": "demo-platform",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "Hosted platform for interactive product tours, on Cloudflare or in a container.",
   "type": "module",
@@ -8,18 +8,19 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "npm run build:player && npm run build:node",
+    "build": "npm run build:player && npm run build:docs && npm run build:node",
     "build:node": "tsc -p tsconfig.build.json",
     "start": "node dist/node/entry.js",
     "dev": "wrangler dev",
     "types": "wrangler types",
-    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.cloudflare.json && tsc -p tsconfig.player.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.cloudflare.json && tsc -p tsconfig.player.json && tsc -p tsconfig.docs.json",
     "test:cf": "vitest run -c vitest.cloudflare.config.ts",
     "test:node": "vitest run -c vitest.node.config.ts",
     "test": "npm run test:cf && npm run test:node",
     "test:container": "bash deploy/test-container.sh",
     "test:cpanel": "bash deploy/cpanel/test-cpanel.sh",
     "build:player": "node scripts/build-player.ts",
+    "build:docs": "node scripts/build-docs.ts",
     "setup:cloudflare": "node scripts/setup-cloudflare.ts",
     "package:cpanel": "node scripts/package-cpanel.ts",
     "sync:core": "node scripts/sync-core.ts"
@@ -32,9 +33,14 @@
     "@cloudflare/vitest-plugin": "1.8.4",
     "@types/node": "24.19.2",
     "esbuild": "0.28.2",
+    "swagger-ui-dist": "5.34.1",
     "typescript": "7.0.2",
     "vitest": "4.1.12",
-    "wrangler": "4.164.0"
+    "wrangler": "4.164.0",
+    "yaml": "2.9.1"
+  },
+  "scarfSettings": {
+    "enabled": false
   },
   "allowScripts": {
     "esbuild@0.28.2": true,

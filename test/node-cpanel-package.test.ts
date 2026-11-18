@@ -107,7 +107,7 @@ describe("the cPanel archive", () => {
     const dist = files.filter((e) => e.path.startsWith("dist/")).map((e) => e.path);
     // One compiled file for every source file of the Node build, and no other file.
     const sources = walk("src")
-      .filter((p) => p.endsWith(".ts") && !p.startsWith("src/cloudflare/") && p !== "src/player/main.ts" && !p.startsWith("src/player/vendor/"))
+      .filter((p) => p.endsWith(".ts") && !p.startsWith("src/cloudflare/") && p !== "src/player/main.ts" && !p.startsWith("src/player/vendor/") && !p.startsWith("src/docs/client/"))
       .map((p) => p.replace(/^src\//, "dist/").replace(/\.ts$/, ".js"));
     expect(dist.sort()).toEqual(sources.sort());
     expect(dist).toContain("dist/node/entry.js");
@@ -123,7 +123,10 @@ describe("the cPanel archive", () => {
   it("holds no source, test, settings, dependency or leftover file", () => {
     for (const e of entries) {
       const p = e.path;
-      expect(p, p).not.toMatch(/(^|\/)(node_modules|src|test|tests|scripts|deploy|docs|\.git|\.wrangler|data|\.data)(\/|$)/);
+      expect(p, p).not.toMatch(/(^|\/)(node_modules|src|test|tests|scripts|deploy|\.git|\.wrangler|data|\.data)(\/|$)/);
+      // The repository's docs/ folder stays out. dist/docs/ is not it: that is the compiled
+      // src/docs/, the documentation page, which the test above holds to the source files.
+      expect(p.replace(/^dist\/docs\//, ""), p).not.toMatch(/(^|\/)docs(\/|$)/);
       expect(p, p).not.toMatch(/(^|\/)\.(env|dev\.vars)/);
       expect(p, p).not.toMatch(/\.(ts|map|sqlite|tgz|tar|gz|log)$/);
       expect(p, p).not.toMatch(/^dist\/(cpanel|cloudflare)(\/|$)/);

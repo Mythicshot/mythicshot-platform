@@ -62,12 +62,24 @@ const ROWS: Record<string, Row> = {
   "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421 },
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { method: "GET", path: "/player.js", one: 200, tours: 200, app: 404, unknown: 421 },
   "GET /t/:slug": { method: "GET", path: "/t/no-such-tour", one: 404, tours: 404, app: 308, unknown: 421 },
+  // The documentation page lives on the app address: the tours address sends the page on and has none of its files.
+  "GET /docs": { method: "GET", path: "/docs", one: 200, tours: 308, app: 200, unknown: 421 },
+  "GET /docs/:file{(?:viewer|docs)\\.[0-9a-f]{16}\\.(?:js|css)}": { method: "GET", path: "/docs/viewer.0123456789abcdef.js", one: 200, tours: 404, app: 200, unknown: 421 },
+  "GET /docs/licences.txt": { method: "GET", path: "/docs/licences.txt", one: 200, tours: 404, app: 200, unknown: 421 },
+  // The description is public text beside the API, on both addresses.
+  "GET /api/v1/openapi.json": { method: "GET", path: "/api/v1/openapi.json", one: 200, tours: 200, app: 200, unknown: 421 },
+  "GET /api/v1/openapi.yaml": { method: "GET", path: "/api/v1/openapi.yaml", one: 200, tours: 200, app: 200, unknown: 421 },
 };
 
 const KEYS = Object.keys(ROWS);
-const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/"));
+const DESCRIPTION_KEYS = KEYS.filter((k) => k.includes(" /api/v1/openapi."));
+/** The token API: everything under /api/v1/ but the description files, which need no token. */
+const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k));
 const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
+const DOCS_PAGE_KEY = "GET /docs";
+/** The page's own files and the licence notices. */
+const DOCS_FILE_KEYS = KEYS.filter((k) => k.startsWith("GET /docs/"));
 
 function sendRow(deps: Deps, row: Row, origin: string): Promise<Call> {
   if (row.body === undefined) return send(deps, row.method, row.path, { origin });
@@ -159,6 +171,11 @@ describe("the host-routing matrix", () => {
     for (const key of API_KEYS) expect(HOST_RULES[key], key).toBe("both");
     for (const key of [...WIZARD_KEYS, PLAYER_KEY]) expect(HOST_RULES[key], key).toBe("tours");
     for (const key of ["GET /t/:slug", "GET /p/:name"]) expect(HOST_RULES[key], key).toBe("tours-redirect");
+    for (const key of DESCRIPTION_KEYS) expect(HOST_RULES[key], key).toBe("both");
+    expect(HOST_RULES[DOCS_PAGE_KEY]).toBe("app-redirect");
+    for (const key of DOCS_FILE_KEYS) expect(HOST_RULES[key], key).toBe("app");
+    expect(DESCRIPTION_KEYS.length).toBe(2);
+    expect(DOCS_FILE_KEYS.length).toBe(2);
     expect(API_KEYS.length).toBe(13);
     expect(WIZARD_KEYS.length).toBe(5);
   });
@@ -181,19 +198,25 @@ describe("the host-routing matrix", () => {
     expect(await count(deps, "workspace")).toBe(0);
   });
 
-  it("the tours address answers every route", async () => {
+  it("the tours address answers every route but the documentation page and its files", async () => {
     const { deps } = await twoAddress();
     const answers = await column(deps, TOURS);
     expect(statuses(answers)).toEqual(expected("tours"));
-    expect(expected("tours")).toEqual(expected("one"));
+    // As in one-address mode, except for the documentation page, which lives on the app address.
+    const onApp = [DOCS_PAGE_KEY, ...DOCS_FILE_KEYS];
+    const without = (col: Record<string, number>) => Object.fromEntries(Object.entries(col).filter(([k]) => !onApp.includes(k)));
+    expect(without(expected("tours"))).toEqual(without(expected("one")));
+    expect(answers[DOCS_PAGE_KEY].headers.get("location")).toBe(APP + "/docs");
+    for (const key of DOCS_FILE_KEYS) expectNotHere(answers[key], key);
+    for (const key of DESCRIPTION_KEYS) expect(answers[key].status, key).toBe(200);
     for (const key of API_KEYS) expect(answers[key].json.error, key).toBe("unauthorized");
     expect(answers["GET /setup"].headers.get("content-type")).toBe("text/html; charset=utf-8");
     expect(answers["POST /setup/claim"].text).toBe('{"error":"bad_workspace"}');
     expect(answers["GET /t/:slug"].headers.get("content-type")).toBe("text/html; charset=utf-8");
     expect(answers["GET /p/:name"].text).toBe(NOT_FOUND);
     expect(answers[PLAYER_KEY].headers.get("content-type")).toBe("text/javascript; charset=utf-8");
-    // The tours address never redirects.
-    for (const key of KEYS) expect(answers[key].headers.get("location"), key).toBeNull();
+    // The tours address redirects nothing else.
+    for (const key of KEYS) if (key !== DOCS_PAGE_KEY) expect(answers[key].headers.get("location"), key).toBeNull();
   });
 
   it("the app address answers the token API and health, redirects tour pages and pictures, and has no wizard and no player files", async () => {
@@ -207,6 +230,11 @@ describe("the host-routing matrix", () => {
     expect(answers["GET /healthz"].status).toBe(200);
     for (const key of ["GET /t/:slug", "GET /p/:name"]) expectRedirect(answers[key], TOURS + ROWS[key].path, key);
     for (const key of [...WIZARD_KEYS, PLAYER_KEY]) expectNotHere(answers[key], key);
+    // The documentation page, its files and the description answer here, and none of them redirects.
+    for (const key of [DOCS_PAGE_KEY, ...DOCS_FILE_KEYS, ...DESCRIPTION_KEYS]) {
+      expect(answers[key].status, key).toBe(200);
+      expect(answers[key].headers.get("location"), key).toBeNull();
+    }
     expect(await count(deps, "workspace")).toBe(0);
   });
 
@@ -558,8 +586,62 @@ describe("the rule lookup", () => {
         if (want.app === 404) expect(onApp.text, what).toBe(NOT_FOUND);
         if (want.app === 308) expect(onApp.location, what).toBe("https://tours.example.com/setup?x=1");
         // A request only the wide route matches keeps the wide route's own rule.
-        const alone = { any: 200, both: 200, tours: 404, "tours-redirect": 308 }[wideRule];
+        const alone = { any: 200, both: 200, tours: 404, "tours-redirect": 308, app: 200, "app-redirect": 200 }[wideRule];
         expect((await ask(app, APP, "/other")).status, what).toBe(alone);
+      }
+    }
+  });
+
+  it("the app rules mirror the tours rules, and the strictest of two still wins", async () => {
+    const cases: [HostRule, HostRule, { tours: number; app: number; unknown: number }][] = [
+      ["app", "both", { tours: 404, app: 200, unknown: 421 }],
+      ["both", "app", { tours: 404, app: 200, unknown: 421 }],
+      ["app-redirect", "both", { tours: 308, app: 200, unknown: 421 }],
+      ["app", "app-redirect", { tours: 404, app: 200, unknown: 421 }],
+      ["app-redirect", "app", { tours: 404, app: 200, unknown: 421 }],
+      ["app", "any", { tours: 404, app: 200, unknown: 421 }],
+      ["app-redirect", "any", { tours: 308, app: 200, unknown: 421 }],
+      ["app-redirect", "app-redirect", { tours: 308, app: 200, unknown: 421 }],
+    ];
+    for (const [name, routes] of orders) {
+      for (const [narrowRule, wideRule, want] of cases) {
+        const app = tiny(routes, { "GET /setup": narrowRule, "GET /:page": wideRule });
+        const what = `${name}: ${narrowRule} + ${wideRule}`;
+        const onTours = await ask(app, TOURS, "/setup?x=1");
+        expect(onTours.status, what).toBe(want.tours);
+        expect((await ask(app, APP, "/setup")).status, what).toBe(want.app);
+        expect((await ask(app, UNKNOWN, "/setup")).status, what).toBe(want.unknown);
+        if (want.tours === 404) expect(onTours.text, what).toBe(NOT_FOUND);
+        if (want.tours === 308) expect(onTours.location, what).toBe("https://app.example.com/setup?x=1");
+        // A request only the wide route matches keeps the wide route's own rule.
+        const alone = { any: 200, both: 200, app: 404, "app-redirect": 308, tours: 200, "tours-redirect": 200 }[wideRule];
+        expect((await ask(app, TOURS, "/other")).status, what).toBe(alone);
+      }
+    }
+  });
+
+  it("two matched routes whose rules name different addresses are closed on both", async () => {
+    const tours: HostRule[] = ["tours", "tours-redirect"];
+    const apps: HostRule[] = ["app", "app-redirect"];
+    const aloneOnTours: Record<HostRule, number> = { any: 200, both: 200, tours: 200, "tours-redirect": 200, app: 404, "app-redirect": 308 };
+    for (const [name, routes] of orders) {
+      for (const a of tours) {
+        for (const b of apps) {
+          for (const [narrowRule, wideRule] of [[a, b], [b, a]]) {
+            const app = tiny(routes, { "GET /setup": narrowRule, "GET /:page": wideRule });
+            const what = `${name}: ${narrowRule} + ${wideRule}`;
+            for (const origin of [TOURS, APP]) {
+              const r = await ask(app, origin, "/setup");
+              // Neither a page nor a redirect: no address may answer for both rules.
+              expect(r.status, `${what} ${origin}`).toBe(404);
+              expect(r.text, `${what} ${origin}`).toBe(NOT_FOUND);
+              expect(r.location, `${what} ${origin}`).toBeNull();
+            }
+            expect((await ask(app, UNKNOWN, "/setup")).status, what).toBe(421);
+            // A request only one of them matches keeps that route's own rule.
+            expect((await ask(app, TOURS, "/other")).status, what).toBe(aloneOnTours[wideRule]);
+          }
+        }
       }
     }
   });

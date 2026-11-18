@@ -65,6 +65,22 @@ It is built to run on Cloudflare's Free plan, which allows 50 subrequests and 10
 
 The setup wizard's last step shows the server address. In Mythicshot, open Settings › Output › Tour publishing, paste the server address and the API token from the wizard, and press Test connection. The token is shown once, by the wizard; keep it in a password manager.
 
+## API documentation
+
+Every request a token can make is documented on the site itself, at `/docs`: what each request takes and answers, every error code and limit, three guides with commands to copy, and a "Try it" for each request. The page is open to anyone and needs no token to read. A token pasted there to try the calls is kept in that browser tab's memory only: it is never stored, and a reload forgets it.
+
+The same reference as one file, for tools, is the OpenAPI 3.1 description at `/api/v1/openapi.json` and `/api/v1/openapi.yaml`. It names no host: its paths are relative to the address it was fetched from.
+
+With two addresses the page is on the app address, and `/docs` on the tours address sends the browser there; the description answers on both. See [What answers where](#what-answers-where).
+
+The description is written in `src/docs/openapi.ts`, and the tests hold it equal to the routes and to what they really answer; the guides are in `src/docs/guides.ts`, and a test runs every command in them against the real routes. After changing either, or anything under `src/docs/client/`, run the command below and commit the two generated files it writes, `src/docs/site-assets.ts` and `src/docs/viewer-assets.ts`.
+
+```sh
+npm run build:docs
+```
+
+The reference is shown with Swagger UI, used under the Apache License 2.0. Its files are built into the app, so the page loads nothing from any other site. Its licence notices are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), and every install serves them at `/docs/licences.txt`.
+
 ## Publish a tour
 
 Mythicshot uploads tours as drafts. To publish one, or take it down again, run the helper with the server address and the tour id; it reads the token from `DEMO_PLATFORM_TOKEN`, or asks for it without echoing it, and never takes it as an argument.
@@ -81,6 +97,8 @@ A large tour publishes over several requests, so the helper prints its progress 
 
 ### The publish API
 
+The full reference for these requests, with every answer, error code and limit, is the site's own documentation page at `/docs` (see [API documentation](#api-documentation)); this section is the short version.
+
 Every request carries `Authorization: Bearer <token>` and answers `404` for a tour of another workspace.
 
 | Request | Answer |
@@ -93,6 +111,8 @@ Every request carries `Authorization: Bearer <token>` and answers `404` for a to
 A publish works from the draft as it was when the publish started: calls naming it keep driving that version, so a chapter uploaded meanwhile goes out with the next publish, never half of it with this one. `400 empty_tour` and `413 too_large` (more than 400 steps, or a snapshot over 512,000 bytes) come from the first request, before anything is copied.
 
 ### The tour API
+
+The full reference for these requests, with every answer, error code and limit, is the site's own documentation page at `/docs` (see [API documentation](#api-documentation)); this section is the short version.
 
 Mythicshot lists, renames and deletes tours with these requests. Each carries `Authorization: Bearer <token>`, acts only inside the token's workspace, and answers `404` for a tour of another workspace.
 
@@ -115,6 +135,8 @@ A repeated delete request after the tour is gone answers `404`, and the server c
 Deleting removes the files from the server; it cannot reach copies that were already handed out. A browser that opened the public page in the last minute may show it once more from its own cache, and images a visitor already downloaded stay in that browser's cache (published images are sent with a one-year cache lifetime, because their names never change). A CDN or caching proxy in front of the server can keep serving both for as long as it holds them; purge it there if that matters. The same holds after an unpublish.
 
 ### Replace a chapter
+
+The full reference for these requests, with every answer, error code and limit, is the site's own documentation page at `/docs` (see [API documentation](#api-documentation)); this section is the short version.
 
 Mythicshot updates a tour it published earlier by replacing one chapter over the same link. It uses the upload requests a new tour uses (create, one request per step image, commit, or abort), with the target `replace`. Each carries `Authorization: Bearer <token>` and acts only inside the token's workspace.
 
@@ -162,11 +184,14 @@ With two addresses the platform knows two host names and the role of each: the t
 | The token API, `/api/v1/…` | Answers | Answers, the same as on the tours address | `421` |
 | The setup wizard, `/setup` and what it loads | Answers | `404` with `{"error":"not_found"}` | `421` |
 | The player's script and stylesheet | Answers | `404` with `{"error":"not_found"}` | `421` |
+| The documentation page, `/docs` | `308` to `/docs` on the app address, with the same query | Answers | `421` |
+| What the documentation page loads, and `/docs/licences.txt` | `404` with `{"error":"not_found"}` | Answers | `421` |
+| The API description, `/api/v1/openapi.json` and `/api/v1/openapi.yaml` | Answers | Answers, the same as on the tours address | `421` |
 | `/healthz` | Answers, and names the role | Answers, and names the role | Answers, without a role |
 
 A host name that is neither of the two gets an empty `421` on every path except `/healthz`, whether the path exists or not: no body and no content type, so the answer says nothing about the site. The check reads no token and makes no database or storage call.
 
-The redirect is a `308` whose `Location` is `https://` (plain `http://` only when the tours host is a `localhost` name or `127.0.0.1`) plus the configured tours host plus the request's own path and query; nothing in it comes from a header. It is sent with `Cache-Control: no-store`, so a browser does not remember a wrong setting. The tours address never redirects, so a redirect cannot loop.
+The redirect is a `308` whose `Location` is `https://` (plain `http://` only when the tours host is a `localhost` name or `127.0.0.1`) plus the configured tours host plus the request's own path and query; nothing in it comes from a header. It is sent with `Cache-Control: no-store`, so a browser does not remember a wrong setting. The documentation page's redirect is built the same way from the configured app host. The app address redirects only tour pages and pictures, and the tours address only `/docs`, which the app address answers itself, so a redirect cannot loop.
 
 `/healthz` answers on every host name, because a container's own health check asks by an internal name. Asked on the tours address it prints `{"ok":true,"address":"tours"}`, on the app address `{"ok":true,"address":"app"}`, and on any other name, or with one address, `{"ok":true}`. The install scripts use this to check that each address reaches the platform under its own name.
 
@@ -278,13 +303,15 @@ The container stack's `.env`, written by `install.sh`, also holds `DOMAIN`, `ACM
 | `src/app.ts` | `createApp(deps)`: routes and error handling |
 | `src/auth.ts` | API tokens (only their SHA-256 hash is stored), ids, slugs and the request guard |
 | `src/setup.ts`, `src/setup/` | The first-run setup wizard |
+| `src/docs/` | The API documentation: the description (`openapi.ts`), the guides, the page and its routes, the page script and stylesheet (`client/`), and the two generated modules |
+| `scripts/docs-bundle.ts`, `scripts/build-docs.ts` | Build the two generated modules of the documentation page, `npm run build:docs` |
 | `src/cloudflare/` | D1 and R2 adapters and the Worker entry |
 | `src/node/` | SQLite and folder adapters, migrations, the HTTP server, the database backup |
 | `Dockerfile`, `deploy/` | The container image, the compose stack with Caddy, the install script and their tests |
 | `scripts/setup-cloudflare.ts` | The guided Cloudflare setup, `npm run setup:cloudflare` |
 | `deploy/cpanel/`, `scripts/package-cpanel.ts` | Shared cPanel hosting: the startup file, the install script and its tests, and the archive builder, `npm run package:cpanel` |
 | `migrations/` | SQL migrations, one set for both targets |
-| `docs/` | The two hosting runbooks |
+| `docs/` | The two hosting runbooks, the hosting guides, and the list of what to check on the documentation page in a browser |
 | `test/contract/` | Adapter contract suites run against both targets |
 | `wrangler.jsonc` | Worker bindings; the database id and bucket names are placeholders. Each install's own copy is `wrangler.deploy.jsonc`, ignored by Git |
 

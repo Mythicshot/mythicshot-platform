@@ -1,0 +1,784 @@
+// The API description (src/docs/openapi.ts) against what the site really answers, on both
+// targets. The description must not be able to say something the site does not do.
+//
+// Every request below goes to the real routes through the harness, and client() checks
+// each answer against the description: the status must be one the request's entry lists,
+// the content type the one it names, the body must fit the schema for that status (answer
+// schemas are closed, so a field the site sends that the description lacks fails, and so
+// does a required field the site leaves out), a status without a body must have none, and
+// every header the description states must be there with a value that fits. For an
+// accepted request, the path values and the JSON body sent must fit what the description
+// asks for, too.
+//
+// Each answer is also recorded as a "case": the request, its status and, where the
+// description gives one status several forms, which form (the error code, the shape of a
+// oneOf, the image type, with or without an optional field). The last test fails when a
+// documented case was never reached and is not in NOT_EXERCISED with its reason, so
+// nothing the description says goes unchecked in silence. That test needs the whole file
+// to have run: on its own (vitest -t) it fails, by design.
+//
+// Where the description and the code disagree, the code wins: correct src/docs/openapi.ts
+// and run `npm run build:docs`. Never change a route to fit the description.
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { makeDeps, seedWorkspace } from "#harness";
+import { openapi } from "../src/docs/openapi.ts";
+import type { Deps } from "../src/ports.ts";
+import { COPY_BATCH } from "../src/publish.ts";
+import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
+import { DEFAULT_MAX_OPEN_UPLOADS } from "../src/uploads.ts";
+import { VERSION } from "../src/version.ts";
+import { clone, fixtures, jpeg, logoPng, png, send, sha256Hex, stepImage, type Call, type Json } from "./bundle.ts";
+import { check, deref, KEYWORDS, keywordsOf } from "./openapi-schema.ts";
+
+/**
+ * Documented cases no test reaches, each with the reason. A case is written as the last
+ * test prints it, such as "DELETE /api/v1/tours/{id} 500 cleanup_pending". A case that is
+ * listed here and reached anyway also fails, so the list cannot go stale.
+ *
+ * It is empty: every documented case is reached. These are reached only with help, which
+ * the test that does it says in a comment; the route and its answer are always the real ones:
+ * - DELETE /api/v1/tours/{id} 202 and POST /api/v1/tours/{id}/unpublish 202 need hundreds
+ *   or thousands of files, so rows naming files that do not exist are written to the
+ *   database first (removing a file that is already gone is not an error).
+ * - The three 500 answers (cleanup_pending twice, publish_failed) need a store that
+ *   fails: a store's delete is made to throw, or a draft image is removed from the store.
+ * - POST /api/v1/tours/{id}/publish 409 publish_busy needs the draft to change twice at
+ *   the moment a publish starts: a hook on the database's batch changes it.
+ * - POST /api/v1/tours/{id}/publish 400 empty_tour needs a tour without steps, which no
+ *   request can make: its row is written to the database.
+ * - GET /api/v1/me 404 needs a token whose workspace is gone, which the database's own
+ *   rules forbid: the one read of the workspace's name is made to find nothing.
+ */
+const NOT_EXERCISED: Readonly<Record<string, string>> = {};
+
+const DOC = openapi();
+const JSON_TYPE = "application/json";
+const JSON_HEADERS = { "content-type": JSON_TYPE };
+
+type Op = { key: string; method: string; path: string; re: RegExp; op: Json };
+
+/** Every operation of the description, with a pattern that matches its real addresses. */
+const OPS: Op[] = Object.entries(DOC.paths).flatMap(([path, item]) =>
+  Object.entries(item).map(([method, op]) => ({
+    key: `${method.toUpperCase()} ${path}`,
+    method: method.toUpperCase(),
+    path,
+    re: new RegExp("^" + path.replace(/\{([a-z_]+)\}/g, "(?<$1>[^/]+)") + "$"),
+    op: op as Json,
+  })),
+);
+
+/** The cases reached so far in this file, with how often. */
+const seen = new Map<string, number>();
+
+/** A response of an operation, with a reference into components followed. */
+function responseOf(op: Op, status: string): Json {
+  return deref(DOC, op.op.responses[status] as Json) as Json;
+}
+
+/** The name of one shape of a oneOf: its schema's name, or its place in the list. */
+function shapeName(branch: Json, i: number): string {
+  return typeof branch.$ref === "string" ? branch.$ref.slice(branch.$ref.lastIndexOf("/") + 1) : `shape ${i + 1}`;
+}
+
+/**
+ * The forms one schema gives a status: one per error code, else two per optional field
+ * (with and without it), else just the one. With a `value`, only the forms that value is.
+ */
+function forms(label: string, schema: Json, value: Json | null): string[] {
+  const codes = schema.properties?.error?.enum as string[] | undefined;
+  if (codes !== undefined) return value === null ? codes.map((c) => `${label} ${c}`) : [`${label} ${value.error}`];
+  const required = (schema.required ?? []) as string[];
+  const optional = Object.keys(schema.properties ?? {}).filter((p) => !required.includes(p));
+  if (optional.length === 0) return [label];
+  return optional.flatMap((p) => (value === null ? [`${label} with ${p}`, `${label} without ${p}`] : [`${label} ${Object.hasOwn(value, p) ? "with" : "without"} ${p}`]));
+}
+
+/** Every case the description documents. */
+function documentedCases(): string[] {
+  const out: string[] = [];
+  for (const op of OPS) {
+    for (const status of Object.keys(op.op.responses)) {
+      const res = responseOf(op, status);
+      const base = `${op.key} ${status}`;
+      if (res.content === undefined) {
+        out.push(base);
+        continue;
+      }
+      const types = Object.keys(res.content);
+      for (const type of types) {
+        const label = types.length > 1 ? `${base} ${type}` : base;
+        const schema = deref(DOC, res.content[type].schema) as Json;
+        if (Array.isArray(schema.oneOf)) {
+          (schema.oneOf as Json[]).forEach((branch, i) => out.push(...forms(`${label} as ${shapeName(branch, i)}`, deref(DOC, branch) as Json, null)));
+        } else out.push(...forms(label, schema, null));
+      }
+    }
+  }
+  return out;
+}
+
+/** What is wrong with the lists: cases neither reached nor excused, excused ones that were reached, and excuses for nothing. */
+function coverageProblems(documented: string[], reached: (c: string) => boolean, excused: Readonly<Record<string, string>>) {
+  return {
+    neverReached: documented.filter((c) => !reached(c) && !Object.hasOwn(excused, c)),
+    excusedButReached: Object.keys(excused).filter((c) => reached(c)),
+    excusedButNotDocumented: Object.keys(excused).filter((c) => !documented.includes(c)),
+    excusedWithoutReason: Object.entries(excused).filter(([, reason]) => reason.trim().length < 20).map(([c]) => c),
+  };
+}
+
+type Opts = NonNullable<Parameters<typeof send>[3]>;
+
+/** Checks one real answer against the description and records its case. Throws with what differs. */
+function verify(method: string, path: string, opts: Opts, call: Call): void {
+  const address = path.split("?")[0];
+  const op = OPS.find((o) => o.method === method && o.re.test(address));
+  if (op === undefined) throw new Error(`${method} ${address} is not a request the description has; send it with send(), not through client()`);
+  const status = String(call.status);
+  const where = `${op.key} answered ${status}`;
+  const fix = "the code wins: correct src/docs/openapi.ts and run npm run build:docs";
+  if (!Object.hasOwn(op.op.responses, status)) throw new Error(`${where} (${call.text.slice(0, 160)}), a status the description does not list for it; ${fix}`);
+  const res = responseOf(op, status);
+
+  for (const [name, header] of Object.entries((res.headers ?? {}) as Record<string, Json>)) {
+    const raw = call.headers.get(name);
+    if (raw === null) throw new Error(`${where} without the header ${name} the description states; ${fix}`);
+    const schema = deref(DOC, header.schema) as Json;
+    const value = schema.type === "integer" && /^(0|[1-9][0-9]*)$/.test(raw) ? Number(raw) : raw;
+    const problems = check(DOC, schema, value, `header ${name}`);
+    if (problems.length > 0) throw new Error(`${where} with a header that differs from the description: ${problems.join("; ")}; ${fix}`);
+  }
+
+  const cases: string[] = [];
+  const base = `${op.key} ${status}`;
+  if (res.content === undefined) {
+    if (call.bytes.byteLength !== 0) throw new Error(`${where} with a body (${call.text.slice(0, 160)}) where the description has none; ${fix}`);
+    cases.push(base);
+  } else {
+    const types = Object.keys(res.content);
+    const type = (call.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+    if (!types.includes(type)) throw new Error(`${where} as ${type || "no content type"}, the description says ${types.join(" or ")}; ${fix}`);
+    let value: unknown = call.bytes;
+    if (type === JSON_TYPE) {
+      try {
+        value = JSON.parse(call.text);
+      } catch {
+        throw new Error(`${where} as JSON that does not parse: ${call.text.slice(0, 160)}`);
+      }
+    }
+    const declared = res.content[type].schema as Json;
+    const problems = check(DOC, declared, value);
+    if (problems.length > 0) throw new Error(`${where} with a body that differs from the description: ${problems.join("; ")}; ${fix}`);
+    const label = types.length > 1 ? `${base} ${type}` : base;
+    const schema = deref(DOC, declared) as Json;
+    if (Array.isArray(schema.oneOf)) {
+      // check() passed, so exactly one shape fits.
+      const i = (schema.oneOf as Json[]).findIndex((branch) => check(DOC, branch, value).length === 0);
+      cases.push(...forms(`${label} as ${shapeName(schema.oneOf[i], i)}`, deref(DOC, schema.oneOf[i]) as Json, value as Json));
+    } else cases.push(...forms(label, schema, type === JSON_TYPE ? (value as Json) : null));
+  }
+
+  // A request the site accepted must itself be one the description allows.
+  if (call.status < 300) {
+    const groups = op.re.exec(address)?.groups ?? {};
+    for (const p of (op.op.parameters ?? []) as Json[]) {
+      const raw = decodeURIComponent(groups[p.name] ?? "");
+      const schema = deref(DOC, p.schema) as Json;
+      const value = schema.type === "integer" && /^-?[0-9]+$/.test(raw) ? Number(raw) : raw;
+      const problems = check(DOC, schema, value, `{${p.name}}`);
+      if (problems.length > 0) throw new Error(`${where} to a path value the description does not allow: ${problems.join("; ")}; ${fix}`);
+    }
+    const body = op.op.requestBody as Json | undefined;
+    const sent = opts.body !== undefined && opts.body !== null;
+    if (body === undefined && sent) throw new Error(`${where} to a request with a body, and the description gives it none; ${fix}`);
+    if (body?.required === true && !sent) throw new Error(`${where} to a request without the body the description requires; ${fix}`);
+    if (body?.content?.[JSON_TYPE] !== undefined && typeof opts.body === "string") {
+      const problems = check(DOC, body.content[JSON_TYPE].schema, JSON.parse(opts.body), "request");
+      if (problems.length > 0) throw new Error(`${where} to a body the description does not allow: ${problems.join("; ")}; ${fix}`);
+    }
+  }
+
+  for (const c of cases) seen.set(c, (seen.get(c) ?? 0) + 1);
+}
+
+type Target = { kind: "new" } | { kind: "chapter"; tour_id: string } | { kind: "replace"; tour_id: string; chapter_id: string };
+type Committed = { tour_id: string; chapter_id: string; steps: number; publish?: string };
+const NEW: Target = { kind: "new" };
+
+/** The API's requests on `deps`, every answer checked against the description. */
+function client(deps: Deps) {
+  const call = async (method: string, path: string, opts: Opts = {}): Promise<Call> => {
+    const r = await send(deps, method, path, opts);
+    verify(method, path, opts, r);
+    return r;
+  };
+  const withJson = (token: string | null, body: unknown): Opts => ({ token, body: typeof body === "string" ? body : JSON.stringify(body), headers: JSON_HEADERS });
+  const bytes = (token: string | null, body: Uint8Array): Opts => ({ token, body: body as NonNullable<RequestInit["body"]> });
+  const api = {
+    call,
+    health: (origin?: string) => call("GET", "/healthz", origin === undefined ? {} : { origin }),
+    me: (token: string | null, origin?: string) => call("GET", "/api/v1/me", origin === undefined ? { token } : { token, origin }),
+    list: (token: string | null) => call("GET", "/api/v1/tours", { token }),
+    rename: (token: string | null, tourId: string, body: unknown) => call("PATCH", `/api/v1/tours/${tourId}`, withJson(token, body)),
+    del: (token: string | null, tourId: string) => call("DELETE", `/api/v1/tours/${tourId}`, { token }),
+    publish: (token: string | null, tourId: string, body?: unknown) => call("POST", `/api/v1/tours/${tourId}/publish`, body === undefined ? { token } : withJson(token, body)),
+    unpublish: (token: string | null, tourId: string) => call("POST", `/api/v1/tours/${tourId}/unpublish`, { token }),
+    image: (token: string | null, tourId: string, stepId: string) => call("GET", `/api/v1/tours/${tourId}/steps/${stepId}/image`, { token }),
+    create: (token: string | null, manifest: unknown, target: unknown = NEW, sha256?: string[]) =>
+      call("POST", "/api/v1/uploads", withJson(token, sha256 === undefined ? { manifest, target } : { manifest, target, sha256 })),
+    step: (token: string | null, uploadId: string, n: number, body: Uint8Array) => call("PUT", `/api/v1/uploads/${uploadId}/steps/${n}`, bytes(token, body)),
+    logo: (token: string | null, uploadId: string, body: Uint8Array) => call("PUT", `/api/v1/uploads/${uploadId}/logo`, bytes(token, body)),
+    commit: (token: string | null, uploadId: string) => call("POST", `/api/v1/uploads/${uploadId}/commit`, { token }),
+    cancel: (token: string | null, uploadId: string) => call("DELETE", `/api/v1/uploads/${uploadId}`, { token }),
+
+    /** Publishes until it is no longer in progress; every answer on the way is checked. */
+    async publishAll(token: string, tourId: string): Promise<Call> {
+      let r = await api.publish(token, tourId);
+      for (let i = 0; r.status === 202; i++) {
+        if (i > 50) throw new Error("publish does not finish");
+        r = await api.publish(token, tourId, { publish_id: r.json.publish_id });
+      }
+      expect(r.status, r.text).toBe(200);
+      return r;
+    },
+
+    /** A whole upload into a new tour or a new chapter: start, every image, the logo if one is due, finish. `pics[i]` picks step i's bytes. */
+    async upload(token: string, manifest: Json, target: Target = NEW, pics: number[] = []): Promise<Committed> {
+      const created = await api.create(token, manifest, target);
+      expect(created.status, created.text).toBe(201);
+      const id = created.json.upload_id as string;
+      for (let i = 0; i < manifest.steps.length; i++) expect((await api.step(token, id, i + 1, stepImage(manifest.steps[i], pics[i] ?? 0))).status).toBe(204);
+      if (manifest.cover?.logo && target.kind === "new") expect((await api.logo(token, id, logoPng())).status).toBe(204);
+      const done = await api.commit(token, id);
+      expect(done.status, done.text).toBe(201);
+      return done.json;
+    },
+
+    /** Starts the replacement of a chapter with a hash per picture and sends the pictures the site lacks. Does not finish it. */
+    async startReplace(token: string, at: { tour_id: string; chapter_id: string }, manifest: Json, pics: number[]): Promise<{ id: string; have: number[]; settings: boolean }> {
+      const hashes = await Promise.all((manifest.steps as Json[]).map((s, i) => sha256Hex(stepImage(s, pics[i] ?? 0))));
+      const created = await api.create(token, manifest, { kind: "replace", ...at }, hashes);
+      expect(created.status, created.text).toBe(201);
+      const id = created.json.upload_id as string;
+      const have = created.json.have as number[];
+      for (let i = 0; i < manifest.steps.length; i++) {
+        if (!have.includes(i + 1)) expect((await api.step(token, id, i + 1, stepImage(manifest.steps[i], pics[i] ?? 0))).status).toBe(204);
+      }
+      return { id, have, settings: created.json.settings };
+    },
+  };
+  return api;
+}
+
+const v2 = fixtures.v2 as Json;
+const v3 = fixtures.v3 as Json;
+
+/** A manifest of `n` small PNG steps. With different `pics` in upload(), the steps' bytes differ. */
+function small(n: number, title = "Small tour"): Json {
+  const m = clone(v2);
+  m.title = title;
+  const base = m.steps[1];
+  m.steps = Array.from({ length: n }, (_, i) => ({ ...clone(base), image: `step-${String(i + 1).padStart(3, "0")}.png`, width: 64, height: 64, bytes: 120 }));
+  return m;
+}
+
+/** Two workspaces; images a publish replaced are removed at once. */
+async function setup(config?: Parameters<typeof makeDeps>[0]) {
+  const ctx = await makeDeps({ retiredGraceMs: 0, ...config });
+  const a = await seedWorkspace(ctx.deps, "Workspace A");
+  const b = await seedWorkspace(ctx.deps, "Workspace B");
+  return { ...ctx, a, b };
+}
+
+const stepIds = async (deps: Deps, tourId: string) =>
+  (await deps.db.all<{ id: string }>("SELECT s.id FROM step s JOIN chapter c ON c.id = s.chapter_id WHERE s.tour_id = ? ORDER BY c.position, s.position", [tourId])).map((r) => r.id);
+
+/** What a refusal must be: the status and the error code. */
+function refused(r: Call, status: number, code: string): void {
+  expect([r.status, r.json?.error], r.text).toEqual([status, code]);
+}
+
+const TOUR_FIELDS = ["id", "title", "status", "slug", "url", "chapters", "steps", "updated_at", "published_at", "unpublished_changes"];
+const NO_TOUR = "tour_" + "0".repeat(24);
+const NO_UPLOAD = "up_" + "0".repeat(24);
+const NO_STEP = "st_" + "0".repeat(24);
+const NO_CHAPTER = "ch_" + "0".repeat(24);
+/** Well formed and known to no server: the placeholder the plan allows in tests. */
+const NO_TOKEN = "dp_" + "0".repeat(40);
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("the description against the real answers", { timeout: 120_000 }, () => {
+  it("every answer of a full upload, publish, list, rename, replace, unpublish and delete is as documented", async () => {
+    const { deps, a } = await setup();
+    const api = client(deps);
+
+    expect((await api.health()).json).toEqual({ ok: true });
+    expect((await api.me(a.token)).json).toEqual({ workspace: "Workspace A", version: VERSION });
+
+    // A new tour with a logo, request by request.
+    const created = await api.create(a.token, v3);
+    expect(created.json).toEqual({ upload_id: created.json.upload_id, steps: 3 });
+    const up = created.json.upload_id as string;
+    for (let i = 0; i < 3; i++) expect((await api.step(a.token, up, i + 1, stepImage(v3.steps[i]))).status).toBe(204);
+    expect((await api.logo(a.token, up, logoPng())).status).toBe(204);
+    const committed = await api.commit(a.token, up);
+    expect(committed.status).toBe(201);
+    const t = committed.json as Committed;
+    expect(Object.keys(t).sort()).toEqual(["chapter_id", "steps", "tour_id"]);
+    // A repeated commit answers the same.
+    expect((await api.commit(a.token, up)).json).toEqual(t);
+
+    // The list's items have exactly the documented fields, for a draft and a published tour.
+    const draft = (await api.list(a.token)).json.tours as Json[];
+    expect(draft).toHaveLength(1);
+    expect(Object.keys(draft[0])).toEqual(TOUR_FIELDS);
+    expect(draft[0]).toMatchObject({ id: t.tour_id, status: "draft", url: null, published_at: null, chapters: 1, steps: 3, unpublished_changes: false });
+
+    // A draft step image is the type its bytes are, and carries its sandbox policy.
+    const steps = await stepIds(deps, t.tour_id);
+    const first = await api.image(a.token, t.tour_id, steps[0]);
+    expect(first.headers.get("content-type")).toBe("image/png");
+    expect([...first.bytes.subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    expect(first.bytes).toEqual(stepImage(v3.steps[0]));
+    expect(first.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
+    expect(first.headers.get("cache-control")).toBe("private, no-store");
+    const third = await api.image(a.token, t.tour_id, steps[2]);
+    expect(third.headers.get("content-type")).toBe("image/jpeg");
+    expect([...third.bytes.subarray(0, 2)]).toEqual([0xff, 0xd8]);
+
+    expect((await api.rename(a.token, t.tour_id, { title: "  Renamed  " })).json).toEqual({ id: t.tour_id, title: "Renamed" });
+
+    // Replacing a chapter of a draft: publishing would have nothing to do with it.
+    const one = await api.startReplace(a.token, t, small(2, "First"), [5, 6]);
+    expect([one.have, one.settings]).toEqual([[], true]);
+    const replaced = await api.commit(a.token, one.id);
+    expect(replaced.json).toEqual({ tour_id: t.tour_id, chapter_id: t.chapter_id, steps: 2, publish: "draft" });
+    expect((await api.commit(a.token, one.id)).json).toEqual(replaced.json);
+
+    const live = await api.publish(a.token, t.tour_id);
+    expect(live.status).toBe(200);
+    expect(live.json).toEqual({ slug: draft[0].slug, url: `/t/${draft[0].slug}`, steps: 2 });
+    const published = (await api.list(a.token)).json.tours as Json[];
+    expect(Object.keys(published[0])).toEqual(TOUR_FIELDS);
+    expect(published[0]).toMatchObject({ status: "published", url: live.json.url, unpublished_changes: false });
+    expect(typeof published[0].published_at).toBe("number");
+
+    // A new chapter waits in the draft, and the list says so.
+    const more = await api.upload(a.token, small(2, "Second"), { kind: "chapter", tour_id: t.tour_id }, [1, 2]);
+    expect(more.tour_id).toBe(t.tour_id);
+    expect(((await api.list(a.token)).json.tours as Json[])[0]).toMatchObject({ chapters: 2, steps: 4, unpublished_changes: true });
+
+    // Replacing that chapter, never published: the draft holds more than this replace.
+    const two = await api.startReplace(a.token, more, small(2, "Second"), [1, 3]);
+    expect([two.have, two.settings]).toEqual([[1], false]);
+    // A step the site already has is not to be sent.
+    refused(await api.step(a.token, two.id, 1, stepImage(small(2).steps[0], 1)), 409, "already_sent");
+    expect((await api.commit(a.token, two.id)).json.publish).toBe("other_changes");
+    // Once all of it is live, a replace is the only change waiting.
+    await api.publishAll(a.token, t.tour_id);
+    const three = await api.startReplace(a.token, more, small(2, "Second"), [1, 4]);
+    expect((await api.commit(a.token, three.id)).json.publish).toBe("ready");
+
+    expect((await api.unpublish(a.token, t.tour_id)).status).toBe(204);
+    expect((await api.unpublish(a.token, t.tour_id)).status).toBe(204); // a draft answers the same
+
+    // The oldest manifest version starts an upload as well.
+    const open = await api.create(a.token, fixtures.v1);
+    expect((await api.cancel(a.token, open.json.upload_id)).status).toBe(204);
+    expect((await api.cancel(a.token, open.json.upload_id)).status).toBe(204); // gone already
+
+    expect((await api.del(a.token, t.tour_id)).json).toEqual({ deleted: true });
+    refused(await api.del(a.token, t.tour_id), 404, "not_found");
+    expect((await api.list(a.token)).json).toEqual({ tours: [] });
+  });
+
+  it("the answers of work done in steps are as documented: publish, unpublish and delete in progress", async () => {
+    const { deps, a } = await setup();
+    const api = client(deps);
+    const total = COPY_BATCH + 1;
+    const t = await api.upload(a.token, small(total));
+
+    const started = await api.publish(a.token, t.tour_id);
+    expect(started.status).toBe(202);
+    expect(started.json).toEqual({ status: "in_progress", publish_id: started.json.publish_id, done: COPY_BATCH, total });
+    // A publish in progress stops a delete.
+    refused(await api.del(a.token, t.tour_id), 409, "publish_busy");
+    const finished = await api.publish(a.token, t.tour_id, { publish_id: started.json.publish_id });
+    expect([finished.status, finished.json.steps]).toEqual([200, total]);
+    // The same answer however often it is asked.
+    expect((await api.publish(a.token, t.tour_id, { publish_id: started.json.publish_id })).json).toEqual(finished.json);
+
+    // Unpublish answers 202 only with more than 2,000 public images to remove. Help: rows
+    // for 2,001 images an earlier publish would have left are written to the database;
+    // the files do not exist, and removing a file that is gone is not an error.
+    await deps.db.run(
+      `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2001)
+       INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, delete_after)
+       SELECT 'p/' || printf('%032x', i) || '.png', ?, 'pub_000000000000000000000000', 'retired', 0, 0 FROM n`,
+      [t.tour_id],
+    );
+    const unpublishing = await api.unpublish(a.token, t.tour_id);
+    expect(unpublishing.status).toBe(202);
+    expect(unpublishing.json.status).toBe("in_progress");
+    expect((await api.unpublish(a.token, t.tour_id)).status).toBe(204);
+
+    // Delete answers 202 only with more files than one request removes. Help: rows for
+    // pictures a chapter replace would have left behind, whose files do not exist.
+    await deps.db.run(
+      `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+       INSERT INTO replaced_object (tour_id, image_key, draft_version, created_at)
+       SELECT ?, 'u/up_000000000000000000000000/step-' || printf('%03d', i) || '.png', 1, 0 FROM n`,
+      [DELETE_FILES_PER_CALL, t.tour_id],
+    );
+    const deleting = await api.del(a.token, t.tour_id);
+    expect(deleting.status).toBe(202);
+    expect(deleting.json).toEqual({ status: "in_progress", done: DELETE_FILES_PER_CALL, total: DELETE_FILES_PER_CALL + total });
+    expect((await api.del(a.token, t.tour_id)).json).toEqual({ deleted: true });
+  });
+
+  it("every refusal is as documented: no token, another workspace's tour, step and upload, and each error code", async () => {
+    const ctx = await setup();
+    const { deps, a, b } = ctx;
+    const api = client(deps);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // Without a token, and with one no server knows: every request that needs one.
+    const example = (op: Op) => op.path.replace("{id}", op.path.includes("/uploads/") ? NO_UPLOAD : NO_TOUR).replace("{step_id}", NO_STEP).replace("{n}", "1");
+    const guarded = OPS.filter((op) => op.op.security.length > 0);
+    expect(guarded).toHaveLength(OPS.length - 1);
+    for (const op of guarded) {
+      for (const token of [null, NO_TOKEN]) {
+        const r = await api.call(op.method, example(op), { token });
+        expect([r.status, r.text], op.key).toEqual([401, '{"error":"unauthorized"}']);
+      }
+    }
+
+    const t = await api.upload(a.token, small(2));
+    const [step] = await stepIds(deps, t.tour_id);
+
+    // Another workspace's tour and step answer as one that does not exist.
+    refused(await api.rename(b.token, t.tour_id, { title: "Mine now" }), 404, "not_found");
+    refused(await api.del(b.token, t.tour_id), 404, "not_found");
+    refused(await api.publish(b.token, t.tour_id), 404, "not_found");
+    refused(await api.unpublish(b.token, t.tour_id), 404, "not_found");
+    refused(await api.image(b.token, t.tour_id, step), 404, "not_found");
+    refused(await api.image(a.token, t.tour_id, NO_STEP), 404, "not_found");
+    refused(await api.create(b.token, small(1), { kind: "chapter", tour_id: t.tour_id }), 404, "not_found");
+    refused(await api.create(a.token, small(1), { kind: "replace", tour_id: t.tour_id, chapter_id: NO_CHAPTER }), 404, "not_found");
+    expect((await api.list(b.token)).json).toEqual({ tours: [] });
+
+    // Rename.
+    refused(await api.rename(a.token, t.tour_id, "[]"), 400, "bad_request");
+    refused(await api.rename(a.token, t.tour_id, { title: "   " }), 400, "bad_title");
+    refused(await api.rename(a.token, t.tour_id, { title: "x".repeat(5000) }), 413, "too_large");
+
+    // Start an upload.
+    refused(await api.call("POST", "/api/v1/uploads", { token: a.token, body: "[]", headers: JSON_HEADERS }), 400, "bad_request");
+    refused(await api.create(a.token, v2, NEW, ["0".repeat(64)]), 400, "bad_request"); // hashes are for a replace only
+    refused(await api.call("POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ target: NEW }), headers: JSON_HEADERS }), 400, "bad_manifest");
+    refused(await api.create(a.token, { ...clone(v2), steps: [] }), 400, "bad_manifest");
+    refused(await api.call("POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: v2 }), headers: JSON_HEADERS }), 400, "bad_target");
+    refused(await api.create(a.token, v2, { kind: "copy" }), 400, "bad_target");
+    refused(await api.call("POST", "/api/v1/uploads", { token: a.token, body: "x".repeat(300_000), headers: JSON_HEADERS }), 413, "too_large");
+    // The open-upload cap, in workspace B, which has none open: one more than allowed.
+    const open: string[] = [];
+    for (let i = 0; i < DEFAULT_MAX_OPEN_UPLOADS; i++) open.push((await api.create(b.token, v2)).json.upload_id);
+    const capped = await api.create(b.token, v2);
+    refused(capped, 429, "too_many_uploads");
+    expect(Number(capped.headers.get("retry-after"))).toBeGreaterThan(0);
+    for (const id of open) expect((await api.cancel(b.token, id)).status).toBe(204);
+
+    // Send a step's image.
+    const up = (await api.create(a.token, small(2))).json.upload_id as string;
+    refused(await api.step(b.token, up, 1, png(64, 64, 120)), 404, "not_found");
+    refused(await api.step(a.token, up, 3, png(64, 64, 120)), 404, "not_found");
+    refused(await api.step(a.token, up, 1, png(32, 32, 120)), 400, "bad_image");
+    refused(await api.step(a.token, up, 1, png(64, 64, 2_000_001)), 413, "too_large");
+    expect((await api.step(a.token, up, 1, png(64, 64, 120))).status).toBe(204);
+    refused(await api.step(a.token, up, 1, png(64, 64, 120)), 409, "already_sent");
+    // Finish it too early, or from another workspace.
+    refused(await api.commit(a.token, up), 409, "incomplete");
+    refused(await api.commit(b.token, up), 404, "not_found");
+    // The manifest names no logo.
+    refused(await api.logo(a.token, up, logoPng()), 404, "not_found");
+    expect((await api.cancel(a.token, up)).status).toBe(204);
+    refused(await api.commit(a.token, up), 404, "not_found");
+
+    // Send the logo.
+    const withLogo = (await api.create(a.token, v3)).json.upload_id as string;
+    refused(await api.logo(a.token, withLogo, jpeg(64, 64, 1000)), 400, "bad_image");
+    refused(await api.logo(a.token, withLogo, png(64, 64, 200_001)), 413, "too_large");
+    expect((await api.logo(a.token, withLogo, logoPng())).status).toBe(204);
+    refused(await api.logo(a.token, withLogo, logoPng()), 409, "already_sent");
+    expect((await api.cancel(a.token, withLogo)).status).toBe(204);
+    const intoTour = (await api.create(a.token, v3, { kind: "chapter", tour_id: t.tour_id })).json.upload_id as string;
+    refused(await api.logo(a.token, intoTour, logoPng()), 409, "logo_not_used");
+    expect((await api.cancel(a.token, intoTour)).status).toBe(204);
+
+    // Two replacements of one chapter: the second to finish is refused.
+    const early = await api.startReplace(a.token, t, small(2), [4, 5]);
+    const late = await api.startReplace(a.token, t, small(2), [6, 7]);
+    expect((await api.commit(a.token, early.id)).status).toBe(201);
+    refused(await api.commit(a.token, late.id), 409, "chapter_changed");
+    expect((await api.cancel(a.token, late.id)).status).toBe(204);
+
+    // Publish.
+    refused(await api.publish(a.token, t.tour_id, { publish_id: 5 }), 400, "bad_request");
+    refused(await api.publish(a.token, t.tour_id, { publish_id: "pub_" + "0".repeat(24) }), 409, "publish_cancelled");
+    refused(await api.publish(a.token, t.tour_id, { note: "x".repeat(2000) }), 413, "too_large");
+    // Help: a tour without steps, which no request can make, is written to the database.
+    const hollow = "tour_" + "e".repeat(24);
+    await deps.db.run("INSERT INTO tour (id, workspace_id, title, slug, status, created_at, updated_at) VALUES (?, ?, 'Empty', 'emptyslug2', 'draft', 1, 1)", [hollow, a.workspaceId]);
+    refused(await api.publish(a.token, hollow), 400, "empty_tour");
+    // Help: the draft changes twice at the moment the publish starts (as an upload finishing
+    // at that moment would change it), so both of its starts lose.
+    const realBatch = deps.db.batch.bind(deps.db);
+    let lost = 0;
+    deps.db.batch = async (stmts) => {
+      if (lost < 2 && stmts[0].sql.startsWith("INSERT INTO publish_job")) {
+        lost++;
+        await deps.db.run("UPDATE tour SET draft_version = draft_version + 1 WHERE id = ?", [t.tour_id]);
+      }
+      return realBatch(stmts);
+    };
+    const busy = await api.publish(a.token, t.tour_id);
+    deps.db.batch = realBatch;
+    expect(lost).toBe(2);
+    refused(busy, 409, "publish_busy");
+
+    // The store fails while unpublishing: the tour is unpublished, its images wait.
+    expect((await api.publishAll(a.token, t.tour_id)).json.steps).toBe(2);
+    const pubDelete = deps.pub.delete.bind(deps.pub);
+    deps.pub.delete = async () => {
+      throw new Error("bucket unavailable");
+    };
+    const stuck = await api.unpublish(a.token, t.tour_id);
+    deps.pub.delete = pubDelete;
+    refused(stuck, 500, "cleanup_pending");
+    expect(stuck.text).not.toContain("bucket");
+    expect((await api.unpublish(a.token, t.tour_id)).status).toBe(204);
+
+    // A draft image is gone from the store: the publish fails and says nothing of why.
+    const key = (await deps.db.first<{ image_key: string }>("SELECT image_key FROM step WHERE tour_id = ? LIMIT 1", [t.tour_id]))!.image_key;
+    await deps.drafts.delete([key]);
+    refused(await api.publish(a.token, t.tour_id), 500, "publish_failed");
+
+    // The store fails while deleting: the tour is gone, its files wait.
+    const draftsDelete = deps.drafts.delete.bind(deps.drafts);
+    deps.drafts.delete = async () => {
+      throw new Error("bucket unavailable");
+    };
+    const half = await api.del(a.token, t.tour_id);
+    deps.drafts.delete = draftsDelete;
+    refused(half, 500, "cleanup_pending");
+    expect((await api.del(a.token, t.tour_id)).json).toEqual({ deleted: true });
+
+    // Help: a token whose workspace is gone cannot exist, since a token's row must name a
+    // workspace; the read of the workspace's name is made to find nothing.
+    const realFirst = deps.db.first.bind(deps.db);
+    deps.db.first = (async (sql: string, params?: unknown[]) => (sql.startsWith("SELECT name FROM workspace") ? null : realFirst(sql, params as never))) as typeof deps.db.first;
+    const orphan = await api.me(a.token);
+    deps.db.first = realFirst;
+    refused(orphan, 404, "not_found");
+  });
+
+  it("me has addresses only with two addresses, and health names the address it was asked on", async () => {
+    const hosts = { tours: "tours.example.com", app: "app.example.com" };
+    const { deps, a } = await setup({ hosts });
+    const api = client(deps);
+    for (const origin of ["https://tours.example.com", "https://app.example.com"]) {
+      expect((await api.me(a.token, origin)).json, origin).toEqual({ workspace: "Workspace A", version: VERSION, addresses: hosts });
+    }
+    expect((await api.health("https://tours.example.com")).json).toEqual({ ok: true, address: "tours" });
+    expect((await api.health("https://app.example.com")).json).toEqual({ ok: true, address: "app" });
+    // Health answers on any host name; on one that is not configured it names no address.
+    expect((await api.health("https://other.example.net")).json).toEqual({ ok: true });
+  });
+
+  it("the answers any request can get are as the introduction says", async () => {
+    const intro = DOC.info.description;
+    const hosts = { tours: "tours.example.com", app: "app.example.com" };
+    const { deps, a } = await setup({ hosts });
+
+    expect(intro).toContain('`401 {"error":"unauthorized"}`, with no detail');
+    const noToken = await send(deps, "GET", "/api/v1/tours");
+    expect([noToken.status, noToken.text]).toEqual([401, '{"error":"unauthorized"}']);
+
+    expect(intro).toContain('`404 {"error":"not_found"}`, with no detail: no request has that address');
+    const nowhere = await send(deps, "GET", "/api/v1/nothing-here", { token: a.token });
+    expect([nowhere.status, nowhere.text, nowhere.headers.get("content-type")]).toEqual([404, '{"error":"not_found"}', JSON_TYPE]);
+
+    expect(intro).toContain("`421` with nothing in it: on a server with two addresses, the request was sent to another host name");
+    const elsewhere = await send(deps, "GET", "/api/v1/tours", { token: a.token, origin: "https://other.example.net" });
+    expect([elsewhere.status, elsewhere.bytes.byteLength]).toEqual([421, 0]);
+
+    expect(intro).toContain('`500 {"error":"internal"}`: the server failed; nothing about the failure is given');
+    const realAll = deps.db.all.bind(deps.db);
+    deps.db.all = async () => {
+      throw new Error("database unavailable");
+    };
+    const failed = await send(deps, "GET", "/api/v1/tours", { token: a.token });
+    deps.db.all = realAll;
+    expect([failed.status, failed.text]).toEqual([500, '{"error":"internal"}']);
+    // `500 {"error":"misconfigured"}` is answered by the Cloudflare entry before the app
+    // runs (test/worker-hosts.test.ts); no route answers it.
+  });
+});
+
+describe("the description is checked in full", () => {
+  /** Every schema the description holds, with where it is. References are not followed: their targets are in the list themselves. */
+  function allSchemas(): { at: string; schema: Json; answer: boolean }[] {
+    const out: { at: string; schema: Json; answer: boolean }[] = [];
+    for (const [name, schema] of Object.entries(DOC.components.schemas)) out.push({ at: `schemas.${name}`, schema: schema as Json, answer: false });
+    const ofResponse = (at: string, res: Json) => {
+      for (const [type, media] of Object.entries((res.content ?? {}) as Record<string, Json>)) out.push({ at: `${at} ${type}`, schema: media.schema, answer: true });
+      for (const [name, header] of Object.entries((res.headers ?? {}) as Record<string, Json>)) out.push({ at: `${at} header ${name}`, schema: header.schema, answer: false });
+    };
+    for (const [name, res] of Object.entries(DOC.components.responses)) ofResponse(`responses.${name}`, res as Json);
+    for (const op of OPS) {
+      for (const p of (op.op.parameters ?? []) as Json[]) out.push({ at: `${op.key} {${p.name}}`, schema: p.schema, answer: false });
+      for (const [type, media] of Object.entries((op.op.requestBody?.content ?? {}) as Record<string, Json>)) out.push({ at: `${op.key} request ${type}`, schema: media.schema, answer: false });
+      for (const [status, res] of Object.entries(op.op.responses as Record<string, Json>)) if (res.$ref === undefined) ofResponse(`${op.key} ${status}`, res);
+    }
+    return out;
+  }
+
+  it("the checker knows every keyword the description uses, and no other", () => {
+    const used = new Set<string>();
+    for (const { schema } of allSchemas()) keywordsOf(schema, used);
+    expect([...used].sort(), "a keyword only one side has: check it in test/openapi-schema.ts (or drop it there), so nothing the description says is ignored").toEqual([...KEYWORDS].sort());
+  });
+
+  it("every answer's schema is closed: no field may come that the description does not name", () => {
+    const open: string[] = [];
+    const visit = (at: string, raw: Json, depth = 0): void => {
+      if (depth > 12) throw new Error(`${at}: schemas nested too deep`);
+      const s = deref(DOC, raw) as Json;
+      const types = Array.isArray(s.type) ? s.type : [s.type];
+      if ((types.includes("object") || s.properties !== undefined) && s.additionalProperties !== false) open.push(at);
+      for (const [name, sub] of Object.entries((s.properties ?? {}) as Record<string, Json>)) visit(`${at}.${name}`, sub, depth + 1);
+      if (s.items !== undefined) visit(`${at}[]`, s.items, depth + 1);
+      for (const [i, sub] of ((s.oneOf ?? []) as Json[]).entries()) visit(`${at} shape ${i + 1}`, sub, depth + 1);
+    };
+    const answers = allSchemas().filter((x) => x.answer);
+    expect(answers.length).toBeGreaterThan(40);
+    for (const { at, schema } of answers) visit(at, schema);
+    expect(open, "these answers accept fields the description does not name; close them with additionalProperties: false").toEqual([]);
+  });
+
+  it("the schema checker itself refuses a missing field, an extra field and a wrong type, and a keyword it does not know", () => {
+    const tour = { $ref: "#/components/schemas/Tour" };
+    const good: Json = { id: NO_TOUR, title: "A tour", status: "draft", slug: "abcdefghij", url: null, chapters: 1, steps: 3, updated_at: 1, published_at: null, unpublished_changes: false };
+    expect(check(DOC, tour, good)).toEqual([]);
+    const { unpublished_changes: _gone, ...lacking } = good;
+    expect(check(DOC, tour, lacking)).toEqual(['$: the required field "unpublished_changes" is missing']);
+    expect(check(DOC, tour, { ...good, owner: "someone" })).toEqual(['$: the field "owner" is not in the description']);
+    expect(check(DOC, tour, { ...good, steps: "3" })).toEqual(['$.steps: expected integer, got string "3"']);
+    expect(check(DOC, tour, { ...good, steps: 2.5 })).toHaveLength(1);
+    expect(check(DOC, tour, { ...good, steps: -1 })).toEqual(["$.steps: -1 breaks minimum 0"]);
+    expect(check(DOC, tour, { ...good, status: "live" })).toHaveLength(1);
+    expect(check(DOC, tour, { ...good, id: "tour_1" })).toHaveLength(1);
+    expect(check(DOC, tour, { ...good, url: 5 })).toHaveLength(1);
+    expect(check(DOC, tour, [good])).not.toEqual([]);
+    expect(check(DOC, { $ref: "#/components/schemas/TourList" }, { tours: [good, { ...good, title: 7 }] })).toEqual(["$.tours[1].title: expected string, got integer 7"]);
+    // Exactly one shape of a oneOf, a constant, and each bound.
+    const created = { oneOf: [{ $ref: "#/components/schemas/UploadCreated" }, { $ref: "#/components/schemas/ReplaceCreated" }] };
+    expect(check(DOC, created, { upload_id: NO_UPLOAD, steps: 2 })).toEqual([]);
+    expect(check(DOC, created, { upload_id: NO_UPLOAD, steps: 2, have: [1], settings: false })).toEqual([]);
+    expect(check(DOC, created, { upload_id: NO_UPLOAD, steps: 2, have: [1] })).toHaveLength(1);
+    expect(check(DOC, { oneOf: [{ type: "integer" }, { type: "number" }] }, 1)).toEqual(["$: fits 2 of the oneOf shapes, must fit exactly one"]);
+    expect(check(DOC, { const: true }, false)).toHaveLength(1);
+    expect(check(DOC, { type: "string", minLength: 2, maxLength: 3 }, "é")).toHaveLength(1);
+    expect(check(DOC, { type: "string", minLength: 2, maxLength: 3 }, "éé")).toEqual([]);
+    expect(check(DOC, { type: "string", minLength: 2, maxLength: 3 }, "éééé")).toHaveLength(1);
+    expect(check(DOC, { type: "number", exclusiveMinimum: 0, maximum: 100 }, 0)).toHaveLength(1);
+    expect(check(DOC, { type: "number", exclusiveMinimum: 0, maximum: 100 }, 100.5)).toHaveLength(1);
+    expect(check(DOC, { type: "array", minItems: 1, maxItems: 2, items: { type: "integer" } }, [])).toHaveLength(1);
+    expect(check(DOC, { type: "array", minItems: 1, maxItems: 2, items: { type: "integer" } }, [1, 2, 3])).toHaveLength(1);
+    expect(check(DOC, { type: ["string", "null"] }, null)).toEqual([]);
+    expect(check(DOC, { type: "string", format: "binary" }, new Uint8Array(3))).toEqual([]);
+    expect(check(DOC, { type: "string", format: "binary" }, "text")).toHaveLength(1);
+    expect(check(DOC, { type: "string" }, new Uint8Array(3))).toHaveLength(1);
+    // What it does not know, it refuses to pass over.
+    expect(() => check(DOC, { type: "string", contentEncoding: "base64" }, "x")).toThrow(/unknown keyword "contentEncoding"/);
+    expect(() => check(DOC, { type: "object", properties: { a: { allOf: [] } } }, {})).toThrow(/unknown keyword "allOf"/);
+    expect(() => check(DOC, { type: "string", format: "date-time" }, "x")).toThrow(/format/);
+    expect(() => check(DOC, { type: "text" }, "x")).toThrow(/unknown type/);
+    expect(() => check(DOC, { type: "object", additionalProperties: { type: "string" } }, {})).toThrow(/additionalProperties/);
+    expect(() => check(DOC, { type: "object", required: ["a"] }, {})).toThrow(/required names "a"/);
+    expect(() => check(DOC, { $ref: "#/components/schemas/Nothing" }, {})).toThrow(/nothing is there/);
+  });
+
+  it("a documented case that is neither reached nor listed with a reason is reported, and so is a stale entry in the list", () => {
+    const documented = ["GET /a 200", "GET /a 404 not_found", "GET /a 500 broken"];
+    const reached = (c: string) => c !== "GET /a 500 broken";
+    expect(coverageProblems(documented, reached, {})).toEqual({ neverReached: ["GET /a 500 broken"], excusedButReached: [], excusedButNotDocumented: [], excusedWithoutReason: [] });
+    expect(coverageProblems(documented, reached, { "GET /a 500 broken": "needs a store that fails in a way no test can make" }).neverReached).toEqual([]);
+    expect(coverageProblems(documented, reached, { "GET /a 200": "is reached, so this entry is stale and must go" }).excusedButReached).toEqual(["GET /a 200"]);
+    expect(coverageProblems(documented, reached, { "GET /b 200": "is not in the description at all, so it must go" }).excusedButNotDocumented).toEqual(["GET /b 200"]);
+    expect(coverageProblems(documented, reached, { "GET /a 500 broken": "todo" }).excusedWithoutReason).toEqual(["GET /a 500 broken"]);
+  });
+
+  // Last, after every request above: it reads what they recorded.
+  it("every documented status was seen, in each of its documented forms, or is listed in NOT_EXERCISED with its reason", () => {
+    const documented = documentedCases();
+    expect(new Set(documented).size, "two documented cases read the same").toBe(documented.length);
+    expect(documented.length).toBeGreaterThan(60);
+    for (const op of OPS) for (const status of Object.keys(op.op.responses)) expect(documented.some((c) => c.startsWith(`${op.key} ${status}`)), `${op.key} ${status}`).toBe(true);
+    // verify() only records cases it built from the description, so each one seen is documented.
+    expect([...seen.keys()].filter((c) => !documented.includes(c))).toEqual([]);
+    const problems = coverageProblems(documented, (c) => seen.has(c), NOT_EXERCISED);
+    expect(problems.neverReached, "documented, but no test in this file reached it: reach it through client(), or list it in NOT_EXERCISED with the reason (if the site cannot answer it at all, remove it from src/docs/openapi.ts)").toEqual([]);
+    expect(problems.excusedButReached, "listed in NOT_EXERCISED, yet a test reached it: remove it from the list").toEqual([]);
+    expect(problems.excusedButNotDocumented, "listed in NOT_EXERCISED, but the description has no such case: remove it from the list").toEqual([]);
+    expect(problems.excusedWithoutReason, "an entry of NOT_EXERCISED needs its reason").toEqual([]);
+  });
+});
+
+// The source of every module beside the route table, read through Vite's ?raw import, which works under both Vitest configs.
+const SOURCES = import.meta.glob("../src/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+
+describe("the error codes in the code", () => {
+  it("every error code the API routes can answer is in the description, with its status, and no other", () => {
+    const source = (file: string) => {
+      const text = SOURCES[`../src/${file}`];
+      expect(typeof text, `src/${file} was not read`).toBe("string");
+      return text;
+    };
+    const inCode = new Set<string>();
+    let calls = 0;
+    for (const file of ["tours.ts", "uploads.ts", "publish.ts"]) {
+      const literal = [...source(file).matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
+      // Every call names its status and code in place, so none escapes this reading.
+      expect(literal.length, `${file}: an apiError call without a literal status and code`).toBe([...source(file).matchAll(/\bapiError\(/g)].length);
+      calls += literal.length;
+      for (const m of literal) inCode.add(`${m[1]} ${m[2]}`);
+    }
+    expect(calls).toBeGreaterThan(40);
+    // Those three are the only modules that answer with apiError (src/http.ts defines it).
+    const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
+    expect(callers).toEqual(["../src/http.ts", "../src/publish.ts", "../src/tours.ts", "../src/uploads.ts"]);
+
+    const described = new Set<string>();
+    for (const op of OPS) {
+      for (const status of Object.keys(op.op.responses)) {
+        const res = responseOf(op, status);
+        for (const media of Object.values((res.content ?? {}) as Record<string, Json>)) {
+          const schema = deref(DOC, media.schema) as Json;
+          for (const code of (schema.properties?.error?.enum ?? []) as string[]) described.add(`${status} ${code}`);
+        }
+      }
+    }
+    expect([...described].sort(), "a status and code only one side has; the code wins: correct src/docs/openapi.ts").toEqual([...inCode].sort());
+
+    // The three that are not made by apiError: the token guard's, and the app's own two.
+    expect(source("auth.ts")).toContain(`'{"error":"unauthorized"}'`);
+    expect((DOC.components.schemas as Json).Unauthorized.properties.error.const).toBe("unauthorized");
+    expect(source("app.ts")).toContain('c.json({ error: "not_found" }, 404)');
+    expect(source("app.ts")).toContain('c.json({ error: "internal" }, 500)');
+    expect(DOC.info.description).toContain('`404 {"error":"not_found"}`');
+    expect(DOC.info.description).toContain('`500 {"error":"internal"}`');
+  });
+});

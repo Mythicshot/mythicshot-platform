@@ -2,6 +2,13 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.7 (2026-11-18)
+
+- API documentation: the site has a public page at `/docs` with every request a token can make, a box to try them with your own token, and three guides with commands to copy.
+- The API is described in the OpenAPI format, to download as JSON or YAML, so other software can build a client from it. Tests hold the description equal to what the site really answers.
+- A token pasted on the page stays in that browser tab only, is sent only to the site itself, and is wiped when you press "Forget token".
+- With two addresses, the page lives on the app address; `/docs` on the tours address leads there.
+
 ## 0.1.6 (2026-11-18)
 
 - The tour list says for each tour whether changes are waiting to be published, so an app can offer to publish them.

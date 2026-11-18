@@ -93,6 +93,7 @@ export function routeOf(path: string): string {
     .replace(/st_[0-9a-f]{24}/g, ":step_id")
     .replace(/\/steps\/[^/]+$/, "/steps/:n")
     .replace(/^\/p\/.+/, "/p/:name")
+    .replace(/^\/docs\/(?:viewer|docs)\.[0-9a-f]{16}\.(?:js|css)$/, "/docs/:file{(?:viewer|docs)\\.[0-9a-f]{16}\\.(?:js|css)}")
     .replace(/^\/t\/.+/, "/t/:slug");
 }
 

@@ -32,6 +32,7 @@
     "src/cloudflare/**",
     "src/player/main.ts",
     "src/player/vendor/**",
+    "src/docs/client/**",
     "test/harness.cloudflare.ts",
     "node_modules",
     "dist"

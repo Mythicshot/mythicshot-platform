@@ -12,6 +12,7 @@
   "exclude": [
     "src/cloudflare/**",
     "src/player/main.ts",
-    "src/player/vendor/**"
+    "src/player/vendor/**",
+    "src/docs/client/**"
   ]
 }

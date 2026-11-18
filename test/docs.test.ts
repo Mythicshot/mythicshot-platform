@@ -10,8 +10,12 @@
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
+import { openapi, routeKeys } from "../src/docs/openapi.ts";
+import { DOCS_CSS_PATH, DOCS_JS_PATH } from "../src/docs/site-assets.ts";
+import { VIEWER_CSS_PATH, VIEWER_JS_PATH, VIEWER_VERSION } from "../src/docs/viewer-assets.ts";
 import type { Deps } from "../src/ports.ts";
 import installSh from "../deploy/install.sh?raw";
+import NOTICES from "../THIRD-PARTY-NOTICES.md?raw";
 import setupCloudflareTs from "../scripts/setup-cloudflare.ts?raw";
 
 const DOCS = import.meta.glob(["../README.md", "../LICENSE", "../docs/*.md"], {
@@ -807,6 +811,120 @@ describe("two addresses in the stack files", () => {
   });
 });
 
+/** The start of the README's row, in "What answers where", for the files of the documentation page. */
+const DOCS_FILES_ROW = "What the documentation page loads, and `/docs/licences.txt`";
+
+describe("the API documentation in the docs", () => {
+  const HOSTS = { tours: "tours.example.com", app: "app.example.com" };
+  const readme = docs[README];
+  const part = section(readme, "API documentation");
+  /** The three parts of the README that describe requests, each from its `### ` heading to the next heading. */
+  const API_PARTS = ["The publish API", "The tour API", "Replace a chapter"];
+  const sub = (heading: string): string => {
+    const start = readme.indexOf(`\n### ${heading}\n`);
+    if (start < 0) throw new Error(`no part "${heading}"`);
+    const end = readme.slice(start + 1).search(/\n#{2,3} /);
+    return readme.slice(start + 1, end < 0 ? undefined : start + 1 + end);
+  };
+
+  it("the README says where the API documentation is, on one address and on two", async () => {
+    // The section sits right after "Connect Mythicshot", before the requests are described.
+    const headings = [...readme.matchAll(/^## (.+)$/gm)].map((m) => m[1]);
+    expect(headings.slice(headings.indexOf("Connect Mythicshot"), headings.indexOf("Connect Mythicshot") + 3)).toEqual(["Connect Mythicshot", "API documentation", "Publish a tour"]);
+    const spans = codeSpans(split(part).prose);
+    for (const span of ["/docs", "/api/v1/openapi.json", "/api/v1/openapi.yaml", "/docs/licences.txt", "src/docs/openapi.ts", "src/docs/guides.ts", "src/docs/client/", "src/docs/site-assets.ts", "src/docs/viewer-assets.ts"]) {
+      expect(spans, span).toContain(span);
+    }
+    expect(part).toContain("open to anyone");
+    expect(part).toContain("never stored");
+    expect(split(part).blocks.map((b) => [b.lang, b.body.trim()])).toEqual([["sh", "npm run build:docs"]]);
+    // The viewer, its licence and where the notices are.
+    expect(part).toContain("Swagger UI, used under the Apache License 2.0");
+    expect(part).toContain("[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)");
+    expect(NOTICES).toContain(`swagger-ui-dist ${VIEWER_VERSION}`);
+    expect(NOTICES).toContain("Apache License 2.0");
+    expect(part).toContain("loads nothing from any other site");
+
+    // On one address: everything the section names answers, without a token.
+    const one = await makeDeps({});
+    for (const path of ["/docs", "/api/v1/openapi.json", "/api/v1/openapi.yaml", "/docs/licences.txt", VIEWER_JS_PATH, VIEWER_CSS_PATH, DOCS_JS_PATH, DOCS_CSS_PATH]) {
+      expect((await createApp(one.deps).fetch(new Request(`https://tours.example.com${path}`))).status, path).toBe(200);
+    }
+    // On two: the page is on the app address, the tours address sends the browser there, the description answers on both.
+    expect(part).toContain("With two addresses the page is on the app address, and `/docs` on the tours address sends the browser there; the description answers on both.");
+    expect(part).toContain("[What answers where](#what-answers-where)");
+    const two = await makeDeps({ hosts: HOSTS });
+    const ask = (host: string, path: string) => createApp(two.deps).fetch(new Request(`https://${host}${path}`, { redirect: "manual" }));
+    expect((await ask(HOSTS.app, "/docs")).status).toBe(200);
+    const moved = await ask(HOSTS.tours, "/docs");
+    expect(moved.status).toBe(308);
+    expect(moved.headers.get("location")).toBe("https://app.example.com/docs");
+    for (const host of [HOSTS.tours, HOSTS.app]) for (const path of ["/api/v1/openapi.json", "/api/v1/openapi.yaml"]) expect((await ask(host, path)).status, `${host}${path}`).toBe(200);
+    // "It names no host: its paths are relative to the address it was fetched from."
+    expect(part).toContain("It names no host");
+    expect(openapi().servers).toEqual([{ url: "/" }]);
+
+    // Each of the three parts that describe requests starts by pointing to the page.
+    for (const heading of API_PARTS) {
+      const first = sub(heading).split("\n").filter((l) => l.trim() !== "")[1];
+      expect(first, heading).toContain("`/docs`");
+      expect(first, heading).toContain("[API documentation](#api-documentation)");
+      expect(first, heading).toMatch(/^The full reference for these requests/);
+    }
+    // The layout table names where it all lives.
+    expect(readme).toMatch(/^\| `src\/docs\/` \| /m);
+    expect(readme).toMatch(/^\| `scripts\/docs-bundle\.ts`, `scripts\/build-docs\.ts` \| .*`npm run build:docs`/m);
+    for (const file of ["src/docs/openapi.ts", "src/docs/guides.ts", "src/docs/page.ts", "src/docs/client/main.ts", "scripts/docs-bundle.ts", "scripts/build-docs.ts", "THIRD-PARTY-NOTICES.md", "docs/api-docs-browser-check.md"]) {
+      expect(REPO_FILES, file).toContain(file);
+    }
+  });
+
+  it("every request the README's API tables name is in the description", () => {
+    const described = new Set(routeKeys(openapi()).map((key) => key.replace(/:[a-z_]+/g, "<>")));
+    expect(described.size).toBeGreaterThanOrEqual(13);
+    const named: string[] = [];
+    for (const heading of API_PARTS) {
+      // A request's row starts with a code span of a method and a path. (The part on
+      // replacing a chapter has a second table, of the values of `publish`, which names none.)
+      const rows = sub(heading).split("\n").flatMap((l) => {
+        const m = /^\| `((?:GET|POST|PUT|PATCH|DELETE) \/[^`\s]*)`/.exec(l);
+        return m === null ? [] : [m[1]];
+      });
+      expect(rows.length, heading).toBeGreaterThanOrEqual(3);
+      // No row names a request in another form that this would miss.
+      for (const l of sub(heading).split("\n")) if (/^\| `?(GET|POST|PUT|PATCH|DELETE)\b/i.test(l)) expect(l, heading).toMatch(/^\| `(?:GET|POST|PUT|PATCH|DELETE) \/api\/v1\//);
+      named.push(...rows);
+    }
+    // And any request named anywhere else in the README, in running text or a table.
+    for (const span of codeSpans(split(readme).prose)) {
+      const m = /^((?:GET|POST|PUT|PATCH|DELETE) \/(?:api\/v1\/|healthz)[^\s]*)/.exec(span);
+      if (m) named.push(m[1]);
+    }
+    const unique = [...new Set(named)];
+    expect(unique.length).toBeGreaterThanOrEqual(10);
+    for (const request of unique) {
+      expect(described.has(request.replace(/<[a-z_]+>/g, "<>")), `${request} is in the README and not in the description (src/docs/openapi.ts)`).toBe(true);
+    }
+    // The tables cover the whole of the tour, publish and upload requests between them.
+    for (const request of ["GET /api/v1/me", "GET /api/v1/tours", "PATCH /api/v1/tours/<id>", "DELETE /api/v1/tours/<id>", "POST /api/v1/tours/<id>/publish", "POST /api/v1/tours/<id>/unpublish", "POST /api/v1/uploads", "PUT /api/v1/uploads/<id>/steps/<n>", "PUT /api/v1/uploads/<id>/logo", "POST /api/v1/uploads/<id>/commit", "DELETE /api/v1/uploads/<id>"]) {
+      expect(unique, request).toContain(request);
+    }
+  });
+
+  it("the Cloudflare runbook gives the Worker's size with the page built in, and says the CPU point is not confirmed", () => {
+    const limits = docs[CLOUDFLARE].slice(docs[CLOUDFLARE].indexOf("### Per-request limits on the Free plan"), docs[CLOUDFLARE].indexOf("## Troubleshooting by symptom"));
+    expect(limits).toContain("The API documentation page (`/docs`, see [API documentation](../README.md#api-documentation)) is built into the Worker");
+    expect(limits).toMatch(/about [0-9,]+ bytes, or [0-9,]+ bytes compressed with gzip/);
+    expect(limits).toContain("`test/node-docs-build.test.ts` prints the figure and fails above 1,000,000 compressed");
+    expect(limits).toMatch(/^\*\*Unconfirmed:\*\* whether the Free plan's 10 ms of CPU time allows the first answer of the viewer's script\./m);
+    expect(limits).toContain("which is not built");
+    // The size also costs at every cold start, for every kind of request; that is said, and what the way out is.
+    expect(limits).toContain("\n**Unconfirmed:** the Worker's startup time. With the viewer built in, every cold start parses a script of about 2.3 MB");
+    expect(limits).toContain("a tour page and an API request as much as for the documentation page");
+    expect(limits).toContain("serve the documentation page's four files (the viewer's script and stylesheet, and the page's own two) as static assets");
+  });
+});
+
 describe("two addresses in the docs", () => {
   const HOSTS = { tours: "tours.example.com", app: "app.example.com" };
   const readme = section(docs[README], "One address or two");
@@ -910,6 +1028,12 @@ describe("two addresses in the docs", () => {
       ["The token API, `/api/v1/…`", "/api/v1/me", { authorization: `Bearer ${token}` }, [200, 200, 421]],
       ["The setup wizard, `/setup`", "/setup", {}, [200, 404, 421]],
       ["The player's script and stylesheet", "/player.js", {}, [200, 404, 421]],
+      ["The documentation page, `/docs`", "/docs?x=1", {}, [308, 200, 421]],
+      [DOCS_FILES_ROW, VIEWER_CSS_PATH, {}, [404, 200, 421]],
+      [DOCS_FILES_ROW, DOCS_JS_PATH, {}, [404, 200, 421]],
+      [DOCS_FILES_ROW, "/docs/licences.txt", {}, [404, 200, 421]],
+      ["The API description, `/api/v1/openapi.json` and `/api/v1/openapi.yaml`", "/api/v1/openapi.json", {}, [200, 200, 421]],
+      ["The API description, `/api/v1/openapi.json` and `/api/v1/openapi.yaml`", "/api/v1/openapi.yaml", {}, [200, 200, 421]],
       ["`/healthz`", "/healthz", {}, [200, 200, 200]],
     ];
     for (const [start, path, headers, statuses] of cases) {
@@ -918,10 +1042,26 @@ describe("two addresses in the docs", () => {
         const status = path === "/setup" ? wizard[i] : (await ask(hosts[i], path, headers)).status;
         expect(status, `${path} on ${hosts[i]}`).toBe(statuses[i]);
         // Nothing is published here, so the tours address answers 404 for the page and the picture; the row says it answers.
-        if (statuses[i] === 308 || statuses[i] === 421 || (i === 1 && statuses[i] === 404)) expect(cells[i + 1], `${start}: column ${i + 1}`).toContain("`" + statuses[i] + "`");
+        // The documentation page's files are the other way round: the tours address never has them, and the row says 404.
+        const refusedHere = statuses[i] === 404 && (i === 1 || start === DOCS_FILES_ROW);
+        if (statuses[i] === 308 || statuses[i] === 421 || refusedHere) expect(cells[i + 1], `${start}: column ${i + 1}`).toContain("`" + statuses[i] + "`");
         else expect(cells[i + 1], `${start}: column ${i + 1}`).toMatch(/^Answers/);
       }
     }
+    // The table has these rows and no other.
+    const rows = readme.split("\n").filter((l) => l.startsWith("| ") && !l.startsWith("| Request") && l.split("|").length === 6 && /`421`|without a role/.test(l));
+    expect(rows.map((l) => l.split("|")[1].trim())).toEqual([...new Set(cases.map((c) => c[0]))].map((start) => row(start)[0]));
+
+    // /docs on the tours address goes to /docs on the app address, with the same query, and is not kept.
+    const toDocs = await ask(HOSTS.tours, "/docs?x=1");
+    expect(toDocs.headers.get("location")).toBe("https://app.example.com/docs?x=1");
+    expect(toDocs.headers.get("cache-control")).toBe("no-store");
+    expect(row("The documentation page, `/docs`")[1]).toBe("`308` to `/docs` on the app address, with the same query");
+    expect(readme).toContain("The documentation page's redirect is built the same way from the configured app host.");
+    // Neither address redirects what the other redirects to, so a redirect cannot loop.
+    expect((await ask(HOSTS.app, "/docs?x=1")).status).toBe(200);
+    expect((await ask(HOSTS.tours, "/t/abcdefghij?x=1")).status).toBe(404);
+    expect(readme).toContain("The app address redirects only tour pages and pictures, and the tours address only `/docs`, which the app address answers itself, so a redirect cannot loop.");
 
     // The redirect goes to the tours address, with the same path and query, and is not kept.
     const moved = await ask(HOSTS.app, "/t/abcdefghij?x=1");
