@@ -4,7 +4,7 @@ import { serve } from "@hono/node-server";
 import { createApp } from "../app.ts";
 import { withBudget } from "../budget.ts";
 import type { Deps } from "../ports.ts";
-import { setupCodeFromEnv } from "../setup.ts";
+import { configFromEnv, guardTarget } from "./config.ts";
 import { APP_UID, prepareDataDir } from "./datadir.ts";
 import { NodeDb } from "./db.ts";
 import { NodeFileStore } from "./files.ts";
@@ -33,6 +33,9 @@ async function main(): Promise<void> {
   if (!dataDir) throw new Error("DATA_DIR is not set");
   const port = Number(process.env.PORT ?? 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT is not a valid port");
+  // Read before anything is created or opened: a pair of addresses that cannot be used
+  // stops the start here, with its one line and nothing else.
+  const config = configFromEnv(process.env);
 
   const root = prepareDataDir(dataDir);
   const dbPath = join(root, "db.sqlite");
@@ -49,16 +52,17 @@ async function main(): Promise<void> {
     db,
     drafts: new NodeFileStore(join(root, "drafts")),
     pub: new NodeFileStore(join(root, "public")),
-    config: {
-      publicImageBase: process.env.PUBLIC_IMAGE_BASE ?? "",
-      setupCode: setupCodeFromEnv(process.env.SETUP_CODE),
-    },
+    config,
     now: () => Date.now(),
   };
 
   // Each request gets its own metered ports, as on Cloudflare, so one that goes over the
   // call budget is logged here too. Building the route table per request is cheap.
-  const fetchOne = (req: Request) => withBudget(deps, req.method, async (d) => createApp(d).fetch(req));
+  const serveOne = (req: Request) => withBudget(deps, req.method, async (d) => createApp(d).fetch(req));
+  // With two addresses the host is read from the Host header only. A request line that
+  // carries a full address instead of a path would name its own host, so the guard answers
+  // it as a host this install does not serve. With one address nothing is checked, as before.
+  const fetchOne = guardTarget(config.hosts, serveOne);
   const server = serve({ fetch: fetchOne, port, serverOptions: { headersTimeout: HEADERS_TIMEOUT_MS, requestTimeout: REQUEST_TIMEOUT_MS } }, (info) => {
     console.log(`listening on port ${info.port}`);
   });

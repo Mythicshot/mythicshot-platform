@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { hostGate } from "./host-gate.ts";
+import { requestHost, roleOf } from "./hosts.ts";
 import type { Deps } from "./ports.ts";
 import { pageRoutes } from "./page.ts";
 import { publishRoutes } from "./publish.ts";
@@ -9,10 +11,16 @@ import { uploadRoutes } from "./uploads.ts";
 /** The route table and error handling. Routes reach data only through `deps`. */
 export function createApp(deps: Deps): Hono {
   const app = new Hono();
+  // First, so that in two-address mode nothing runs before the host is known.
+  app.use("*", hostGate(deps.config));
 
+  // Answers on any host. To a configured address it also reports the role the app sees
+  // it in, which is how an install checks that each address reaches it under its own name.
   app.get("/healthz", async (c) => {
     await deps.db.first("SELECT 1 AS ok");
-    return c.json({ ok: true });
+    const hosts = deps.config.hosts ?? null;
+    const address = hosts === null ? null : roleOf(hosts, requestHost(c.req.raw));
+    return c.json(address === null ? { ok: true } : { ok: true, address });
   });
 
   setupRoutes(app, deps);

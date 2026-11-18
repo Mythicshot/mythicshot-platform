@@ -3,7 +3,9 @@
 # caddy/ folder: docker compose up -d
 #
 # .env (mode 600, never committed) holds DOMAIN, ACME_EMAIL, DATA_DIR (a host folder
-# owned by id 1001), APP_IMAGE and SETUP_CODE.
+# owned by id 1001), APP_IMAGE and SETUP_CODE. With a second address, for the app, it
+# also holds APP_DOMAIN; DOMAIN is then the address of the tours, and caddy/Caddyfile
+# is the two-address one (deploy/caddy/Caddyfile.two).
 
 # Docker's local log files, capped at three files of 10 MB per container.
 x-logging: &logging
@@ -21,6 +23,10 @@ services:
       # where DATA_DIR is the folder on the host.
       DATA_DIR: /data
       PORT: "3000"
+      # The two addresses the app answers on, each in its own role. Both are empty
+      # without APP_DOMAIN in .env, which is one address: every host is answered.
+      TOURS_HOST: ${APP_DOMAIN:+${DOMAIN}}
+      APP_HOST: ${APP_DOMAIN:-}
     volumes:
       # The data folder must already exist, owned by id 1001. Docker would otherwise
       # create a missing one owned by root, which the app cannot write to.
@@ -45,6 +51,8 @@ services:
       # Read by the Caddyfile as {$DOMAIN} and {$ACME_EMAIL}.
       DOMAIN: ${DOMAIN:?DOMAIN is not set in .env}
       ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is not set in .env}
+      # Read only by the two-address Caddyfile, as {$APP_DOMAIN}.
+      APP_DOMAIN: ${APP_DOMAIN:-}
     ports:
       - "80:80"
       - "443:443"

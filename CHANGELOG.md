@@ -2,6 +2,14 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.5 (2026-11-18)
+
+- Two addresses: the site can serve tours on one address and keep a second address for the app. With neither set, everything works as before.
+- With two addresses, tour pages and pictures are served only on the tours address; a tour link opened on the app address is sent on to the tours address; any other host name is refused.
+- A wrong or half-set pair of addresses stops the site from starting instead of half-working, and the health check reports which address is which.
+- The install script and the cPanel script can set up and check a second address, and stop with nothing changed when it is not ready. The cPanel script now also notices a site that refuses its own address.
+- New sections in the README, the Docker and Cloudflare runbooks and the cPanel guide. Nothing about two addresses has been run on real hosting yet.
+
 ## 0.1.4 (2026-11-18)
 
 - Replace a chapter of a tour over the same link: the app sends a fingerprint of each picture and uploads only the ones the site does not have yet.

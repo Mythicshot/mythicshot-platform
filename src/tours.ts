@@ -141,7 +141,10 @@ export function tourRoutes(app: Hono, deps: Deps): void {
     if (auth instanceof Response) return auth;
     const row = await deps.db.first<{ name: string }>("SELECT name FROM workspace WHERE id = ?", [auth.workspaceId]);
     if (row === null) return apiError(404, "not_found", "no such workspace");
-    return json(200, { workspace: row.name, version: VERSION });
+    // In two-address mode the answer also names both addresses, as host names without a
+    // scheme; in one-address mode the key is absent, meaning "use the address you were given".
+    const hosts = deps.config.hosts ?? null;
+    return json(200, { workspace: row.name, version: VERSION, ...(hosts === null ? {} : { addresses: { tours: hosts.tours, app: hosts.app } }) });
   });
 
   app.get("/api/v1/tours", async (c) => {

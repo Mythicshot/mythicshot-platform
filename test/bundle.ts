@@ -53,8 +53,8 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 export type Call ={ status: number; text: string; json: any; headers: Headers; bytes: Uint8Array; calls: number };
 
-/** Sends one request to a fresh app on `deps` and reads the whole answer. */
-export async function send(deps: Deps, method: string, path: string, opts: { token?: string | null; body?: RequestInit["body"]; headers?: Record<string, string> } = {}): Promise<Call> {
+/** Sends one request to a fresh app on `deps` and reads the whole answer. `opts.origin` is the address it is sent to, ORIGIN unless given. */
+export async function send(deps: Deps, method: string, path: string, opts: { token?: string | null; body?: RequestInit["body"]; headers?: Record<string, string>; origin?: string } = {}): Promise<Call> {
   const headers: Record<string, string> = { ...opts.headers };
   if (opts.token) headers.authorization = "Bearer " + opts.token;
   const init: RequestInit & { duplex?: string } = { method, headers };
@@ -65,7 +65,7 @@ export async function send(deps: Deps, method: string, path: string, opts: { tok
   // Every request any test sends is metered and held to the budget, so a path that makes
   // too many storage or database calls fails the test that reaches it.
   const meter = metered(deps);
-  const res = await createApp(meter.deps).fetch(new Request(ORIGIN + path, init));
+  const res = await createApp(meter.deps).fetch(new Request((opts.origin ?? ORIGIN) + path, init));
   const bytes = new Uint8Array(await res.arrayBuffer());
   const calls = meter.calls();
   const route = `${method} ${routeOf(path)}`;

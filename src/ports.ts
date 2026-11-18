@@ -1,6 +1,7 @@
 // The two interfaces every route reaches data through, and the rules both adapters
 // share. Nothing in this file, or in any file outside src/cloudflare/ and src/node/,
 // may import a platform API.
+import type { Hosts } from "./hosts.ts";
 
 /**
  * A bound parameter. Both back ends bind every JS number as REAL, so a TEXT column
@@ -108,6 +109,8 @@ export type Config = {
    * so a viewer still on the previous page keeps its images. Default 10 minutes.
    */
   retiredGraceMs?: number;
+  /** The tours and the app address in two-address mode. Absent or null: one address, no host check. */
+  hosts?: Hosts | null;
 };
 
 export type Deps = { db: Db; drafts: FileStore; pub: FileStore; config: Config; now: () => number };

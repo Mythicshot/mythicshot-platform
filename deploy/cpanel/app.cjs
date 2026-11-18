@@ -9,6 +9,12 @@
 // with # are ignored, a variable that is already set in the environment wins, and one
 // pair of quotes around a value is dropped. No value from the file is ever printed.
 //
+// Two more settings are optional and go together: TOURS_HOST and APP_HOST, the host names
+// of the tours address and the app address (such as tours.example.com and
+// app.example.com). With neither, the app serves one address. They are passed on like
+// every other line; the app itself checks them and stops at the start on a pair it
+// cannot use.
+//
 // Tests: test/node-cpanel-app.test.ts.
 const fs = require("node:fs");
 const path = require("node:path");

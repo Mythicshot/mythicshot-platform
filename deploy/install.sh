@@ -6,7 +6,8 @@
 # tunnel.
 #
 #   sudo bash install.sh [install|update|backup|status|uninstall] [--tunnel|--direct]
-#                        [--new-token] [--dry-run] [--yes] [--force] [--delete-data]
+#                        [--app-domain=<name>] [--new-token] [--dry-run] [--yes]
+#                        [--force] [--delete-data]
 #
 # Pages checked on 2026-11-17 for what this script does:
 #   Debian releases (13 "trixie" is stable, 12 "bookworm" is oldstable):
@@ -34,7 +35,9 @@
 # Before running it, by hand. Direct mode: point the domain's DNS record at this server
 # and open ports 80 and 443 to it. Tunnel mode: create the tunnel in Cloudflare's
 # dashboard, copy its token, and give the tunnel a published application for the domain
-# with the service URL http://caddy:80. Everything else is done here.
+# with the service URL http://caddy:80. Everything else is done here. With a second
+# address for the app (--app-domain=<name>), the same for that name: a second DNS record,
+# or a second published application with the same service URL.
 #
 # Safety rules this script keeps:
 # - It never removes or overwrites the data folder, the .env file or a backup. The
@@ -81,6 +84,19 @@
 # - The mode is recorded in .env (DEPLOY_MODE=tunnel; no such line means direct). A run
 #   never switches an existing install to the other mode: --tunnel or --direct against
 #   the recorded mode is refused, with the steps to do it by hand.
+# - A second address, for the app, is recorded in .env as APP_DOMAIN; DOMAIN is then the
+#   address of the tours, and no such line means one address, as before. The stack file
+#   derives the app's two settings (TOURS_HOST, APP_HOST) from the pair, and the
+#   Caddyfile written is the two-address one. --app-domain=<name> writes the line on a
+#   first install only: an existing .env is not rewritten for it, so on an existing
+#   install the line is added (or removed) by hand and the next install run writes the
+#   stack files to match. update refuses to start a stack whose Caddyfile was written
+#   for the other number of addresses.
+# - With two addresses, each is asked for /healthz after the start and must report its
+#   own role. An address that reports another role, or none, fails the run with exit
+#   code 1; nothing is undone, and the setup code of a first install is still printed.
+#   An address that cannot be asked yet, or does not answer, is reported and is no
+#   failure.
 #
 # Tests: deploy/test-install.sh (runs this script in Debian containers with Docker
 # replaced by a stub). DP_ROOT, for those tests only, prefixes every system path.
@@ -96,17 +112,33 @@ readonly DEFAULT_DATA_DIR=/opt/demo-platform/data
 readonly DEFAULT_APP_IMAGE=demo-platform:latest
 readonly WAIT_SECONDS=120
 # up --wait-timeout and up --pull need Compose 2.17 or later; 2.20 leaves a margin.
+# The stack files' two-address settings nest one variable in another
+# (${APP_DOMAIN:+${DOMAIN}}). That was checked on Compose 5.5.1, not on this minimum,
+# so the script checks it itself on whatever Compose is installed: install_stack_files
+# validates the new stack file and then has Compose render it, and requires the app's
+# TOURS_HOST and APP_HOST to come out as meant (check_rendered_addresses). A Compose
+# that cannot read the file, or fills the two in differently, stops the run before
+# anything is replaced.
 readonly MIN_COMPOSE=2.20.0
 readonly DOCKER_KEY_FPR=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
 # What the tunnel's published application points at: Caddy, by its service name on the
 # stack's own network, over plain HTTP.
 readonly TUNNEL_SERVICE_URL=http://caddy:80
+# With two addresses: how often an address that does not answer /healthz is asked after
+# a start (a new certificate takes a moment), and the seconds between two tries.
+readonly ROLE_TRIES=5
+readonly ROLE_PAUSE=4
 
 # A token given in the environment is taken out of it at once: Compose prefers the
 # environment over .env, so a leftover value would override the recorded token, and no
 # child process needs it.
 ENV_TOKEN="${TUNNEL_TOKEN:-}"
 unset TUNNEL_TOKEN
+# The two host names come from .env, the domain question and --app-domain only: this
+# script never takes either from the environment. One left there would be read by
+# Compose before .env, so both are taken out.
+unset APP_DOMAIN
+unset DOMAIN
 
 case "$0" in
   install.sh | */install.sh) SELF="$0" ;;
@@ -143,6 +175,7 @@ FORCE=0
 DELETE_DATA=0
 MODE_FLAG=""  # tunnel or direct, when --tunnel or --direct was given
 NEW_TOKEN=0
+APP_DOMAIN_FLAG=""  # the name given with --app-domain=
 
 MODE=""       # direct or tunnel
 TOKEN=""      # the tunnel token; never printed
@@ -156,6 +189,7 @@ PENDING=0     # 1 when this install's tunnel has never connected (PENDING_FILE w
 UNFINISHED=0  # 1 when update found PENDING_FILE; on_exit then repeats what to run
 SECRET_EXTRA=0
 DOMAIN=""
+APP_DOMAIN=""  # the app address of a two-address install (DOMAIN is then the address of the tours); empty: one address
 ACME_EMAIL=""
 DATA_DIR=""   # the resolved path as the host sees it, without DP_ROOT; stored in .env
 DATA_PATH=""  # "$DP_ROOT$DATA_DIR", the path this script works on
@@ -198,6 +232,7 @@ Options:
                   default at the question a first install asks).
   --new-token     With install, on a tunnel install: ask for the tunnel token again and
                   replace the one in .env once the new one has connected.
+  --app-domain=<name>  With install: a second address, for the app. The domain asked for stays the address of the tours.
   --dry-run       Print every command and file write without doing any.
   --yes           Do not ask "continue?" questions (never skips the data deletion check).
   --force         Try on a system other than Debian 13 or 12.
@@ -222,7 +257,7 @@ run_pkg() { ( umask 022; run "$@" ); }
 # ---------------------------------------------------------------- arguments
 
 parse_args() {
-  local seen=0 a
+  local seen=0 app_seen=0 a
   for a in "$@"; do
     case "$a" in
       install | update | backup | status | uninstall)
@@ -239,6 +274,9 @@ parse_args() {
         [ "$MODE_FLAG" != tunnel ] || usage_error "give only one of --tunnel and --direct"
         MODE_FLAG=direct ;;
       --new-token) NEW_TOKEN=1 ;;
+      --app-domain=*)
+        [ "$app_seen" = 0 ] || usage_error "give --app-domain only once"
+        APP_DOMAIN_FLAG="${a#--app-domain=}"; app_seen=1 ;;
       -h | --help) usage; exit 0 ;;
       *) usage_error "unknown argument: $a" ;;
     esac
@@ -251,6 +289,10 @@ parse_args() {
   fi
   if [ "$NEW_TOKEN" = 1 ] && [ "$COMMAND" != install ]; then
     usage_error "--new-token goes only with install"
+  fi
+  if [ "$app_seen" = 1 ]; then
+    [ "$COMMAND" = install ] || usage_error "--app-domain goes only with install"
+    valid_domain "$APP_DOMAIN_FLAG" || usage_error "--app-domain must be a host name in lowercase, such as app.example.com, without https:// and without a path"
   fi
 }
 
@@ -855,58 +897,79 @@ is_private_ipv4() {
 }
 
 # Warns, never fails: from inside a network the public address cannot always be known.
+# $1 is the name: the domain, or the app address of a two-address install.
 check_dns() {
-  say "Checking that $DOMAIN points at this server"
+  local name="$1"
+  say "Checking that $name points at this server"
   local resolved local_ips ip records="" public_v4=0
-  resolved="$(getent ahosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+  resolved="$(getent ahosts "$name" 2>/dev/null | awk '{print $1}' | sort -u || true)"
   local_ips="$(ip -o addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | sort -u || true)"
   for ip in $resolved; do
     if printf '%s\n' "$local_ips" | grep -qxF -- "$ip"; then
-      info "$DOMAIN resolves to $ip, an address of this server"
+      info "$name resolves to $ip, an address of this server"
       return 0
     fi
   done
   for ip in $local_ips; do
     if [[ "$ip" == *:* ]]; then
-      [[ "$ip" == fe80:* || "$ip" == fd* || "$ip" == fc* ]] || records+="      $DOMAIN.  AAAA  $ip"$'\n'
+      [[ "$ip" == fe80:* || "$ip" == fd* || "$ip" == fc* ]] || records+="      $name.  AAAA  $ip"$'\n'
     elif ! is_private_ipv4 "$ip"; then
-      records+="      $DOMAIN.  A     $ip"$'\n'
+      records+="      $name.  A     $ip"$'\n'
       public_v4=1
     fi
   done
   if [ -z "$resolved" ]; then
-    warn "$DOMAIN does not resolve yet, so Caddy cannot get its certificate until it does."
+    warn "$name does not resolve yet, so Caddy cannot get its certificate until it does."
   else
-    warn "$DOMAIN resolves to $(printf '%s' "$resolved" | tr '\n' ' ')which is not an address of this server. That is fine if this server is behind a router that forwards ports 80 and 443 to it; otherwise fix the record."
+    warn "$name resolves to $(printf '%s' "$resolved" | tr '\n' ' ')which is not an address of this server. That is fine if this server is behind a router that forwards ports 80 and 443 to it; otherwise fix the record."
   fi
   if [ "$public_v4" = 1 ] || [ -n "$records" ]; then
     printf '    Create this DNS record at your DNS provider:\n%s' "$records" >&2
   else
     printf '    This server has only private addresses (%s), so it is behind a router. Create:\n      %s.  A     <your public IPv4 address>\n    and forward TCP ports 80 and 443 (and UDP 443) on the router to this server.\n' \
-      "$(printf '%s' "$local_ips" | tr '\n' ' ' | sed 's/ $//')" "$DOMAIN" >&2
+      "$(printf '%s' "$local_ips" | tr '\n' ' ' | sed 's/ $//')" "$name" >&2
   fi
   info "the install goes on; the certificate is issued as soon as the record works."
+}
+
+# The name resolves to an address of this server.
+resolves_here() {
+  local resolved local_ips ip
+  resolved="$(getent ahosts "$1" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+  local_ips="$(ip -o addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | sort -u || true)"
+  for ip in $resolved; do
+    if printf '%s\n' "$local_ips" | grep -qxF -- "$ip"; then return 0; fi
+  done
+  return 1
 }
 
 # ---------------------------------------------------------------- configuration
 
 read_env_file() {
-  local line key value have_code=0 mode=""
+  local line key value have_code=0 mode="" host_lines=0
   TOKEN=""
+  APP_DOMAIN=""
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in "" | "#"*) continue ;; esac
     key="${line%%=*}"
     value="${line#*=}"
     case "$key" in
       DOMAIN) DOMAIN="$value" ;;
+      APP_DOMAIN) APP_DOMAIN="$value" ;;
       ACME_EMAIL) ACME_EMAIL="$value" ;;
       DATA_DIR) DATA_DIR="$value" ;;
       APP_IMAGE) IMAGE="$value" ;;
       SETUP_CODE) [ -z "$value" ] || have_code=1 ;;
       DEPLOY_MODE) mode="$value" ;;
       TUNNEL_TOKEN) TOKEN="$value" ;;
+      TOURS_HOST | APP_HOST) host_lines=1 ;;
     esac
   done <"$ENV_FILE"
+  # The app's own two settings: the stack file sets both from DOMAIN and APP_DOMAIN, so
+  # a line for either in .env changes nothing. Said once, without the values.
+  if [ "$host_lines" = 1 ]; then
+    warn "$ENV_FILE has a TOURS_HOST or APP_HOST line, which has no effect on an install made by this script: a second address is set with APP_DOMAIN, and the stack gives the app both settings from DOMAIN and APP_DOMAIN. Remove the line."
+  fi
   # No DEPLOY_MODE line is direct mode: that is every .env written before tunnel mode
   # existed, and what direct mode still writes.
   case "$mode" in
@@ -915,6 +978,14 @@ read_env_file() {
     *) die "$ENV_FILE has a DEPLOY_MODE that is neither direct nor tunnel; fix it by hand, nothing was changed" ;;
   esac
   valid_domain "$DOMAIN" || die "$ENV_FILE has no valid DOMAIN; fix it by hand, nothing was changed"
+  # No APP_DOMAIN line, or an empty one, is one address: every .env written before two
+  # addresses existed. One that is set must be a second name; a half-right pair would
+  # start an app that refuses its own address.
+  if [ -n "$APP_DOMAIN" ]; then
+    if ! valid_domain "$APP_DOMAIN" || [ "$APP_DOMAIN" = "$DOMAIN" ]; then
+      die "$ENV_FILE has an APP_DOMAIN that is not a valid host name or is the same as DOMAIN; fix it by hand, nothing was changed"
+    fi
+  fi
   if [ "$MODE" = tunnel ]; then
     if ! valid_token "$TOKEN"; then
       # An install run that is about to ask for the token anyway goes on without one.
@@ -955,10 +1026,14 @@ load_or_ask_config() {
     fi
     check_recorded_data strict
     if [ -n "$MODE_FLAG" ] && [ "$MODE_FLAG" != "$MODE" ]; then refuse_mode_switch; fi
+    if [ -n "$APP_DOMAIN_FLAG" ] && [ "$APP_DOMAIN_FLAG" != "$APP_DOMAIN" ]; then refuse_app_domain_change; fi
     if [ "$MODE" = tunnel ]; then
       info "tunnel mode, domain $DOMAIN, data folder $DATA_DIR, image $IMAGE"
     else
       info "domain $DOMAIN, email $ACME_EMAIL, data folder $DATA_DIR, image $IMAGE"
+    fi
+    if [ -n "$APP_DOMAIN" ]; then
+      info "two addresses: $DOMAIN is the address of the tours, the app address is $APP_DOMAIN"
     fi
     refuse_other_modes_stack
     if [ "$MODE" = tunnel ]; then renew_token; fi
@@ -968,6 +1043,10 @@ load_or_ask_config() {
   say "A few questions"
   if [ -n "$MODE_FLAG" ]; then MODE="$MODE_FLAG"; else ask_mode; fi
   ask_domain
+  if [ -n "$APP_DOMAIN_FLAG" ]; then
+    [ "$APP_DOMAIN_FLAG" != "$DOMAIN" ] || die "the app address must be a different name than the tours address. Nothing was installed and nothing was changed."
+    APP_DOMAIN="$APP_DOMAIN_FLAG"
+  fi
   if [ "$MODE" = tunnel ]; then ask_token; else ask_email; fi
   ask_data_dir
   DATA_PATH="$DP_ROOT$DATA_DIR"
@@ -1046,6 +1125,29 @@ refuse_mode_switch() {
     die "this install is in direct mode (ports 80 and 443, its own certificate), recorded in $env; --tunnel does not switch it. Nothing was changed. To switch by hand, keeping the data and the setup code: 1. stop it: sudo bash $SELF uninstall  2. as root, add two lines to $env with an editor: DEPLOY_MODE=tunnel and TUNNEL_TOKEN=<the tunnel token>  3. start it: sudo bash $SELF install  4. close ports 80 and 443 on the firewall or router. The runbook's section on switching routes has the details."
   fi
   die "this install is in tunnel mode (behind a Cloudflare Tunnel), recorded in $env; --direct does not switch it. Nothing was changed. To switch by hand, keeping the data and the setup code: 1. stop it: sudo bash $SELF uninstall  2. as root, edit $env: remove the DEPLOY_MODE and TUNNEL_TOKEN lines and add ACME_EMAIL=<your email>  3. point the DNS record at this server and open ports 80 and 443  4. start it: sudo bash $SELF install. The runbook's section on switching routes has the details."
+}
+
+# The second address of an existing install is never set or changed by a flag: .env is
+# not rewritten for it, so the line is added by hand and the next install run writes the
+# stack files for it.
+refuse_app_domain_change() {
+  local env="$LOGICAL_INSTALL_DIR/.env"
+  if [ "$APP_DOMAIN_FLAG" = "$DOMAIN" ]; then
+    die "the app address must be a different name than the tours address. Nothing was changed."
+  fi
+  if [ -n "$APP_DOMAIN" ]; then
+    die "this install's .env does not hold APP_DOMAIN=$APP_DOMAIN_FLAG, and install.sh does not change that file. To add the second address, add that line to $env as root, then run: sudo bash $SELF install. The file holds APP_DOMAIN=$APP_DOMAIN now: change that line instead of adding one. Nothing was changed."
+  fi
+  die "this install's .env does not hold APP_DOMAIN=$APP_DOMAIN_FLAG, and install.sh does not change that file. To add the second address, add that line to $env as root, then run: sudo bash $SELF install. Nothing was changed."
+}
+
+# The Caddyfile on disk was written for the addresses .env records: the two-address one
+# when there is an app address, the one-address one when there is none.
+caddyfile_matches_addresses() {
+  local two=0
+  # shellcheck disable=SC2016 # the literal Caddyfile placeholder
+  if grep -qF '{$APP_DOMAIN}' "$CADDYFILE" 2>/dev/null; then two=1; fi
+  if [ -n "$APP_DOMAIN" ]; then [ "$two" = 1 ]; else [ "$two" = 0 ]; fi
 }
 
 # The mode of the stack file on disk: tunnel when it has a cloudflared service.
@@ -1209,11 +1311,13 @@ write_env_file() {
   else
     say "Writing $ENV_FILE (mode 600, root only) with a new setup code"
   fi
+  local names=DOMAIN
+  [ -z "$APP_DOMAIN" ] || names="DOMAIN, APP_DOMAIN"
   if [ "$DRY_RUN" = 1 ]; then
     if [ "$MODE" = tunnel ]; then
-      info "would write DOMAIN, DEPLOY_MODE, DATA_DIR, APP_IMAGE, a new SETUP_CODE and the TUNNEL_TOKEN to $ENV_FILE"
+      info "would write $names, DEPLOY_MODE, DATA_DIR, APP_IMAGE, a new SETUP_CODE and the TUNNEL_TOKEN to $ENV_FILE"
     else
-      info "would write DOMAIN, ACME_EMAIL, DATA_DIR, APP_IMAGE and a new SETUP_CODE to $ENV_FILE"
+      info "would write $names, ACME_EMAIL, DATA_DIR, APP_IMAGE and a new SETUP_CODE to $ENV_FILE"
     fi
     return 0
   fi
@@ -1229,6 +1333,7 @@ write_env_file() {
     {
       printf '# Written by install.sh. Root only: SETUP_CODE claims this install and TUNNEL_TOKEN runs its tunnel. Never share or commit.\n'
       printf 'DOMAIN=%s\n' "$DOMAIN"
+      [ -z "$APP_DOMAIN" ] || printf 'APP_DOMAIN=%s\n' "$APP_DOMAIN"
       printf 'DEPLOY_MODE=tunnel\n'
       printf 'DATA_DIR=%s\n' "$DATA_DIR"
       printf 'APP_IMAGE=%s\n' "$IMAGE"
@@ -1239,6 +1344,7 @@ write_env_file() {
     {
       printf '# Written by install.sh. Root only: SETUP_CODE claims this install. Never share or commit.\n'
       printf 'DOMAIN=%s\n' "$DOMAIN"
+      [ -z "$APP_DOMAIN" ] || printf 'APP_DOMAIN=%s\n' "$APP_DOMAIN"
       printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
       printf 'DATA_DIR=%s\n' "$DATA_DIR"
       printf 'APP_IMAGE=%s\n' "$IMAGE"
@@ -1267,12 +1373,20 @@ install_stack_files() {
   else
     say "Writing $COMPOSE_FILE and $CADDYFILE (the domain and email come from .env)"
   fi
+  if [ -n "$APP_DOMAIN" ]; then
+    info "two addresses: the Caddyfile is the one that answers for $DOMAIN and $APP_DOMAIN"
+  fi
   if [ "$DRY_RUN" = 1 ]; then
     local f
     for f in "$COMPOSE_FILE" "$CADDYFILE"; do
       if [ -e "$f" ]; then info "would compare $f and, if it differs, save it as .bak-<timestamp> and replace it"
       else info "would write $f"; fi
     done
+    if [ -n "$APP_DOMAIN" ]; then
+      info "would check that Docker Compose fills in the new stack file with TOURS_HOST=$DOMAIN and APP_HOST=$APP_DOMAIN for the app, before it replaces anything"
+    else
+      info "would check that Docker Compose fills in the new stack file with TOURS_HOST and APP_HOST both empty for the app, before it replaces anything"
+    fi
     return 0
   fi
   [ -e "$COMPOSE_FILE" ] || COMPOSE_CREATED=1
@@ -1284,15 +1398,60 @@ install_stack_files() {
   local staged_compose="$STAGED"
   with_trial_token run docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged_compose" config --quiet \
     || die "the new compose file does not validate; nothing was replaced"
+  check_rendered_addresses "$staged_compose"
   STAGED="$staged_compose"
   commit_file "$COMPOSE_FILE" "$INSTALL_DIR"
-  if [ "$MODE" = tunnel ]; then
-    stage_file "$CADDYFILE" 0600 < <(tunnel_caddyfile_content)
-  else
-    stage_file "$CADDYFILE" 0600 < <(caddyfile_content)
-  fi
+  stage_file "$CADDYFILE" 0600 < <(caddyfile_for_install)
   commit_file "$CADDYFILE" "$CADDY_DIR"
   CADDY_CHANGED="$COMMITTED"
+}
+
+# Stops the run, before anything is replaced, unless the installed Compose fills in the
+# staged stack file with the app's TOURS_HOST and APP_HOST exactly as this script means
+# them: both empty with one address, DOMAIN and APP_DOMAIN with two. Compose renders the
+# file with the project folder, and so the .env, that the start uses, and with a token on
+# trial the way the start gets it. The rendering holds the setup code and the token: it
+# goes down a pipe to rendered_app_hosts and nowhere else, never to the terminal or a
+# file, and what comes back is compared and never printed.
+check_rendered_addresses() {
+  local staged="$1" want="|" got
+  [ -z "$APP_DOMAIN" ] || want="$DOMAIN|$APP_DOMAIN"
+  info "asking Docker Compose how it fills in the new stack file's two address settings (what it prints is read here and not shown)"
+  got="$(with_trial_token docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged" config 2>/dev/null | rendered_app_hosts)" || got=""
+  [ "$got" = "$want" ] \
+    || die "This version of Docker Compose does not read the two-address settings in the stack file the way this script expects, so nothing was changed. Update Docker Compose and run install again."
+}
+
+# Reads a rendered stack file (the output of docker compose config) and prints the app
+# service's two settings as "<TOURS_HOST>|<APP_HOST>", quotes taken off; nothing unless
+# each is under services, app, environment exactly once. A setting without a value is
+# not an empty one. No other part of what is read is passed on.
+rendered_app_hosts() {
+  awk -v sq="'" '
+    { sub(/\r$/, "") }
+    /^[^ ]/ { top = $0; svc = ""; sec = ""; next }
+    /^  [^ ]/ { svc = $0; sec = ""; next }
+    /^    [^ ]/ { sec = $0; next }
+    top == "services:" && svc == "  app:" && sec == "    environment:" && /^      (TOURS_HOST|APP_HOST):( |$)/ {
+      key = $1; sub(/:$/, "", key)
+      val = $0; sub(/^      [A-Z_]+:/, "", val); gsub(/^ +| +$/, "", val)
+      first = substr(val, 1, 1); last = substr(val, length(val), 1)
+      if (length(val) >= 2 && first == last && (first == "\"" || first == sq)) val = substr(val, 2, length(val) - 2)
+      else if (val == "") val = "(no value)"
+      seen[key]++; value[key] = val
+    }
+    END { if (seen["TOURS_HOST"] == 1 && seen["APP_HOST"] == 1) printf "%s|%s\n", value["TOURS_HOST"], value["APP_HOST"] }
+  '
+}
+
+# The Caddyfile for this install's mode and its one or two addresses.
+caddyfile_for_install() {
+  case "$MODE:${APP_DOMAIN:+two}" in
+    tunnel:two) tunnel_caddyfile_two_content ;;
+    tunnel:) tunnel_caddyfile_content ;;
+    *:two) caddyfile_two_content ;;
+    *) caddyfile_content ;;
+  esac
 }
 
 # Runs a command. While a new token is on trial, that command alone gets it, as
@@ -1398,7 +1557,15 @@ start_stack() {
 
 finish() {
   if [ "$DRY_RUN" = 1 ]; then say "Dry run finished: nothing was changed"; return 0; fi
-  if [ "$MODE" = tunnel ]; then
+  if [ "$MODE" = tunnel ] && [ -n "$APP_DOMAIN" ]; then
+    printf '\nThe platform is running and its tunnel is connected to Cloudflare.\n'
+    printf "\nIn Cloudflare's dashboard, the tunnel needs two published applications, one for each address (skip this if they are there already):\n"
+    printf '  Hostname:     %s\n' "$DOMAIN"
+    printf '  Service URL:  %s\n' "$TUNNEL_SERVICE_URL"
+    printf '  Hostname:     %s\n' "$APP_DOMAIN"
+    printf '  Service URL:  %s\n' "$TUNNEL_SERVICE_URL"
+    printf 'No port is published on this server; it is reached only through the tunnel.\n'
+  elif [ "$MODE" = tunnel ]; then
     printf '\nThe platform is running and its tunnel is connected to Cloudflare.\n'
     printf "\nIn Cloudflare's dashboard, the tunnel needs one published application (skip this if it is there already):\n"
     printf '  Hostname:     %s\n' "$DOMAIN"
@@ -1406,6 +1573,9 @@ finish() {
     printf 'No port is published on this server; it is reached only through the tunnel, at https://%s\n' "$DOMAIN"
   else
     printf '\nThe platform is running at https://%s\n' "$DOMAIN"
+  fi
+  if [ -n "$APP_DOMAIN" ]; then
+    printf 'Tours are at https://%s; the app address is https://%s. Mythicshot keeps using https://%s.\n' "$DOMAIN" "$APP_DOMAIN" "$DOMAIN"
   fi
   # The tunnel has connected: the mark that it never did goes, and a setup code that a
   # failed earlier run made without printing it is printed now, once.
@@ -1423,6 +1593,74 @@ finish() {
   fi
 }
 
+# With two addresses: asks each one for /healthz, through whatever is in front of the
+# platform, and requires the role the platform reports to be that address's own. An
+# address that answers in another role, or in none, fails the run with exit code 1;
+# nothing is undone, the install stays as it is. $1 is how often an address that does
+# not answer is asked.
+check_roles() {
+  local tries="$1" bad=0
+  [ -n "$APP_DOMAIN" ] || return 0
+  if [ "$DRY_RUN" = 1 ]; then
+    info "would ask https://$DOMAIN/healthz and https://$APP_DOMAIN/healthz which address the platform sees each as"
+    return 0
+  fi
+  # The stack has started: from here the install stays as it is however this run ends,
+  # an interruption while an address is asked included. Nothing it created is removed.
+  CREATED=()
+  say "Checking that the platform sees each address in its own role"
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "curl is not installed, so the two addresses were not asked. Install it (apt-get install curl) and run: sudo bash $SELF status. Or open both in a browser: https://$DOMAIN/healthz must show \"address\":\"tours\" and https://$APP_DOMAIN/healthz must show \"address\":\"app\"."
+    return 0
+  fi
+  check_role "$DOMAIN" tours "$tries" || bad=1
+  check_role "$APP_DOMAIN" app "$tries" || bad=1
+  [ "$bad" = 1 ] || return 0
+  exit 1
+}
+
+# Asks one address for /healthz: check_role <host> <role> <tries>. Returns 1 only when
+# the address answered and the platform does not report that role for it. In direct
+# mode a name is asked only while it resolves to this server: otherwise the request
+# would go to another machine, and Caddy has no certificate for the name yet. An address
+# that does not answer is reported and is no failure: its certificate or its published
+# application may not be there yet. The address is a host name from .env; nothing
+# secret is on the command line.
+check_role() {
+  local host="$1" role="$2" tries="$3" url body n
+  url="https://$host/healthz"
+  if [ "$MODE" != tunnel ] && ! resolves_here "$host"; then
+    warn "$url was not asked: $host does not resolve to an address of this server (not yet, or this server is behind a router). Open it in a browser instead: it must show \"address\":\"$role\"."
+    return 0
+  fi
+  # -q comes first, so that root's curl settings file is not read.
+  info "\$ curl -q --proto =https --tlsv1.2 -fsS --max-time 8 $url"
+  for ((n = 1; n <= tries; n++)); do
+    body=""
+    if body="$(curl -q --proto '=https' --tlsv1.2 -fsS --max-time 8 "$url" 2>/dev/null)" && [[ "$body" == *'"ok":true'* ]]; then
+      if [[ "$body" == *"\"address\":\"$role\""* ]]; then
+        info "$host is the platform's $role address"
+        return 0
+      fi
+      # No role at all: an app from before two addresses answers like that, and so does
+      # a current one for a host name that is neither of its two.
+      if [[ "$body" != *'"address"'* ]]; then
+        printf 'ERROR: %s answered, but the platform running here is older than two addresses. Run: sudo bash %s update. If it is up to date already, the request reached it under another host name: check that nothing in front of the platform changes the Host header.\n' "$url" "$SELF" >&2
+        return 1
+      fi
+      printf 'ERROR: %s answered, but the platform does not see it as its %s address. Check DOMAIN and APP_DOMAIN in %s, and that nothing in front of the platform changes the Host header.\n' "$url" "$role" "$LOGICAL_INSTALL_DIR/.env" >&2
+      return 1
+    fi
+    [ "$n" -ge "$tries" ] || sleep "$ROLE_PAUSE"
+  done
+  if [ "$MODE" = tunnel ]; then
+    warn "$url did not answer. Check in Cloudflare's dashboard that the tunnel has a published application for $host with the service URL $TUNNEL_SERVICE_URL, then run: sudo bash $SELF status"
+  else
+    warn "$url did not answer. Caddy may still be getting the certificate for $host: check that ports 80 and 443 reach this server, then run: sudo bash $SELF status"
+  fi
+  return 0
+}
+
 cmd_install() {
   # Before any question or check: --new-token has nothing to replace without an install.
   if [ "$NEW_TOKEN" = 1 ] && [ ! -f "$ENV_FILE" ]; then
@@ -1430,14 +1668,21 @@ cmd_install() {
   fi
   say "Installing the demo platform"
   load_or_ask_config
-  if [ "$MODE" = tunnel ]; then
+  if [ "$MODE" = tunnel ] && [ -n "$APP_DOMAIN" ]; then
+    info "Tunnel mode. Do these by hand, in Cloudflare's dashboard: create the tunnel, and give the tunnel a published application for each of $DOMAIN and $APP_DOMAIN, both with the service URL $TUNNEL_SERVICE_URL."
+  elif [ "$MODE" = tunnel ]; then
     info "Tunnel mode. Do these by hand, in Cloudflare's dashboard: create the tunnel, and give it a published application for $DOMAIN with the service URL $TUNNEL_SERVICE_URL."
+  elif [ -n "$APP_DOMAIN" ]; then
+    info "Do these by hand first: point the DNS records of $DOMAIN and $APP_DOMAIN at this server and open ports 80 and 443 to it."
   else
     info "Do these by hand first: point the domain's DNS record at this server and open ports 80 and 443 to it."
   fi
   if [ "$FIRST_RUN" = 1 ]; then
     say "About to install"
     info "domain:      $DOMAIN"
+    if [ -n "$APP_DOMAIN" ]; then
+      info "app address: $APP_DOMAIN (the domain above is then the address of the tours)"
+    fi
     if [ "$MODE" = tunnel ]; then
       info "reached:     through a Cloudflare Tunnel; no port is published"
       info "token:       given (not shown)"
@@ -1464,9 +1709,11 @@ cmd_install() {
   if [ "$MODE" = tunnel ]; then
     say "Tunnel mode: no port is published, so ports 80 and 443 and the DNS record are not checked"
     info "the DNS record for $DOMAIN belongs to the tunnel and is managed in Cloudflare's dashboard, not here"
+    if [ -n "$APP_DOMAIN" ]; then info "and so does the one for $APP_DOMAIN"; fi
   else
     check_ports
-    check_dns
+    check_dns "$DOMAIN"
+    if [ -n "$APP_DOMAIN" ]; then check_dns "$APP_DOMAIN"; fi
   fi
   if [ "$docker_missing" = 1 ]; then
     make_dir "$INSTALL_DIR" 0700 0
@@ -1479,6 +1726,7 @@ cmd_install() {
   install_stack_files
   start_stack
   finish
+  check_roles "$ROLE_TRIES"
 }
 
 # ---------------------------------------------------------------- other commands
@@ -1529,6 +1777,13 @@ cmd_update() {
     warn "this install was never finished: its tunnel has not connected to Cloudflare yet. update leaves that as it is; what to run is repeated at the end."
   fi
   check_recorded_data strict
+  # update starts the stack from the files on disk and writes none of them.
+  if ! caddyfile_matches_addresses; then
+    if [ -n "$APP_DOMAIN" ]; then
+      die "$ENV_FILE holds APP_DOMAIN=$APP_DOMAIN, but the Caddyfile here was written for one address, and update does not rewrite it. Nothing was changed. Run: sudo bash $SELF install"
+    fi
+    die "$ENV_FILE holds no APP_DOMAIN, but the Caddyfile here was written for two addresses, and update does not rewrite it. Nothing was changed. Run: sudo bash $SELF install"
+  fi
   refuse_snap
   check_docker_ready
   take_lock
@@ -1554,6 +1809,7 @@ cmd_update() {
     die "the platform did not report healthy. The data folder and $ENV_FILE were not changed, and the backup above holds the state before the update. See: ${DC[*]} logs"
   fi
   say "Updated"
+  check_roles "$ROLE_TRIES"
 }
 
 cmd_backup() {
@@ -1589,9 +1845,15 @@ cmd_status() {
   say "Data folder"
   if [ -d "$DATA_PATH" ]; then du -sh -- "$DATA_PATH" || true; else warn "$DATA_DIR is missing"; fi
   info "address: https://$DOMAIN"
-  if [ "$MODE" = tunnel ]; then
+  if [ -n "$APP_DOMAIN" ]; then
+    info "app address: https://$APP_DOMAIN (the address above is the address of the tours)"
+  fi
+  if [ "$MODE" = tunnel ] && [ -n "$APP_DOMAIN" ]; then
+    info "mode: behind a Cloudflare Tunnel; no port is published. The tunnel has a published application for each of $DOMAIN and $APP_DOMAIN, both with the service URL $TUNNEL_SERVICE_URL"
+  elif [ "$MODE" = tunnel ]; then
     info "mode: behind a Cloudflare Tunnel; no port is published. The tunnel's published application for $DOMAIN has the service URL $TUNNEL_SERVICE_URL"
   fi
+  check_roles 1
 }
 
 # Deletes the data folder only if it is still exactly the folder recorded at install
@@ -1659,9 +1921,10 @@ cmd_uninstall() {
 
 # ---------------------------------------------------------------- embedded stack files
 
-# Exact copies of deploy/docker-compose.yml and deploy/caddy/Caddyfile (direct mode), so
-# the script works on its own; deploy/test-install.sh fails if they, or the tunnel
-# mode copies further down, drift apart from the files in deploy/.
+# Exact copies of deploy/docker-compose.yml, deploy/caddy/Caddyfile and, for two
+# addresses, deploy/caddy/Caddyfile.two (direct mode), so the script works on its own;
+# deploy/test-install.sh fails if they, or the tunnel mode copies further down, drift
+# apart from the files in deploy/.
 compose_file_content() {
   cat <<'DP_COMPOSE_END'
 # The container stack: the app behind Caddy, which ends HTTPS and is the only service
@@ -1669,7 +1932,9 @@ compose_file_content() {
 # caddy/ folder: docker compose up -d
 #
 # .env (mode 600, never committed) holds DOMAIN, ACME_EMAIL, DATA_DIR (a host folder
-# owned by id 1001), APP_IMAGE and SETUP_CODE.
+# owned by id 1001), APP_IMAGE and SETUP_CODE. With a second address, for the app, it
+# also holds APP_DOMAIN; DOMAIN is then the address of the tours, and caddy/Caddyfile
+# is the two-address one (deploy/caddy/Caddyfile.two).
 
 # Docker's local log files, capped at three files of 10 MB per container.
 x-logging: &logging
@@ -1687,6 +1952,10 @@ services:
       # where DATA_DIR is the folder on the host.
       DATA_DIR: /data
       PORT: "3000"
+      # The two addresses the app answers on, each in its own role. Both are empty
+      # without APP_DOMAIN in .env, which is one address: every host is answered.
+      TOURS_HOST: ${APP_DOMAIN:+${DOMAIN}}
+      APP_HOST: ${APP_DOMAIN:-}
     volumes:
       # The data folder must already exist, owned by id 1001. Docker would otherwise
       # create a missing one owned by root, which the app cannot write to.
@@ -1711,6 +1980,8 @@ services:
       # Read by the Caddyfile as {$DOMAIN} and {$ACME_EMAIL}.
       DOMAIN: ${DOMAIN:?DOMAIN is not set in .env}
       ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is not set in .env}
+      # Read only by the two-address Caddyfile, as {$APP_DOMAIN}.
+      APP_DOMAIN: ${APP_DOMAIN:-}
     ports:
       - "80:80"
       - "443:443"
@@ -1745,8 +2016,31 @@ caddyfile_content() {
 DP_CADDYFILE_END
 }
 
-# Exact copies of deploy/tunnel/docker-compose.yml and deploy/tunnel/caddy/Caddyfile,
-# written instead of the two above in tunnel mode.
+# The same file with one more name in the site address: Caddy gets a certificate for
+# each. Written instead of the one above when .env has an APP_DOMAIN.
+caddyfile_two_content() {
+  cat <<'DP_CADDYFILE_TWO_END'
+# Caddy gets and renews the certificate for DOMAIN by itself once the domain's DNS
+# record points at this server and ports 80 and 443 are reachable. ACME_EMAIL is the
+# contact address for the certificate authority. Both come from the stack's .env.
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN}, {$APP_DOMAIN} {
+	# Browsers keep to HTTPS for this host for one week. No subdomains, no preload list.
+	header Strict-Transport-Security "max-age=604800"
+
+	# Caddy passes the Host header through unchanged, which the setup wizard's
+	# same-origin check compares against the page's Origin.
+	reverse_proxy app:3000
+}
+DP_CADDYFILE_TWO_END
+}
+
+# Exact copies of deploy/tunnel/docker-compose.yml, deploy/tunnel/caddy/Caddyfile and,
+# for two addresses, deploy/tunnel/caddy/Caddyfile.two, written instead of the three
+# above in tunnel mode.
 tunnel_compose_file_content() {
   cat <<'DP_TUNNEL_COMPOSE_END'
 # The container stack behind a Cloudflare Tunnel: the app behind Caddy, and cloudflared,
@@ -1755,10 +2049,12 @@ tunnel_compose_file_content() {
 # holding this file, a .env file and the caddy/ folder: docker compose up -d
 #
 # .env (mode 600, never committed) holds DOMAIN, DEPLOY_MODE=tunnel, DATA_DIR (a host
-# folder owned by id 1001), APP_IMAGE, SETUP_CODE and TUNNEL_TOKEN.
+# folder owned by id 1001), APP_IMAGE, SETUP_CODE and TUNNEL_TOKEN. With a second
+# address, for the app, it also holds APP_DOMAIN; DOMAIN is then the address of the
+# tours, and caddy/Caddyfile is the two-address one (deploy/tunnel/caddy/Caddyfile.two).
 #
 # In Cloudflare's dashboard the tunnel's published application for DOMAIN has the
-# service URL http://caddy:80
+# service URL http://caddy:80, and so has the one for APP_DOMAIN when there is one.
 
 # Docker's local log files, capped at three files of 10 MB per container.
 x-logging: &logging
@@ -1775,6 +2071,10 @@ services:
       # cloudflared may see.
       SETUP_CODE: ${SETUP_CODE:?SETUP_CODE is not set in .env}
       PUBLIC_IMAGE_BASE: ${PUBLIC_IMAGE_BASE:-}
+      # The two addresses the app answers on, each in its own role. Both are empty
+      # without APP_DOMAIN in .env, which is one address: every host is answered.
+      TOURS_HOST: ${APP_DOMAIN:+${DOMAIN}}
+      APP_HOST: ${APP_DOMAIN:-}
       # Paths and port inside the container; in .env, DATA_DIR is the folder on the host.
       DATA_DIR: /data
       PORT: "3000"
@@ -1801,6 +2101,8 @@ services:
     environment:
       # Read by the Caddyfile as {$DOMAIN}.
       DOMAIN: ${DOMAIN:?DOMAIN is not set in .env}
+      # Read only by the two-address Caddyfile, as {$APP_DOMAIN}.
+      APP_DOMAIN: ${APP_DOMAIN:-}
     # No ports: only cloudflared, on the stack's own network, reaches Caddy.
     volumes:
       # The folder is mounted, not the single Caddyfile, so edits and reloads apply.
@@ -1862,6 +2164,35 @@ http://{$DOMAIN} {
 	reverse_proxy app:3000
 }
 DP_TUNNEL_CADDYFILE_END
+}
+
+# The same file with one more name in the site address. A separate file, not an
+# optional name in the one above: an empty name after http:// would match every host.
+tunnel_caddyfile_two_content() {
+  cat <<'DP_TUNNEL_CADDYFILE_TWO_END'
+# Behind a Cloudflare Tunnel: Cloudflare ends HTTPS for DOMAIN, and cloudflared, the only
+# client that can reach this server, sends each request here as plain HTTP with the
+# visitor's Host header unchanged. DOMAIN comes from the stack's .env.
+{
+	# No certificate is requested and nothing listens on port 443.
+	auto_https off
+}
+
+http://{$DOMAIN}, http://{$APP_DOMAIN} {
+	# Cloudflare sets X-Forwarded-Proto to the protocol the visitor used and overwrites
+	# a value the visitor sent, so a visitor on plain HTTP is sent to HTTPS here.
+	@plain header X-Forwarded-Proto http
+	redir @plain https://{host}{uri} 308
+
+	# Browsers keep to HTTPS for this host for one week. No subdomains, no preload list.
+	header Strict-Transport-Security "max-age=604800"
+
+	# Caddy passes the Host header through unchanged, which the setup wizard's
+	# same-origin check compares against the page's Origin. The app reads no forwarded
+	# address or scheme, so nothing a visitor sends in such a header is trusted.
+	reverse_proxy app:3000
+}
+DP_TUNNEL_CADDYFILE_TWO_END
 }
 
 # ---------------------------------------------------------------- main

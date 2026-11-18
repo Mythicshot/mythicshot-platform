@@ -783,3 +783,89 @@ describe("an account_id in the Wrangler configuration", () => {
     }
   });
 });
+
+describe("the two address settings (TOURS_HOST and APP_HOST)", () => {
+  const VARS = { PUBLIC_IMAGE_BASE: "", TOURS_HOST: "", APP_HOST: "" };
+  const deployed = (root: string) => JSON.parse(stripJsonComments(readFileSync(join(root, DEPLOY_CONFIG), "utf8")));
+
+  it("wrangler.jsonc carries both empty, so a plain deploy serves one address", () => {
+    const base = JSON.parse(stripJsonComments(readFileSync(join(REPO, "wrangler.jsonc"), "utf8")));
+    expect(base.vars).toEqual(VARS);
+  });
+
+  it("the install's Wrangler file carries TOURS_HOST and APP_HOST empty", async () => {
+    const h = harness(fakeAccount());
+    expect(await h.run("--yes")).toBe(0);
+    expect(deployed(h.root).vars).toEqual(VARS);
+    expect(readInstall(h.root)).toEqual({ name: "demo-platform", domain: null, databaseId: DB_ID, publicImageBase: "" });
+  });
+
+  it("still has at most one custom domain", async () => {
+    const h = harness(fakeAccount());
+    expect(await h.run("--yes", "--domain", "tours.example.com", "--replace-existing-domain")).toBe(0);
+    const config = deployed(h.root);
+    expect(config.routes).toEqual([{ pattern: "tours.example.com", custom_domain: true }]);
+    expect(config.vars).toEqual(VARS);
+    // A second address is not an option of the guided setup yet.
+    expect(parseArgs(["--app-domain", "app.example.com"])).toHaveProperty("error");
+    expect(parseArgs(["--app-domain=app.example.com"])).toHaveProperty("error");
+  });
+
+  /** An install with an own address whose file then gets these two values written in by hand, as JSON text. */
+  async function installWith(tours: string, app: string) {
+    const account = fakeAccount();
+    const first = harness(account);
+    expect(await first.run("--yes", "--domain", "tours.example.com", "--replace-existing-domain")).toBe(0);
+    const path = join(first.root, DEPLOY_CONFIG);
+    const before = readFileSync(path, "utf8");
+    expect(before).toContain('"TOURS_HOST": ""');
+    expect(before).toContain('"APP_HOST": ""');
+    writeFileSync(path, before.replace('"PUBLIC_IMAGE_BASE": ""', '"PUBLIC_IMAGE_BASE": "https://images.example.com"').replace('"TOURS_HOST": ""', `"TOURS_HOST": ${tours}`).replace('"APP_HOST": ""', `"APP_HOST": ${app}`));
+    return { account, root: first.root };
+  }
+
+  it("update keeps a hand-set pair, and so does running setup again", async () => {
+    const { account, root } = await installWith('"tours.example.com"', '"app.example.com"');
+    const kept = { PUBLIC_IMAGE_BASE: "https://images.example.com", TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com" };
+    for (const argv of [["update", "--yes"], ["--yes"], ["update", "--yes"]]) {
+      const h = harness(account, { root });
+      expect(await h.run(...argv), argv.join(" ")).toBe(0);
+      expect(deployed(root).vars, argv.join(" ")).toEqual(kept);
+      expect(deployed(root).routes).toEqual([{ pattern: "tours.example.com", custom_domain: true }]);
+    }
+    const status = harness(account, { root });
+    expect(await status.run("status")).toBe(0);
+    expect(deployed(root).vars).toEqual(kept);
+  });
+
+  it("update keeps both empty when they were empty", async () => {
+    const account = fakeAccount();
+    const first = harness(account);
+    expect(await first.run("--yes")).toBe(0);
+    const before = readFileSync(join(first.root, DEPLOY_CONFIG), "utf8");
+    const up = harness(account, { root: first.root });
+    expect(await up.run("update", "--yes")).toBe(0);
+    expect(deployed(first.root).vars).toEqual(VARS);
+    expect(readFileSync(join(first.root, DEPLOY_CONFIG), "utf8")).toBe(before);
+  });
+
+  const AS_IT_IS: [string, string, string, unknown, unknown][] = [
+    ["a half-set pair", '"made-up-tours.example.com"', '""', "made-up-tours.example.com", ""],
+    ["a value that is not a host name", '"https://made-up-tours.example.com/"', '"app.example.com"', "https://made-up-tours.example.com/", "app.example.com"],
+    ["the same name twice", '"made-up.example.com"', '"Made-Up.example.com:8443"', "made-up.example.com", "Made-Up.example.com:8443"],
+    ["a value that is not text", "42", '"app.example.com"', 42, "app.example.com"],
+  ];
+  for (const [label, tours, app, toursValue, appValue] of AS_IT_IS) {
+    it(`update keeps ${label} as it is, for the Worker to report, and prints none of it`, async () => {
+      const { account, root } = await installWith(tours, app);
+      for (const argv of [["update", "--yes"], ["--yes"], ["status"]]) {
+        const h = harness(account, { root });
+        expect(await h.run(...argv), argv.join(" ")).toBe(0);
+        expect(deployed(root).vars, argv.join(" ")).toEqual({ PUBLIC_IMAGE_BASE: "https://images.example.com", TOURS_HOST: toursValue, APP_HOST: appValue });
+        const printed = (text(h.out) + text(h.err)).toLowerCase();
+        expect(printed, argv.join(" ")).not.toContain("made-up");
+        expect(codeIn(h.out), argv.join(" ")).toBeNull();
+      }
+    });
+  }
+});

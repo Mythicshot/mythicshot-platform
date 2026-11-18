@@ -13,6 +13,7 @@ Examples use `tours.example.com` for your own address, `images.example.com` for 
 - [Quick path](#quick-path)
 - [What the command does](#what-the-command-does)
 - [Your address](#your-address)
+- [Two addresses](#two-addresses)
 - [Published images](#published-images)
 - [The setup wizard and Mythicshot](#the-setup-wizard-and-mythicshot)
 - [Manual setup, step by step](#manual-setup-step-by-step)
@@ -119,7 +120,7 @@ Limits Cloudflare states for it, on the same page:
 
 An account that has never deployed a Worker may not have registered its subdomain yet. **Unconfirmed:** in that case Wrangler's deploy asks to register one (this is read from Wrangler's source, not seen on an account), and the guided command runs Wrangler without a terminal for it to ask in, so the deploy stops with Wrangler's message. Register the subdomain in the dashboard under Workers & Pages, then run the same command again.
 
-Nothing in the app depends on the address: the setup wizard checks that a request comes from the same host it was opened on, whatever that host is; the published-tour page allows images only from its own address; and the wizard shows the address it was opened on as the server address for Mythicshot. The test suite runs all of this against `tours.example.com`, and the same pages were seen working under `wrangler dev` on `localhost`.
+With one address, which is what this runbook sets up, nothing in the app depends on the address: the setup wizard checks that a request comes from the same host it was opened on, whatever that host is; the published-tour page allows images only from its own address; and the wizard shows the address it was opened on as the server address for Mythicshot. The test suite runs all of this against `tours.example.com`, and the same pages were seen working under `wrangler dev` on `localhost`.
 
 ### Add your domain later
 
@@ -149,6 +150,39 @@ For someone who already has a different domain on Cloudflare, there is a third, 
 
 > [!WARNING]
 > If the domain uses DNSSEC, turn it off at the registrar before changing nameservers, or the domain can become unreachable.
+
+## Two addresses
+
+The platform can serve two host names in two roles, a tours address such as `tours.example.com` and an app address such as `app.example.com`; what each answers is in [One address or two](../README.md#one-address-or-two) in the README. On Cloudflare the two names are two vars of the Worker, `TOURS_HOST` and `APP_HOST`, beside `PUBLIC_IMAGE_BASE` in `wrangler.jsonc`. Both are empty there, which is one address: the Worker checks no host name and answers on your own address and on the `workers.dev` address alike, as the rest of this runbook describes.
+
+**Unconfirmed:** nothing in this section has been run on a real Cloudflare account. It is written from the Worker's code and from the tests of the guided command, which run against a stand-in for Wrangler.
+
+Two addresses on Cloudflare wait for a later version. The guided command sets up one address: on a new install it writes both empty into `wrangler.deploy.jsonc`, it has no option for a second domain, and it attaches one custom domain only. A second `routes` entry added to that file by hand stops it with "wrangler.deploy.jsonc has routes this command did not write; it handles one custom domain only." So the app address cannot be attached with this command yet, and until it can, leave both vars empty.
+
+```jsonc
+"vars": { "PUBLIC_IMAGE_BASE": "", "TOURS_HOST": "", "APP_HOST": "" }
+```
+
+The command never sets, checks or shows the two vars, but it keeps a pair that was set by hand in `wrangler.deploy.jsonc`: `update`, and a later run of the setup, write both values back exactly as they found them. What such a pair does is the Worker's own behaviour.
+
+| The two vars | What the Worker answers |
+|---|---|
+| Both empty (what the command writes) | One address: every host name is answered, the `workers.dev` address included |
+| Both set, to two different host names | The two names in their roles, as in the README. Every other host name, the `workers.dev` address included, gets an empty answer with status 421 on every path except `/healthz` |
+| One without the other, a value that is not a plain host name, or the same name twice | Every request, `/healthz` included, answers `500` with `{"error":"misconfigured"}` until the pair is corrected or emptied |
+
+A Worker cannot refuse to start, which is why a pair that cannot be used closes every path instead. Each such request logs one fixed line after `hosts: `, naming the var and never its value; `npx wrangler tail --config wrangler.deploy.jsonc` shows it, and the README lists the lines.
+
+> [!WARNING]
+> Setting the two vars by hand can take the whole site down at the next deploy: a pair that cannot be used answers 500 everywhere, and a pair that can be used refuses the `workers.dev` address and every name that is not one of the two.
+
+To go back to one address, set both vars to an empty string in `wrangler.deploy.jsonc`, as in the block above, and deploy with the update command. With both empty the command writes them empty again, and the Worker answers on every address as before.
+
+```sh
+npm run setup:cloudflare -- update
+```
+
+**How to tell it worked:** `/healthz` prints `{"ok":true}` on your own address and on the `workers.dev` address.
 
 ## Published images
 
@@ -299,7 +333,7 @@ Keep the code only until you finish the wizard. Neither Wrangler nor the dashboa
 npm ci
 ```
 
-3. Run the update. It refreshes `wrangler.deploy.jsonc` from the new `wrangler.jsonc` (keeping your name, database id, address and `PUBLIC_IMAGE_BASE`), applies any new migrations, then deploys. Add `--dry-run` to see the commands first. **Unconfirmed:** migrating before deploying assumes each migration only adds to the schema, which holds for the migrations so far.
+3. Run the update. It refreshes `wrangler.deploy.jsonc` from the new `wrangler.jsonc` (keeping your name, database id, address and `PUBLIC_IMAGE_BASE`, and a `TOURS_HOST` and `APP_HOST` that were set by hand), applies any new migrations, then deploys. Add `--dry-run` to see the commands first. **Unconfirmed:** migrating before deploying assumes each migration only adds to the schema, which holds for the migrations so far.
 
 ```sh
 npm run setup:cloudflare -- update
@@ -454,6 +488,8 @@ The CPU limit has not been measured on Cloudflare. In plain Node on a desktop co
 | "That setup code isn't right." | The code typed differs from the secret | Secrets cannot be read back: run the command with `--new-setup-code`. |
 | "This site has already been set up." | Someone finished setup first | If nobody holds the token, see [The token was lost](#the-token-was-lost-before-anyone-saved-it). |
 | The images address stays Initializing | Not yet connected | In the bucket list, use the menu next to the bucket and choose Retry connection. |
+| Every address answers `{"error":"misconfigured"}` with status 500, `/healthz` included | `TOURS_HOST` and `APP_HOST` in `wrangler.deploy.jsonc` are a pair the Worker cannot use | Empty both, then run `npm run setup:cloudflare -- update` ([Two addresses](#two-addresses)). |
+| The `workers.dev` address shows an empty page with status 421 while your own address works | Both vars are set, and with two addresses every other host name is refused | To have one address again, empty both vars ([Two addresses](#two-addresses)). |
 
 ## Pages this runbook relies on
 

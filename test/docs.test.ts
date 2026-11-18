@@ -20,17 +20,28 @@ const DOCS = import.meta.glob(["../README.md", "../LICENSE", "../docs/*.md"], {
   eager: true,
 }) as Record<string, string>;
 
+/** Guides a doc may link into by heading; their own checks are in test/hosting-docs.test.ts. */
+const GUIDES = import.meta.glob("../docs/hosting/*.md", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+
 /** Every file a doc may link to; only the keys are used. */
 const REPO_FILES = Object.keys(
   import.meta.glob(["../*", "../deploy/**", "../docs/**", "../migrations/**", "../scripts/**", "../src/**", "../test/**"], { query: "?raw" }),
 ).map((k) => k.replace(/^\.\.\//, ""));
 
 /** The code that reads environment variables, as text. */
-const CODE = import.meta.glob(["../src/**/*.ts", "../scripts/*.ts", "../deploy/docker-compose.yml", "../deploy/caddy/Caddyfile", "../Dockerfile", "../wrangler.jsonc"], {
-  query: "?raw",
-  import: "default",
-  eager: true,
-}) as Record<string, string>;
+const CODE = import.meta.glob(
+  [
+    "../src/**/*.ts",
+    "../scripts/*.ts",
+    "../deploy/docker-compose.yml",
+    "../deploy/caddy/Caddyfile",
+    "../deploy/caddy/Caddyfile.two",
+    "../deploy/tunnel/caddy/Caddyfile.two",
+    "../Dockerfile",
+    "../wrangler.jsonc",
+  ],
+  { query: "?raw", import: "default", eager: true },
+) as Record<string, string>;
 
 /** Docs keyed by their path from the repo root. */
 const docs: Record<string, string> = Object.fromEntries(Object.entries(DOCS).map(([k, v]) => [k.replace(/^\.\.\//, ""), v]));
@@ -38,6 +49,8 @@ const MARKDOWN = Object.keys(docs).filter((p) => p.endsWith(".md"));
 const README = "README.md";
 const DOCKER = "docs/runbook-docker.md";
 const CLOUDFLARE = "docs/runbook-cloudflare.md";
+/** Every markdown file a link's anchor may point into: the docs, and the hosting guides. */
+const linkable: Record<string, string> = { ...Object.fromEntries(Object.entries(GUIDES).map(([k, v]) => [k.replace(/^\.\.\//, ""), v])), ...docs };
 
 /** Hosts the docs may name besides the placeholders: the vendor pages they rely on and r2.dev, named as the address not to use. */
 const ALLOWED_HOSTS = new Set([
@@ -105,13 +118,13 @@ function resolveLink(from: string, target: string): string | null {
   return parts.join("/");
 }
 
-/** The commands and options install.sh's parse_args accepts. */
+/** The commands and options install.sh's parse_args accepts; an option that takes a value (--name=*) is listed by its name. */
 function scriptVocabulary(): { commands: Set<string>; flags: Set<string> } {
   const body = installSh.match(/^parse_args\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
   const commands = new Set<string>();
   const flags = new Set<string>();
-  for (const m of body.matchAll(/^\s*([a-z| -]+)\)/gm)) {
-    for (const word of m[1].split("|").map((w) => w.trim())) {
+  for (const m of body.matchAll(/^\s*([a-z| =*-]+)\)/gm)) {
+    for (const word of m[1].split("|").map((w) => w.trim().replace(/=\*$/, ""))) {
       if (word.startsWith("-")) flags.add(word);
       else if (/^[a-z]+$/.test(word)) commands.add(word);
     }
@@ -119,13 +132,13 @@ function scriptVocabulary(): { commands: Set<string>; flags: Set<string> } {
   return { commands, flags };
 }
 
-/** The install.sh commands and options a doc names: the words after install.sh on each code line. */
+/** The install.sh commands and options a doc names: the words after install.sh on each code line, an option's =value dropped. */
 function docVocabulary(md: string): { commands: string[]; flags: string[] } {
   const commands: string[] = [];
   const flags: string[] = [];
   for (const line of codeLines(md)) {
-    for (const m of line.matchAll(/install\.sh((?: +(?:--?[a-z][a-z-]*|[a-z]+)(?=\s|$))*)/g)) {
-      for (const word of m[1].trim().split(/ +/).filter(Boolean)) (word.startsWith("-") ? flags : commands).push(word);
+    for (const m of line.matchAll(/install\.sh((?: +(?:--?[a-z][a-z-]*(?:=[a-z0-9.<>-]+)?|[a-z]+)(?=\s|$))*)/g)) {
+      for (const word of m[1].trim().split(/ +/).filter(Boolean)) (word.startsWith("-") ? flags : commands).push(word.replace(/=.*$/, ""));
     }
   }
   return { commands, flags };
@@ -170,7 +183,7 @@ function variablesRead(): Set<string> {
       add(/\$\{([A-Z][A-Z0-9_]*)/g, text);
       add(/^ {6}([A-Z][A-Z0-9_]*):/gm, text);
     }
-    if (path.endsWith("Caddyfile")) add(/\{\$([A-Z][A-Z0-9_]*)\}/g, text);
+    if (/Caddyfile(\.two)?$/.test(path)) add(/\{\$([A-Z][A-Z0-9_]*)\}/g, text);
     if (path.endsWith("Dockerfile")) add(/\b([A-Z][A-Z0-9_]*)=/g, text.match(/^ENV [\s\S]*?[^\\]\n/m)?.[0] ?? "");
     if (path.endsWith("wrangler.jsonc")) add(/"([A-Z][A-Z0-9_]*)"\s*:/g, text.match(/"vars"\s*:\s*\{[^}]*\}/)?.[0] ?? "");
   }
@@ -194,6 +207,14 @@ function variablesNamed(md: string): Set<string> {
     for (const m of b.body.matchAll(/\$\{?([A-Z][A-Z0-9_]{2,})/g)) out.add(m[1]);
   }
   return out;
+}
+
+/** One `## ` section of a doc, from its heading to the next heading of that level. */
+function section(md: string, heading: string): string {
+  const start = md.indexOf(`\n## ${heading}\n`);
+  if (start < 0) throw new Error(`no section "${heading}"`);
+  const end = md.indexOf("\n## ", start + 1);
+  return md.slice(start + 1, end < 0 ? undefined : end);
 }
 
 /** The setup-recovery SQL a runbook gives: its sql block that deletes the setup row. */
@@ -256,8 +277,8 @@ describe("the docs", () => {
         const exists = REPO_FILES.includes(target) || REPO_FILES.some((f) => f.startsWith(target.replace(/\/$/, "") + "/"));
         if (!exists) problems.push(`${p}: ${link} does not exist`);
         else if (anchor !== undefined) {
-          if (!(target in docs)) problems.push(`${p}: ${link} has an anchor into a file that is not a doc`);
-          else if (!anchors(docs[target]).has(anchor)) problems.push(`${p}: ${link} names a missing heading`);
+          if (!(target in linkable)) problems.push(`${p}: ${link} has an anchor into a file that is not a doc`);
+          else if (!anchors(linkable[target]).has(anchor)) problems.push(`${p}: ${link} names a missing heading`);
         }
       }
     }
@@ -326,7 +347,13 @@ describe("the docs", () => {
     const named = docVocabulary(docs[DOCKER]);
     const spans = new Set(codeSpans(split(docs[DOCKER]).prose));
     for (const c of commands) expect(named.commands, `install.sh ${c}`).toContain(c);
-    for (const f of flags) expect(named.flags.includes(f) || spans.has(f), `install.sh ${f}`).toBe(true);
+    for (const f of flags) expect(named.flags.includes(f) || spans.has(f) || spans.has(`${f}=<name>`), `install.sh ${f}`).toBe(true);
+  });
+
+  it("the option that takes a value is in the script's vocabulary and in the runbook's option table", () => {
+    expect(scriptVocabulary().flags).toContain("--app-domain");
+    expect(docVocabulary("`sudo bash install.sh install --app-domain=app.example.com --yes`")).toEqual({ commands: ["install"], flags: ["--app-domain", "--yes"] });
+    expect(docs[DOCKER]).toMatch(/^\| `--app-domain=<name>` \| Only with `install`: /m);
   });
 
   it("every environment variable the docs name is read by the code", () => {
@@ -534,7 +561,7 @@ describe("the tunnel route", () => {
       "tunnel --no-autoupdate --metrics 127.0.0.1:20241 run",
       "Provided Tunnel token is not valid.",
     ]) expect(runbook, s).toContain(s);
-    const section = runbook.slice(runbook.indexOf("## Behind a Cloudflare Tunnel"), runbook.indexOf("## Troubleshooting by symptom"));
+    const section = runbook.slice(runbook.indexOf("## Behind a Cloudflare Tunnel"), runbook.indexOf("## Two addresses"));
     expect(section.match(/^> \[!WARNING\]$/gm)?.length).toBeGreaterThanOrEqual(3);
     expect(section.match(/\*\*How to tell it worked:\*\*/g)?.length).toBeGreaterThanOrEqual(5);
     expect(section).toMatch(/\*\*Unconfirmed:\*\* this route has not yet been run against a real tunnel/);
@@ -624,5 +651,365 @@ describe("a tunnel token that does not connect", () => {
 
   it("starting the stack removes no container the script did not make", () => {
     for (const line of installSh.split("\n")) if (/ up -d/.test(line)) expect(line).not.toContain("--remove-orphans");
+  });
+});
+
+describe("two addresses in the stack files", () => {
+  const FILES = import.meta.glob(
+    [
+      "../deploy/docker-compose.yml",
+      "../deploy/tunnel/docker-compose.yml",
+      "../deploy/caddy/Caddyfile",
+      "../deploy/caddy/Caddyfile.two",
+      "../deploy/tunnel/caddy/Caddyfile",
+      "../deploy/tunnel/caddy/Caddyfile.two",
+    ],
+    { query: "?raw", import: "default", eager: true },
+  ) as Record<string, string>;
+  const file = (path: string): string => {
+    const text = FILES[`../deploy/${path}`];
+    if (text === undefined) throw new Error(`no deploy/${path}`);
+    return text;
+  };
+
+  /** The body of a here-document inside install.sh, by its end marker. */
+  function embedded(marker: string): string {
+    const m = installSh.match(new RegExp(`<<'${marker}'\\n([\\s\\S]*?)^${marker}$`, "m"));
+    if (!m) throw new Error(`no ${marker} in install.sh`);
+    return m[1];
+  }
+
+  /** One service's block of a compose file. */
+  function service(text: string, name: string): string {
+    const m = text.match(new RegExp(`^  ${name}:\\n((?:(?:    .*)?\\n)*)`, "m"));
+    if (!m) throw new Error(`no service ${name}`);
+    return m[1];
+  }
+
+  /** The lines of b that differ from the line of a at the same place, as pairs. */
+  function changedLines(a: string, b: string): [string, string][] {
+    const x = a.split("\n");
+    const y = b.split("\n");
+    expect(y.length).toBe(x.length);
+    return x.flatMap((line, i): [string, string][] => (line === y[i] ? [] : [[line, y[i]]]));
+  }
+
+  it("install.sh carries exact copies of all four Caddyfiles and both stack files", () => {
+    expect(embedded("DP_COMPOSE_END")).toBe(file("docker-compose.yml"));
+    expect(embedded("DP_TUNNEL_COMPOSE_END")).toBe(file("tunnel/docker-compose.yml"));
+    expect(embedded("DP_CADDYFILE_END")).toBe(file("caddy/Caddyfile"));
+    expect(embedded("DP_CADDYFILE_TWO_END")).toBe(file("caddy/Caddyfile.two"));
+    expect(embedded("DP_TUNNEL_CADDYFILE_END")).toBe(file("tunnel/caddy/Caddyfile"));
+    expect(embedded("DP_TUNNEL_CADDYFILE_TWO_END")).toBe(file("tunnel/caddy/Caddyfile.two"));
+  });
+
+  it("the two-address Caddyfiles differ from the one-address ones only in the site address line", () => {
+    expect(changedLines(file("caddy/Caddyfile"), file("caddy/Caddyfile.two"))).toEqual([["{$DOMAIN} {", "{$DOMAIN}, {$APP_DOMAIN} {"]]);
+    expect(changedLines(file("tunnel/caddy/Caddyfile"), file("tunnel/caddy/Caddyfile.two"))).toEqual([
+      ["http://{$DOMAIN} {", "http://{$DOMAIN}, http://{$APP_DOMAIN} {"],
+    ]);
+  });
+
+  it("the one-address Caddyfiles have no place for a second name, so an empty one cannot widen them", () => {
+    for (const p of ["caddy/Caddyfile", "tunnel/caddy/Caddyfile"]) expect(file(p), p).not.toContain("APP_DOMAIN");
+  });
+
+  it("both stack files give the app its two addresses, derived from DOMAIN and APP_DOMAIN, and Caddy the app address", () => {
+    for (const p of ["docker-compose.yml", "tunnel/docker-compose.yml"]) {
+      const app = service(file(p), "app");
+      expect(app, p).toContain("      TOURS_HOST: ${APP_DOMAIN:+${DOMAIN}}\n");
+      expect(app, p).toContain("      APP_HOST: ${APP_DOMAIN:-}\n");
+      const caddy = service(file(p), "caddy");
+      expect(caddy, p).toContain("      APP_DOMAIN: ${APP_DOMAIN:-}\n");
+      expect(caddy, p).toContain("      DOMAIN: ${DOMAIN:?DOMAIN is not set in .env}\n");
+      // Without APP_DOMAIN nothing is required: one address stays the default.
+      expect(file(p), p).not.toMatch(/\$\{APP_DOMAIN:\?/);
+      expect(file(p), p).not.toMatch(/\$\{(TOURS_HOST|APP_HOST)/);
+    }
+    expect(service(file("tunnel/docker-compose.yml"), "cloudflared")).not.toMatch(/APP_DOMAIN|TOURS_HOST|APP_HOST/);
+  });
+
+  it("install.sh reads APP_DOMAIN from .env, takes --app-domain=<name> and never rewrites .env for it", () => {
+    const read = installSh.match(/^read_env_file\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    expect(read).toMatch(/^ {6}APP_DOMAIN\) /m);
+    expect(read).toContain("has an APP_DOMAIN that is not a valid host name or is the same as DOMAIN; fix it by hand, nothing was changed");
+    expect(installSh).toContain("  --app-domain=<name>  With install: a second address, for the app. The domain asked for stays the address of the tours.");
+    for (const s of [
+      "--app-domain goes only with install",
+      "--app-domain must be a host name in lowercase, such as app.example.com, without https:// and without a path",
+      "the app address must be a different name than the tours address",
+      "and install.sh does not change that file. To add the second address, add that line to",
+      "Mythicshot keeps using https://",
+      "answered, but the platform does not see it as its",
+      "and that nothing in front of the platform changes the Host header.",
+    ]) expect(installSh, s).toContain(s);
+    // The only function that rewrites an existing .env changes the TUNNEL_TOKEN line alone.
+    const replace = installSh.match(/^replace_env_token\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    expect(replace).not.toBe("");
+    expect(replace).not.toContain("APP_DOMAIN");
+  });
+
+  it("the role check tells an older platform from a changed Host header, and asks without a curl settings file", () => {
+    expect(installSh).toContain("answered, but the platform running here is older than two addresses. Run: sudo bash");
+    const check = installSh.match(/^check_role\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    expect(check).toContain("older than two addresses");
+    expect(check).toContain("does not see it as its");
+    const calls = check.split("\n").filter((l) => /\$\(curl /.test(l));
+    expect(calls.length).toBeGreaterThan(0);
+    for (const l of calls) expect(l).toMatch(/\$\(curl -q /);
+  });
+
+  it("the script takes neither host name nor the token from the caller's environment into Compose", () => {
+    for (const name of ["TUNNEL_TOKEN", "APP_DOMAIN", "DOMAIN"]) expect(installSh, name).toMatch(new RegExp(`^unset ${name}$`, "m"));
+  });
+
+  it("TOURS_HOST and APP_HOST in a Docker .env are reported as having no effect, in the script and in the runbook", () => {
+    const read = installSh.match(/^read_env_file\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    expect(read).toContain("TOURS_HOST | APP_HOST)");
+    expect(read).toContain("which has no effect on an install made by this script: a second address is set with APP_DOMAIN");
+    const two = section(docs[DOCKER], "Two addresses");
+    expect(two).toMatch(/`TOURS_HOST` or `APP_HOST` line written into `\.env` by hand has no effect/);
+    expect(two).toContain("which has no effect on an install made by this script");
+  });
+
+  it("the runbook says which Compose version the two-address settings were checked on, and the way back after a failed start", () => {
+    const two = section(docs[DOCKER], "Two addresses");
+    expect(two).toMatch(/checked on Docker Compose 5\.5\.1, not on the oldest version the script accepts/);
+    expect(two).toContain("validates the new stack file before it replaces anything");
+    expect(two).toMatch(/puts the old Caddyfile back but never changes `\.env`/);
+    expect(two).toContain("remove the `APP_DOMAIN` line");
+    expect(installSh).toMatch(/^# .*checked on Compose 5\.5\.1/m);
+    // The script checks the rendering itself on whatever Compose is installed, and the runbook quotes its sentence.
+    expect(two).toContain("so the script checks it itself on whatever Compose is installed");
+    expect(two).toMatch(/what the app would get as `TOURS_HOST` and `APP_HOST`: both empty with one address, the two names with two/);
+    const sentence = "This version of Docker Compose does not read the two-address settings in the stack file the way this script expects";
+    expect(two).toContain(sentence);
+    expect(installSh.split(sentence).length - 1).toBe(1);
+    expect(installSh).toContain(`${sentence}, so nothing was changed. Update Docker Compose and run install again.`);
+    // The warning about the moment without an answer is read before the step that restarts.
+    const warning = two.indexOf("> Step 6 restarts the app and Caddy");
+    expect(warning).toBeGreaterThan(-1);
+    expect(warning).toBeLessThan(two.indexOf("6. Run the install again."));
+    expect(warning).toBeGreaterThan(two.indexOf("5. Add this one line"));
+    // The redirect's scheme, as src/hosts.ts has it.
+    expect(docs[README]).toContain("(plain `http://` only when the tours host is a `localhost` name or `127.0.0.1`)");
+    // The option's row in the table stays short and points to the section.
+    const row = docs[DOCKER].split("\n").find((l) => l.startsWith("| `--app-domain=<name>` |")) ?? "";
+    expect(row).toContain("](#two-addresses)");
+    expect(row).not.toContain("5.5.1");
+    expect(row.length).toBeLessThan(400);
+  });
+
+  it("the stack files name only placeholder hosts", () => {
+    for (const [p, text] of Object.entries(FILES)) {
+      for (const m of text.matchAll(/\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev)\b/g)) expect(isPlaceholderHost(m[0]), `${p}: ${m[0]}`).toBe(true);
+    }
+  });
+});
+
+describe("two addresses in the docs", () => {
+  const HOSTS = { tours: "tours.example.com", app: "app.example.com" };
+  const readme = section(docs[README], "One address or two");
+  const docker = section(docs[DOCKER], "Two addresses");
+  const cloudflare = section(docs[CLOUDFLARE], "Two addresses");
+
+  it("the README and both runbooks say how to turn on two addresses, and how to go back", () => {
+    // The README: the settings, what answers where, and where each route's steps are.
+    for (const name of ["TOURS_HOST", "APP_HOST"]) expect(docs[README], name).toMatch(new RegExp(`^\\| \`${name}\` \\| both \\| `, "m"));
+    expect(docs[README]).toMatch(/^The container stack's `\.env`, written by `install\.sh`, also holds .*`APP_DOMAIN`/m);
+    for (const link of ["](docs/runbook-docker.md#two-addresses)", "](docs/runbook-cloudflare.md#two-addresses)", "](docs/hosting/cpanel.md#14-a-second-address-for-the-app)"]) expect(readme, link).toContain(link);
+    expect(readme).toMatch(/Mythicshot keeps (using )?the tours address/);
+    expect(readme).toMatch(/[Tt]o go back/);
+
+    // The Docker runbook: both routes, a first install, an existing one, the check and the way back.
+    expect(docs[DOCKER]).toContain("- [Two addresses](#two-addresses)");
+    for (const s of [
+      "sudo bash install.sh install --app-domain=app.example.com",
+      "sudo bash install.sh install --tunnel --app-domain=app.example.com",
+      "```text\nAPP_DOMAIN=app.example.com\n```",
+      "### On a first install",
+      "### On an install that has one address today",
+      "### Go back to one address",
+      "a published application for each",
+    ]) expect(docker, s).toContain(s);
+    expect(docker).toMatch(/\| A \| `app` /);
+    expect(docker.match(/\*\*How to tell it worked:\*\*/g)?.length).toBeGreaterThanOrEqual(2);
+    const back = docker.slice(docker.indexOf("### Go back to one address"));
+    expect(back).toContain("`APP_DOMAIN` line");
+    expect(back).toContain("sudo bash install.sh install");
+
+    // The Cloudflare runbook: the two vars, and that turning them on waits for a later version.
+    expect(docs[CLOUDFLARE]).toContain("- [Two addresses](#two-addresses)");
+    for (const s of ["`TOURS_HOST`", "`APP_HOST`", "writes both empty", "`workers.dev`", "421", '{"error":"misconfigured"}', "wrangler.deploy.jsonc"]) expect(cloudflare, s).toContain(s);
+    expect(cloudflare).toMatch(/waits? for a later version/);
+    expect(cloudflare).toMatch(/[Tt]o go back/);
+    expect(cloudflare).toContain("npm run setup:cloudflare -- update");
+  });
+
+  it("the docs name only placeholder hosts for both addresses", () => {
+    const allowed: Record<string, string[]> = {
+      TOURS_HOST: ["tours.example.com", ""],
+      APP_HOST: ["app.example.com", ""],
+      APP_DOMAIN: ["app.example.com", "<name>"],
+      "--app-domain": ["app.example.com", "<name>"],
+      DOMAIN: ["tours.example.com"],
+    };
+    let seen = 0;
+    for (const p of MARKDOWN) {
+      const text = docs[p];
+      const found: [string, string][] = [];
+      for (const m of text.matchAll(/(?<![A-Z_])(TOURS_HOST|APP_HOST|APP_DOMAIN|DOMAIN)=([a-z0-9.<>-]+)/g)) found.push([m[1], m[2]]);
+      for (const m of text.matchAll(/(--app-domain)(?:=| (?=<|[a-z0-9-]+\.))([a-z0-9.<>-]+)/g)) found.push([m[1], m[2]]);
+      for (const m of text.matchAll(/"(TOURS_HOST|APP_HOST)":\s*"([^"]*)"/g)) found.push([m[1], m[2]]);
+      for (const [key, raw] of found) {
+        expect(allowed[key], `${p}: ${key}=${raw}`).toContain(raw.replace(/\.$/, ""));
+        seen++;
+      }
+      // Where a doc shows the answer of /api/v1/me, the names in it are the placeholders.
+      for (const m of text.matchAll(/"addresses":\{[^}]*\}/g)) expect(m[0], p).toBe('"addresses":{"tours":"tours.example.com","app":"app.example.com"}');
+    }
+    expect(seen).toBeGreaterThan(8);
+    for (const part of [readme, docker, cloudflare]) for (const host of Object.values(HOSTS)) expect(part).toContain(host);
+  });
+
+  it("every part about two addresses says it has never been run on real hosting", () => {
+    expect(readme).toMatch(/^> \[!warning\] Never run on real hosting\n> Nothing about two addresses has been run on real hosting yet/m);
+    expect(docker).toMatch(/^\*\*Unconfirmed:\*\* nothing in this section has been run on a real server or against a real tunnel/m);
+    expect(cloudflare).toMatch(/^\*\*Unconfirmed:\*\* nothing in this section has been run on a real Cloudflare account/m);
+  });
+
+  it("what the README says each address answers is what the app answers", async () => {
+    const { deps } = await makeDeps({ setupCode: "0123456789abcdef0123456789abcdef", hosts: HOSTS });
+    const ask = (host: string, path: string, headers: Record<string, string> = {}) => createApp(deps).fetch(new Request(`https://${host}${path}`, { headers, redirect: "manual" }));
+    const hosts = [HOSTS.tours, HOSTS.app, "other.example.net"];
+    // The wizard is open only until a workspace exists, so it is asked first, before anyone has claimed the install.
+    const wizard: number[] = [];
+    for (const host of hosts) wizard.push((await ask(host, "/setup")).status);
+    const { token } = await seedWorkspace(deps, "Acme Tours");
+
+    // /healthz: the three bodies the README gives.
+    for (const [host, body] of [
+      [HOSTS.tours, '{"ok":true,"address":"tours"}'],
+      [HOSTS.app, '{"ok":true,"address":"app"}'],
+      ["other.example.net", '{"ok":true}'],
+    ]) {
+      expect(readme, body).toContain("`" + body + "`");
+      expect(await (await ask(host, "/healthz")).text(), host).toBe(body);
+    }
+
+    // The table: one row per kind of request, with the status on each address.
+    const row = (start: string): string[] => {
+      const line = readme.split("\n").find((l) => l.startsWith(`| ${start}`));
+      if (!line) throw new Error(`no row ${start}`);
+      return line.split("|").slice(1, -1).map((c) => c.trim());
+    };
+    expect(row("Request")).toEqual(["Request", "Tours address", "App address", "Any other host name"]);
+    const cases: [string, string, Record<string, string>, number[]][] = [
+      ["A tour page, `/t/<slug>`", "/t/abcdefghij?x=1", {}, [404, 308, 421]],
+      ["A published picture, `/p/<name>`", "/p/nothing.png", {}, [404, 308, 421]],
+      ["The token API, `/api/v1/…`", "/api/v1/me", { authorization: `Bearer ${token}` }, [200, 200, 421]],
+      ["The setup wizard, `/setup`", "/setup", {}, [200, 404, 421]],
+      ["The player's script and stylesheet", "/player.js", {}, [200, 404, 421]],
+      ["`/healthz`", "/healthz", {}, [200, 200, 200]],
+    ];
+    for (const [start, path, headers, statuses] of cases) {
+      const cells = row(start);
+      for (let i = 0; i < 3; i++) {
+        const status = path === "/setup" ? wizard[i] : (await ask(hosts[i], path, headers)).status;
+        expect(status, `${path} on ${hosts[i]}`).toBe(statuses[i]);
+        // Nothing is published here, so the tours address answers 404 for the page and the picture; the row says it answers.
+        if (statuses[i] === 308 || statuses[i] === 421 || (i === 1 && statuses[i] === 404)) expect(cells[i + 1], `${start}: column ${i + 1}`).toContain("`" + statuses[i] + "`");
+        else expect(cells[i + 1], `${start}: column ${i + 1}`).toMatch(/^Answers/);
+      }
+    }
+
+    // The redirect goes to the tours address, with the same path and query, and is not kept.
+    const moved = await ask(HOSTS.app, "/t/abcdefghij?x=1");
+    expect(moved.headers.get("location")).toBe("https://tours.example.com/t/abcdefghij?x=1");
+    expect(moved.headers.get("cache-control")).toBe("no-store");
+    expect(readme).toContain("same path and query");
+
+    // The refusal is empty.
+    const refused = await ask("other.example.net", "/t/abcdefghij");
+    expect(await refused.text()).toBe("");
+    expect(readme).toContain("an empty `421`");
+
+    // /api/v1/me names both addresses, as the README shows, and only with two addresses.
+    const me = (await (await ask(HOSTS.app, "/api/v1/me", { authorization: `Bearer ${token}` })).json()) as { addresses?: unknown };
+    expect(me.addresses).toEqual(HOSTS);
+    expect(docs[README]).toContain('"addresses":{"tours":"tours.example.com","app":"app.example.com"}');
+    const one = await makeDeps({});
+    const seeded = await seedWorkspace(one.deps, "Acme Tours");
+    const plain = await createApp(one.deps).fetch(new Request("https://tours.example.com/api/v1/me", { headers: { authorization: `Bearer ${seeded.token}` } }));
+    expect(Object.keys((await plain.json()) as object).sort()).toEqual(["version", "workspace"]);
+  });
+
+  it("the lines the README quotes for a pair that cannot be used are the app's own", async () => {
+    const { resolveHosts } = await import("../src/hosts.ts");
+    const lines = [
+      resolveHosts({ tours: "tours.example.com" }),
+      resolveHosts({ tours: "https://tours.example.com", app: "app.example.com" }),
+      resolveHosts({ tours: "tours.example.com", app: "tours.example.com" }),
+    ].map((r) => (r.ok ? "" : r.problem));
+    expect(lines[0]).toBe("TOURS_HOST is set but APP_HOST is not. Set both for two addresses, or neither for one.");
+    for (const line of lines) {
+      expect(line).not.toBe("");
+      expect(readme, line).toContain(line);
+    }
+    expect(readme).toContain('{"error":"misconfigured"}');
+    expect(cloudflare).toContain("`hosts: `");
+  });
+
+  it("what the Docker runbook quotes for two addresses is what install.sh prints", () => {
+    for (const s of [
+      "Mythicshot keeps using https://",
+      "answered, but the platform running here is older than two addresses",
+      "answered, but the platform does not see it as its",
+      "and that nothing in front of the platform changes the Host header.",
+      "and install.sh does not change that file. To add the second address, add that line to",
+      "but the Caddyfile here was written for one address, and update does not rewrite it",
+      "but the Caddyfile here was written for two addresses, and update does not rewrite it",
+      "the app address must be a different name than the tours address",
+      "has an APP_DOMAIN that is not a valid host name or is the same as DOMAIN",
+      "--app-domain goes only with install",
+      "the tunnel needs two published applications, one for each address",
+      "did not answer",
+      "was not asked",
+    ]) {
+      expect(docs[DOCKER], s).toContain(s);
+      expect(installSh, s).toContain(s);
+    }
+    // The line for an address that passed is built from the host and its role.
+    expect(installSh).toContain(`info "$host is the platform's $role address"`);
+    for (const role of ["tours", "app"]) expect(docker).toContain(`\`${role}.example.com is the platform's ${role} address\``);
+    // A wrong role is a failed run, and status reports it the same way.
+    expect(docker).toContain("exit code 1");
+    expect(docker).toMatch(/`sudo bash install\.sh status`[^\n]*exit code 1/);
+    const status = installSh.match(/^cmd_status\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    expect(status).toContain("check_roles 1");
+  });
+
+  it("the Docker runbook still says no forwarded header is read, and the Fly steps are said to wait", () => {
+    const sees = docs[DOCKER].slice(docs[DOCKER].indexOf("What the app sees:"), docs[DOCKER].indexOf("The tunnel token reaches cloudflared"));
+    for (const s of ["`X-Forwarded-Host`", "`Forwarded`", "`X-Original-Host`", "`Host` header"]) expect(sees, s).toContain(s);
+    expect(sees).toMatch(/two addresses/);
+    // The code agrees: no source file reads a forwarded host.
+    let sources = 0;
+    for (const [path, text] of Object.entries(CODE)) {
+      if (!path.startsWith("../src/")) continue;
+      sources++;
+      const code = text.split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+      expect(code.toLowerCase(), path).not.toMatch(/x-forwarded-host|x-original-host|["'`]forwarded["'`]/);
+    }
+    expect(sources).toBeGreaterThan(10);
+    expect(docker).toMatch(/Fly\.io[^\n]*wait for a later version/);
+  });
+
+  it("the Cloudflare runbook says what the guided setup does with the two vars, as the command does", () => {
+    expect(setupCloudflareTs).toContain('const HOST_VARS = ["TOURS_HOST", "APP_HOST"] as const;');
+    expect(setupCloudflareTs).toContain("it handles one custom domain only");
+    expect(cloudflare).toContain("it handles one custom domain only");
+    expect(cloudflare).toContain("keeps a pair that was set by hand");
+    expect(CODE["../wrangler.jsonc"]).toMatch(/"TOURS_HOST": "",\n\s*"APP_HOST": ""/);
   });
 });
