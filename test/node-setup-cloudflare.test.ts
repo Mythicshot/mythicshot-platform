@@ -783,3 +783,50 @@ describe("an account_id in the Wrangler configuration", () => {
     }
   });
 });
+
+describe("the two address settings (TOURS_HOST and APP_HOST)", () => {
+  const VARS = { PUBLIC_IMAGE_BASE: "", TOURS_HOST: "", APP_HOST: "" };
+  const deployed = (root: string) => JSON.parse(stripJsonComments(readFileSync(join(root, DEPLOY_CONFIG), "utf8")));
+
+  it("wrangler.jsonc carries both empty, so a plain deploy serves one address", () => {
+    const base = JSON.parse(stripJsonComments(readFileSync(join(REPO, "wrangler.jsonc"), "utf8")));
+    expect(base.vars).toEqual(VARS);
+  });
+
+  it("the install's Wrangler file carries TOURS_HOST and APP_HOST empty", async () => {
+    const h = harness(fakeAccount());
+    expect(await h.run("--yes")).toBe(0);
+    expect(deployed(h.root).vars).toEqual(VARS);
+    expect(readInstall(h.root)).toEqual({ name: "demo-platform", domain: null, databaseId: DB_ID, publicImageBase: "" });
+  });
+
+  it("still has at most one custom domain", async () => {
+    const h = harness(fakeAccount());
+    expect(await h.run("--yes", "--domain", "tours.example.com", "--replace-existing-domain")).toBe(0);
+    const config = deployed(h.root);
+    expect(config.routes).toEqual([{ pattern: "tours.example.com", custom_domain: true }]);
+    expect(config.vars).toEqual(VARS);
+    // A second address is not an option of the guided setup yet.
+    expect(parseArgs(["--app-domain", "app.example.com"])).toHaveProperty("error");
+    expect(parseArgs(["--app-domain=app.example.com"])).toHaveProperty("error");
+  });
+
+  it("writes both empty again on update, keeping PUBLIC_IMAGE_BASE, when they were set by hand", async () => {
+    const account = fakeAccount();
+    const first = harness(account);
+    expect(await first.run("--yes", "--domain", "tours.example.com", "--replace-existing-domain")).toBe(0);
+    const path = join(first.root, DEPLOY_CONFIG);
+    const before = readFileSync(path, "utf8");
+    const byHand = before.replace('"PUBLIC_IMAGE_BASE": ""', '"PUBLIC_IMAGE_BASE": "https://images.example.com"').replace('"TOURS_HOST": ""', '"TOURS_HOST": "tours.example.com"').replace('"APP_HOST": ""', '"APP_HOST": "app.example.com"');
+    expect(deployedText(byHand).vars).toEqual({ PUBLIC_IMAGE_BASE: "https://images.example.com", TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com" });
+    writeFileSync(path, byHand);
+    const up = harness(account, { root: first.root });
+    expect(await up.run("update", "--yes")).toBe(0);
+    expect(deployed(first.root).vars).toEqual({ ...VARS, PUBLIC_IMAGE_BASE: "https://images.example.com" });
+    expect(deployed(first.root).routes).toEqual([{ pattern: "tours.example.com", custom_domain: true }]);
+  });
+
+  function deployedText(text: string) {
+    return JSON.parse(stripJsonComments(text));
+  }
+});
