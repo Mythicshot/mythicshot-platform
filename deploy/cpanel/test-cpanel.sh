@@ -1589,6 +1589,28 @@ test_app_domain_is_checked() {
   cpanel "" backup
   expect "a record that is no host name: a backup is still made" test "$RC" = 0
   expect "a record that is no host name: the backup is not told to give the option itself" hasnt "$ERR" "give "
+
+  # An app address without an address of the tours beside it. An install made by hand
+  # has no record: status that is given the option says what is missing.
+  new_sandbox
+  hand_install
+  before="$(snapshot)"
+  cpanel "" status --app-domain "$APP_DOMAIN"
+  expect "no tours address, option given: status refuses" test "$RC" != 0
+  expect "no tours address, option given: says what to add" has "$ERR" "ERROR: --app-domain needs the address of the tours beside it, and none is recorded for this install; add --domain <name>. Nothing was changed"
+  cpanel "" update --yes --app-domain "$APP_DOMAIN"
+  expect "no tours address, option given: update refuses too" test "$RC" != 0
+  expect "no tours address, option given: update says to give the address" has "$ERR" "update --domain <name>"
+  # And a record that holds an app address only: no option is blamed.
+  printf 'APP_DOMAIN=%s\n' "$APP_DOMAIN" >"$APP/.cpanel-install"
+  before="$(snapshot)"
+  cpanel "" status
+  expect "no tours address, app address recorded: status refuses" test "$RC" != 0
+  expect "no tours address, app address recorded: says what to do" has "$ERR" "ERROR: an app address is recorded in $APP/.cpanel-install but no address of the tours; add --domain <name>, or remove the APP_DOMAIN line. Nothing was changed"
+  expect "no tours address, app address recorded: blames no option that was given" hasnt "$ERR" "--app-domain"
+  cpanel "" status --domain "$DOMAIN"
+  expect "with the tours address given, status goes on" test "$RC" = 0
+  expect "nothing was called before that, and nothing was changed" test "$(snapshot)" = "$before"
 }
 
 test_install_with_app_domain_is_refused() {
@@ -1654,6 +1676,7 @@ test_existing_settings_file_is_kept_and_the_two_lines_are_printed() {
   expect "no roles: names the tours address" has "$OUT" "    health of the tours address: FAILED. $(wrong_role "$DOMAIN" tours)"
   expect "no roles: names the app address" has "$OUT" "    health of the app address: FAILED. $(wrong_role "$APP_DOMAIN" app)"
   expect "no roles: prints the sentence and the two lines, as the plan has them" kept_lines_printed
+  expect "no roles: says what to do about an update that was cut off" has "$OUT" "If an earlier update was cut off, finish it first by running update without --app-domain."
   expect "no roles: says nothing was changed" has "$ERR" "ERROR: the two addresses do not both report their own role yet, so the update did not start and the app address was not recorded. Nothing was changed"
   expect "no roles: no commands to go back, there is nothing to go back from" hasnt "$OUT" "To go back"
   expect "no roles: does not claim success" hasnt "$OUT" "Updated to version"
@@ -1938,6 +1961,40 @@ test_health_notices_an_address_that_refuses_every_other_request() {
   expect "two addresses, update: exit code non-zero" test "$RC" != 0
   expect "two addresses, update: says the check did not pass" has "$OUT" "Version 0.2.0 is in place, but the health check did not pass"
   expect "two addresses, update: the commands to go back are shown" has "$OUT" "To go back to the version that ran before"
+}
+
+# The two lines are in the settings file the wrong way round, and the script knows of one
+# address only: /healthz answers and the API answers 401, so nothing else would notice
+# that the platform takes the tours address for its app address and sends every tour
+# link away.
+test_one_recorded_address_that_reports_the_app_role_fails() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  local swapped="https://$DOMAIN/healthz answered, but the platform does not see it as its tours address: it reports it as its app address. In the settings file $SETTINGS the lines TOURS_HOST and APP_HOST are probably the wrong way round: TOURS_HOST must name $DOMAIN. Restart the app after a change."
+  : >"$LOG"
+  STUB_HEALTH=app CPANEL_HEALTH_TRIES=1 cpanel "" status
+  expect "status: reported as failed, with the reason" grep -qxF "    health: FAILED. $swapped" "$OUT"
+  expect "status: not reported as ok" hasnt "$OUT" "health: ok"
+  expect "status: the API is not asked for an address that already failed" test "$(grep -c 'api/v1/me' "$LOG")" = 0
+  # The role it should have, or no role at all, is fine as before.
+  STUB_HEALTH=tours cpanel "" status
+  expect "status: the tours role is ok" grep -qxF "    health: ok" "$OUT"
+  STUB_HEALTH=ok cpanel "" status
+  expect "status: no role is ok" grep -qxF "    health: ok" "$OUT"
+  make_release "$T/new" 0.2.0
+  STUB_HEALTH=app CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "update: exit code non-zero" test "$RC" != 0
+  expect "update: names the reason" has "$OUT" "health: FAILED. $swapped"
+  expect "update: does not claim success" hasnt "$OUT" "Updated to version"
+  expect "update: says the check did not pass" has "$OUT" "Version 0.2.0 is in place, but the health check did not pass"
+  expect "update: the reply is not echoed" test "$(cat "$OUT" "$ERR" | grep -c '"address"')" = 0
+  expect "update: the setup code is not shown" code_not_shown
+  # With both addresses recorded, the same reply on the tours address is the wrong role, as before.
+  new_sandbox
+  two_address_setup
+  STUB_HEALTH=roles STUB_HEALTH_TOURS=app CPANEL_HEALTH_TRIES=1 cpanel "" status
+  expect "two addresses: the usual sentence" grep -qxF "    health of the tours address: FAILED. $(wrong_role "$DOMAIN" tours)" "$OUT"
 }
 
 test_app_domain_never_shows_the_setup_code() {

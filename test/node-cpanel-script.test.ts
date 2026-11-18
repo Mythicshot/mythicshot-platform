@@ -30,6 +30,7 @@ const TWO_ADDRESS_TESTS = [
   "test_health_names_the_address_that_reports_the_wrong_role",
   "test_dry_run_with_app_domain_changes_nothing",
   "test_health_notices_an_address_that_refuses_every_other_request",
+  "test_one_recorded_address_that_reports_the_app_role_fails",
   "test_app_domain_never_shows_the_setup_code",
 ];
 

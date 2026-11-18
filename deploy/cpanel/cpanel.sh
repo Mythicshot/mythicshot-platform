@@ -573,7 +573,12 @@ check_address() {
     if reply="$(curl -fsS --max-time 20 "https://$host/healthz" 2>&1)"; then
       case "$reply" in
         *'"ok":true'*)
-          if [ -z "$role" ] || [[ "$reply" == *"\"address\":\"$role\""* ]]; then
+          if [ -z "$role" ] && [[ "$reply" == *'"address":"app"'* ]]; then
+            # One address is recorded, and it is the address of the tours. A platform
+            # that reports it as its app address has the two lines the wrong way round:
+            # it would send every tour link away, while its API still answers here.
+            HEALTH_NOTE="https://$host/healthz answered, but the platform does not see it as its tours address: it reports it as its app address. In the settings file $SETTINGS the lines TOURS_HOST and APP_HOST are probably the wrong way round: TOURS_HOST must name $host. Restart the app after a change."
+          elif [ -z "$role" ] || [[ "$reply" == *"\"address\":\"$role\""* ]]; then
             if refuses_other_requests "$host"; then
               HEALTH_NOTE="https://$host answers its health check but refuses every other request: the settings file names other addresses in TOURS_HOST and APP_HOST than the one this install uses."
               return 1
@@ -581,9 +586,10 @@ check_address() {
             HEALTH=ok
             HEALTH_NOTE=""
             return 0
+          else
+            HEALTH=role
+            HEALTH_NOTE="https://$host/healthz answered, but the platform does not see it as its $role address. The settings file $SETTINGS must hold TOURS_HOST=$DOMAIN and APP_HOST=$APP_DOMAIN, and the app must be restarted after a change."
           fi
-          HEALTH=role
-          HEALTH_NOTE="https://$host/healthz answered, but the platform does not see it as its $role address. The settings file $SETTINGS must hold TOURS_HOST=$DOMAIN and APP_HOST=$APP_DOMAIN, and the app must be restarted after a change."
           ;;
         *) HEALTH_NOTE="https://$host/healthz answered, but not with the platform's reply; another site may be answering for this name" ;;
       esac
@@ -644,7 +650,7 @@ precheck_app_address() {
   report_address "$APP_DOMAIN" app 1 || rc=1
   [ "$rc" != 0 ] || return 0
   print_host_lines
-  info "The second address is set up by hand before the script is told about it: the name attached to this Node.js app, its certificate, the two lines, a restart. If the installed version is older than the second address, update without --app-domain first."
+  info "The second address is set up by hand before the script is told about it: the name attached to this Node.js app, its certificate, the two lines, a restart. If the installed version is older than the second address, update without --app-domain first. If an earlier update was cut off, finish it first by running update without --app-domain."
   die "the two addresses do not both report their own role yet, so the update did not start and the app address was not recorded. Nothing was changed"
 }
 
