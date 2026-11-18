@@ -2,6 +2,14 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.4 (2026-11-18)
+
+- Replace a chapter of a tour over the same link: the app sends a fingerprint of each picture and uploads only the ones the site does not have yet.
+- Nothing public changes until a publish completes. An update of a draft stays a draft, and an update is not published by itself when another chapter still has unpublished changes.
+- Updating a tour's first chapter also updates its cover, theme, logo, buttons and end card. The title and the link never change.
+- Pictures that no step uses any more are removed in small steps, never while a publish still needs them.
+- A publish that starts just as the draft changes starts again by itself instead of failing.
+
 ## 0.1.3 (2026-11-18)
 
 - cPanel shared hosting is a supported route: `npm run package:cpanel` builds one archive to upload, and `cpanel.sh` on the hosting does install, update, backup and status.

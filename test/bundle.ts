@@ -43,7 +43,15 @@ export function stepImage(step: Json, fill = 0): Uint8Array {
   return String(step.image).endsWith(".png") ? png(step.width, step.height, step.bytes, fill) : jpeg(step.width, step.height, step.bytes, fill);
 }
 
-export type Call = { status: number; text: string; json: any; headers: Headers; bytes: Uint8Array; calls: number };
+/** The lowercase hex SHA-256 of `bytes`, as the server records it for a stored picture. */
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>));
+  let s = "";
+  for (const b of digest) s += b.toString(16).padStart(2, "0");
+  return s;
+}
+
+export type Call ={ status: number; text: string; json: any; headers: Headers; bytes: Uint8Array; calls: number };
 
 /** Sends one request to a fresh app on `deps` and reads the whole answer. `opts.origin` is the address it is sent to, ORIGIN unless given. */
 export async function send(deps: Deps, method: string, path: string, opts: { token?: string | null; body?: RequestInit["body"]; headers?: Record<string, string>; origin?: string } = {}): Promise<Call> {

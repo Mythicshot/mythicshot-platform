@@ -11,8 +11,8 @@
 // database and storage calls however large the tour (see src/budget.ts and migration
 // 0005). The client calls the delete route again and again:
 // - The first call removes every row of the tour in ONE batch: the snapshot and its
-//   object rows, public_object rows, unfinished uploads into the tour, steps, chapters and
-//   the tour row itself. The same batch records every file those rows named in
+//   object rows, public_object rows, unfinished uploads into the tour, the rows of pictures
+//   a chapter replace left for removal, steps, chapters and the tour row itself. The same batch records every file those rows named in
 //   deleted_object under a tour_deletion row. So from that call on the tour does not
 //   exist for any other route (list, publish, unpublish, rename, upload, the public page
 //   and its images all answer as for an unknown tour), and every file it owned is still
@@ -35,6 +35,7 @@ import { requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, readCapped } from "./http.ts";
 import { parseTitle } from "./manifest.ts";
 import { housekeeping } from "./publish.ts";
+import { clearReplaced } from "./replace.ts";
 import type { Deps, Stmt } from "./ports.ts";
 import { VERSION } from "./version.ts";
 
@@ -111,6 +112,8 @@ function removeTourStatements(auth: Auth, id: string, now: number): Stmt[] {
     record("drafts", "t.logo_key FROM tour t WHERE t.id = ? AND t.logo_key IS NOT NULL"),
     record("drafts", "s.image_key FROM upload_step s JOIN upload u ON u.id = s.upload_id WHERE u.tour_id = ?"),
     record("drafts", "u.logo_key FROM upload u WHERE u.tour_id = ? AND u.logo_key IS NOT NULL"),
+    // And the pictures a chapter replace took out of the tour that are still in the store.
+    record("drafts", "r.image_key FROM replaced_object r WHERE r.tour_id = ?"),
     // Public files: the live snapshot's, and those a publish replaced, retired or left pending.
     record("public", "o.image_key FROM snapshot_object o WHERE o.tour_id = ?"),
     record("public", "o.image_key FROM public_object o WHERE o.tour_id = ?"),
@@ -122,6 +125,7 @@ function removeTourStatements(auth: Auth, id: string, now: number): Stmt[] {
     remove("public_object", "tour_id = ?"),
     remove("upload_step", "upload_id IN (SELECT id FROM upload WHERE tour_id = ?)"),
     remove("upload", "tour_id = ?"),
+    remove("replaced_object", "tour_id = ?"),
     remove("step", "tour_id = ?"),
     remove("chapter", "tour_id = ?"),
     {
@@ -149,6 +153,8 @@ export function tourRoutes(app: Hono, deps: Deps): void {
     // Publish housekeeping rides on this frequent, cheap request too (at most 4 calls), so
     // an abandoned publish or an image past its grace is cleared without a later publish.
     await housekeeping(deps, auth.workspaceId, null, 1);
+    // And one page of the draft pictures chapter replaces left behind (at most 3 calls).
+    await clearReplaced(deps, auth.workspaceId, null);
     const rows = await deps.db.all<{ id: string; title: string; status: "draft" | "published"; slug: string; chapters: number; steps: number; updated_at: number; published_at: number | null }>(
       `SELECT t.id, t.title, t.status, t.slug,
               (SELECT count(*) FROM chapter c WHERE c.tour_id = t.id) AS chapters,

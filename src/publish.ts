@@ -464,16 +464,19 @@ async function stopPublish(deps: Deps, tourId: string, publishId: string, writte
 function commitStatements(auth: Auth, tourId: string, publishId: string, justCopied: string[], now: number, graceMs: number): Stmt[] {
   return [
     {
-      sql: `INSERT INTO snapshot (tour_id, data, published_at, publish_id, steps)
+      // draft_version is the draft the job's snapshot was built from, so a later replace of a
+      // chapter can tell whether the draft holds other changes that were never published.
+      sql: `INSERT INTO snapshot (tour_id, data, published_at, publish_id, steps, draft_version)
             VALUES (?, (SELECT j.data FROM publish_job j
                          WHERE j.publish_id = ? AND j.tour_id = ?
                            AND (SELECT count(*) FROM public_object o
                                  WHERE o.publish_id = ? AND o.state = 'pending' AND o.tour_id = ?
                                    AND (o.copied = 1 OR o.image_key IN (SELECT value FROM json_each(?)))) = j.total
                            AND EXISTS (SELECT 1 FROM tour WHERE id = ? AND workspace_id = ?)),
-                    ?, ?, (SELECT steps FROM publish_job WHERE publish_id = ?))
-            ON CONFLICT (tour_id) DO UPDATE SET data = excluded.data, published_at = excluded.published_at, publish_id = excluded.publish_id, steps = excluded.steps`,
-      params: [tourId, publishId, tourId, publishId, tourId, keyList(justCopied), tourId, auth.workspaceId, now, publishId, publishId],
+                    ?, ?, (SELECT steps FROM publish_job WHERE publish_id = ?), (SELECT draft_version FROM publish_job WHERE publish_id = ?))
+            ON CONFLICT (tour_id) DO UPDATE SET data = excluded.data, published_at = excluded.published_at, publish_id = excluded.publish_id, steps = excluded.steps,
+                                                draft_version = excluded.draft_version`,
+      params: [tourId, publishId, tourId, publishId, tourId, keyList(justCopied), tourId, auth.workspaceId, now, publishId, publishId, publishId],
     },
     {
       sql: "INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, delete_after) SELECT image_key, tour_id, ?, 'retired', ?, ? FROM snapshot_object WHERE tour_id = ?",
@@ -516,6 +519,7 @@ const publishFailed = () => apiError(500, "publish_failed", "the tour could not 
 const publishStopped = () =>
   apiError(409, "publish_cancelled", "this publish was stopped before it finished (the tour was unpublished, or the publish failed or was abandoned); publish again to start over");
 const publishBusy = () => apiError(409, "publish_busy", "another publish of this tour is starting at this moment; try again");
+const draftMoved = () => apiError(409, "publish_busy", "the tour's draft changed while this publish was starting; try again");
 const done = (slug: string, steps: number) => json(200, { slug, url: `/t/${slug}`, steps });
 const inProgress = (publishId: string, doneCount: number, total: number) => json(202, { status: "in_progress", publish_id: publishId, done: doneCount, total });
 
@@ -538,14 +542,18 @@ async function readPublishBody(req: Request): Promise<{ publishId: string | null
   return { publishId: id };
 }
 
-type Started = { kind: "started"; publishId: string; total: number; steps: number; copies: Copy[] } | { kind: "joined" } | { kind: "answer"; res: Response };
+type Started = { kind: "started"; publishId: string; total: number; steps: number; copies: Copy[] } | { kind: "joined" } | { kind: "changed" } | { kind: "answer"; res: Response };
 
 /**
  * Reads the draft once, builds the snapshot and records the job (with the draft version
  * it was built from, read in the same statement) and every key it will write, in one
  * batch, before writing any. When another start of the same tour won the race, answers
- * "joined" so the caller continues that publish instead. When the tour was deleted since
- * the draft was read, nothing is recorded or written and the answer is 404.
+ * "joined" so the caller continues that publish instead. The job is recorded only while
+ * the tour still exists at the draft version that was read: when the tour was deleted or
+ * its draft changed in between (an upload's commit, or a replace of a chapter, which also
+ * removes the pictures it took out), nothing is recorded or written and the answer is
+ * "changed", so no publish ever starts on pictures that may be gone. The caller then
+ * starts once more from the draft as it is now. Two calls: the read and the batch.
  */
 async function startPublish(deps: Deps, auth: Auth, tourId: string): Promise<Started> {
   const rows = await deps.db.all<DraftRow>(DRAFT_SQL, [tourId, auth.workspaceId, MAX_PUBLISH_STEPS + 1]);
@@ -562,14 +570,16 @@ async function startPublish(deps: Deps, auth: Auth, tourId: string): Promise<Sta
   try {
     await deps.db.batch([
       {
-        // The tour id comes from the tour row itself, so a tour deleted since the draft was
-        // read fails the batch (NOT NULL) instead of starting a publish no row records.
+        // The tour id comes from the tour row itself, and only while its draft is still the
+        // version that was read, so a tour deleted or changed since the draft was read
+        // fails the batch (NOT NULL) instead of starting a publish no row records, or one
+        // of a draft whose pictures a replace has since removed.
         // The title is taken from the tour row here, not from the draft read above, so a
         // rename that landed in between (it found no job to update) is not lost.
         sql: `INSERT INTO publish_job (tour_id, publish_id, data, steps, total, draft_version, created_at, touched_at)
-              VALUES ((SELECT id FROM tour WHERE id = ? AND workspace_id = ?), ?,
+              VALUES ((SELECT id FROM tour WHERE id = ? AND workspace_id = ? AND draft_version = ?), ?,
                       json_set(?, '$.title', (SELECT title FROM tour WHERE id = ? AND workspace_id = ?)), ?, ?, ?, ?, ?)`,
-        params: [tourId, auth.workspaceId, publishId, data, tourId, auth.workspaceId, rows.length, copies.length, rows[0].draft_version, now, now],
+        params: [tourId, auth.workspaceId, rows[0].draft_version, publishId, data, tourId, auth.workspaceId, rows.length, copies.length, rows[0].draft_version, now, now],
       },
       {
         sql: `INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, source_key, seq, copied)
@@ -580,7 +590,7 @@ async function startPublish(deps: Deps, auth: Auth, tourId: string): Promise<Sta
     ]);
   } catch (err) {
     if (isUniqueViolation(err)) return { kind: "joined" };
-    if (isNotNullViolation(err)) return { kind: "answer", res: notFound() }; // deleted since the draft was read
+    if (isNotNullViolation(err)) return { kind: "changed" }; // deleted, or its draft changed, since the draft was read
     throw err;
   }
   return { kind: "started", publishId, total: copies.length, steps: rows.length, copies };
@@ -647,7 +657,16 @@ export function publishRoutes(app: Hono, deps: Deps): void {
       steps = tour.job_steps ?? 0;
       ({ batch, left } = await nextBatch(d, tour.id, publishId, room()));
     } else {
-      const started = await startPublish(d, auth, tour.id);
+      let started = await startPublish(d, auth, tour.id);
+      if (started.kind === "changed") {
+        // The tour is gone, or its draft moved on while the publish was starting (an upload
+        // or a chapter replace committed). Nothing was written. If the tour is still there,
+        // read the draft again and start once more, in this same request, so the client
+        // gets its publish of the newer draft; only losing a second time answers 409.
+        if ((await tourState(d, auth, tour.id)) === null) return notFound();
+        started = await startPublish(d, auth, tour.id);
+        if (started.kind === "changed") return (await tourState(d, auth, tour.id)) === null ? notFound() : draftMoved();
+      }
       if (started.kind === "answer") return started.res;
       if (started.kind === "started") {
         ({ publishId, total, steps } = started);
