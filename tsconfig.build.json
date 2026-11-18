@@ -10,6 +10,8 @@
     "src/**/*.ts"
   ],
   "exclude": [
-    "src/cloudflare/**"
+    "src/cloudflare/**",
+    "src/player/main.ts",
+    "src/player/vendor/**"
   ]
 }

@@ -35,8 +35,8 @@ RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
  && chown 1001:1001 /data
 
 # The runner holds only dist/, migrations/, package.json (for "type": "module") and the
-# production node_modules. The wizard's page is served from dist/; a public/ folder is
-# added here once the app has one.
+# production node_modules. The wizard's page and the player's script and stylesheet are
+# compiled into dist/ (src/player/assets.ts), so there is no static folder to copy.
 FROM scratch AS runner
 COPY --from=runtime / /
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \

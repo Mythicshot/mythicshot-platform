@@ -1,0 +1,4 @@
+{
+  "//": "tour-core.js is a classic script with a CommonJS export line; this tells the bundler so.",
+  "type": "commonjs"
+}
