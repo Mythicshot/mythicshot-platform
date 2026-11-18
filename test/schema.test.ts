@@ -6,6 +6,7 @@ const TABLES = [
   "api_token",
   "chapter",
   "public_object",
+  "publish_job",
   "setup",
   "snapshot",
   "snapshot_object",

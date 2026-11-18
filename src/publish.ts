@@ -5,32 +5,53 @@
 // the cover logo) into the public store under a new random name. The player reads only
 // the snapshot, so nothing done to the draft afterwards reaches it until the next publish.
 //
+// Publishing runs in bounded steps, so that no request makes more than SUBREQUEST_BUDGET
+// database and storage calls however large the tour (see src/budget.ts). The client calls
+// the publish route again and again:
+// - The first call reads the draft in ONE statement (a consistent read), builds the
+//   snapshot, and records a job (migration 0004) holding the snapshot text together with
+//   one 'pending' public_object row per image, before writing any image. It then copies
+//   the first COPY_BATCH images.
+// - Each later call copies the next COPY_BATCH images and marks them copied. Until the
+//   end it answers 202 with how many images are done out of how many.
+// - The call that copies the last images commits in one batch, exactly as a one-request
+//   publish did: the snapshot switches only then, so viewers see the previous version
+//   until that moment. It answers 200 with { slug, url, steps }.
+// A publish continues against the draft version it started from: the snapshot was built
+// from one consistent read at the start, and draft objects never change once written
+// (each upload writes its own keys and nothing rewrites them), so the remaining copies are
+// exactly that version's images, and a chapter committed meanwhile goes out with the next
+// publish. Restarting instead would let a tour that is being added to never finish.
+//
 // Every public object is named by exactly one row at every moment (see migration 0003):
-// - A publish records each key it intends to write as 'pending' in public_object BEFORE
-//   writing it, then copies, then commits in one batch that moves its pending keys into
-//   snapshot_object and the previous snapshot's keys into public_object as 'retired'.
-//   A retired key stays served for a grace period (config.retiredGraceMs), so a viewer
+// - A publish records each key as 'pending' BEFORE writing it. A pending row's created_at
+//   is refreshed by every call that makes progress, so a publish counts as abandoned only
+//   after STALE_PUBLISH_MS without progress; any later request in the workspace then
+//   retires its rows and drops its job. The commit moves the pending keys into
+//   snapshot_object and the previous snapshot's keys into public_object as 'retired', and
+//   only takes effect while the job exists and every one of its rows is still pending, so
+//   a sweep, an unpublish or a failure that ended the publish can never race it into
+//   going live with missing images.
+// - A retired key stays served for a grace period (config.retiredGraceMs), so a viewer
 //   still on the previous page (cached for a minute) keeps its images; once that has
 //   passed, a later request deletes it from the store, then its row.
-// - Unpublish moves the snapshot's keys to 'retired' in one batch with deleting the
-//   snapshot, with no grace (and ends the grace of keys an earlier re-publish retired),
-//   then deletes exactly those keys, then their rows.
-// - Every publish and unpublish also sweeps a few other tours of its workspace, oldest
-//   due first, so a replaced or abandoned image never stays public for want of another
-//   request on its own tour.
-// - A publish that fails retires its own pending keys, deletes every key it chose (it
-//   holds them in memory, so even a key written after its rows were swept is caught),
-//   then the rows. If that cleanup fails too, the rows stay and a later request finishes.
-// - The commit only takes effect while all of this publish's pending rows are still
-//   pending, so a sweep that retired a stale publish can never race it into going live
-//   with missing images.
+// - Unpublish cancels a publish in progress (retires its rows, drops its job) and moves
+//   the snapshot's keys to 'retired' in one batch with deleting the snapshot, with no grace,
+//   then deletes the due keys a page at a time.
+// - A publish that fails or finds itself cancelled retires its own pending rows, drops its
+//   job, and deletes every key it recorded plus the keys this call wrote (so even a key
+//   written after its rows were swept is caught). It deletes nothing another publish made.
+// - Every publish and unpublish also sweeps a few other tours of its workspace, most
+//   overdue first, so a replaced or abandoned image never stays public for want of
+//   another request on its own tour.
 // Keys are random and never reused, so a retired key past its grace can be deleted by any
 // request at any time. Nothing is ever found by listing the store.
 import type { Hono } from "hono";
 import { requireAuth, type Auth } from "./auth.ts";
-import { apiError, json, noContent } from "./http.ts";
+import { SUBREQUEST_BUDGET } from "./budget.ts";
+import { apiError, json, noContent, readCapped } from "./http.ts";
 import { legacySettings, safeUrl, type Autoplay, type Box, type Card, type Cover, type EndCard, type Link, type Note, type Theme, type Zoom } from "./manifest.ts";
-import type { Deps, Stmt } from "./ports.ts";
+import { isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 
 export type SnapshotStep = {
   id: string;
@@ -72,35 +93,60 @@ export type Snapshot = {
 export const PUBLIC_CACHE = "public, max-age=31536000, immutable";
 /** How long a key a re-publish replaced keeps being served, when the config sets nothing else. */
 export const DEFAULT_RETIRED_GRACE_MS = 10 * 60 * 1000;
-/** A pending publish older than this is taken to be dead and is swept by a later request on the same tour. */
+/** A publish that has made no progress for this long is taken to be abandoned and is swept by a later request in the workspace. */
 export const STALE_PUBLISH_MS = 15 * 60 * 1000;
 /**
- * The most steps one publish copies. Each copy is one read from the drafts store and one
- * write to the public store, so 400 steps and a logo are 802 storage calls, which with
- * about a dozen database calls stays under the 1,000 subrequests a Worker may make.
+ * The most steps one tour publishes. Publishing is no longer one request, so this is not
+ * a subrequest limit any more: it bounds the first call's draft read and snapshot build
+ * (see MAX_SNAPSHOT_BYTES) and the number of calls a publish takes (34 at 400 steps).
  */
 export const MAX_PUBLISH_STEPS = 400;
 /**
  * The largest snapshot text. D1 stores up to 2,000,000 bytes in one value, but CPU sets
- * the cap: reading the draft rows, building the snapshot and serialising it twice costs
- * about 4 ms of pure CPU per megabyte (measured in V8), so 512,000 bytes keeps that part
- * near 2 ms of the free plan's 10 ms. A single upload's manifest is at most 262,144 bytes,
- * so this allows about two full-size uploads' worth of text per tour.
+ * the cap: the first call reads the draft rows, builds the snapshot and serialises it
+ * once, which costs about 2 ms of pure CPU per 100,000 bytes of notes in V8 (see the
+ * README), so 512,000 bytes keeps that call within reach of the free plan's 10 ms. Later
+ * calls never read the text; the commit copies it inside the database. A single upload's
+ * manifest is at most 262,144 bytes, so this allows about two full-size uploads' worth of
+ * text per tour.
  */
 export const MAX_SNAPSHOT_BYTES = 512_000;
+/**
+ * The calls one publish request makes besides its copies, in the worst case:
+ *   2  authentication (token lookup, last-used update)
+ *   1  the tour with its job and live snapshot, in one query
+ *   4  housekeeping: one batch retiring abandoned publishes, then one page of due keys
+ *      (select, one store delete, delete their rows)
+ *   2  starting: the draft read, and one batch recording the job and its pending rows
+ *      (resuming instead: 1, the select of the next images)
+ *   6  finishing: the commit batch, then either the cleanup of this tour's due keys (3), or
+ *      after a failed commit a status read (1) and stopping the publish (4: one batch, a
+ *      read, a store delete, a row delete). A call that does not finish uses at most 5.
+ */
+const FIXED_PUBLISH_CALLS = 15;
+/** Images one request copies: each is one read from the drafts store and one write to the public store. */
+export const COPY_BATCH = Math.floor((SUBREQUEST_BUDGET - FIXED_PUBLISH_CALLS) / 2);
 /** Copies in flight at once, inside the six connections a Worker may hold open. */
 const COPIES_IN_FLIGHT = 4;
-/** Retired rows cleared per call, and calls per request. */
-const RETIRED_PAGE = 500;
-const RETIRED_PAGES = 3;
-/** Other tours of the workspace one request sweeps, oldest due first. */
+/** Due keys deleted per page: one store delete call takes at most 1,000 keys. */
+const DUE_PAGE = 1000;
+/** Pages of due keys per request: publish does one; unpublish, which retires a whole snapshot at once, two. */
+const PUBLISH_PAGES = 1;
+const UNPUBLISH_PAGES = 2;
+/** Other tours of the workspace one request sweeps, most overdue first. */
 export const SWEEP_TOURS = 2;
+/** Starts that lost a race to another start of the same tour, before giving up. */
+const START_ATTEMPTS = 3;
 
 const TOUR_ID = /^tour_[0-9a-f]{24}$/;
+const PUBLISH_ID = /^pub_[0-9a-f]{24}$/;
 const PUBLIC_NAME = /^[0-9a-f]{32}\.(png|jpg)$/;
+/** The publish route's optional body: {"publish_id": "..."}. */
+const PUBLISH_BODY_BYTES = 1024;
 
 type ImageType = "png" | "jpg";
 const mime = (t: ImageType) => (t === "png" ? "image/png" : "image/jpeg");
+const typeOfKey = (key: string): ImageType => (key.endsWith(".png") ? "png" : "jpg");
 
 function randomHex(bytes: number): string {
   let s = "";
@@ -180,7 +226,7 @@ function cleanLink(v: unknown): Link | null {
   return { label: l.label, url };
 }
 
-type Copy = { from: string; to: string; type: ImageType };
+type Copy = { from: string; to: string };
 
 /** The snapshot's id for a draft chapter: one-way, so it says nothing about the upload behind the chapter. */
 async function publicChapterId(chapterId: string): Promise<string> {
@@ -191,7 +237,7 @@ async function publicChapterId(chapterId: string): Promise<string> {
 }
 
 /** Builds the snapshot and the copies it needs, choosing a fresh public key for each image. */
-function buildSnapshot(rows: DraftRow[], chapterIds: Map<string, string>): { snapshot: Snapshot; copies: Copy[] } {
+export function buildSnapshot(rows: DraftRow[], chapterIds: Map<string, string>): { snapshot: Snapshot; copies: Copy[] } {
   const t = rows[0];
   const legacy = legacySettings();
   const copies: Copy[] = [];
@@ -205,7 +251,7 @@ function buildSnapshot(rows: DraftRow[], chapterIds: Map<string, string>): { sna
       chapters.push(ch);
     }
     const image = publicKey(r.image_type);
-    copies.push({ from: r.image_key, to: image, type: r.image_type });
+    copies.push({ from: r.image_key, to: image });
     ch.steps.push({
       id: r.s_id,
       image,
@@ -227,7 +273,7 @@ function buildSnapshot(rows: DraftRow[], chapterIds: Map<string, string>): { sna
     let logo: string | null = null;
     if (storedCover.logo && t.logo_key !== null && t.logo_type !== null) {
       logo = publicKey(t.logo_type);
-      copies.push({ from: t.logo_key, to: logo, type: t.logo_type });
+      copies.push({ from: t.logo_key, to: logo });
     }
     cover = { title: storedCover.title, body: storedCover.body, button: storedCover.button, logo };
   }
@@ -247,6 +293,21 @@ function buildSnapshot(rows: DraftRow[], chapterIds: Map<string, string>): { sna
     chapters,
   };
   return { snapshot, copies };
+}
+
+/** UTF-8 length of a string without encoding it. */
+function utf8Length(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return n;
 }
 
 /** Runs `jobs` with at most `limit` in flight. Stops starting new ones after a failure, waits for those running, then throws. */
@@ -271,113 +332,132 @@ async function copyOne(deps: Deps, c: Copy): Promise<void> {
   const file = await deps.drafts.get(c.from);
   if (file === null) throw new Error("a draft image is missing");
   const bytes = new Uint8Array(await new Response(file.body).arrayBuffer());
-  await deps.pub.put(c.to, bytes, { contentType: mime(c.type), cacheControl: PUBLIC_CACHE });
+  await deps.pub.put(c.to, bytes, { contentType: mime(typeOfKey(c.to)), cacheControl: PUBLIC_CACHE });
 }
 
 const keyList = (keys: string[]) => JSON.stringify(keys);
 
 const graceOf = (deps: Deps) => deps.config.retiredGraceMs ?? DEFAULT_RETIRED_GRACE_MS;
 
+const WORKSPACE_TOURS = "SELECT id FROM tour WHERE workspace_id = ?";
+
 /**
- * Deletes this tour's retired objects whose grace has passed, then their rows. They are
- * referenced by nothing live and no longer served, so this is safe at any time and from
- * any number of requests at once.
+ * One page of retired keys past their grace: this tour's first, then those of up to
+ * `otherTours` other tours of the workspace, most overdue first. Deletes the objects in
+ * one store call, then their rows. Returns whether more of this tour's keys are due.
+ * They are referenced by nothing live and no longer served, so this is safe at any time
+ * and from any number of requests at once.
  */
-async function clearRetired(deps: Deps, tourId: string, pages = RETIRED_PAGES): Promise<void> {
+async function clearDuePage(deps: Deps, workspaceId: string, tourId: string, otherTours: number): Promise<{ any: boolean; more: boolean }> {
   const now = deps.now();
-  for (let page = 0; page < pages; page++) {
-    const rows = await deps.db.all<{ image_key: string }>(
-      "SELECT image_key FROM public_object WHERE tour_id = ? AND state = 'retired' AND delete_after <= ? ORDER BY image_key LIMIT ?",
-      [tourId, now, RETIRED_PAGE],
-    );
-    if (rows.length === 0) return;
-    const keys = rows.map((r) => r.image_key);
-    await deps.pub.delete(keys);
-    await deps.db.run("DELETE FROM public_object WHERE tour_id = ? AND state = 'retired' AND image_key IN (SELECT value FROM json_each(?))", [
-      tourId,
-      keyList(keys),
-    ]);
-    if (rows.length < RETIRED_PAGE) return;
-  }
+  const rows = await deps.db.all<{ image_key: string; tour_id: string }>(
+    `SELECT o.image_key, o.tour_id FROM public_object o
+      WHERE o.state = 'retired' AND o.delete_after <= ?
+        AND (o.tour_id = ? OR o.tour_id IN (
+              SELECT p.tour_id FROM public_object p
+               WHERE p.state = 'retired' AND p.delete_after <= ? AND p.tour_id <> ? AND p.tour_id IN (${WORKSPACE_TOURS})
+               GROUP BY p.tour_id ORDER BY min(p.delete_after), p.tour_id LIMIT ?))
+      ORDER BY o.tour_id <> ?, o.delete_after, o.image_key
+      LIMIT ?`,
+    [now, tourId, now, tourId, workspaceId, otherTours, tourId, DUE_PAGE + 1],
+  );
+  if (rows.length === 0) return { any: false, more: false };
+  const page = rows.slice(0, DUE_PAGE);
+  const keys = page.map((r) => r.image_key);
+  await deps.pub.delete(keys);
+  await deps.db.run(
+    `DELETE FROM public_object WHERE state = 'retired' AND delete_after <= ? AND image_key IN (SELECT value FROM json_each(?)) AND tour_id IN (${WORKSPACE_TOURS})`,
+    [now, keyList(keys), workspaceId],
+  );
+  return { any: true, more: rows.length > DUE_PAGE && rows[DUE_PAGE].tour_id === tourId };
 }
 
 /**
- * Housekeeping before a publish or unpublish: retires the tour's pending keys of any
- * publish older than STALE_PUBLISH_MS (its request is taken to be dead; if it is not,
- * its commit now fails), then clears every retired key of the tour. Errors are logged
- * as fixed text and never fail the request.
+ * Housekeeping on every publish and unpublish, in at most 1 + 3 x `pages` calls: retires
+ * the pending rows of every publish in the workspace that has made no progress for
+ * STALE_PUBLISH_MS and drops jobs left with no pending rows (one batch), then deletes due
+ * keys a page at a time, this tour's first and a few other tours' after. Errors are logged
+ * as fixed text and never thrown. Answers "failed" if anything failed, "more" if this
+ * tour still has due keys, else "clean".
  */
-async function sweepTour(deps: Deps, tourId: string, pages = RETIRED_PAGES): Promise<void> {
+async function housekeeping(deps: Deps, workspaceId: string, tourId: string, pages: number): Promise<"clean" | "more" | "failed"> {
   try {
     const now = deps.now();
-    await deps.db.run(
-      "UPDATE public_object SET state = 'retired', publish_id = ?, delete_after = ? WHERE tour_id = ? AND state = 'pending' AND created_at < ?",
-      ["sweep_" + randomHex(12), now, tourId, now - STALE_PUBLISH_MS],
-    );
-    await clearRetired(deps, tourId, pages);
+    await deps.db.batch([
+      {
+        sql: `UPDATE public_object SET state = 'retired', delete_after = ? WHERE state = 'pending' AND created_at < ? AND tour_id IN (${WORKSPACE_TOURS})`,
+        params: [now, now - STALE_PUBLISH_MS, workspaceId],
+      },
+      {
+        sql: `DELETE FROM publish_job WHERE tour_id IN (${WORKSPACE_TOURS})
+                AND NOT EXISTS (SELECT 1 FROM public_object o WHERE o.publish_id = publish_job.publish_id AND o.state = 'pending')`,
+        params: [workspaceId],
+      },
+    ]);
+    for (let page = 0; page < pages; page++) {
+      const r = await clearDuePage(deps, workspaceId, tourId, SWEEP_TOURS);
+      if (!r.more) return "clean";
+    }
+    return "more";
   } catch {
-    console.error(`publish: could not remove old public images of ${tourId}; will retry later`);
+    console.error(`publish: could not remove old public images near ${tourId}; will retry later`);
+    return "failed";
   }
 }
 
 /**
- * Sweeps up to SWEEP_TOURS other tours of the workspace that have a retired image past
- * its grace or a stale pending publish, the longest due first. Bounded, so one request
- * does a fixed amount of work; logged as fixed text and never fails the request.
+ * Ends a publish that will not commit: retires its pending rows and drops its job in one
+ * batch (after which it can never commit), then, unless it turns out to have committed
+ * after all (a second call of the same publish finished it), deletes every key it recorded
+ * and every key in `written`, then those rows. Four calls. If anything fails the rows
+ * stay retired and due, and a later request finishes the job.
  */
-async function sweepWorkspace(deps: Deps, workspaceId: string, exceptTourId: string): Promise<void> {
-  let due: { tour_id: string }[];
+async function stopPublish(deps: Deps, tourId: string, publishId: string, written: string[]): Promise<"live" | "stopped"> {
   try {
     const now = deps.now();
-    due = await deps.db.all<{ tour_id: string }>(
-      `SELECT o.tour_id, min(CASE WHEN o.state = 'retired' THEN o.delete_after ELSE o.created_at + ? END) AS due
-         FROM public_object o JOIN tour t ON t.id = o.tour_id
-        WHERE t.workspace_id = ? AND o.tour_id <> ?
-          AND ((o.state = 'retired' AND o.delete_after <= ?) OR (o.state = 'pending' AND o.created_at < ?))
-        GROUP BY o.tour_id ORDER BY due, o.tour_id LIMIT ?`,
-      [STALE_PUBLISH_MS, workspaceId, exceptTourId, now, now - STALE_PUBLISH_MS, SWEEP_TOURS],
+    await deps.db.batch([
+      { sql: "UPDATE public_object SET state = 'retired', delete_after = ? WHERE publish_id = ? AND state = 'pending' AND tour_id = ?", params: [now, publishId, tourId] },
+      { sql: "DELETE FROM publish_job WHERE publish_id = ? AND tour_id = ?", params: [publishId, tourId] },
+    ]);
+    const row = await deps.db.first<{ live: string | null; keys: string }>(
+      `SELECT (SELECT publish_id FROM snapshot WHERE tour_id = ?) AS live,
+              (SELECT json_group_array(image_key) FROM public_object WHERE publish_id = ? AND tour_id = ? AND state = 'retired' AND source_key IS NOT NULL) AS keys`,
+      [tourId, publishId, tourId],
     );
+    if (row?.live === publishId) return "live";
+    const recorded = parse<string[]>(row?.keys ?? "[]") ?? [];
+    const keys = [...new Set([...recorded, ...written])];
+    if (keys.length > 0) await deps.pub.delete(keys);
+    if (recorded.length > 0) {
+      await deps.db.run(
+        "DELETE FROM public_object WHERE publish_id = ? AND tour_id = ? AND state = 'retired' AND source_key IS NOT NULL AND image_key IN (SELECT value FROM json_each(?))",
+        [publishId, tourId, keyList(recorded)],
+      );
+    }
   } catch {
-    console.error("publish: could not look for old public images; will retry later");
-    return;
+    console.error(`publish: could not remove the images of a stopped publish of ${tourId}; will retry later`);
   }
-  for (const { tour_id } of due) await sweepTour(deps, tour_id, 1);
-}
-
-/** Housekeeping before a publish or unpublish: this tour's leftovers, then a few other tours'. */
-async function housekeeping(deps: Deps, auth: Auth, tourId: string): Promise<void> {
-  await sweepTour(deps, tourId);
-  await sweepWorkspace(deps, auth.workspaceId, tourId);
+  return "stopped";
 }
 
 /**
- * Undoes a publish that did not commit: retires its pending rows, deletes every key it
- * chose, then the rows. If any step fails the rows stay, pending or retired, and a later
- * request on the tour finishes the job.
+ * The commit, one batch. The snapshot insert fails (NOT NULL on data) unless the job still
+ * exists, every one of its rows is still pending and copied (or copied by this call), and
+ * the tour is still this workspace's; then the whole batch rolls back.
  */
-async function abandon(deps: Deps, tourId: string, publishId: string, keys: string[]): Promise<void> {
-  try {
-    await deps.db.run("UPDATE public_object SET state = 'retired', delete_after = ? WHERE publish_id = ? AND state = 'pending'", [deps.now(), publishId]);
-    await deps.pub.delete(keys);
-    await deps.db.run("DELETE FROM public_object WHERE tour_id = ? AND state = 'retired' AND image_key IN (SELECT value FROM json_each(?))", [
-      tourId,
-      keyList(keys),
-    ]);
-  } catch {
-    console.error(`publish: could not remove the images of a failed publish of ${tourId}; will retry later`);
-  }
-}
-
-function commitStatements(auth: Auth, tourId: string, publishId: string, data: string, expected: number, now: number, graceMs: number): Stmt[] {
+function commitStatements(auth: Auth, tourId: string, publishId: string, justCopied: string[], now: number, graceMs: number): Stmt[] {
   return [
-    // Fails (NOT NULL on data) unless every pending row of this publish is still there and
-    // the tour is still this workspace's; then the whole batch rolls back.
     {
-      sql: `INSERT INTO snapshot (tour_id, data, published_at, publish_id)
-            VALUES (?, (SELECT ? WHERE (SELECT count(*) FROM public_object WHERE publish_id = ? AND state = 'pending' AND tour_id = ?) = ?
-                                  AND EXISTS (SELECT 1 FROM tour WHERE id = ? AND workspace_id = ?)), ?, ?)
-            ON CONFLICT (tour_id) DO UPDATE SET data = excluded.data, published_at = excluded.published_at, publish_id = excluded.publish_id`,
-      params: [tourId, data, publishId, tourId, expected, tourId, auth.workspaceId, now, publishId],
+      sql: `INSERT INTO snapshot (tour_id, data, published_at, publish_id, steps)
+            VALUES (?, (SELECT j.data FROM publish_job j
+                         WHERE j.publish_id = ? AND j.tour_id = ?
+                           AND (SELECT count(*) FROM public_object o
+                                 WHERE o.publish_id = ? AND o.state = 'pending' AND o.tour_id = ?
+                                   AND (o.copied = 1 OR o.image_key IN (SELECT value FROM json_each(?)))) = j.total
+                           AND EXISTS (SELECT 1 FROM tour WHERE id = ? AND workspace_id = ?)),
+                    ?, ?, (SELECT steps FROM publish_job WHERE publish_id = ?))
+            ON CONFLICT (tour_id) DO UPDATE SET data = excluded.data, published_at = excluded.published_at, publish_id = excluded.publish_id, steps = excluded.steps`,
+      params: [tourId, publishId, tourId, publishId, tourId, keyList(justCopied), tourId, auth.workspaceId, now, publishId, publishId],
     },
     {
       sql: "INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, delete_after) SELECT image_key, tour_id, ?, 'retired', ?, ? FROM snapshot_object WHERE tour_id = ?",
@@ -389,88 +469,211 @@ function commitStatements(auth: Auth, tourId: string, publishId: string, data: s
       params: [publishId, tourId],
     },
     { sql: "DELETE FROM public_object WHERE publish_id = ? AND state = 'pending'", params: [publishId] },
+    { sql: "DELETE FROM publish_job WHERE publish_id = ?", params: [publishId] },
     { sql: "UPDATE tour SET status = 'published', published_at = ? WHERE id = ? AND workspace_id = ?", params: [now, tourId, auth.workspaceId] },
   ];
 }
 
-async function ownedTour(deps: Deps, auth: Auth, id: string): Promise<{ id: string } | null> {
+type TourState = {
+  id: string;
+  slug: string;
+  job_id: string | null;
+  job_total: number | null;
+  job_steps: number | null;
+  live_id: string | null;
+  live_steps: number | null;
+};
+
+const TOUR_STATE_SQL = `
+  SELECT t.id, t.slug, j.publish_id AS job_id, j.total AS job_total, j.steps AS job_steps, s.publish_id AS live_id, s.steps AS live_steps
+    FROM tour t LEFT JOIN publish_job j ON j.tour_id = t.id LEFT JOIN snapshot s ON s.tour_id = t.id
+   WHERE t.id = ? AND t.workspace_id = ?`;
+
+async function tourState(deps: Deps, auth: Auth, id: string): Promise<TourState | null> {
   if (!TOUR_ID.test(id)) return null;
-  return deps.db.first<{ id: string }>("SELECT id FROM tour WHERE id = ? AND workspace_id = ?", [id, auth.workspaceId]);
+  return deps.db.first<TourState>(TOUR_STATE_SQL, [id, auth.workspaceId]);
 }
 
 const publishFailed = () => apiError(500, "publish_failed", "the tour could not be published; what was published before is unchanged");
+const publishStopped = () =>
+  apiError(409, "publish_cancelled", "this publish was stopped before it finished (the tour was unpublished, or the publish failed or was abandoned); publish again to start over");
+const done = (slug: string, steps: number) => json(200, { slug, url: `/t/${slug}`, steps });
+const inProgress = (publishId: string, doneCount: number, total: number) => json(202, { status: "in_progress", publish_id: publishId, done: doneCount, total });
+
+/** The publish route's body: nothing, or {"publish_id": "pub_..."} to continue that publish. */
+async function readPublishBody(req: Request): Promise<{ publishId: string | null } | Response> {
+  const bad = () => apiError(400, "bad_request", 'the body must be empty or {"publish_id": "<id from the previous answer>"}');
+  const raw = await readCapped(req, PUBLISH_BODY_BYTES);
+  if (raw === "too_large") return apiError(413, "too_large", `the request is over ${PUBLISH_BODY_BYTES} bytes`);
+  if (raw.byteLength === 0) return { publishId: null };
+  let body: unknown;
+  try {
+    body = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw));
+  } catch {
+    return bad();
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return bad();
+  const id = (body as Record<string, unknown>).publish_id;
+  if (id === undefined || id === null) return { publishId: null };
+  if (typeof id !== "string" || !PUBLISH_ID.test(id)) return bad();
+  return { publishId: id };
+}
+
+type Started = { kind: "started"; publishId: string; total: number; steps: number; batch: Copy[] } | { kind: "joined" } | { kind: "answer"; res: Response };
+
+/**
+ * Reads the draft once, builds the snapshot and records the job and every key it will
+ * write, in one batch, before writing any. When another start of the same tour won the
+ * race, answers "joined" so the caller continues that publish instead.
+ */
+async function startPublish(deps: Deps, auth: Auth, tourId: string): Promise<Started> {
+  const rows = await deps.db.all<DraftRow>(DRAFT_SQL, [tourId, auth.workspaceId, MAX_PUBLISH_STEPS + 1]);
+  if (rows.length === 0) return { kind: "answer", res: apiError(400, "empty_tour", "a tour with no steps cannot be published") };
+  if (rows.length > MAX_PUBLISH_STEPS) return { kind: "answer", res: apiError(413, "too_large", `a tour of more than ${MAX_PUBLISH_STEPS} steps cannot be published`) };
+  const chapterIds = new Map<string, string>();
+  for (const r of rows) if (!chapterIds.has(r.c_id)) chapterIds.set(r.c_id, await publicChapterId(r.c_id));
+  const { snapshot, copies } = buildSnapshot(rows, chapterIds);
+  const data = JSON.stringify(snapshot);
+  if (utf8Length(data) > MAX_SNAPSHOT_BYTES) return { kind: "answer", res: apiError(413, "too_large", "the tour is too large to publish") };
+
+  const publishId = "pub_" + randomHex(12);
+  const now = deps.now();
+  try {
+    await deps.db.batch([
+      {
+        sql: "INSERT INTO publish_job (tour_id, publish_id, data, steps, total, created_at) SELECT id, ?, ?, ?, ?, ? FROM tour WHERE id = ? AND workspace_id = ?",
+        params: [publishId, data, rows.length, copies.length, now, tourId, auth.workspaceId],
+      },
+      {
+        sql: `INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, source_key, seq, copied)
+              SELECT json_extract(j.value, '$[0]'), t.id, ?, 'pending', ?, json_extract(j.value, '$[1]'), j.key, 0
+                FROM json_each(?) j JOIN tour t ON t.id = ? AND t.workspace_id = ?`,
+        params: [publishId, now, JSON.stringify(copies.map((c) => [c.to, c.from])), tourId, auth.workspaceId],
+      },
+    ]);
+  } catch (err) {
+    if (isUniqueViolation(err)) return { kind: "joined" };
+    throw err;
+  }
+  return { kind: "started", publishId, total: copies.length, steps: rows.length, batch: copies.slice(0, COPY_BATCH) };
+}
+
+/** The next images of a publish still to copy, and how many are left in all. */
+async function nextBatch(deps: Deps, tourId: string, publishId: string): Promise<{ batch: Copy[]; left: number }> {
+  const rows = await deps.db.all<{ image_key: string; source_key: string; left: number }>(
+    `SELECT image_key, source_key,
+            (SELECT count(*) FROM public_object WHERE publish_id = ? AND tour_id = ? AND state = 'pending' AND copied = 0) AS left
+       FROM public_object WHERE publish_id = ? AND tour_id = ? AND state = 'pending' AND copied = 0
+      ORDER BY seq LIMIT ?`,
+    [publishId, tourId, publishId, tourId, COPY_BATCH],
+  );
+  return { batch: rows.map((r) => ({ from: r.source_key, to: r.image_key })), left: rows[0]?.left ?? 0 };
+}
 
 export function publishRoutes(app: Hono, deps: Deps): void {
+  // Publish in bounded steps. Request: POST with no body to start (or to join the publish
+  // already in progress for this tour), then POST {"publish_id": "<id>"} until done.
+  // Answers: 202 {status: "in_progress", publish_id, done, total} while images are being
+  // copied; 200 {slug, url, steps} once the new version is live (again on any repeat);
+  // 409 publish_cancelled when that publish was stopped (unpublished, failed, abandoned).
   app.post("/api/v1/tours/:id/publish", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
-    const tour = await ownedTour(deps, auth, c.req.param("id"));
+    const body = await readPublishBody(c.req.raw);
+    if (body instanceof Response) return body;
+    let tour = await tourState(deps, auth, c.req.param("id"));
     if (tour === null) return notFound();
-    await housekeeping(deps, auth, tour.id);
+    await housekeeping(deps, auth.workspaceId, tour.id, PUBLISH_PAGES);
 
-    const rows = await deps.db.all<DraftRow>(DRAFT_SQL, [tour.id, auth.workspaceId, MAX_PUBLISH_STEPS + 1]);
-    if (rows.length === 0) return apiError(400, "empty_tour", "a tour with no steps cannot be published");
-    if (rows.length > MAX_PUBLISH_STEPS) return apiError(413, "too_large", `a tour of more than ${MAX_PUBLISH_STEPS} steps cannot be published`);
-    const chapterIds = new Map<string, string>();
-    for (const r of rows) if (!chapterIds.has(r.c_id)) chapterIds.set(r.c_id, await publicChapterId(r.c_id));
-    const { snapshot, copies } = buildSnapshot(rows, chapterIds);
-    const data = JSON.stringify(snapshot);
-    if (new TextEncoder().encode(data).byteLength > MAX_SNAPSHOT_BYTES) return apiError(413, "too_large", "the tour is too large to publish");
+    const asked = body.publishId;
+    let publishId: string;
+    let total: number;
+    let steps: number;
+    let batch: Copy[];
+    let left: number;
+    for (let attempt = 1; ; attempt++) {
+      // A publish that went live answers the same however often it is asked.
+      if (asked !== null && tour.live_id === asked) return done(tour.slug, tour.live_steps ?? 0);
+      if (asked !== null && tour.job_id !== asked) return publishStopped();
+      if (tour.job_id !== null) {
+        publishId = tour.job_id;
+        total = tour.job_total ?? 0;
+        steps = tour.job_steps ?? 0;
+        ({ batch, left } = await nextBatch(deps, tour.id, publishId));
+        break;
+      }
+      const started = await startPublish(deps, auth, tour.id);
+      if (started.kind === "answer") return started.res;
+      if (started.kind === "started") {
+        ({ publishId, total, steps, batch } = started);
+        left = total;
+        break;
+      }
+      // Another start of this tour won: continue the publish it began.
+      if (attempt >= START_ATTEMPTS) return apiError(409, "publish_busy", "another publish of this tour is starting; try again");
+      const again = await tourState(deps, auth, tour.id);
+      if (again === null) return notFound();
+      tour = again;
+    }
 
-    // Record every key before writing any of them.
-    const publishId = "pub_" + randomHex(12);
-    const keys = copies.map((x) => x.to);
-    const recorded = await deps.db.run(
-      `INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at)
-       SELECT j.value, t.id, ?, 'pending', ? FROM json_each(?) j JOIN tour t ON t.id = ? AND t.workspace_id = ?`,
-      [publishId, deps.now(), keyList(keys), tour.id, auth.workspaceId],
-    );
-    if (recorded.changes !== keys.length) {
-      await abandon(deps, tour.id, publishId, keys);
-      return notFound();
+    const written = batch.map((x) => x.to);
+    try {
+      await runLimited(batch.map((x) => () => copyOne(deps, x)), COPIES_IN_FLIGHT);
+    } catch {
+      return (await stopPublish(deps, tour.id, publishId, written)) === "live" ? done(tour.slug, steps) : publishFailed();
+    }
+
+    if (batch.length < left) {
+      // Not the last images: mark these copied and keep the publish alive. The update
+      // touches every pending row of this publish, so it reports `total` changes unless
+      // the publish was ended meanwhile (unpublish, a failure elsewhere, a sweep).
+      const marked = await deps.db.run(
+        `UPDATE public_object SET copied = CASE WHEN image_key IN (SELECT value FROM json_each(?)) THEN 1 ELSE copied END, created_at = ?
+          WHERE publish_id = ? AND tour_id = ? AND state = 'pending'`,
+        [keyList(written), deps.now(), publishId, tour.id],
+      );
+      if (marked.changes !== total) {
+        return (await stopPublish(deps, tour.id, publishId, written)) === "live" ? done(tour.slug, steps) : publishStopped();
+      }
+      return inProgress(publishId, total - left + batch.length, total);
     }
 
     try {
-      await runLimited(copies.map((x) => () => copyOne(deps, x)), COPIES_IN_FLIGHT);
+      await deps.db.batch(commitStatements(auth, tour.id, publishId, written, deps.now(), graceOf(deps)));
     } catch {
-      await abandon(deps, tour.id, publishId, keys);
-      return publishFailed();
-    }
-
-    try {
-      await deps.db.batch(commitStatements(auth, tour.id, publishId, data, keys.length, deps.now(), graceOf(deps)));
-    } catch {
-      // The batch may have committed and only its answer been lost: look before undoing.
-      let live: { publish_id: string | null } | null;
+      // The batch may have committed and only its answer been lost, or a second call of
+      // the same publish may have committed it: look before undoing.
+      let state: { live: string | null; job: number | null } | null;
       try {
-        live = await deps.db.first<{ publish_id: string | null }>("SELECT publish_id FROM snapshot WHERE tour_id = ?", [tour.id]);
+        state = await deps.db.first<{ live: string | null; job: number | null }>(
+          "SELECT (SELECT publish_id FROM snapshot WHERE tour_id = ?) AS live, (SELECT 1 FROM publish_job WHERE publish_id = ?) AS job",
+          [tour.id, publishId],
+        );
       } catch {
-        // Cannot tell. Leave the pending rows: if it did not commit, a later sweep removes them.
+        // Cannot tell. Leave the rows: if it did not commit, a later sweep removes them.
         return publishFailed();
       }
-      if (live?.publish_id !== publishId) {
-        await abandon(deps, tour.id, publishId, keys);
-        return publishFailed();
+      if (state?.live !== publishId) {
+        if ((await stopPublish(deps, tour.id, publishId, written)) !== "live") return state?.job === 1 ? publishFailed() : publishStopped();
       }
     }
 
     // The new snapshot is live. The images it replaced go once their grace has passed;
     // this clears anything of this tour that is already due.
     try {
-      await clearRetired(deps, tour.id);
+      await clearDuePage(deps, auth.workspaceId, tour.id, 0);
     } catch {
       console.error(`publish: could not remove the previous public images of ${tour.id}; will retry later`);
     }
-    const slug = rows[0].slug;
-    return json(200, { slug, url: `/t/${slug}`, steps: rows.length });
+    return done(tour.slug, steps);
   });
 
   app.post("/api/v1/tours/:id/unpublish", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
-    const tour = await ownedTour(deps, auth, c.req.param("id"));
+    const id = c.req.param("id");
+    const tour = TOUR_ID.test(id) ? await deps.db.first<{ id: string }>("SELECT id FROM tour WHERE id = ? AND workspace_id = ?", [id, auth.workspaceId]) : null;
     if (tour === null) return notFound();
-    await housekeeping(deps, auth, tour.id);
     const ws = auth.workspaceId;
     const owned = "SELECT id FROM tour WHERE id = ? AND workspace_id = ?";
     const now = deps.now();
@@ -480,6 +683,9 @@ export function publishRoutes(app: Hono, deps: Deps): void {
         sql: `UPDATE public_object SET delete_after = ? WHERE state = 'retired' AND delete_after > ? AND tour_id IN (${owned})`,
         params: [now, now, tour.id, ws],
       },
+      // A publish in progress is cancelled: its rows are retired and its job dropped, so it can never commit.
+      { sql: `UPDATE public_object SET state = 'retired', delete_after = ? WHERE state = 'pending' AND tour_id IN (${owned})`, params: [now, tour.id, ws] },
+      { sql: `DELETE FROM publish_job WHERE tour_id IN (${owned})`, params: [tour.id, ws] },
       {
         sql: `INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, delete_after)
               SELECT image_key, tour_id, ?, 'retired', ?, ? FROM snapshot_object WHERE tour_id IN (${owned})`,
@@ -489,11 +695,14 @@ export function publishRoutes(app: Hono, deps: Deps): void {
       { sql: `DELETE FROM snapshot WHERE tour_id IN (${owned})`, params: [tour.id, ws] },
       { sql: "UPDATE tour SET status = 'draft', published_at = NULL WHERE id = ? AND workspace_id = ?", params: [tour.id, ws] },
     ]);
-    try {
-      await clearRetired(deps, tour.id);
-    } catch {
-      console.error(`unpublish: could not remove the public images of ${tour.id}; will retry later`);
+    // Nothing of the tour is served from here on; deleting the objects takes as many
+    // requests as it takes, UNPUBLISH_PAGES pages of keys at a time.
+    const cleared = await housekeeping(deps, ws, tour.id, UNPUBLISH_PAGES);
+    if (cleared === "failed") {
       return apiError(500, "cleanup_pending", "the tour is unpublished, but some of its public images could not be removed yet; unpublish again to retry");
+    }
+    if (cleared === "more") {
+      return json(202, { status: "in_progress", detail: "the tour is unpublished; some of its public images are still to be removed; unpublish again to finish" });
     }
     return noContent();
   });
@@ -517,7 +726,7 @@ export function publishRoutes(app: Hono, deps: Deps): void {
     return new Response(file.body, {
       status: 200,
       headers: {
-        "content-type": mime(name.endsWith(".png") ? "png" : "jpg"),
+        "content-type": mime(typeOfKey(name)),
         "content-length": String(file.size),
         "cache-control": PUBLIC_CACHE,
         "x-content-type-options": "nosniff",

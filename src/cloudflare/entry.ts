@@ -1,4 +1,5 @@
 import { createApp } from "../app.ts";
+import { withBudget } from "../budget.ts";
 import type { Deps } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
 import { D1Db } from "./db.ts";
@@ -26,6 +27,7 @@ export function depsFromEnv(env: WorkerEnv): Deps {
 
 export default {
   fetch(request: Request, env: WorkerEnv, ctx: ExecutionContext): Response | Promise<Response> {
-    return createApp(depsFromEnv(env)).fetch(request, env, ctx);
+    // Each request gets its own metered ports, so one that goes over the call budget is logged.
+    return withBudget(depsFromEnv(env), request.method, async (deps) => createApp(deps).fetch(request, env, ctx));
   },
 } satisfies ExportedHandler<WorkerEnv>;

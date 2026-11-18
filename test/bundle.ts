@@ -1,6 +1,7 @@
 // Builds tour bundles for the route tests: manifests from the fixtures and images whose
 // header and length match what the manifest declares, plus a thin client for the API.
 import { createApp } from "../src/app.ts";
+import { metered, SUBREQUEST_BUDGET } from "../src/budget.ts";
 import type { Deps } from "../src/ports.ts";
 import v1 from "./fixtures/manifest-v1.json" with { type: "json" };
 import v2 from "./fixtures/manifest-v2.json" with { type: "json" };
@@ -42,7 +43,7 @@ export function stepImage(step: Json, fill = 0): Uint8Array {
   return String(step.image).endsWith(".png") ? png(step.width, step.height, step.bytes, fill) : jpeg(step.width, step.height, step.bytes, fill);
 }
 
-export type Call = { status: number; text: string; json: any; headers: Headers; bytes: Uint8Array };
+export type Call = { status: number; text: string; json: any; headers: Headers; bytes: Uint8Array; calls: number };
 
 /** Sends one request to a fresh app on `deps` and reads the whole answer. */
 export async function send(deps: Deps, method: string, path: string, opts: { token?: string | null; body?: RequestInit["body"]; headers?: Record<string, string> } = {}): Promise<Call> {
@@ -53,8 +54,15 @@ export async function send(deps: Deps, method: string, path: string, opts: { tok
     init.body = opts.body;
     if (opts.body instanceof ReadableStream) init.duplex = "half";
   }
-  const res = await createApp(deps).fetch(new Request(ORIGIN + path, init));
+  // Every request any test sends is metered and held to the budget, so a path that makes
+  // too many storage or database calls fails the test that reaches it.
+  const meter = metered(deps);
+  const res = await createApp(meter.deps).fetch(new Request(ORIGIN + path, init));
   const bytes = new Uint8Array(await res.arrayBuffer());
+  const calls = meter.calls();
+  const route = `${method} ${routeOf(path)}`;
+  budgetSeen.set(route, Math.max(budgetSeen.get(route) ?? 0, calls));
+  if (calls > SUBREQUEST_BUDGET) throw new Error(`over the call budget: ${route} made ${calls} calls (budget ${SUBREQUEST_BUDGET})`);
   const text = new TextDecoder().decode(bytes);
   let json: any = null;
   try {
@@ -62,7 +70,22 @@ export async function send(deps: Deps, method: string, path: string, opts: { tok
   } catch {
     json = null;
   }
-  return { status: res.status, text, json, headers: res.headers, bytes };
+  return { status: res.status, text, json, headers: res.headers, bytes, calls };
+}
+
+/** The most calls seen per route in this test file, for the budget report. */
+export const budgetSeen = new Map<string, number>();
+
+/** A path with its ids replaced by placeholders, so requests group by route. */
+export function routeOf(path: string): string {
+  return path
+    .split("?")[0]
+    .replace(/tour_[0-9a-f]{24}/g, ":id")
+    .replace(/up_[0-9a-f]{24}/g, ":id")
+    .replace(/st_[0-9a-f]{24}/g, ":step_id")
+    .replace(/\/steps\/[^/]+$/, "/steps/:n")
+    .replace(/^\/p\/.+/, "/p/:name")
+    .replace(/^\/t\/.+/, "/t/:slug");
 }
 
 export function createUpload(deps: Deps, token: string, manifest: unknown, target: unknown = { kind: "new" }): Promise<Call> {

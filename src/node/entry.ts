@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp } from "../app.ts";
+import { withBudget } from "../budget.ts";
 import type { Deps } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
 import { APP_UID, prepareDataDir } from "./datadir.ts";
@@ -55,8 +56,10 @@ async function main(): Promise<void> {
     now: () => Date.now(),
   };
 
-  const app = createApp(deps);
-  const server = serve({ fetch: app.fetch, port, serverOptions: { headersTimeout: HEADERS_TIMEOUT_MS, requestTimeout: REQUEST_TIMEOUT_MS } }, (info) => {
+  // Each request gets its own metered ports, as on Cloudflare, so one that goes over the
+  // call budget is logged here too. Building the route table per request is cheap.
+  const fetchOne = (req: Request) => withBudget(deps, req.method, async (d) => createApp(d).fetch(req));
+  const server = serve({ fetch: fetchOne, port, serverOptions: { headersTimeout: HEADERS_TIMEOUT_MS, requestTimeout: REQUEST_TIMEOUT_MS } }, (info) => {
     console.log(`listening on port ${info.port}`);
   });
 
