@@ -21,13 +21,15 @@ const TEST = "test_backup_with_real_node_copies_a_live_wal_database";
  */
 const TWO_ADDRESS_TESTS = [
   "test_app_domain_is_checked",
-  "test_install_with_app_domain_writes_both_host_lines",
+  "test_install_with_app_domain_is_refused",
   "test_install_without_app_domain_writes_todays_settings",
   "test_existing_settings_file_is_kept_and_the_two_lines_are_printed",
+  "test_a_failed_update_does_not_record_a_new_app_address",
   "test_app_domain_is_remembered_by_update_and_status",
   "test_health_needs_each_address_to_report_its_own_role",
   "test_health_names_the_address_that_reports_the_wrong_role",
   "test_dry_run_with_app_domain_changes_nothing",
+  "test_health_notices_an_address_that_refuses_every_other_request",
   "test_app_domain_never_shows_the_setup_code",
 ];
 
@@ -69,7 +71,7 @@ describe("the cPanel script's backup with a real Node.js", () => {
     // No test reaches a real host: the containers have no network, and the only names are placeholders.
     expect(harness).toContain("docker run --rm --init --network none");
     const names = [...harness.matchAll(/\b(?:[a-z0-9-]+\.)+example\.(?:com|net|org)\b/g)].map((m) => m[0]);
-    expect([...new Set(names)].sort()).toEqual(["app.example.com", "demo.example.com", "other.example.com", "sub.domain.example.org", "tours.example.com"]);
+    expect([...new Set(names)].sort()).toEqual(["app.example.com", "appp.example.com", "demo.example.com", "other.example.com", "sub.domain.example.org", "tours.example.com"]);
   });
 
   it.skipIf("reason" in found)(`copies a database in use, row in the WAL included, and checks the copy${"reason" in found ? ` (skipped: ${found.reason})` : ""}`, () => {
