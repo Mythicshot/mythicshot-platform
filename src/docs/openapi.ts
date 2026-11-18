@@ -518,8 +518,8 @@ function paths(): OpenApiDoc["paths"] {
           "200": {
             description: "The image.",
             headers: {
-              "content-security-policy": { description: "Always `default-src 'none'; sandbox`, so the picture can do nothing when opened on its own.", schema: { type: "string" } },
-              "cache-control": { description: "Always `private, no-store`.", schema: { type: "string" } },
+              "content-security-policy": { description: "Always `default-src 'none'; sandbox`, so the picture can do nothing when opened on its own.", schema: { type: "string", const: "default-src 'none'; sandbox" } },
+              "cache-control": { description: "Always `private, no-store`.", schema: { type: "string", const: "private, no-store" } },
             },
             content: image,
           },
@@ -549,7 +549,7 @@ function paths(): OpenApiDoc["paths"] {
           "413": refusal("The request body is too long.", "too_large"),
           "429": {
             description: "The workspace already has its number of open uploads. Finish or cancel one first.",
-            headers: { "retry-after": { description: "Seconds to wait before trying again.", schema: { type: "integer" } } },
+            headers: { "retry-after": { description: "Seconds to wait before trying again.", schema: { type: "integer", minimum: 1 } } },
             content: refusal("", "too_many_uploads").content,
           },
         },
