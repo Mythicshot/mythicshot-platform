@@ -55,7 +55,7 @@ import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
 import { legacySettings, safeUrl, type Autoplay, type Box, type Card, type Cover, type EndCard, type Link, type Note, type Theme, type Zoom } from "./manifest.ts";
-import { isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
+import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 
 export type SnapshotStep = {
   id: string;
@@ -544,7 +544,8 @@ type Started = { kind: "started"; publishId: string; total: number; steps: numbe
  * Reads the draft once, builds the snapshot and records the job (with the draft version
  * it was built from, read in the same statement) and every key it will write, in one
  * batch, before writing any. When another start of the same tour won the race, answers
- * "joined" so the caller continues that publish instead.
+ * "joined" so the caller continues that publish instead. When the tour was deleted since
+ * the draft was read, nothing is recorded or written and the answer is 404.
  */
 async function startPublish(deps: Deps, auth: Auth, tourId: string): Promise<Started> {
   const rows = await deps.db.all<DraftRow>(DRAFT_SQL, [tourId, auth.workspaceId, MAX_PUBLISH_STEPS + 1]);
@@ -561,9 +562,14 @@ async function startPublish(deps: Deps, auth: Auth, tourId: string): Promise<Sta
   try {
     await deps.db.batch([
       {
+        // The tour id comes from the tour row itself, so a tour deleted since the draft was
+        // read fails the batch (NOT NULL) instead of starting a publish no row records.
+        // The title is taken from the tour row here, not from the draft read above, so a
+        // rename that landed in between (it found no job to update) is not lost.
         sql: `INSERT INTO publish_job (tour_id, publish_id, data, steps, total, draft_version, created_at, touched_at)
-              SELECT id, ?, ?, ?, ?, ?, ?, ? FROM tour WHERE id = ? AND workspace_id = ?`,
-        params: [publishId, data, rows.length, copies.length, rows[0].draft_version, now, now, tourId, auth.workspaceId],
+              VALUES ((SELECT id FROM tour WHERE id = ? AND workspace_id = ?), ?,
+                      json_set(?, '$.title', (SELECT title FROM tour WHERE id = ? AND workspace_id = ?)), ?, ?, ?, ?, ?)`,
+        params: [tourId, auth.workspaceId, publishId, data, tourId, auth.workspaceId, rows.length, copies.length, rows[0].draft_version, now, now],
       },
       {
         sql: `INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, source_key, seq, copied)
@@ -574,6 +580,7 @@ async function startPublish(deps: Deps, auth: Auth, tourId: string): Promise<Sta
     ]);
   } catch (err) {
     if (isUniqueViolation(err)) return { kind: "joined" };
+    if (isNotNullViolation(err)) return { kind: "answer", res: notFound() }; // deleted since the draft was read
     throw err;
   }
   return { kind: "started", publishId, total: copies.length, steps: rows.length, copies };

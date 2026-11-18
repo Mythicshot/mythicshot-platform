@@ -2,6 +2,13 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.1 (2026-11-18)
+
+- Rename a tour: the title changes on the public page, and the link stays the same.
+- Delete a tour: it leaves the list and its page goes offline at once; its files are removed in small steps that also fit Cloudflare's free plan.
+- The tour list now includes each tour's link, status and dates.
+- The site reports its version to a signed-in app.
+
 ## 0.1.0 (2026-11-18)
 
 Everything built so far, in the order it was added.

@@ -5,6 +5,7 @@ import { isUniqueViolation, type Deps } from "../src/ports.ts";
 const TABLES = [
   "api_token",
   "chapter",
+  "deleted_object",
   "public_object",
   "publish_job",
   "setup",
@@ -12,6 +13,7 @@ const TABLES = [
   "snapshot_object",
   "step",
   "tour",
+  "tour_deletion",
   "upload",
   "upload_step",
   "user",

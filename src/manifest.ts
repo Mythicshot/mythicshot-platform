@@ -483,6 +483,21 @@ function manifest(json: unknown): Manifest {
  * default theme with zoom and the progress bar off, no cover, button, end card or cards)
  * or a message naming the first bad field.
  */
+/**
+ * A tour title on its own (a rename), under exactly the rule a manifest's title passes:
+ * trimmed, no control or format characters, 1 to LIMITS.title characters. The error is
+ * fixed text that reads on after "the title", never the title itself.
+ */
+export function parseTitle(v: unknown): { ok: true; title: string } | { ok: false; error: string } {
+  const path = "title";
+  try {
+    return { ok: true, title: text(v, path, { min: 1, max: LIMITS.title }) };
+  } catch (e) {
+    if (e instanceof Bad) return { ok: false, error: e.message.slice(path.length + 2) };
+    throw e;
+  }
+}
+
 export function parseManifest(json: unknown): { ok: true; manifest: Manifest } | { ok: false; error: string } {
   try {
     return { ok: true, manifest: manifest(json) };

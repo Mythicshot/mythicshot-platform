@@ -90,6 +90,14 @@ export function isUniqueViolation(err: unknown): boolean {
   return false;
 }
 
+/** True when `err` is a NOT NULL constraint failure from either adapter. */
+export function isNotNullViolation(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
+    if (/\bNOT NULL constraint failed\b/.test(e.message)) return true;
+  }
+  return false;
+}
+
 export type Config = {
   publicImageBase: string; // "" when the app serves published images itself, else an https origin
   setupCode: string | null; // null or shorter than 16 characters: setup is off
