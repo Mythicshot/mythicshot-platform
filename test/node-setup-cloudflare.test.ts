@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { checkDomain, checkName, DEPLOY_CONFIG, main, parseArgs, readInstall, stripJsonComments, wranglerError, type Io, type WranglerResult } from "../scripts/setup-cloudflare.ts";
+import { checkDomain, checkName, DEPLOY_CONFIG, isCustomDomainFailure, main, parseArgs, readInstall, stripJsonComments, wranglerError, type Io, type WranglerResult } from "../scripts/setup-cloudflare.ts";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const DB_ID = "11111111-2222-3333-4444-555555555555";
@@ -78,7 +78,13 @@ function stub(account: Account, calls: Call[], root: string) {
     if (args[0] === "deploy") {
       const c = config();
       account.workers.add(c.name); // the script is uploaded before its domains are attached
-      for (const r of c.routes ?? []) if (account.unattachable.has(r.pattern)) return fail(`X [ERROR] A request to the Cloudflare API failed. Could not attach ${r.pattern}: zone not found.`);
+      // Wrangler's own wording for a failed call to the Worker's domains endpoint; the API's
+      // message on the second line is made up for the stub.
+      for (const r of c.routes ?? []) {
+        if (account.unattachable.has(r.pattern)) {
+          return fail(`X [ERROR] A request to the Cloudflare API (/accounts/0123/workers/scripts/${c.name}/domains/records) failed.\n\n  The zone for ${r.pattern} was not found on this account. [code: 100117]`);
+        }
+      }
       return ok(`Uploaded ${c.name}\nDeployed ${c.name} triggers\n  https://${c.name}.example-account.workers.dev\n`);
     }
     if (args[0] === "secret" && args[1] === "list") {
@@ -665,4 +671,115 @@ describe("a hand-edited wrangler.deploy.jsonc", () => {
       }
     });
   }
+});
+
+describe("an address confirmed in a run that stopped before its deploy", () => {
+  it("is still taken back out when a later run's deploy fails on it, and the run after completes", async () => {
+    // A new account with R2 off and a domain that is not active yet.
+    const account = fakeAccount({ unattachable: new Set(["tours.example.com"]), failOnce: "r2 bucket create" });
+    const first = harness(account);
+    expect(await first.run("--yes", "--domain", "tours.example.com", "--replace-existing-domain")).toBe(1);
+    expect(readInstall(first.root)).toMatchObject({ domain: "tours.example.com", pending: { previous: null } });
+    expect(changing(first.calls)).not.toContain(`deploy --config ${DEPLOY_CONFIG}`);
+
+    // R2 is on now; the domain still is not. No second confirmation is asked for.
+    const second = harness(account, { root: first.root });
+    expect(await second.run("--yes")).toBe(1);
+    expect(text(second.err)).not.toContain("--replace-existing-domain; --yes is not enough");
+    expect(text(second.err)).toContain("Cloudflare would not attach tours.example.com");
+    expect(readInstall(first.root)!.domain).toBeNull();
+    expect(account.secrets.has("SETUP_CODE")).toBe(false);
+
+    const third = harness(account, { root: first.root });
+    expect(await third.run("--yes")).toBe(0);
+    expect(account.secrets.get("SETUP_CODE")).toBe(codeIn(third.out));
+  });
+
+  it("goes back to the address attached before, not to none", async () => {
+    const account = fakeAccount();
+    const first = harness(account);
+    expect(await first.run("--yes", "--domain", "tours.example.com", "--replace-existing-domain")).toBe(0);
+    account.unattachable.add("www.example.com");
+    account.failOnce = "d1 migrations list"; // the run stops before its deploy
+    const second = harness(account, { root: first.root });
+    expect(await second.run("--yes", "--domain", "www.example.com", "--replace-existing-domain")).toBe(1);
+    expect(readInstall(first.root)).toMatchObject({ domain: "www.example.com", pending: { previous: "tours.example.com" } });
+    const third = harness(account, { root: first.root });
+    expect(await third.run("--yes")).toBe(1);
+    expect(readInstall(first.root)).toEqual({ name: "demo-platform", domain: "tours.example.com", databaseId: DB_ID, publicImageBase: "" });
+  });
+});
+
+describe("a deploy that fails for another reason", () => {
+  it("keeps a new address confirmed but not attached, shows the real error, and the next run attaches it", async () => {
+    const account = fakeAccount({ failOnce: "deploy --config" });
+    const first = harness(account);
+    expect(await first.run("--yes", "--domain", "tours.example.com", "--replace-existing-domain")).toBe(1);
+    const err = text(first.err);
+    expect(err).toContain("A request to the Cloudflare API failed (simulated).");
+    expect(err).toContain("stays in wrangler.deploy.jsonc, confirmed but not attached yet");
+    expect(err).not.toContain("Cloudflare would not attach");
+    expect(readInstall(first.root)).toMatchObject({ domain: "tours.example.com", pending: { previous: null } });
+    const second = harness(account, { root: first.root });
+    expect(await second.run("--yes")).toBe(0);
+    expect(readInstall(first.root)).toEqual({ name: "demo-platform", domain: "tours.example.com", databaseId: DB_ID, publicImageBase: "" });
+    expect(readFileSync(join(first.root, DEPLOY_CONFIG), "utf8")).not.toContain("not attached yet");
+  });
+
+  it("is told apart from a failure to attach the custom domain by Wrangler's own wording", () => {
+    const r = (stderr: string) => ({ code: 1, stdout: "", stderr });
+    expect(isCustomDomainFailure(r("X [ERROR] A request to the Cloudflare API (/accounts/abc/workers/scripts/demo-platform/domains/records) failed.\n  some API message [code: 100117]"))).toBe(true);
+    expect(isCustomDomainFailure(r('X [ERROR] Publishing to Custom Domain "tours.example.com" was skipped, fix conflict and try again'))).toBe(true);
+    expect(isCustomDomainFailure(r("X [ERROR] You can either deploy your worker to one or more routes by specifying them in your wrangler.deploy.jsonc file, or register a workers.dev subdomain here:"))).toBe(false);
+    expect(isCustomDomainFailure(r("X [ERROR] A request to the Cloudflare API (/accounts/abc/workers/scripts/demo-platform) failed.\n  fetch failed"))).toBe(false);
+    expect(isCustomDomainFailure(r("X [ERROR] Build failed with 1 error"))).toBe(false);
+  });
+});
+
+describe("an account_id in the Wrangler configuration", () => {
+  const accounts = [
+    { id: "a".repeat(32), name: "Acme Tours" },
+    { id: "b".repeat(32), name: "Side project" },
+  ];
+  function withAccountId(root: string, file: string, id: string) {
+    const path = join(root, file);
+    writeFileSync(path, readFileSync(path, "utf8").replace('"name": "demo-platform",', `"name": "demo-platform",\n  "account_id": "${id}",`));
+  }
+
+  it("is the account the plan names, since Wrangler prefers it", async () => {
+    const root = checkout();
+    withAccountId(root, "wrangler.jsonc", "b".repeat(32));
+    const h = harness(fakeAccount({ accounts }), { root });
+    expect(await h.run("--yes")).toBe(0);
+    expect(text(h.out)).toContain("Account: Side project");
+    expect(text(h.out)).toContain("account_id in wrangler.jsonc");
+  });
+
+  it("stops before anything else when it disagrees with CLOUDFLARE_ACCOUNT_ID, or names an account the login cannot use", async () => {
+    const root = checkout();
+    withAccountId(root, "wrangler.jsonc", "b".repeat(32));
+    const clash = harness(fakeAccount({ accounts }), { root, env: { CLOUDFLARE_ACCOUNT_ID: "a".repeat(32) } });
+    expect(await clash.run("--yes")).toBe(1);
+    expect(text(clash.err)).toContain("Wrangler would use the one in the file");
+    expect(shown(clash.calls)).toEqual(["whoami --json"]);
+    const other = checkout();
+    withAccountId(other, "wrangler.jsonc", "c".repeat(32));
+    const unknown = harness(fakeAccount({ accounts }), { root: other });
+    expect(await unknown.run("--yes")).toBe(1);
+    expect(text(unknown.err)).toContain("account this login cannot use");
+    expect(shown(unknown.calls)).toEqual(["whoami --json"]);
+  });
+
+  it("set by hand in wrangler.deploy.jsonc only, stops every mode before any change", async () => {
+    const account = fakeAccount({ accounts: [accounts[0]] });
+    const first = harness(account);
+    expect(await first.run("--yes")).toBe(0);
+    withAccountId(first.root, DEPLOY_CONFIG, "a".repeat(32));
+    for (const argv of [["--yes"], ["update", "--yes"], ["status"]]) {
+      const h = harness(account, { root: first.root });
+      expect(await h.run(...argv), argv.join(" ")).toBe(1);
+      expect(text(h.err)).toContain("account_id differs between wrangler.jsonc and wrangler.deploy.jsonc");
+      noChange(h.calls);
+    }
+  });
 });

@@ -190,8 +190,15 @@ export function stripJsonComments(text: string): string {
 
 type Json = Record<string, any>;
 
-/** What this script records about an install: everything is in wrangler.deploy.jsonc. */
-export type Install = { name: string; domain: string | null; databaseId: string | null; publicImageBase: string };
+/**
+ * What this script records about an install: everything is in wrangler.deploy.jsonc.
+ * `pending` is there while `domain` is confirmed but not yet attached by a deploy that
+ * succeeded; `previous` is the address attached before it (null: none).
+ */
+export type Install = { name: string; domain: string | null; databaseId: string | null; publicImageBase: string; pending?: { previous: string | null } };
+
+/** The comment line in wrangler.deploy.jsonc that records a confirmed address not attached yet. */
+const PENDING_LINE = /^\/\/ setup:cloudflare: address (\S+) confirmed, not attached yet; attached before: (\S+)$/m;
 
 /** A wrangler.deploy.jsonc this script cannot use as it stands. */
 export class InstallConfigError extends Error {}
@@ -230,12 +237,21 @@ export function readInstall(root: string): Install | null {
     domain = checked.host;
   }
   const id = c.d1_databases?.[0]?.database_id;
-  return {
+  const install: Install = {
     name,
     domain,
     databaseId: typeof id === "string" && !/^0{8}-/.test(id) ? id : null,
     publicImageBase: typeof c.vars?.PUBLIC_IMAGE_BASE === "string" ? c.vars.PUBLIC_IMAGE_BASE : "",
   };
+  const pending = readFileSync(path, "utf8").match(PENDING_LINE);
+  if (pending) {
+    const previous = pending[2] === "none" ? null : pending[2];
+    if (pending[1] !== domain || (previous !== null && "error" in checkDomain(previous))) {
+      throw new InstallConfigError(`${DEPLOY_CONFIG} has a "not attached yet" line that does not match its address. Delete that line, or fix "routes".`);
+    }
+    install.pending = { previous };
+  }
+  return install;
 }
 
 export function bucketNames(name: string): { drafts: string; pub: string } {
@@ -254,10 +270,15 @@ export function deployConfigText(root: string, install: Install & { databaseId: 
   if (install.domain) c.routes = [{ pattern: install.domain, custom_domain: true }];
   else delete c.routes;
   c.vars = { ...(c.vars ?? {}), PUBLIC_IMAGE_BASE: install.publicImageBase };
+  const pending =
+    install.domain && install.pending
+      ? `// setup:cloudflare: address ${install.domain} confirmed, not attached yet; attached before: ${install.pending.previous ?? "none"}\n`
+      : "";
   return (
     "// This install's Wrangler configuration, written by `npm run setup:cloudflare` from\n" +
     "// wrangler.jsonc. Ignored by Git; holds no secret. `update` rewrites it, keeping the\n" +
     "// name, database id, address and PUBLIC_IMAGE_BASE.\n" +
+    pending +
     JSON.stringify(c, null, 2) +
     "\n"
   );
@@ -301,8 +322,19 @@ async function read(io: Io, args: string[], what: string): Promise<string> {
   return r.stdout;
 }
 
-/** A changing call: printed instead in a dry run. Returns its output, or throws Stop (after `onFail`) when it fails. */
-async function change(io: Io, o: Options, args: string[], what: string, input?: string, onFail?: () => void): Promise<string> {
+/**
+ * True when a failed deploy failed on attaching its custom domain, recognised by the two
+ * errors Wrangler's deploy gives for that: the API call to the Worker's domains endpoint
+ * failing ("A request to the Cloudflare API (/accounts/…/workers/scripts/<name>/domains/records)
+ * failed."), or "Publishing to Custom Domain … was skipped". Anything else is not.
+ */
+export function isCustomDomainFailure(r: WranglerResult): boolean {
+  const text = r.stderr + "\n" + r.stdout;
+  return /Cloudflare API \([^)\n]*\/workers\/scripts\/[^)\n]*\/domains\/(?:records|changeset)[^)\n]*\) failed/.test(text) || /Publishing to (?:\d+ )?Custom Domains? .*was skipped/.test(text);
+}
+
+/** A changing call: printed instead in a dry run. Returns its output, or throws Stop when it fails. */
+async function change(io: Io, o: Options, args: string[], what: string, input?: string, onFail?: (r: WranglerResult) => boolean): Promise<string> {
   if (o.dryRun) {
     info(io, `would run: ${shown(args)}${input === undefined ? "" : "   (the value goes on standard input and is not shown)"}`);
     return "";
@@ -312,8 +344,7 @@ async function change(io: Io, o: Options, args: string[], what: string, input?: 
   if (r.code !== 0) {
     io.err(`ERROR: could not ${what}.`);
     for (const l of wranglerError(r)) io.err(`    ${l}`);
-    if (onFail) onFail();
-    else io.err("    Everything done before this step is kept. Fix the cause and run the same command again: it picks up where it stopped.");
+    if (!onFail || !onFail(r)) io.err("    Everything done before this step is kept. Fix the cause and run the same command again: it picks up where it stopped.");
     throw new Stop();
   }
   return r.stdout;
@@ -332,6 +363,32 @@ function checkPrerequisites(io: Io): void {
     throw new Stop();
   }
   info(io, "Wrangler: installed");
+}
+
+/**
+ * The account_id set in the Wrangler configuration this command uses: wrangler.jsonc
+ * (reading calls) and wrangler.deploy.jsonc (changing calls). When the two disagree
+ * (including one setting it and the other not), the calls could reach two accounts, so
+ * it stops.
+ */
+function configAccountId(root: string): { id: string; file: string } | null {
+  const ids: { file: string; id: string | null }[] = [];
+  for (const file of [BASE_CONFIG, DEPLOY_CONFIG]) {
+    const path = join(root, file);
+    if (!existsSync(path)) continue;
+    let c: Json;
+    try {
+      c = readJsonc(path);
+    } catch {
+      continue; // reported where the file is read for its settings
+    }
+    ids.push({ file, id: typeof c.account_id === "string" && c.account_id !== "" ? c.account_id : null });
+  }
+  if (ids.length === 2 && ids[0].id !== ids[1].id) {
+    throw new InstallConfigError(`account_id differs between ${BASE_CONFIG} and ${DEPLOY_CONFIG}, so Wrangler's calls could reach two accounts. Set the same account_id in both, or remove it from both.`);
+  }
+  const set = ids.find((x) => x.id !== null);
+  return set ? { id: set.id!, file: set.file } : null;
 }
 
 /** An account name with any email address in it hidden: the default name is "<email>'s Account". */
@@ -370,8 +427,22 @@ async function checkSignedIn(io: Io, o: Options): Promise<string | null> {
   }
   const accounts: Json[] = Array.isArray(who.accounts) ? who.accounts : [];
   const chosen = io.env.CLOUDFLARE_ACCOUNT_ID;
+  // Wrangler prefers an account_id in its configuration over CLOUDFLARE_ACCOUNT_ID, so
+  // the account this run acts on is that one when it is set.
+  const fromConfig = configAccountId(io.root);
   let account: Json | undefined;
-  if (chosen) {
+  if (fromConfig) {
+    account = accounts.find((a) => a && a.id === fromConfig.id);
+    if (!account) {
+      io.err(`ERROR: ${fromConfig.file} sets account_id to an account this login cannot use, so nothing was done. Fix or remove account_id there.`);
+      throw new Stop();
+    }
+    if (chosen && chosen !== fromConfig.id) {
+      io.err(`ERROR: account_id in ${fromConfig.file} and CLOUDFLARE_ACCOUNT_ID name different accounts, and Wrangler would use the one in the file. Nothing was done. Remove one of them.`);
+      throw new Stop();
+    }
+    info(io, `The account is the one account_id in ${fromConfig.file} names.`);
+  } else if (chosen) {
     account = accounts.find((a) => a && a.id === chosen);
     if (!account) {
       io.err("ERROR: CLOUDFLARE_ACCOUNT_ID names an account this login cannot use, so nothing was done. Check the id in the dashboard, or unset it.");
@@ -632,8 +703,13 @@ async function setup(io: Io, o: Options): Promise<void> {
     }
   }
 
-  // Gate 2: a new own address replaces what that hostname has today.
+  // Gate 2: a new own address replaces what that hostname has today. "New" means not in
+  // wrangler.deploy.jsonc yet; an address recorded there as confirmed but not attached
+  // (an earlier run stopped before its deploy succeeded) is not asked for again.
   const newDomain = domain !== null && domain !== (existing?.domain ?? null);
+  const pendingBefore = existing?.pending && existing.domain === domain ? existing.pending : null;
+  /** The address attached by the last deploy that succeeded, as far as this checkout knows. */
+  const attachedBefore = existing ? (existing.pending ? existing.pending.previous : existing.domain) : null;
   if (newDomain) {
     say(io, `Attaching ${domain} replaces what that address has today`);
     info(io, `If ${domain} already has a DNS record (a website, mail service or anything else) or is the custom domain of another Worker, it WILL be pointed at this platform instead, without a further question: Wrangler does that when it runs without a terminal.`);
@@ -674,11 +750,14 @@ async function setup(io: Io, o: Options): Promise<void> {
   // Written as soon as the database id is known, so a run that stops later is this
   // checkout's install on the next run, not something to adopt.
   say(io, `Writing this install's settings to ${DEPLOY_CONFIG}`);
-  const install = {
+  // A new address is recorded as confirmed but not attached until a deploy succeeds, so a
+  // run that stops at any later step keeps the right to take it back out again.
+  const install: Install & { databaseId: string } = {
     name,
     domain,
     databaseId: databaseId ?? "00000000-0000-0000-0000-000000000000",
     publicImageBase: existing?.publicImageBase ?? "",
+    ...(domain !== null && (newDomain || pendingBefore) ? { pending: { previous: newDomain ? attachedBefore : pendingBefore!.previous } } : {}),
   };
   const configChanged = writeConfig(io, o, deployConfigText(io.root, install));
   for (const [bucket, exists] of [[b.drafts, found.drafts], [b.pub, found.pub]] as const) {
@@ -694,21 +773,32 @@ async function setup(io: Io, o: Options): Promise<void> {
   const codeBefore = found.worker?.setupCode ?? false;
   say(io, "Deploying the Worker");
   let deployOutput = "";
-  if (configChanged || migrated || !found.worker || !codeBefore) {
-    // A new address that cannot be attached (most often: its domain is not an active zone
-    // on this account) must not stay in the settings, or every later run would stop here
-    // again before the setup code. Put the previous address back and say what to do.
-    const onFail = newDomain
-      ? () => {
-          writeConfig(io, { ...o, dryRun: false }, deployConfigText(io.root, { ...install, domain: existing?.domain ?? null }), true);
-          io.err(`    The address ${domain} was taken out of ${DEPLOY_CONFIG} again, so running again does not repeat this failure.`);
+  if (configChanged || migrated || !found.worker || !codeBefore || install.pending) {
+    // An address that Cloudflare refuses to attach (most often: its domain is not an active
+    // zone on this account) must not stay in the settings, or every later run would stop
+    // here again before the setup code: put the previous address back. Any other failure
+    // keeps the address as confirmed but not attached, for the next run to try again.
+    const pending = install.pending;
+    const onFail = pending
+      ? (r: WranglerResult): boolean => {
+          if (!isCustomDomainFailure(r)) {
+            io.err(`    ${domain} stays in ${DEPLOY_CONFIG}, confirmed but not attached yet. Fix the cause above and run the same command again;`);
+            io.err(`    if it then fails on the address itself, the command takes the address out again. To give up on it now, run with --no-domain.`);
+            return true;
+          }
+          writeConfig(io, { ...o, dryRun: false }, deployConfigText(io.root, { ...install, domain: pending.previous, pending: undefined }), true);
+          io.err(`    Cloudflare would not attach ${domain}, so it was taken out of ${DEPLOY_CONFIG} again${pending.previous ? ` (back to ${pending.previous})` : ""}; running again does not repeat this failure.`);
           io.err("    The most common cause is a domain that is not an active zone on this Cloudflare account. Then either:");
-          io.err("      - set up on the free address now: npm run setup:cloudflare -- --no-domain");
+          io.err(`      - set up without it now: npm run setup:cloudflare${pending.previous ? "" : " -- --no-domain"}`);
           io.err(`      - or, once the domain is active on this account: npm run setup:cloudflare -- --domain ${domain} --replace-existing-domain`);
+          return true;
         }
       : undefined;
     deployOutput = await change(io, o, ["deploy", "--config", DEPLOY_CONFIG], "deploy the Worker", undefined, onFail);
-    if (domain && !o.dryRun) info(io, "The certificate for a new custom domain can take a few minutes after the first deploy.");
+    if (pending && !o.dryRun) {
+      writeConfig(io, o, deployConfigText(io.root, { ...install, pending: undefined }), true);
+      info(io, `Attached ${domain}. The certificate for a new custom domain can take a few minutes after the first deploy.`);
+    }
   } else {
     info(io, "Already deployed and nothing changed: skipped (use `npm run setup:cloudflare -- update` to deploy a new version)");
   }
@@ -750,7 +840,7 @@ async function setup(io: Io, o: Options): Promise<void> {
     io.out("If setup has not been finished yet, open the setup wizard and enter it there; the old code no longer works.");
     io.out("If setup was already finished, the wizard stays closed and this code opens nothing. It does not reset the");
     io.out(`workspace or the API token. To start setup over after a lost token, see "The token was lost" in ${DOCS.runbook}.`);
-  } else if (domain && existing && existing.domain !== domain) {
+  } else if (domain && existing && attachedBefore !== domain) {
     info(io, `If setup was already finished, change the server address in Mythicshot to ${address}. Nothing else changes.`);
   }
 }
@@ -791,6 +881,10 @@ async function update(io: Io, o: Options): Promise<void> {
   await migrate(io, o, existing.name, true);
   say(io, "Deploying the new version");
   await change(io, o, ["deploy", "--config", DEPLOY_CONFIG], "deploy the Worker");
+  if (existing.pending && !o.dryRun) {
+    writeConfig(io, o, deployConfigText(io.root, { ...existing, databaseId: existing.databaseId, pending: undefined }), true);
+    info(io, `Attached ${existing.domain}.`);
+  }
   say(io, o.dryRun ? "Dry run finished: nothing was changed" : "Done. The setup code and the data were not touched.");
 }
 
