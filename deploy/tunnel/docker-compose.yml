@@ -1,0 +1,85 @@
+# The container stack behind a Cloudflare Tunnel: the app behind Caddy, and cloudflared,
+# which connects out to Cloudflare and hands each request to Caddy over plain HTTP on
+# the stack's own network. No service publishes a port on the host. Run from the folder
+# holding this file, a .env file and the caddy/ folder: docker compose up -d
+#
+# .env (mode 600, never committed) holds DOMAIN, DEPLOY_MODE=tunnel, DATA_DIR (a host
+# folder owned by id 1001), APP_IMAGE, SETUP_CODE and TUNNEL_TOKEN.
+#
+# In Cloudflare's dashboard the tunnel's published application for DOMAIN has the
+# service URL http://caddy:80
+
+# Docker's local log files, capped at three files of 10 MB per container.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  app:
+    image: ${APP_IMAGE:?APP_IMAGE is not set in .env}
+    environment:
+      # Named one by one instead of env_file: .env also holds TUNNEL_TOKEN, which only
+      # cloudflared may see.
+      SETUP_CODE: ${SETUP_CODE:?SETUP_CODE is not set in .env}
+      PUBLIC_IMAGE_BASE: ${PUBLIC_IMAGE_BASE:-}
+      # Paths and port inside the container; in .env, DATA_DIR is the folder on the host.
+      DATA_DIR: /data
+      PORT: "3000"
+    volumes:
+      # The data folder must already exist, owned by id 1001. Docker would otherwise
+      # create a missing one owned by root, which the app cannot write to.
+      - type: bind
+        source: ${DATA_DIR:?DATA_DIR is not set in .env}
+        target: /data
+        bind:
+          create_host_path: false
+    # No ports: the app is reached only through caddy on the stack's own network.
+    restart: unless-stopped
+    stop_grace_period: 10s
+    logging: *logging
+
+  caddy:
+    # caddy:2.11.9-alpine, pinned by the digest of its multi-platform index.
+    image: caddy@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      # Read by the Caddyfile as {$DOMAIN}.
+      DOMAIN: ${DOMAIN:?DOMAIN is not set in .env}
+    # No ports: only cloudflared, on the stack's own network, reaches Caddy.
+    volumes:
+      # The folder is mounted, not the single Caddyfile, so edits and reloads apply.
+      - ./caddy:/etc/caddy:ro
+      - ./caddy-data:/data
+      - ./caddy-config:/config
+    logging: *logging
+
+  cloudflared:
+    # cloudflare/cloudflared:2026.11.1, pinned by the digest of its multi-platform index,
+    # read from Docker Hub on 2026-11-17. To refresh it, pick the newest version tag on
+    # Docker Hub and take the line "Digest:" that this prints:
+    #   docker buildx imagetools inspect cloudflare/cloudflared:<version>
+    # then change it here and in the copy inside install.sh.
+    image: cloudflare/cloudflared@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d
+    restart: unless-stopped
+    depends_on:
+      - caddy
+    # The token is not on this command line: cloudflared reads it from TUNNEL_TOKEN.
+    # The metrics address serves the health check below and is not reachable from
+    # outside the container.
+    command: tunnel --no-autoupdate --metrics 127.0.0.1:20241 run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?TUNNEL_TOKEN is not set in .env}
+    healthcheck:
+      # Succeeds once cloudflared holds a connection to Cloudflare.
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "ready"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      start_interval: 2s
+      retries: 3
+    logging: *logging

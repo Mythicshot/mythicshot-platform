@@ -10,7 +10,13 @@
 #   5. the compose stack with Caddy in front (DOMAIN=localhost, internal certificate):
 #      only Caddy published, on 127.0.0.1, and the wizard claimed through Caddy with the
 #      same-origin check still enforced
-# Ports are published on 127.0.0.1 only. Real certificate issuance is not exercised.
+#   6. the tunnel-mode stack (deploy/tunnel) on a network with no route out and a made-up
+#      token: no container publishes a port, the token is in no command line and not in
+#      the app's or Caddy's environment, the app is healthy, cloudflared refuses the
+#      token and never turns healthy, and requests sent to Caddy the way cloudflared
+#      sends them (plain HTTP, the visitor's Host) reach the app with HSTS set
+# Ports are published on 127.0.0.1 only. Real certificate issuance is not exercised, and
+# neither is a real tunnel: nothing here contacts Cloudflare.
 #
 # Usage: bash deploy/test-container.sh   (env: IMAGE, APP_PORT, HTTPS_PORT, TEST_TMP)
 set -euo pipefail
@@ -26,6 +32,10 @@ APP1="${RUN_ID}-app1"
 APP2="${RUN_ID}-app2"
 APP3="${RUN_ID}-app3"
 STACK="${RUN_ID}-stack"
+TSTACK="${RUN_ID}-tunnel"
+CF_PROBE="${RUN_ID}-cfprobe"
+CF_IMAGE="$(grep -o 'cloudflare/cloudflared@sha256:[0-9a-f]\{64\}' deploy/tunnel/docker-compose.yml)"
+CF_PULLED=0
 
 SETUP_CODE="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 BASE="http://127.0.0.1:${APP_PORT}"
@@ -61,7 +71,17 @@ check() { local name="$1"; shift; if "$@"; then pass "$name"; else fail "$name";
 
 cleanup() {
   set +e
-  docker rm -f "$APP1" "$APP2" "$APP3" >/dev/null 2>&1
+  docker rm -f "$APP1" "$APP2" "$APP3" "$CF_PROBE" >/dev/null 2>&1
+  if [ -f "$WORK/tunnel/docker-compose.yml" ]; then
+    docker compose -p "$TSTACK" --project-directory "$(host_path "$WORK/tunnel")" \
+      -f "$(host_path "$WORK/tunnel/docker-compose.yml")" -f "$(host_path "$WORK/tunnel/docker-compose.tunnel-test.yml")" \
+      down -v --remove-orphans >/dev/null 2>&1
+  fi
+  if [ -d "$WORK/tunnel" ]; then
+    docker run --rm --user 0 --entrypoint sh -v "$(host_path "$WORK/tunnel"):/w" "$IMAGE" -c 'rm -rf /w/data /w/caddy-data /w/caddy-config' >/dev/null 2>&1
+  fi
+  # The cloudflared image goes again only if this run pulled it.
+  if [ "$CF_PULLED" = 1 ]; then docker image rm "$CF_IMAGE" >/dev/null 2>&1; fi
   if [ -f "$WORK/stack/docker-compose.yml" ]; then
     docker compose -p "$STACK" --project-directory "$(host_path "$WORK/stack")" \
       -f "$(host_path "$WORK/stack/docker-compose.yml")" -f "$(host_path "$WORK/stack/docker-compose.test.yml")" \
@@ -77,8 +97,8 @@ cleanup() {
 trap cleanup EXIT
 
 wait_healthy() { # container name
-  local i status
-  for i in $(seq 1 60); do
+  local status
+  for _ in $(seq 1 60); do
     status="$(docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null || true)"
     [ "$status" = "healthy" ] && return 0
     [ "$status" = "unhealthy" ] && return 1
@@ -213,6 +233,84 @@ check "cross-origin claim refused through Caddy" sh -c "[ \"\$(curl -s -o /dev/n
 check "wrong code passes the origin check and is refused" sh -c "[ \"\$(curl -s ${CURL_TLS[*]} -X POST -H 'content-type: application/json' -H 'origin: $FRONT' --data '{\"code\":\"wrong-code-wrong-code\"}' '$FRONT/setup/check')\" = '{\"error\":\"wrong_code\"}' ]"
 check "same-origin claim succeeds through Caddy" test "$(status POST "$FRONT/setup/claim" "${CURL_TLS[@]}" -H 'content-type: application/json' -H "origin: $FRONT" --data "{\"code\":\"$SETUP_CODE\",\"workspace\":\"Front\",\"email\":\"owner@example.com\"}")" = "201"
 "${COMPOSE[@]}" down -v >/dev/null 2>&1
+
+echo "== 6. the tunnel-mode stack, with no way out and a made-up token"
+# Shaped like a tunnel token (base64 text starting with eyJ) but not one: it decodes to
+# cut-off JSON, so cloudflared refuses it before it opens any connection.
+FAKE_TOKEN="$(printf '{"a":"made-up-for-the-test","t":"00000000-0000-4000-8000-000000000000","s":"this text is cut off before the JSON ends' | base64 | tr -d '\n=')"
+docker run --rm -e DOMAIN=tours.example.com -v "$(host_path "$PWD/deploy/tunnel/caddy"):/etc/caddy:ro" "$CADDY_IMAGE" caddy adapt --config /etc/caddy/Caddyfile >"$WORK/caddy-tunnel.json" 2>/dev/null || true
+check "the tunnel Caddyfile adapts, with the domain as the site" grep -q '"tours.example.com"' "$WORK/caddy-tunnel.json"
+check "it listens on port 80 only" sh -c "grep -q '\":80\"' '$WORK/caddy-tunnel.json' && ! grep -q '443' '$WORK/caddy-tunnel.json'"
+check "it requests no certificate" grep -q '"automatic_https":{"disable":true}' "$WORK/caddy-tunnel.json"
+check "it sends HSTS with max-age=604800" sh -c "grep -q 'Strict-Transport-Security' '$WORK/caddy-tunnel.json' && grep -q 'max-age=604800' '$WORK/caddy-tunnel.json'"
+check "cloudflared is pinned by digest" test -n "$CF_IMAGE"
+if ! docker image inspect "$CF_IMAGE" >/dev/null 2>&1; then
+  docker pull -q "$CF_IMAGE" >/dev/null && CF_PULLED=1
+fi
+# The image alone, with no network at all: the command line the stack uses is accepted,
+# a token that cannot be decoded gets the message install.sh looks for, and the health
+# check command fails while nothing is connected.
+if docker run --name "$CF_PROBE" --network none -e TUNNEL_TOKEN="$FAKE_TOKEN" "$CF_IMAGE" tunnel --no-autoupdate --metrics 127.0.0.1:20241 run >"$WORK/cf-probe.log" 2>&1; then CF_RC=0; else CF_RC=$?; fi
+check "cloudflared refuses a token it cannot decode (exit $CF_RC)" test "$CF_RC" != 0
+check "with the message install.sh explains" grep -q 'Provided Tunnel token is not valid' "$WORK/cf-probe.log"
+check "and does not print the token" sh -c "! grep -qF '$FAKE_TOKEN' '$WORK/cf-probe.log'"
+docker rm -f "$CF_PROBE" >/dev/null 2>&1
+check "the health check command fails while no tunnel is connected" sh -c "! docker run --rm --network none '$CF_IMAGE' tunnel --metrics 127.0.0.1:20241 ready >/dev/null 2>&1"
+
+mkdir -p "$WORK/tunnel/data"
+cp deploy/tunnel/docker-compose.yml deploy/test/docker-compose.tunnel-test.yml "$WORK/tunnel/"
+cp -r deploy/tunnel/caddy "$WORK/tunnel/caddy"
+cat >"$WORK/tunnel/.env" <<EOF
+DOMAIN=tours.example.com
+DEPLOY_MODE=tunnel
+DATA_DIR=$(host_path "$WORK/tunnel/data")
+APP_IMAGE=$IMAGE
+SETUP_CODE=$SETUP_CODE
+TUNNEL_TOKEN=$FAKE_TOKEN
+EOF
+TCOMPOSE=(docker compose -p "$TSTACK" --project-directory "$(host_path "$WORK/tunnel")" -f "$(host_path "$WORK/tunnel/docker-compose.yml")" -f "$(host_path "$WORK/tunnel/docker-compose.tunnel-test.yml")")
+check "the stack file validates" "${TCOMPOSE[@]}" config --quiet
+T_START=$(date +%s)
+if "${TCOMPOSE[@]}" up -d --wait --wait-timeout 60 >"$WORK/tunnel-up.log" 2>&1; then T_UP=started; else T_UP=failed; fi
+check "up --wait fails, because the tunnel never connects ($(( $(date +%s) - T_START ))s)" test "$T_UP" = failed
+APP_T="$("${TCOMPOSE[@]}" ps -aq app)"
+CADDY_T="$("${TCOMPOSE[@]}" ps -aq caddy)"
+CF_T="$("${TCOMPOSE[@]}" ps -aq cloudflared)"
+check "three containers, one per service" sh -c "[ -n '$APP_T' ] && [ -n '$CADDY_T' ] && [ -n '$CF_T' ]"
+check "app healthy in the tunnel stack" wait_healthy "$APP_T"
+check "caddy running" test "$(docker inspect -f '{{.State.Running}}' "$CADDY_T")" = true
+check "cloudflared is not healthy" sh -c "[ \"\$(docker inspect -f '{{.State.Health.Status}}' '$CF_T')\" != healthy ]"
+check "cloudflared's log names the refused token" sh -c "docker logs '$CF_T' 2>&1 | grep -q 'Provided Tunnel token is not valid'"
+check "cloudflared's log does not hold the token" sh -c "! docker logs '$CF_T' 2>&1 | grep -qF '$FAKE_TOKEN'"
+no_ports() { [ -z "$(docker port "$1")" ] && [ "$(docker inspect -f '{{len .HostConfig.PortBindings}}' "$1")" = 0 ]; }
+check "app publishes no port" no_ports "$APP_T"
+check "caddy publishes no port" no_ports "$CADDY_T"
+check "cloudflared publishes no port" no_ports "$CF_T"
+check "the stack's network has no route out" test "$(docker network inspect -f '{{.Internal}}' "${TSTACK}_default")" = true
+check "cloudflared's command line is the documented one, without a token" test "$(docker inspect -f '{{.Path}} {{join .Args " "}}' "$CF_T")" = "cloudflared tunnel --no-autoupdate --metrics 127.0.0.1:20241 run"
+check "the token is in cloudflared's environment" sh -c "docker inspect -f '{{json .Config.Env}}' '$CF_T' | grep -qF 'TUNNEL_TOKEN=$FAKE_TOKEN'"
+check "the token is not in the app's or Caddy's environment" sh -c "! docker inspect -f '{{json .Config.Env}}' '$APP_T' '$CADDY_T' | grep -q TUNNEL_TOKEN"
+check "the token is in no running process's command line" sh -c "! { docker top '$APP_T'; docker top '$CADDY_T'; } 2>/dev/null | grep -qF '$FAKE_TOKEN'"
+check "the token is not in the stack file or the Caddyfile" sh -c "! grep -rqF '$FAKE_TOKEN' '$WORK/tunnel/docker-compose.yml' '$WORK/tunnel/caddy'"
+check "cloudflared logs rotate (10m x 3)" sh -c "docker inspect -f '{{.HostConfig.LogConfig.Type}} {{index .HostConfig.LogConfig.Config \"max-size\"}} {{index .HostConfig.LogConfig.Config \"max-file\"}}' '$CF_T' | grep -qx 'json-file 10m 3'"
+# What cloudflared would send, sent from the app container over the stack's network:
+# plain HTTP to caddy:80 with the visitor's Host header. Prints the status, the
+# Location and HSTS headers and the body on one line.
+via_caddy() { # method path body header...
+  docker exec "$APP_T" node -e 'const http=require("node:http");const [m,p,body,...hs]=process.argv.slice(1);const headers={};for(const h of hs){const i=h.indexOf(":");headers[h.slice(0,i)]=h.slice(i+1).trim()}const r=http.request({host:"caddy",port:80,method:m,path:p,headers},res=>{let b="";res.on("data",d=>b+=d);res.on("end",()=>console.log(res.statusCode+" loc="+(res.headers.location||"")+" hsts="+(res.headers["strict-transport-security"]||"")+" body="+b))});r.on("error",e=>console.log("error "+e.message));if(body)r.write(body);r.end()' "$@" | tr -d '\r'
+}
+SITE="tours.example.com"
+CLAIM="{\"code\":\"$SETUP_CODE\",\"workspace\":\"Tunnel\",\"email\":\"owner@example.com\"}"
+ok=""; for _ in $(seq 1 30); do [ "$(via_caddy GET /healthz "" "Host: $SITE" "X-Forwarded-Proto: https")" = '200 loc= hsts=max-age=604800 body={"ok":true}' ] && { ok=1; break; }; sleep 1; done
+check "/healthz through caddy:80 with the visitor's Host, with HSTS" test -n "$ok"
+check "a visitor on plain HTTP is sent to HTTPS" test "$(via_caddy GET /setup "" "Host: $SITE" "X-Forwarded-Proto: http" | cut -d' ' -f1-2)" = "308 loc=https://$SITE/setup"
+OTHER="$(via_caddy GET /healthz "" "Host: other.example.com" "X-Forwarded-Proto: https")"
+check "another Host does not reach the app (${OTHER%% *})" sh -c "! printf '%s' '$OTHER' | grep -q ok"
+check "the wizard page through caddy:80" test "$(via_caddy GET /setup "" "Host: $SITE" "X-Forwarded-Proto: https" | head -n 1 | cut -d' ' -f1)" = "200"
+check "cross-origin claim refused behind the tunnel" test "$(via_caddy POST /setup/claim "$CLAIM" "Host: $SITE" "X-Forwarded-Proto: https" "Content-Type: application/json" "Origin: https://elsewhere.example" | head -n 1 | cut -d' ' -f1)" = "403"
+check "a forged X-Forwarded-Host does not move the origin check" test "$(via_caddy POST /setup/claim "$CLAIM" "Host: $SITE" "X-Forwarded-Proto: https" "X-Forwarded-Host: elsewhere.example" "Content-Type: application/json" "Origin: https://elsewhere.example" | head -n 1 | cut -d' ' -f1)" = "403"
+check "same-origin claim succeeds behind the tunnel" test "$(via_caddy POST /setup/claim "$CLAIM" "Host: $SITE" "X-Forwarded-Proto: https" "Content-Type: application/json" "Origin: https://$SITE" | head -n 1 | cut -d' ' -f1)" = "201"
+"${TCOMPOSE[@]}" down -v >/dev/null 2>&1
 
 echo
 if [ "$FAILS" -eq 0 ]; then echo "ALL CHECKS PASSED"; else echo "$FAILS CHECK(S) FAILED"; exit 1; fi
