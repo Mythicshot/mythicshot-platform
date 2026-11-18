@@ -2,6 +2,7 @@
 // table, the version and the limits. What each request really answers is checked by the
 // contract tests; this file checks that nothing is missing, invented or hard-coded.
 import { describe, expect, it } from "vitest";
+import { makeDeps } from "#harness";
 import { createApp } from "../src/app.ts";
 import { GET_STARTED, openapi, routeKeys, UNDOCUMENTED_ROUTES, type OpenApiDoc } from "../src/docs/openapi.ts";
 import { LIMITS } from "../src/manifest.ts";
@@ -10,7 +11,9 @@ import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } f
 import { LOGO_RULE, STEP_IMAGE_RULE } from "../src/sniff.ts";
 import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS, UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
+import { OPENAPI_JSON, OPENAPI_JSON_ETAG, OPENAPI_YAML, OPENAPI_YAML_ETAG } from "../src/docs/site-assets.ts";
 import { VERSION } from "../src/version.ts";
+import { send } from "./bundle.ts";
 
 type Json = Record<string, any>;
 
@@ -288,5 +291,52 @@ describe("the API description", () => {
     const s = openapi().components.schemas as Json;
     const kinds = (s.UploadTarget.oneOf as Json[]).map((t) => ((t.$ref ? resolve(openapi(), t.$ref) : t) as Json).properties.kind.const);
     expect(kinds).toEqual(["new", "chapter", "replace"]);
+  });
+});
+
+describe("the served description", () => {
+  const FILES = [
+    { path: "/api/v1/openapi.json", body: OPENAPI_JSON, etag: OPENAPI_JSON_ETAG, type: "application/json; charset=utf-8" },
+    { path: "/api/v1/openapi.yaml", body: OPENAPI_YAML, etag: OPENAPI_YAML_ETAG, type: "application/yaml; charset=utf-8" },
+  ];
+
+  it("the description is served as JSON and as YAML with their types, a short cache and an ETag", async () => {
+    const { deps } = await makeDeps();
+    for (const f of FILES) {
+      const r = await send(deps, "GET", f.path);
+      expect(r.status, f.path).toBe(200);
+      expect(r.text, f.path).toBe(f.body);
+      expect(r.headers.get("content-type"), f.path).toBe(f.type);
+      expect(r.headers.get("cache-control"), f.path).toBe("public, max-age=300");
+      expect(r.headers.get("etag"), f.path).toBe(f.etag);
+      expect(r.headers.get("x-content-type-options"), f.path).toBe("nosniff");
+      expect(r.calls, f.path).toBe(0);
+      for (const [header] of r.headers) expect(header.startsWith("access-control-"), `${f.path} ${header}`).toBe(false);
+
+      for (const header of [f.etag, `W/${f.etag}`, "*"]) {
+        const cached = await send(deps, "GET", f.path, { headers: { "if-none-match": header } });
+        expect(cached.status, `${f.path} ${header}`).toBe(304);
+        expect(cached.bytes.length, f.path).toBe(0);
+        for (const h of ["content-type", "cache-control", "etag", "x-content-type-options"]) expect(cached.headers.get(h), `${f.path} ${h}`).toBe(r.headers.get(h));
+      }
+      expect((await send(deps, "GET", f.path, { headers: { "if-none-match": '"other"' } })).status, f.path).toBe(200);
+
+      // HEAD answers the same headers and no body.
+      const head = await send(deps, "HEAD", f.path);
+      expect(head.status, f.path).toBe(200);
+      expect(head.bytes.length, f.path).toBe(0);
+      for (const h of ["content-type", "cache-control", "etag", "x-content-type-options"]) expect(head.headers.get(h), `${f.path} ${h}`).toBe(r.headers.get(h));
+    }
+  });
+
+  it("what is served is the description itself, at the code's version", async () => {
+    const { deps } = await makeDeps();
+    const served = (await send(deps, "GET", "/api/v1/openapi.json")).json;
+    expect(served).toEqual(openapi());
+    expect(served.info.version).toBe(VERSION);
+    // The same on any host, with or without a token: it is public text.
+    const again = await send(deps, "GET", "/api/v1/openapi.json", { origin: "http://localhost:8787", token: "dp_" + "0".repeat(40) });
+    expect(again.text).toBe(OPENAPI_JSON);
+    expect((await send(deps, "GET", "/api/v1/openapi.yaml")).text.startsWith("openapi: 3.1.0\n")).toBe(true);
   });
 });

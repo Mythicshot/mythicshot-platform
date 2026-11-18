@@ -4,15 +4,17 @@
 // one-address mode it does nothing.
 import type { Context, MiddlewareHandler } from "hono";
 import { matchedRoutes } from "hono/route";
-import { originOf, requestHost, roleOf } from "./hosts.ts";
+import { originOf, requestHost, roleOf, type HostRole } from "./hosts.ts";
 import type { Config } from "./ports.ts";
 
 /**
  * Where a route answers in two-address mode. `any`: on every host, known or not. `both`:
  * on the tours and the app address. `tours`: on the tours address only, 404 on the app
  * address. `tours-redirect`: on the tours address, and the app address redirects there.
+ * `app` and `app-redirect` are the same the other way round: on the app address only,
+ * with 404 on the tours address, or a redirect from it.
  */
-export type HostRule = "any" | "both" | "tours" | "tours-redirect";
+export type HostRule = "any" | "both" | "tours" | "tours-redirect" | "app" | "app-redirect";
 
 /**
  * The rule of every route, keyed by "<METHOD> <route path>" exactly as in the app's
@@ -50,6 +52,17 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /p/:name": "tours-redirect",
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": "tours",
   "GET /t/:slug": "tours-redirect",
+
+  // The API documentation. The tours origin holds what users publish and may be framed
+  // anywhere, so nothing of the page is served from it: it sends the page on to the app
+  // address (people know the tours address, so <tours address>/docs should arrive) and
+  // has none of its files.
+  "GET /docs": "app-redirect",
+  "GET /docs/:file{(?:viewer|docs)\\.[0-9a-f]{16}\\.(?:js|css)}": "app",
+  "GET /docs/licences.txt": "app",
+  // The description is public text beside the API it describes, on either address.
+  "GET /api/v1/openapi.json": "both",
+  "GET /api/v1/openapi.yaml": "both",
 };
 
 /** The answer to a host this install does not serve: 421 with nothing in it. */
@@ -57,28 +70,43 @@ export function misdirected(): Response {
   return new Response(null, { status: 421, headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" } });
 }
 
-/** The app address's answer for a route only the tours address has. */
+/** One address's answer for a route only the other address has. */
 function notHere(): Response {
   return new Response('{"error":"not_found"}', { status: 404, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
-/** From the most open rule to the strictest. */
-const STRICTNESS: readonly HostRule[] = ["any", "both", "tours-redirect", "tours"];
+/** From the most open rule to the strictest. Rules that name different addresses are never compared: see ruleFor. */
+const STRICTNESS: readonly HostRule[] = ["any", "both", "tours-redirect", "app-redirect", "tours", "app"];
+
+/** The one address a rule keeps a route to, or null when it answers on both. */
+function sideOf(rule: HostRule): HostRole | null {
+  if (rule === "tours" || rule === "tours-redirect") return "tours";
+  if (rule === "app" || rule === "app-redirect") return "app";
+  return null;
+}
 
 /**
  * The rule for this request: the strictest rule among every route it matched, the gate
  * itself left out. Hono may answer from any of them, so each one needs a rule: null when
- * no route matched, "none" when a matched route has no rule. A route is keyed as
+ * no route matched, "none" when a matched route has no rule, and also when two matched
+ * routes are kept to different addresses: no address may then answer for both, so the
+ * request is closed on both. A route is keyed as
  * "<METHOD> <path>", one registered for every method as "ALL <path>"; a HEAD request is
  * matched as GET, so it gets GET's rule.
  */
 function ruleFor(c: Context, gate: MiddlewareHandler, rules: Readonly<Record<string, HostRule>>): HostRule | "none" | null {
   let strictest: HostRule | null = null;
+  let side: HostRole | null = null;
   for (const route of matchedRoutes(c)) {
     if (route.handler === gate) continue;
     const key = `${route.method} ${route.path}`;
     if (!Object.hasOwn(rules, key)) return "none";
     const rule = rules[key];
+    const kept = sideOf(rule);
+    if (kept !== null) {
+      if (side !== null && side !== kept) return "none";
+      side = kept;
+    }
     if (strictest === null || STRICTNESS.indexOf(rule) > STRICTNESS.indexOf(strictest)) strictest = rule;
   }
   return strictest;
@@ -102,14 +130,16 @@ export function hostGate(config: Config, rules: Readonly<Record<string, HostRule
     if (rule === null) return next();
     // A matched route nobody gave a rule: closed on both addresses.
     if (rule === "none") return c.notFound();
-    if (rule === "both" || role === "tours") return next();
-    if (rule === "tours-redirect") {
+    // The address the rule keeps the route to; this request reached `role`.
+    const home = sideOf(rule);
+    if (home === null || home === role) return next();
+    if (rule === "tours-redirect" || rule === "app-redirect") {
       // The path and query are the request's; the host comes only from configuration.
       const url = new URL(c.req.url);
       return new Response(null, {
         status: 308,
         headers: {
-          location: originOf(hosts.tours) + url.pathname + url.search,
+          location: originOf(hosts[home]) + url.pathname + url.search,
           "cache-control": "no-store",
           "referrer-policy": "no-referrer",
           "x-content-type-options": "nosniff",
