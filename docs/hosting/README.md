@@ -15,6 +15,7 @@ Prices were checked 2026-11-17 on the pages each guide links. They are in US dol
 | Provider | Monthly cost | Effort | Best for |
 |---|---|---|---|
 | [DigitalOcean](digitalocean.md) | $6 | Medium: one server, SSH, one DNS record | A plain rented server with the fewest surprises |
+| [Namecheap VPS](namecheap.md) | $3.88 billed yearly, $4.48 billed quarterly, $4.88 billed monthly | Medium: one server, SSH, one DNS record; the term is prepaid | Your domain is at Namecheap already and you want one account for both |
 | [Akamai Cloud (Linode)](linode.md) | $5 | Medium: one server, SSH, one DNS record | The cheapest plain rented server of the four |
 | [AWS Lightsail](aws-lightsail.md) | $7 | Medium: as above, plus one firewall rule and a static address | You want it inside your own AWS account at a flat price |
 | [Azure virtual machine](azure.md) | About $13: the server, its disk and its address are billed separately | Medium to high: more choices in the portal, more lines on the bill | You want it inside your own Azure account |
@@ -24,7 +25,7 @@ The two runbooks cover what the guides above build on:
 
 | Runbook | Use it when |
 |---|---|
-| [Docker on Debian](../runbook-docker.md) | You already have a Debian server, at any provider or at home. The four server guides above follow this runbook for the install itself. |
+| [Docker on Debian](../runbook-docker.md) | You already have a Debian server, at any provider or at home. The server guides above follow this runbook for the install itself. |
 | [Cloudflare](../runbook-cloudflare.md) | Your domain is on Cloudflare, or you are willing to move it there. No server and no disk. |
 
 ## What every route has in common
@@ -39,12 +40,12 @@ The two runbooks cover what the guides above build on:
 
 ## How the server guides differ
 
-| | DigitalOcean | Akamai Cloud | AWS Lightsail | Azure |
-|---|---|---|---|---|
-| Plan | Basic, 1 GiB | Nanode 1 GB | $7 Linux plan, 1 GB | B2ats v2, or B2pts v2 on Arm |
-| Debian image | 13 | 13 | 13 | 12 |
-| Login name | `root` | `root` | `admin` | the one you choose, such as `azureuser` |
-| Control-panel firewall | None unless you create one | None unless you choose one | Always on: opens 22 and 80 only | Always on: opens only what you tick |
-| What you must open | Nothing, or 80 and 443 if you add a firewall | Nothing, or 80 and 443 if you add a firewall | 443 | 80 and 443 |
+| | DigitalOcean | Akamai Cloud | AWS Lightsail | Azure | Namecheap |
+|---|---|---|---|---|---|
+| Plan | Basic, 1 GiB | Nanode 1 GB | $7 Linux plan, 1 GB | B2ats v2, or B2pts v2 on Arm | Spark |
+| Debian image | 13 | 13 | 13 | 12 | 12 |
+| Login name | `root` | `root` | `admin` | the one you choose, such as `azureuser` | `root` |
+| Control-panel firewall | None unless you create one | None unless you choose one | Always on: opens 22 and 80 only | Always on: opens only what you tick | None found in Namecheap's pages (unconfirmed) |
+| What you must open | Nothing, or 80 and 443 if you add a firewall | Nothing, or 80 and 443 if you add a firewall | 443 | 80 and 443 | Nothing, as far as could be confirmed |
 
 Each guide says where every row above comes from.

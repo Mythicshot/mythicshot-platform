@@ -31,7 +31,7 @@ const allDocs: Record<string, string> = { ...strip(RUNBOOKS), ...hosting };
 
 const INDEX = "docs/hosting/README.md";
 const FLY = "docs/hosting/fly.md";
-const SERVER_GUIDES = ["docs/hosting/digitalocean.md", "docs/hosting/aws-lightsail.md", "docs/hosting/azure.md", "docs/hosting/linode.md"];
+const SERVER_GUIDES = ["docs/hosting/digitalocean.md", "docs/hosting/aws-lightsail.md", "docs/hosting/azure.md", "docs/hosting/linode.md", "docs/hosting/namecheap.md"];
 const GUIDES = [...SERVER_GUIDES, FLY];
 
 /** Headings every guide has, without their step numbers. */
@@ -209,7 +209,7 @@ describe("the hosting guides", () => {
     }
   });
 
-  it("the four server guides follow one outline, in one order", () => {
+  it("the server guides follow one outline, in one order", () => {
     for (const p of SERVER_GUIDES) expect(sections(hosting[p]).filter((h) => h !== "Contents"), p).toEqual(SERVER_OUTLINE);
   });
 
@@ -298,6 +298,7 @@ describe("the hosting guides", () => {
       "docs/hosting/aws-lightsail.md": /(^|\.)(aws\.)?amazon\.com$/,
       "docs/hosting/azure.md": /(^|\.)(microsoft|azure)\.com$/,
       "docs/hosting/linode.md": /(^|\.)(akamai|linode)\.com$/,
+      "docs/hosting/namecheap.md": /(^|\.)namecheap\.com$/,
       "docs/hosting/fly.md": /(^|\.)fly\.io$/,
     };
     for (const [p, re] of Object.entries(hosts)) {
