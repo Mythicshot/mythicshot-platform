@@ -87,7 +87,7 @@ Every request carries `Authorization: Bearer <token>` and answers `404` for a to
 |---|---|
 | `POST /api/v1/tours/<id>/publish` with no body | Starts a publish, or joins the one in progress for the tour if it was built from the current draft; one built from an older draft is cancelled and a new one started. `202 {"status":"in_progress","publish_id":"pub_…","done":12,"total":60}`, or `200` at once for a small tour |
 | `POST /api/v1/tours/<id>/publish` with `{"publish_id":"pub_…"}` | Copies the next images (up to 12): `202` as above while more remain; `200 {"slug","url","steps"}` once the new version is live, and the same `200` on any repeat |
-| either, when that publish was stopped | `409 publish_cancelled`: the tour was unpublished, the publish failed or was abandoned, or a fresh start replaced it; publish again to start over. `409 publish_busy` means another start of the tour landed at the same moment: try again |
+| either, when that publish was stopped | `409 publish_cancelled`: the tour was unpublished, the publish failed or was abandoned, or a fresh start replaced it; publish again to start over. `409 publish_busy` means another start of the tour landed at the same moment, or the tour's draft changed (a chapter was uploaded or replaced) while this publish was starting; nothing was written: try again |
 | `POST /api/v1/tours/<id>/unpublish` | `204` when the tour and all its public images are gone; `202` when the tour is unpublished but images remain to remove, so call again; a publish in progress is cancelled |
 
 A publish works from the draft as it was when the publish started: calls naming it keep driving that version, so a chapter uploaded meanwhile goes out with the next publish, never half of it with this one. `400 empty_tour` and `413 too_large` (more than 400 steps, or a snapshot over 512,000 bytes) come from the first request, before anything is copied.
@@ -137,12 +137,12 @@ The server finds the images a chapter already has by a SHA-256 it computed itsel
 | `publish` | Meaning |
 |---|---|
 | `draft` | The tour is not published. Nothing is public and nothing needs publishing |
-| `ready` | The tour is published and this replace is its only change that is not public yet. Publish it to put the update live |
-| `other_changes` | The tour is published and its draft holds more than this replace that was never published: a chapter uploaded as a draft, an earlier replace that was not published, or changes from before the server recorded this (a tour last published under 0.1.3 and renamed since). Publishing would put all of it live, so Mythicshot uploads the update and leaves publishing to you |
+| `ready` | The tour is published and the only changes that are not public yet are replaces of this chapter (this one, and any before it that were not published, for example because the publish after them failed). Publish it to put the update live |
+| `other_changes` | The tour is published and its draft holds more than replaces of this chapter that was never published: a chapter uploaded as a draft, a replace of another chapter that was not published, or changes from before the server recorded this (a tour last published under 0.1.3 and renamed since). Publishing would put all of it live, so Mythicshot uploads the update and leaves publishing to you |
 
 When `settings` is `true`, the commit also replaces the tour's theme, zoom, spotlight dim, cover, button, end card, autoplay and logo with the manifest's; a manifest that names no logo removes the tour's. When it is `false`, the tour keeps all of these. A replace never changes the tour's title or its link.
 
-Every request is safe to send again. A repeated create only makes another upload, which is removed by an abort or, left alone, after 24 hours. A repeated commit answers `201` with the same ids and steps, and with `publish` as it stands at that moment. Images the replace took out of the chapter are deleted from the server right after the commit, or with a later request if a publish of the older draft is still copying them.
+Every request is safe to send again. A repeated create only makes another upload, which is removed by an abort or, left alone, after 24 hours. A repeated commit answers `201` with the same ids and steps, and with `publish` as it stands at that moment; once a later replace of the same chapter has been committed, it answers `404`, because the chapter no longer holds that upload's steps. Images the replace took out of the chapter are deleted from the server right after the commit, or with a later request if a publish of the older draft is still copying them.
 
 ## Develop
 

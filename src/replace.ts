@@ -170,15 +170,15 @@ export function replaceStatements(deps: Deps, auth: Auth, up: ReplaceUpload, m: 
   const stmts: Stmt[] = [
     // The draft moves on by one version: the version that orphans the pictures recorded next.
     { sql: "UPDATE tour SET updated_at = ?, draft_version = draft_version + 1 WHERE id = ? AND workspace_id = ?", params: [now, tourId, ws] },
-    // Every old key of the chapter that no new step uses. A key belongs to one chapter only
-    // (a step's key is under the id of the upload that sent it, and a replace reuses keys of
-    // its own chapter only); the last condition holds that against any mistake.
+    // Every old key of the chapter that no new step uses. A key belongs to one chapter only:
+    // a step's key is under the id of the upload that sent it, each upload fills one
+    // chapter, and a replace reuses keys of its own chapter only (chapterPictures reads no
+    // other). So no step outside the chapter can use one of these keys, and none is looked for.
     {
       sql: `INSERT OR IGNORE INTO replaced_object (tour_id, image_key, draft_version, created_at)
             SELECT s.tour_id, s.image_key, t.draft_version, ? FROM step s JOIN tour t ON t.id = s.tour_id
              WHERE s.chapter_id = ? AND s.tour_id = ? AND t.workspace_id = ?
-               AND s.image_key NOT IN (SELECT image_key FROM upload_step WHERE upload_id = ?)
-               AND NOT EXISTS (SELECT 1 FROM step o WHERE o.tour_id = s.tour_id AND o.chapter_id <> s.chapter_id AND o.image_key = s.image_key)`,
+               AND s.image_key NOT IN (SELECT image_key FROM upload_step WHERE upload_id = ?)`,
       params: [now, chapterId, tourId, ws, up.id],
     },
     {
