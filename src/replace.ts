@@ -217,10 +217,17 @@ export function replaceStatements(deps: Deps, auth: Auth, up: ReplaceUpload, m: 
       ],
     });
   });
+  // The tour's new draft version (the bump ran first) is this replace's. replaced_from
+  // keeps the version of the first replace of a run: it stays when the chapter's previous
+  // replace made the version just before this one, so nothing else changed the draft in
+  // between, and starts again at this version otherwise. (Every right-hand side reads the
+  // row as it was before this statement.)
+  const version = "(SELECT draft_version FROM tour WHERE id = ? AND workspace_id = ?)";
   stmts.push({
-    sql: `UPDATE chapter SET revision = ?, replaced_version = (SELECT draft_version FROM tour WHERE id = ? AND workspace_id = ?)
+    sql: `UPDATE chapter SET revision = ?, replaced_version = ${version},
+                             replaced_from = CASE WHEN replaced_version = ${version} - 1 THEN replaced_from ELSE ${version} END
            WHERE id = ? AND tour_id IN (SELECT id FROM tour WHERE id = ? AND workspace_id = ?)`,
-    params: [up.id, tourId, ws, chapterId, tourId, ws],
+    params: [up.id, tourId, ws, tourId, ws, tourId, ws, chapterId, tourId, ws],
   });
   stmts.push({ sql: "DELETE FROM upload_step WHERE upload_id IN (SELECT id FROM upload WHERE id = ? AND workspace_id = ?)", params: [up.id, ws] });
   stmts.push({ sql: "DELETE FROM upload WHERE id = ? AND workspace_id = ?", params: [up.id, ws] });
@@ -232,25 +239,31 @@ export function replaceStatements(deps: Deps, auth: Auth, up: ReplaceUpload, m: 
  * the upload as its revision, or null. `publish` is worked out from the tour as it is now:
  * - "draft": the tour is not published, so there is nothing to publish again.
  * - "ready": the tour is published, nothing has changed its draft since this replace, and
- *   the live snapshot was built from the draft just before the replace (or already from
- *   the one it made): publishing now puts this replace live and nothing else.
+ *   the live snapshot was built from the draft just before the chapter's current run of
+ *   replaces (replaced_from) or from a later one: the only changes that are not public
+ *   are replaces of this chapter, so publishing puts this replace live and nothing else.
+ *   A second update with no publish in between (the publish after the first failed, say)
+ *   is therefore ready too.
  * - "other_changes": anything else, a snapshot whose draft version is not known included.
  *   Publishing would also put other changes live that were never published.
+ * A rename never counts as a change here: it does not move the draft version, and it
+ * writes the title into the live snapshot itself (src/tours.ts).
  */
 export async function replaceAnswer(deps: Deps, auth: Auth, uploadId: string): Promise<ReplaceAnswer | null> {
   if (!UPLOAD_ID.test(uploadId)) return null;
-  const row = await deps.db.first<{ chapter_id: string; tour_id: string; replaced_version: number | null; status: string; draft_version: number; steps: number; live_version: number | null }>(
-    `SELECT c.id AS chapter_id, c.tour_id, c.replaced_version, t.status, t.draft_version,
+  const row = await deps.db.first<{ chapter_id: string; tour_id: string; replaced_version: number | null; replaced_from: number | null; status: string; draft_version: number; steps: number; live_version: number | null }>(
+    `SELECT c.id AS chapter_id, c.tour_id, c.replaced_version, c.replaced_from, t.status, t.draft_version,
             (SELECT count(*) FROM step s WHERE s.chapter_id = c.id AND s.tour_id = c.tour_id) AS steps,
             (SELECT n.draft_version FROM snapshot n WHERE n.tour_id = t.id) AS live_version
        FROM chapter c JOIN tour t ON t.id = c.tour_id WHERE c.revision = ? AND t.workspace_id = ?`,
     [uploadId, auth.workspaceId],
   );
   if (row === null) return null;
-  const made = row.replaced_version;
   let publish: ReplaceAnswer["publish"] = "other_changes";
   if (row.status !== "published") publish = "draft";
-  else if (made !== null && row.draft_version === made && (row.live_version === made - 1 || row.live_version === made)) publish = "ready";
+  else if (row.replaced_version !== null && row.draft_version === row.replaced_version && row.replaced_from !== null && row.live_version !== null && row.live_version >= row.replaced_from - 1) {
+    publish = "ready";
+  }
   return { tour_id: row.tour_id, chapter_id: row.chapter_id, steps: row.steps, publish };
 }
 

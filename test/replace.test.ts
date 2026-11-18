@@ -284,7 +284,7 @@ describe("replace: commit", { timeout: 60_000 }, () => {
     expect(done.json).toEqual({ tour_id: t.tour_id, chapter_id: t.chapter_id, steps: 2, publish: "draft" });
 
     const chapter = await chapterRow(deps, t.chapter_id);
-    expect(chapter).toEqual({ ...chapterBefore, revision: id, replaced_version: 2 });
+    expect(chapter).toEqual({ ...chapterBefore, revision: id, replaced_version: 2, replaced_from: 2 });
     expect(chapter.title).toBe("Customer onboarding");
     expect(chapter.position).toBe(0);
     const steps = await stepRows(deps, t.chapter_id);
@@ -507,6 +507,77 @@ describe("replace: what is public", { timeout: 60_000 }, () => {
     // Once it is published again the version is known.
     await publishAll(deps, a.token, t.tour_id);
     expect((await replaceChapter(deps, a.token, t, [6])).json.publish).toBe("ready");
+  });
+  it("a second update with no publish in between is still ready, however many follow", async () => {
+    const { deps, a } = await setup();
+    const t = await uploadPics(deps, a.token, [1, 2]);
+    await uploadPics(deps, a.token, [3], "Second", t.tour_id);
+    await publishAll(deps, a.token, t.tour_id);
+    // As when the publish after an update failed and the user pressed Update again.
+    for (const [i, pics] of [[5], [5, 6], [7]].entries()) {
+      const done = await replaceChapter(deps, a.token, t, pics);
+      expect(done.json.publish, `update ${i + 1}`).toBe("ready");
+      expect(await chapterRow(deps, t.chapter_id)).toMatchObject({ replaced_version: 3 + i, replaced_from: 3 });
+    }
+    // Publishing then shows the last of them, and the next update is ready as well.
+    expect((await publishAll(deps, a.token, t.tour_id)).json.steps).toBe(2);
+    expect((await replaceChapter(deps, a.token, t, [8])).json.publish).toBe("ready");
+    expect(await chapterRow(deps, t.chapter_id)).toMatchObject({ replaced_version: 6, replaced_from: 3 });
+  });
+
+  it("another chapter's upload between two updates makes the second other_changes", async () => {
+    const { deps, a } = await setup();
+    const t = await uploadPics(deps, a.token, [1, 2]);
+    await publishAll(deps, a.token, t.tour_id);
+    expect((await replaceChapter(deps, a.token, t, [5])).json.publish).toBe("ready");
+    const extra = await uploadPics(deps, a.token, [3], "Not public yet", t.tour_id);
+    expect((await replaceChapter(deps, a.token, t, [6])).json.publish).toBe("other_changes");
+    expect((await replaceChapter(deps, a.token, t, [7])).json.publish).toBe("other_changes");
+    // So does an update of another chapter between two updates of this one.
+    await publishAll(deps, a.token, t.tour_id);
+    expect((await replaceChapter(deps, a.token, t, [8])).json.publish).toBe("ready");
+    expect((await replaceChapter(deps, a.token, { tour_id: t.tour_id, chapter_id: extra.chapter_id }, [9])).json.publish).toBe("other_changes");
+    expect((await replaceChapter(deps, a.token, t, [10])).json.publish).toBe("other_changes");
+    // Once all of it is published, updates are ready again.
+    await publishAll(deps, a.token, t.tour_id);
+    expect((await replaceChapter(deps, a.token, t, [11])).json.publish).toBe("ready");
+  });
+
+  it("a publish between two updates leaves the second ready", async () => {
+    const { deps, a } = await setup();
+    const t = await uploadPics(deps, a.token, [1, 2]);
+    await publishAll(deps, a.token, t.tour_id);
+    expect((await replaceChapter(deps, a.token, t, [5])).json.publish).toBe("ready");
+    await publishAll(deps, a.token, t.tour_id);
+    expect((await replaceChapter(deps, a.token, t, [6])).json.publish).toBe("ready");
+    expect(await chapterRow(deps, t.chapter_id)).toMatchObject({ replaced_version: 3, replaced_from: 2 });
+  });
+
+  it("two updates of a tour whose snapshot version is not known are both other_changes", async () => {
+    const { deps, a } = await setup();
+    const t = await uploadPics(deps, a.token, [1, 2]);
+    await publishAll(deps, a.token, t.tour_id);
+    await deps.db.run("UPDATE snapshot SET draft_version = NULL WHERE tour_id = ?", [t.tour_id]);
+    expect((await replaceChapter(deps, a.token, t, [5])).json.publish).toBe("other_changes");
+    expect((await replaceChapter(deps, a.token, t, [6])).json.publish).toBe("other_changes");
+  });
+
+  it("a rename between two updates does not hold the second back, and the new title is kept", async () => {
+    const { deps, a } = await setup();
+    const t = await uploadPics(deps, a.token, [1, 2], "Old name");
+    const live = await publishAll(deps, a.token, t.tour_id);
+    expect((await replaceChapter(deps, a.token, t, [5])).json.publish).toBe("ready");
+    // A rename does not move the draft version: it writes the title into the live snapshot itself.
+    const renamed = await send(deps, "PATCH", `/api/v1/tours/${t.tour_id}`, { token: a.token, body: JSON.stringify({ title: "New name" }), headers: JSON_HEADERS });
+    expect(renamed.status).toBe(200);
+    expect((await tourRow(deps, t.tour_id)).draft_version).toBe(2);
+    expect((await send(deps, "GET", live.json.url)).text).toContain("New name");
+    expect((await replaceChapter(deps, a.token, t, [6], "Old name")).json.publish).toBe("ready");
+    await publishAll(deps, a.token, t.tour_id);
+    expect(JSON.parse((await snapshotRow(deps, t.tour_id))!.data).title).toBe("New name");
+    // Renamed with nothing else unpublished, the next update is ready too.
+    await send(deps, "PATCH", `/api/v1/tours/${t.tour_id}`, { token: a.token, body: JSON.stringify({ title: "Newer name" }), headers: JSON_HEADERS });
+    expect((await replaceChapter(deps, a.token, t, [7])).json.publish).toBe("ready");
   });
 });
 
