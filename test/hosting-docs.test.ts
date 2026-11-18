@@ -1,8 +1,8 @@
 /// <reference types="vite/client" />
 // Checks on the provider guides in docs/hosting and on the Fly.io template that can be
 // made without an account: every guide exists, follows the shared outline and says at
-// its top that it is unverified; no guide names the owner's domain or an address outside
-// the documentation ranges; links between docs resolve; the server guides install the
+// its top that it is unverified; no guide names a hostname outside a short allow-list or
+// an address outside the documentation ranges; links between docs resolve; the server guides install the
 // way the Docker runbook does; and deploy/fly/fly.toml parses, holds no secret, and
 // agrees with the Dockerfile and the compose file on the port, the data path and the
 // health path.
@@ -39,6 +39,33 @@ const SHARED_HEADINGS = ["What you need and what it costs", "Open the setup wiza
 /** Headings the four server guides add, in this order between the shared ones. */
 const SERVER_HEADINGS = ["Create the server", "Open ports 80 and 443", "Point the domain at the server", "Connect by SSH", "Install the platform"];
 const SERVER_OUTLINE = ["What you need and what it costs", ...SERVER_HEADINGS, "Open the setup wizard", "Backups", "Updates", "Delete everything to stop paying", "Pages this guide relies on"];
+
+/**
+ * The only hostnames the guides and the template may name, besides the example.com
+ * placeholders and an app's own address under fly.dev: the providers' documentation and
+ * pricing hosts the guides link to. Any other real domain fails the check below.
+ */
+const ALLOWED_HOSTS = new Set([
+  "docs.docker.com",
+  "www.digitalocean.com",
+  "docs.digitalocean.com",
+  "techdocs.akamai.com",
+  "api.linode.com",
+  "aws.amazon.com",
+  "docs.aws.amazon.com",
+  "learn.microsoft.com",
+  "prices.azure.com",
+  "docs.fly.io",
+  "community.fly.io",
+  "www.namecheap.com",
+]);
+
+/** Last labels that are file extensions, not top-level domains. */
+const FILE_EXTENSIONS = new Set(["sh", "md", "yml", "yaml", "json", "ts", "js", "sqlite", "tar", "gz", "toml", "pem", "env", "html"]);
+
+function isPlaceholderHost(host: string): boolean {
+  return /(^|\.)example\.(com|net|org)$/.test(host) || /(^|\.)fly\.dev$/.test(host);
+}
 
 /** Splits a markdown text into its fenced code blocks and the prose around them. */
 function split(md: string): { prose: string; blocks: { lang: string; body: string }[] } {
@@ -241,12 +268,37 @@ describe("the hosting guides", () => {
     for (const p of SERVER_GUIDES) expect(hosting[p].split("\n").slice(0, 10).join("\n"), p).toMatch(/no published image/);
   });
 
-  it("no guide names the owner's domain, a real token or a real setup code", () => {
+  it("no guide holds a real token or a real setup code", () => {
     for (const [p, text] of [...Object.entries(hosting), ["deploy/fly/fly.toml", flyToml]]) {
-      expect(text.toLowerCase(), p).not.toContain("mythicsourcecode");
       expect(text, p).not.toMatch(/dp_[0-9a-f]{40}/);
       expect(text, p).not.toMatch(/SETUP_CODE=[0-9a-f]{16,}/);
     }
+  });
+
+  it("the only hostnames are the placeholders and the providers' own pages", () => {
+    const problems: string[] = [];
+    for (const [p, text] of [...Object.entries(hosting), ["deploy/fly/fly.toml", flyToml]]) {
+      for (const m of text.matchAll(/\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+([a-z]{2,63})\b/gi)) {
+        const host = m[0].toLowerCase();
+        const at = m.index ?? 0;
+        if (text[at - 1] === "." || text[at - 1] === "/" || text[at - 1] === "_") continue; // the tail of a file name or a path
+        if (FILE_EXTENSIONS.has(m[1].toLowerCase())) continue;
+        if (isPlaceholderHost(host) || ALLOWED_HOSTS.has(host)) continue;
+        if (host === "fly.io") continue; // the provider is called Fly.io; links to it are checked below
+        problems.push(`${p}: ${host}`);
+      }
+      // Every link goes to an allowed host too, whatever its spelling.
+      for (const m of text.matchAll(/https?:\/\/([^/\s)"'`]+)/g)) {
+        const host = m[1].toLowerCase();
+        if (!isPlaceholderHost(host) && !ALLOWED_HOSTS.has(host)) problems.push(`${p}: link to ${host}`);
+      }
+    }
+    expect(problems).toEqual([]);
+    // The check has teeth: a real domain in prose, in code or in a link is caught.
+    const probe = /\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+([a-z]{2,63})\b/gi;
+    expect([..."open tours.realcompany.io now".matchAll(probe)].map((m) => m[0])).toEqual(["tours.realcompany.io"]);
+    expect(isPlaceholderHost("tours.realcompany.io") || ALLOWED_HOSTS.has("tours.realcompany.io")).toBe(false);
+    expect(isPlaceholderHost("tours.example.com") && isPlaceholderHost("tours-example.fly.dev")).toBe(true);
   });
 
   it("every guide uses the placeholder domain", () => {
@@ -393,7 +445,11 @@ describe("deploy/fly/fly.toml", () => {
     expect(table(toml, "env").DATA_DIR).toBe(facts.dataDir);
     expect(mounts.source).toBeTypeOf("string");
     // The guide creates the volume by this name.
-    expect(codeLines(hosting[FLY])).toContain(`fly volumes create ${String(mounts.source)} --region ${String(toml.primary_region)} --size 1`);
+    const lines = codeLines(hosting[FLY]);
+    expect(lines).toContain(`fly volumes create ${String(mounts.source)} --region <your region> --size 1`);
+    // The reader may change the region, so no command carries the template's own.
+    for (const l of lines) expect(l, l).not.toMatch(new RegExp(`--region ${String(toml.primary_region)}\\b`));
+    expect(hosting[FLY]).toMatch(/must match the `primary_region` line/);
   });
 
   it("checks the app's own health path", () => {
@@ -424,7 +480,10 @@ describe("deploy/fly/fly.toml", () => {
       expect(code, line).not.toMatch(/[0-9a-f]{16,}/i);
       expect(code, line).not.toMatch(/[A-Za-z0-9+/_-]{24,}/);
     }
-    expect(codeLines(hosting[FLY])).toContain("fly secrets set SETUP_CODE=<your setup code>");
+    // The code is typed into `fly secrets import`, never passed on a command line.
+    expect(codeLines(hosting[FLY])).toContain("fly secrets import");
+    expect(codeLines(hosting[FLY])).toContain("SETUP_CODE=<your setup code>");
+    for (const l of codeLines(hosting[FLY])) expect(l, l).not.toMatch(/fly secrets set .*SETUP_CODE/);
     expect(codeLines(hosting[FLY])).toContain("openssl rand -hex 16");
   });
 

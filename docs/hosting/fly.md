@@ -79,32 +79,37 @@ Leave every other line as it is. The port, the health check and the place the vo
 fly apps create tours-example
 ```
 
-6. Create the volume, in the same region as in `fly.toml`. Its name must be `data`, the name the template's `[mounts]` section asks for. This is [`fly volumes create`](https://docs.fly.io/flyctl/cmd/fly_volumes_create).
+6. Create the volume. Put the region code from your `fly.toml` where the placeholder is: it must match the `primary_region` line exactly. The volume's name must be `data`, the name the template's `[mounts]` section asks for. This is [`fly volumes create`](https://docs.fly.io/flyctl/cmd/fly_volumes_create).
 
 ```sh
-fly volumes create data --region iad --size 1
+fly volumes create data --region <your region> --size 1
 ```
 
-7. **Unconfirmed:** hand the empty volume to the app's user. The app runs as user id 1001, not as root, and stops at start if it cannot write to `/data`. Fly's pages do not say who owns a new volume. If it is root, the app's log says `data folder /data is missing or not writable`. This one-off command starts a throwaway Machine from the small public `alpine` image, makes user 1001 the owner of the volume, and removes the Machine again. It is harmless if it was not needed. It uses [`fly machine run`](https://docs.fly.io/flyctl/cmd/fly_machine_run) with its documented `--volume` and `--rm` options, but the command as a whole has not been run.
+> [!WARNING]
+> A volume in any other region than `primary_region` is not used: the deploy then creates a second volume next to the Machine, and you pay for both. If that happened, list them with `fly volumes list` and remove the stray one with `fly volumes destroy <volume id>`.
 
-```sh
-fly machine run alpine chown 1001:1001 /data --volume data:/data --region iad --rm
-```
-
-8. Generate a setup code. Never invent one yourself: the app refuses a code shorter than 16 characters. This prints 32 random characters; `openssl` comes with macOS, Linux and Git for Windows.
+7. Generate a setup code. Never invent one yourself: the app refuses a code shorter than 16 characters. This prints 32 random characters; `openssl` comes with macOS, Linux and Git for Windows.
 
 ```sh
 openssl rand -hex 16
 ```
 
-9. Save the code in your password manager, then store it as a Fly secret. Put your code where the placeholder is. [Fly's secrets page](https://docs.fly.io/apps/secrets) says a secret is kept encrypted and handed to the app as an environment variable when the Machine starts.
+8. Save the code in your password manager, then store it as a Fly secret with [`fly secrets import`](https://docs.fly.io/flyctl/cmd/fly_secrets_import), which reads the secret from what you type instead of from the command line. That keeps the code out of your terminal's history. [Fly's secrets page](https://docs.fly.io/apps/secrets) says a secret is kept encrypted and handed to the app as an environment variable when the Machine starts.
 
 ```sh
-fly secrets set SETUP_CODE=<your setup code>
+fly secrets import
 ```
 
+The command waits for input. Type this one line, with your code where the placeholder is, and press Enter.
+
+```text
+SETUP_CODE=<your setup code>
+```
+
+Then end the input: press Ctrl+D on macOS and Linux, or Ctrl+Z and then Enter on Windows. **Unconfirmed:** Fly's page says the values are read from standard input as NAME=VALUE pairs; typing them by hand like this has not been run.
+
 > [!WARNING]
-> Whoever enters the setup code first becomes the owner of the platform. Never write it into `fly.toml` or any other file in the repository, and keep it private until you finish [step 5](#5-open-the-setup-wizard). The command above also leaves the code in your terminal's history.
+> Whoever enters the setup code first becomes the owner of the platform. Never write it into `fly.toml` or any other file in the repository, never pass it on a command line, and keep it private until you finish [step 5](#5-open-the-setup-wizard).
 
 **How to tell it worked:** this lists one volume named `data`, and `fly secrets list` shows `SETUP_CODE` with no value.
 
@@ -132,6 +137,18 @@ fly status
 
 ```sh
 fly logs
+```
+
+4. **Unconfirmed:** check who owns the volume. The app runs as user id 1001, not as root, and stops at start if it cannot write to `/data`. Fly's reference pages do not say who owns a new volume. In [a thread on Fly's community forum](https://community.fly.io/t/grafana-cannot-write-to-mounted-volume/2877) from 2021, a Fly staff member writes that Fly changes the ownership of the volume to match the image's user, so no extra step should be needed. This shows the owner; the two numbers in the line should both be `1001`.
+
+```sh
+fly ssh console -C "ls -ldn /data"
+```
+
+If the owner is `0` instead, the log from item 3 says `data folder /data is missing or not writable`. Hand the folder to the app's user while the Machine is up, then deploy again. If you cannot connect because the Machine keeps stopping, stop here and tell the owner: the image then needs a change.
+
+```sh
+fly ssh console -C "chown 1001:1001 /data"
 ```
 
 > [!WARNING]
@@ -299,8 +316,8 @@ Opened on 2026-11-17.
 
 - [Fly.io resource pricing](https://docs.fly.io/about/pricing), [free trial](https://docs.fly.io/about/free-trial) and [free waiver](https://docs.fly.io/about/free-waiver), for step 1.
 - [App configuration (fly.toml)](https://docs.fly.io/reference/configuration), for every key in the template: `app`, `primary_region`, `kill_signal`, `kill_timeout`, `[env]`, `[http_service]` and its checks, `[mounts]` and `[[vm]]`.
-- [Install flyctl](https://docs.fly.io/flyctl/install), [fly auth login](https://docs.fly.io/flyctl/cmd/fly_auth_login), [fly apps create](https://docs.fly.io/flyctl/cmd/fly_apps_create), [fly volumes create](https://docs.fly.io/flyctl/cmd/fly_volumes_create), [fly machine run](https://docs.fly.io/flyctl/cmd/fly_machine_run), [Secrets](https://docs.fly.io/apps/secrets) and [Fly regions](https://docs.fly.io/reference/regions), for step 2.
-- [fly deploy](https://docs.fly.io/flyctl/cmd/fly_deploy), [Deploy an app](https://docs.fly.io/launch/deploy) and [App availability](https://docs.fly.io/apps/app-availability), for step 3.
+- [Install flyctl](https://docs.fly.io/flyctl/install), [fly auth login](https://docs.fly.io/flyctl/cmd/fly_auth_login), [fly apps create](https://docs.fly.io/flyctl/cmd/fly_apps_create), [fly volumes create](https://docs.fly.io/flyctl/cmd/fly_volumes_create), [fly secrets import](https://docs.fly.io/flyctl/cmd/fly_secrets_import), [Secrets](https://docs.fly.io/apps/secrets) and [Fly regions](https://docs.fly.io/reference/regions), for step 2.
+- [fly deploy](https://docs.fly.io/flyctl/cmd/fly_deploy), [Deploy an app](https://docs.fly.io/launch/deploy) and [App availability](https://docs.fly.io/apps/app-availability), for step 3, and [a Fly community thread on volume ownership](https://community.fly.io/t/grafana-cannot-write-to-mounted-volume/2877), which is a forum post and not documentation.
 - [Custom domains](https://docs.fly.io/networking/custom-domain) and [fly certs add](https://docs.fly.io/flyctl/cmd/fly_certs_add), for step 4.
 - [Volumes overview](https://docs.fly.io/volumes/overview), [Manage volume snapshots](https://docs.fly.io/volumes/snapshots), [fly ssh console](https://docs.fly.io/flyctl/cmd/fly_ssh_console) and [fly ssh sftp get](https://docs.fly.io/flyctl/cmd/fly_ssh_sftp_get), for step 6.
 - [Scale the number of Machines](https://docs.fly.io/launch/scale-count) and [fly apps destroy](https://docs.fly.io/flyctl/cmd/fly_apps_destroy), for step 8.
