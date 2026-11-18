@@ -3,12 +3,13 @@
 # official Debian 13 container and one Debian 12 container (no network, the deploy
 # folder mounted read-only, removed afterwards) and runs this same file inside each as
 # root. Inside, install.sh runs against a temporary root (DP_ROOT) with docker, apt-get,
-# curl, gpg, snap, dpkg, dpkg-query, ss, getent and ip replaced by stubs that record what
-# would be run; the tests assert on that record and on the files written.
+# curl, gpg, snap, dpkg, dpkg-query, ss, getent, ip and sleep replaced by stubs that
+# record what would be run; the tests assert on that record and on the files written.
 #
 # Not covered here, only on a clean server: real package installation, real
 # certificate issuance, real ports and a real Cloudflare Tunnel (the tunnel tests use a
-# made-up token and the docker stub, so cloudflared never runs here).
+# made-up token and the docker stub, so cloudflared never runs here), and a real answer
+# from /healthz (the curl stub answers for the two addresses in the sandbox's .env).
 #
 # Usage: bash deploy/test-install.sh          (env: DEBIAN_IMAGES="debian:13 debian:12")
 #        bash deploy/test-install.sh --inside (inside a Debian container, as root)
@@ -61,6 +62,14 @@ $TOK
 
 "
 DOCKER_FPR=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+# The second address of a two-address install, and an address of this server (the ip
+# stub's), which makes a name resolve here.
+APP=app.example.com
+HERE=203.0.113.10
+# The Caddyfiles of version 0.1.3, by checksum: an install without a second address
+# still writes exactly these bytes.
+CADDYFILE_0_1_3=0f121757a027ffd30a0154a22501f6dcfa5b18a3eeff2d8735092098cb0ce001
+TUNNEL_CADDYFILE_0_1_3=fc5e331bb4f60c0a465550aef5f72fafa9801e7b240c180d7d8b3ff581d2c041
 PASSES=0
 FAILS=0
 
@@ -132,6 +141,9 @@ case "$args" in
     in_env="$(sed -n 's/^TUNNEL_TOKEN=//p' "$envfile" 2>/dev/null | tail -n 1)"
     printf '%s\n' "${TUNNEL_TOKEN:-$in_env}" >>"$STUB_STATE/up-tokens"
     printf '%s\n' "$in_env" >>"$STUB_STATE/up-env-tokens"
+    # up-names: the two host names as this start's own environment holds them, which
+    # Compose would read before .env.
+    printf '%s %s\n' "${DOMAIN-unset}" "${APP_DOMAIN-unset}" >>"$STUB_STATE/up-names"
     # STUB_UP_SIGNAL: the run gets that signal during the starts listed in STUB_UP_SIGNAL_ON
     # (default: the first). The first start is cut short by it; a later one finishes.
     if [ -n "${STUB_UP_SIGNAL:-}" ] && [[ " ${STUB_UP_SIGNAL_ON:-1} " == *" $n "* ]]; then
@@ -168,8 +180,38 @@ EOF
   cat >"$b/curl" <<'EOF'
 #!/bin/bash
 printf 'curl %s\n' "$*" >>"$STUB_LOG"
-out=""; prev=""
-for a in "$@"; do [ "$prev" != "-o" ] || out="$a"; prev="$a"; done
+out=""; prev=""; url=""
+for a in "$@"; do
+  [ "$prev" != "-o" ] || out="$a"
+  case "$a" in https://*/healthz) url="$a" ;; esac
+  prev="$a"
+done
+# /healthz of an address: what the platform answers when it sees the host it was asked
+# on, going by the two names in the sandbox's .env. STUB_HEALTH_TOURS and STUB_HEALTH_APP
+# replace the answer of that address; "fail" means no answer at all.
+if [ -n "$url" ]; then
+  host="${url#https://}"; host="${host%/healthz}"
+  envfile="$DP_ROOT/opt/demo-platform/.env"
+  role=""
+  [ "$host" != "$(sed -n 's/^DOMAIN=//p' "$envfile" 2>/dev/null)" ] || role=tours
+  [ "$host" != "$(sed -n 's/^APP_DOMAIN=//p' "$envfile" 2>/dev/null)" ] || role=app
+  answer='{"ok":true}'
+  [ -z "$role" ] || answer="{\"ok\":true,\"address\":\"$role\"}"
+  [ "$role" != tours ] || [ -z "${STUB_HEALTH_TOURS:-}" ] || answer="$STUB_HEALTH_TOURS"
+  [ "$role" != app ] || [ -z "${STUB_HEALTH_APP:-}" ] || answer="$STUB_HEALTH_APP"
+  [ "$answer" != fail ] || { echo "curl: (7) Failed to connect" >&2; exit 7; }
+  # STUB_HEALTH_SIGNAL: the run gets that signal while an address is asked. The run is
+  # this stub's parent, or that one's parent when the stub was started from a subshell.
+  if [ -n "${STUB_HEALTH_SIGNAL:-}" ]; then
+    run_pid="$PPID"
+    above="$(awk '{print $4}' "/proc/$PPID/stat")"
+    if tr '\0' ' ' <"/proc/$above/cmdline" | grep -q '/src/install\.sh'; then run_pid="$above"; fi
+    kill -s "$STUB_HEALTH_SIGNAL" "$run_pid"
+    exit 143
+  fi
+  printf '%s' "$answer"
+  exit 0
+fi
 [ -z "$out" ] || printf -- '-----BEGIN PGP PUBLIC KEY BLOCK-----\nstub\n-----END PGP PUBLIC KEY BLOCK-----\n' >"$out"
 exit 0
 EOF
@@ -209,6 +251,8 @@ EOF
   cat >"$b/getent" <<'EOF'
 #!/bin/bash
 [ -n "${STUB_RESOLVE:-}" ] || exit 2
+# STUB_NO_RESOLVE: names that do not resolve although the others do.
+for n in ${STUB_NO_RESOLVE:-}; do [ "$n" != "$2" ] || exit 2; done
 for ip in $STUB_RESOLVE; do echo "$ip      STREAM $2"; done
 EOF
   cat >"$b/ip" <<'EOF'
@@ -216,6 +260,12 @@ EOF
 for a in ${STUB_LOCAL_IPS:-203.0.113.10}; do
   echo "2: eth0    inet $a/24 brd 203.0.113.255 scope global eth0"
 done
+EOF
+  # The pauses between two tries of an address take no time here.
+  cat >"$b/sleep" <<'EOF'
+#!/bin/bash
+printf 'sleep %s\n' "$*" >>"$STUB_LOG"
+exit 0
 EOF
   chmod +x "$b"/*
 }
@@ -253,6 +303,22 @@ $1
   [ "$RC" = 0 ] || { cat "$OUT" "$ERR"; die "install with data folder $1 failed"; }
 }
 tunnel_install() { install_sh "$TUNNEL_ANSWERS" install --tunnel --yes; [ "$RC" = 0 ] || { cat "$OUT" "$ERR"; die "tunnel install failed"; }; }
+# A fresh direct install with a second address; both names resolve to this server.
+two_install() {
+  STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes "--app-domain=$APP"
+  [ "$RC" = 0 ] || { cat "$OUT" "$ERR"; die "install with a second address failed"; }
+}
+tunnel_two_install() {
+  install_sh "$TUNNEL_ANSWERS" install --tunnel --yes "--app-domain=$APP"
+  [ "$RC" = 0 ] || { cat "$OUT" "$ERR"; die "tunnel install with a second address failed"; }
+}
+# How often /healthz of a host was asked for.
+asked() { grep -c -- "^curl .*https://$1/healthz\$" "$LOG" || true; }
+sum_of() { sha256sum <"$1" | awk '{print $1}'; }
+# The sentence a run prints when an address does not report its own role.
+wrong_role() { printf 'https://%s/healthz answered, but the platform does not see it as its %s address. Check DOMAIN and APP_DOMAIN in /opt/demo-platform/.env, and that nothing in front of the platform changes the Host header.' "$1" "$2"; }
+# The sentence for an address that answers without naming any role.
+old_platform() { printf 'https://%s/healthz answered, but the platform running here is older than two addresses. Run: sudo bash %s update' "$1" "$SCRIPT"; }
 # The token appears nowhere in what the run printed or in any stub's command line.
 token_not_shown() { ! grep -qF -- "$TOK" "$OUT" "$ERR" "$LOG"; }
 # Nor does a piece of either token: its first or last 12 characters.
@@ -426,6 +492,11 @@ test_embedded_files_match_deploy() {
   expect "Caddyfile differs from deploy/caddy/Caddyfile" cmp -s <(caddyfile_content) /src/caddy/Caddyfile
   expect "tunnel compose file differs from deploy/tunnel/docker-compose.yml" cmp -s <(tunnel_compose_file_content) /src/tunnel/docker-compose.yml
   expect "tunnel Caddyfile differs from deploy/tunnel/caddy/Caddyfile" cmp -s <(tunnel_caddyfile_content) /src/tunnel/caddy/Caddyfile
+  expect "two-address Caddyfile differs from deploy/caddy/Caddyfile.two" cmp -s <(caddyfile_two_content) /src/caddy/Caddyfile.two
+  expect "two-address tunnel Caddyfile differs from deploy/tunnel/caddy/Caddyfile.two" cmp -s <(tunnel_caddyfile_two_content) /src/tunnel/caddy/Caddyfile.two
+  # The two-address files are the one-address files with another site address line.
+  expect "direct: only the site address line differs" test "$(diff <(caddyfile_content) <(caddyfile_two_content) | grep -c '^[<>]')" = 2
+  expect "tunnel: only the site address line differs" test "$(diff <(tunnel_caddyfile_content) <(tunnel_caddyfile_two_content) | grep -c '^[<>]')" = 2
 }
 
 test_token_validation() {
@@ -1820,6 +1891,525 @@ test_a_signal_without_a_token_on_trial_starts_nothing_again() {
   expect "tunnel rerun: one start only" test "$(wc -l <"$STATE/up-tokens")" = 1
   expect "tunnel rerun: no file changed" test "$(snapshot)" = "$before"
   expect "tunnel rerun: no word of a new token" test "$(cat "$OUT" "$ERR" | grep -c 'was not saved')" = 0
+}
+
+# ---------------------------------------------------------------- two addresses
+
+test_app_domain_validation() {
+  new_sandbox; load_functions
+  parse_args; [ -z "$APP_DOMAIN_FLAG" ] || die "an app address without the option"
+  parse_args install "--app-domain=$APP"; [ "$APP_DOMAIN_FLAG" = "$APP" ] || die "--app-domain=<name>"
+  APP_DOMAIN_FLAG=""; parse_args "--app-domain=$APP" --yes; [ "$COMMAND $APP_DOMAIN_FLAG" = "install $APP" ] || die "the default command"
+  local bad
+  for bad in "--app-domain=" "--app-domain" "--app-domain=APP.example.com" "--app-domain=https://app.example.com" \
+             "--app-domain=app.example.com/x" "--app-domain=localhost" "--app-domain=1.2.3.4" "--app-domain=app.example.com." \
+             "--app-domain=*.example.com" "--app-domain=a_b.example.com" "--app-domain=$APP --app-domain=other.example.com" \
+             "update --app-domain=$APP" "status --app-domain=$APP" "backup --app-domain=$APP" "uninstall --app-domain=$APP"; do
+    # shellcheck disable=SC2086
+    (set -f; APP_DOMAIN_FLAG=""; parse_args $bad) >/dev/null 2>&1; [ $? = 2 ] || die "accepted: $bad"
+  done
+  # The messages, and that a refused option changes nothing.
+  install_sh "$ANSWERS" install --yes "--app-domain=https://app.example.com"
+  expect "a name with a scheme is refused" test "$RC" = 2
+  expect "says what the option takes" has "$ERR" "--app-domain must be a host name in lowercase, such as app.example.com, without https:// and without a path"
+  expect "nothing written" test ! -e "$R/opt"
+  expect "no command run" test ! -s "$LOG"
+  install_sh "" update "--app-domain=$APP"
+  expect "the option with update is refused" test "$RC" = 2
+  expect "says where it goes" has "$ERR" "--app-domain goes only with install"
+  install_sh "" --help
+  expect "the usage text names the option" has "$OUT" "  --app-domain=<name>  With install: a second address, for the app. The domain asked for stays the address of the tours."
+}
+
+test_fresh_install_with_app_domain_writes_env_compose_and_two_address_caddyfile() {
+  new_sandbox
+  two_install
+  local code; code="$(setup_code)"
+  local want="# Written by install.sh. Root only: SETUP_CODE claims this install. Never share or commit.
+DOMAIN=$DOMAIN
+APP_DOMAIN=$APP
+ACME_EMAIL=$EMAIL
+DATA_DIR=/opt/demo-platform/data
+APP_IMAGE=demo-platform:latest
+SETUP_CODE=$code"
+  expect ".env is the direct-mode file with the app address in it" test "$(cat "$INST/.env")" = "$want"
+  expect ".env is 600 root" test "$(stat -c '%a %u:%g' "$INST/.env")" = "600 0:0"
+  expect "compose file is the deploy copy" cmp -s "$INST/docker-compose.yml" /src/docker-compose.yml
+  # shellcheck disable=SC2016 # the literal compose placeholders
+  expect "the app gets the tours address only when there is an app address" grep -qxF '      TOURS_HOST: ${APP_DOMAIN:+${DOMAIN}}' "$INST/docker-compose.yml"
+  # shellcheck disable=SC2016
+  expect "the app gets the app address" grep -qxF '      APP_HOST: ${APP_DOMAIN:-}' "$INST/docker-compose.yml"
+  # shellcheck disable=SC2016
+  expect "Caddy gets the app address" grep -qxF '      APP_DOMAIN: ${APP_DOMAIN:-}' "$INST/docker-compose.yml"
+  expect "Caddyfile is the two-address copy" cmp -s "$INST/caddy/Caddyfile" /src/caddy/Caddyfile.two
+  # shellcheck disable=SC2016 # the literal Caddyfile placeholders
+  expect "one site block for both names" grep -qxF '{$DOMAIN}, {$APP_DOMAIN} {' "$INST/caddy/Caddyfile"
+  expect "Caddyfile is 600 root" test "$(stat -c '%a %u:%g' "$INST/caddy/Caddyfile")" = "600 0:0"
+  expect "the summary names the app address" has "$OUT" "app address: $APP"
+  expect "the DNS record of the tours address is checked" has "$OUT" "$DOMAIN resolves to $HERE, an address of this server"
+  expect "the DNS record of the app address is checked" has "$OUT" "$APP resolves to $HERE, an address of this server"
+  expect "the stack is started before an address is asked" test "$(grep -nE ' up -d |/healthz$' "$LOG" | head -n 1 | grep -c ' up -d ')" = 1
+  expect "the tours address is asked for its role, once" test "$(asked "$DOMAIN")" = 1
+  expect "the app address is asked for its role, once" test "$(asked "$APP")" = 1
+  expect "asked over HTTPS only, and without reading a curl settings file" test "$(grep -c '^curl -q --proto =https --tlsv1.2 ' "$LOG")" = 2
+  expect "-q is the first argument of every question" test "$(grep -c 'healthz$' "$LOG")" = "$(grep -c '^curl -q .*healthz$' "$LOG")"
+  expect "says both addresses and which one Mythicshot uses" has "$OUT" "Tours are at https://$DOMAIN; the app address is https://$APP. Mythicshot keeps using https://$DOMAIN."
+  expect "the wizard is on the tours address" has "$OUT" "https://$DOMAIN/setup"
+  expect "no wizard address on the app address" hasnt "$OUT" "https://$APP/setup"
+  expect "code printed exactly once" test "$(grep -c -- "$code" "$OUT")" = 1
+  expect "code never on a stub's command line" hasnt "$LOG" "$code"
+  expect "no temporary files left" test "$(find "$R" -name '.*.new.*' | wc -l)" = 0
+  # Run again, with and without the option: nothing changes.
+  local before; before="$(snapshot)"
+  : >"$LOG"
+  STUB_RESOLVE="$HERE" install_sh "" install
+  expect "second run succeeds without input" test "$RC" = 0
+  expect "every file, mode and owner unchanged" test "$(snapshot)" = "$before"
+  expect "both addresses are asked again" test "$(asked "$DOMAIN") $(asked "$APP")" = "1 1"
+  expect "the code is not printed again" hasnt "$OUT" "$code"
+  STUB_RESOLVE="$HERE" install_sh "" install "--app-domain=$APP"
+  expect "the recorded name given again is fine" test "$RC" = 0
+  expect "still unchanged" test "$(snapshot)" = "$before"
+  # status names both addresses and asks each for its role.
+  : >"$LOG"
+  STUB_RESOLVE="$HERE" install_sh "" status
+  expect "status succeeds" test "$RC" = 0
+  expect "status names the tours address" has "$OUT" "address: https://$DOMAIN"
+  expect "status names the app address" has "$OUT" "app address: https://$APP"
+  expect "status asks both addresses" test "$(asked "$DOMAIN") $(asked "$APP")" = "1 1"
+  STUB_HEALTH_APP='{"ok":true,"address":"tours"}' STUB_RESOLVE="$HERE" install_sh "" status
+  expect "status fails when an address reports the wrong role" test "$RC" = 1
+  expect "status says which" has "$ERR" "$(wrong_role "$APP" app)"
+}
+
+test_each_address_must_report_its_own_role() {
+  # The app address is seen as the tours address (something rewrites the Host header).
+  new_sandbox
+  STUB_HEALTH_APP='{"ok":true,"address":"tours"}' STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes "--app-domain=$APP"
+  expect "the run fails" test "$RC" = 1
+  expect "names the address and the role it should have" has "$ERR" "$(wrong_role "$APP" app)"
+  expect "does not blame the address that is right" hasnt "$ERR" "https://$DOMAIN/healthz answered"
+  expect "the install is not undone: .env" test -f "$INST/.env"
+  expect "the install is not undone: stack file" test -f "$INST/docker-compose.yml"
+  expect "the install is not undone: Caddyfile" cmp -s "$INST/caddy/Caddyfile" /src/caddy/Caddyfile.two
+  expect "the install is not undone: data folder" test -d "$DATA"
+  expect "nothing is taken down" hasnt "$LOG" " down"
+  expect "says nothing was removed" hasnt "$ERR" "removed "
+  expect "the setup code is still printed, once" test "$(grep -c -- "$(setup_code)" "$OUT")" = 1
+  # The next run finds the same and fails the same way, changing nothing.
+  local before; before="$(snapshot)"
+  STUB_HEALTH_APP='{"ok":true,"address":"tours"}' STUB_RESOLVE="$HERE" install_sh "" install
+  expect "the next run fails too" test "$RC" = 1
+  expect "and changes nothing" test "$(snapshot)" = "$before"
+  # Each address is seen in the other's role.
+  new_sandbox
+  STUB_HEALTH_TOURS='{"ok":true,"address":"app"}' STUB_HEALTH_APP='{"ok":true,"address":"tours"}' STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes "--app-domain=$APP"
+  expect "both wrong: the run fails" test "$RC" = 1
+  expect "both wrong: names the tours address" has "$ERR" "$(wrong_role "$DOMAIN" tours)"
+  expect "both wrong: names the app address" has "$ERR" "$(wrong_role "$APP" app)"
+  # A name that does not point at this server yet is not asked, and that is no failure.
+  new_sandbox
+  STUB_RESOLVE="$HERE" STUB_NO_RESOLVE="$APP" install_sh "$ANSWERS" install --yes "--app-domain=$APP"
+  expect "unresolved app address: the run succeeds" test "$RC" = 0
+  expect "unresolved app address: the tours address is asked" test "$(asked "$DOMAIN")" = 1
+  expect "unresolved app address: the app address is not" test "$(asked "$APP")" = 0
+  expect "unresolved app address: says it was not asked" has "$ERR" "https://$APP/healthz was not asked"
+  expect "unresolved app address: the DNS warning names its record" has "$ERR" "$APP.  A     $HERE"
+  new_sandbox
+  install_sh "$ANSWERS" install --yes "--app-domain=$APP"
+  expect "neither resolves: the run succeeds" test "$RC" = 0
+  expect "neither resolves: no address is asked" test "$(grep -c healthz "$LOG")" = 0
+  # An address that does not answer is tried again, then reported; that is no failure.
+  new_sandbox
+  STUB_HEALTH_APP=fail STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes "--app-domain=$APP"
+  expect "no answer: the run succeeds" test "$RC" = 0
+  expect "no answer: tried more than once" test "$(asked "$APP")" -gt 1
+  expect "no answer: says so" has "$ERR" "https://$APP/healthz did not answer"
+  expect "no answer: does not call it a wrong role" hasnt "$ERR" "answered, but"
+  # Interrupted while an address is asked: the stack runs, so the install stays.
+  new_sandbox
+  STUB_HEALTH_SIGNAL=TERM STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes "--app-domain=$APP"
+  expect "interrupted: exit code 143" test "$RC" = 143
+  expect "interrupted: .env stays" test -f "$INST/.env"
+  expect "interrupted: the stack files stay" test -f "$INST/docker-compose.yml" -a -f "$INST/caddy/Caddyfile"
+  expect "interrupted: the data folder stays" test -d "$DATA"
+  expect "interrupted: nothing is removed or taken down" test "$(grep -c 'removed ' "$ERR") $(grep -c ' down' "$LOG")" = "0 0"
+  expect "interrupted: the setup code was printed before, once" test "$(grep -c -- "$(setup_code)" "$OUT")" = 1
+  # Without curl the addresses cannot be asked; the run says how to check by hand.
+  new_sandbox
+  two_install
+  rm -f "$T/bin/curl"
+  if ! command -v curl >/dev/null 2>&1; then
+    STUB_RESOLVE="$HERE" install_sh "" install
+    expect "no curl: the run succeeds" test "$RC" = 0
+    expect "no curl: says how to check by hand" has "$ERR" "curl is not installed"
+  fi
+}
+
+test_install_without_app_domain_writes_todays_files() {
+  new_sandbox
+  STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes
+  expect "direct install succeeds" test "$RC" = 0
+  expect "the Caddyfile is the one of 0.1.3, byte for byte" test "$(sum_of "$INST/caddy/Caddyfile")" = "$CADDYFILE_0_1_3"
+  expect "the deploy copy is that file too" test "$(sum_of /src/caddy/Caddyfile)" = "$CADDYFILE_0_1_3"
+  expect ".env has no app address" test "$(grep -c 'APP_DOMAIN' "$INST/.env")" = 0
+  expect ".env has six lines, as before" test "$(wc -l <"$INST/.env")" = 6
+  expect "no address is asked for its role" test "$(grep -c healthz "$LOG")" = 0
+  expect "no curl is run at all" test "$(grep -c '^curl' "$LOG")" = 0
+  expect "no word of a second address" test "$(cat "$OUT" "$ERR" | grep -ciE 'app address|APP_DOMAIN|Mythicshot keeps')" = 0
+  expect "the closing line is the one from before" has "$OUT" "The platform is running at https://$DOMAIN"
+  install_sh "" status
+  expect "status has no word of a second address" test "$(cat "$OUT" "$ERR" | grep -ciE 'app address|healthz')" = 0
+  new_sandbox
+  tunnel_install
+  expect "the tunnel Caddyfile is the one of 0.1.3, byte for byte" test "$(sum_of "$INST/caddy/Caddyfile")" = "$TUNNEL_CADDYFILE_0_1_3"
+  expect "the tunnel deploy copy is that file too" test "$(sum_of /src/tunnel/caddy/Caddyfile)" = "$TUNNEL_CADDYFILE_0_1_3"
+  expect "tunnel: .env has no app address" test "$(grep -c 'APP_DOMAIN' "$INST/.env")" = 0
+  expect "tunnel: no address is asked for its role" test "$(grep -c '^curl' "$LOG")" = 0
+  expect "tunnel: one published application, as before" has "$OUT" "the tunnel needs one published application (skip this if it is there already):"
+  expect "tunnel: no word of a second address" test "$(cat "$OUT" "$ERR" | grep -ciE 'app address|APP_DOMAIN|Mythicshot keeps|each of')" = 0
+}
+
+test_app_domain_equal_to_domain_refused() {
+  new_sandbox
+  install_sh "$ANSWERS" install --yes "--app-domain=$DOMAIN"
+  expect "a first install is refused" test "$RC" = 1
+  expect "says the two names must differ" has "$ERR" "the app address must be a different name than the tours address"
+  expect "nothing written" test ! -e "$R/opt"
+  expect "nothing started" hasnt "$LOG" " up "
+  expect "it stops at the domain, before the other questions" hasnt "$ERR" "Email for the certificate"
+  # The domain is lowercased before it is compared.
+  new_sandbox
+  install_sh "
+APP.Example.COM
+$EMAIL
+
+" install --yes "--app-domain=$APP"
+  expect "the same name in capitals is refused too" test "$RC" = 1
+  expect "nothing written" test ! -e "$R/opt"
+  new_sandbox
+  install_sh "$TUNNEL_ANSWERS" install --tunnel --yes "--app-domain=$DOMAIN"
+  expect "tunnel: refused" test "$RC" = 1
+  expect "tunnel: before the token is asked for" hasnt "$ERR" "Tunnel token from"
+  expect "tunnel: nothing written" test ! -e "$R/opt"
+  # On an existing install too.
+  new_sandbox
+  fresh_install
+  local before; before="$(snapshot)"
+  : >"$LOG"
+  install_sh "" install "--app-domain=$DOMAIN"
+  expect "an existing install: refused" test "$RC" = 1
+  expect "an existing install: says the two names must differ" has "$ERR" "the app address must be a different name than the tours address"
+  expect "an existing install: nothing changed" test "$(snapshot)" = "$before"
+  expect "an existing install: nothing started or stopped" test "$(grep -cE ' (up|down|pull) ' "$LOG")" = 0
+}
+
+test_app_domain_on_an_existing_install_is_refused_with_the_steps() {
+  new_sandbox
+  fresh_install
+  local before; before="$(snapshot)"
+  : >"$LOG"
+  install_sh "" install --yes "--app-domain=$APP"
+  expect "refused" test "$RC" = 1
+  expect "says what .env lacks and how to add it" has "$ERR" "this install's .env does not hold APP_DOMAIN=$APP, and install.sh does not change that file. To add the second address, add that line to /opt/demo-platform/.env as root, then run: sudo bash $SCRIPT install"
+  expect "nothing changed" test "$(snapshot)" = "$before"
+  expect "nothing started or stopped" test "$(grep -cE ' (up|down|pull) ' "$LOG")" = 0
+  expect "no address asked" test "$(grep -c '^curl' "$LOG")" = 0
+  # Another name than the recorded one is refused the same way.
+  new_sandbox
+  two_install
+  before="$(snapshot)"
+  : >"$LOG"
+  install_sh "" install "--app-domain=other.example.com"
+  expect "another name: refused" test "$RC" = 1
+  expect "another name: names the one given" has "$ERR" "does not hold APP_DOMAIN=other.example.com"
+  expect "another name: nothing changed" test "$(snapshot)" = "$before"
+  expect "another name: nothing started or stopped" test "$(grep -cE ' (up|down|pull) ' "$LOG")" = 0
+  # On a tunnel install: refused before the token is touched.
+  new_sandbox
+  tunnel_install
+  before="$(snapshot)"
+  forget_starts
+  install_sh "$TOK2
+" install --new-token "--app-domain=$APP"
+  expect "tunnel: refused" test "$RC" = 1
+  expect "tunnel: says how to add it" has "$ERR" "does not hold APP_DOMAIN=$APP"
+  expect "tunnel: no token question" hasnt "$ERR" "Tunnel token from"
+  expect "tunnel: nothing changed" test "$(snapshot)" = "$before"
+  expect "tunnel: nothing started" test ! -e "$STATE/up-tokens"
+  expect "tunnel: no part of a token is shown" no_token_part_shown
+}
+
+test_app_domain_added_by_hand_is_picked_up_and_old_files_backed_up() {
+  new_sandbox
+  fresh_install
+  local code; code="$(setup_code)"
+  echo marker >"$DATA/marker"
+  # The stack file as a version before two addresses wrote it: without the new lines.
+  sed -i '/APP_DOMAIN/d; /TOURS_HOST/d; /APP_HOST/d' "$INST/docker-compose.yml"
+  local old_compose; old_compose="$(sum_of "$INST/docker-compose.yml")"
+  printf 'APP_DOMAIN=%s\n' "$APP" >>"$INST/.env"
+  local env_sum; env_sum="$(sum_of "$INST/.env")"
+  : >"$LOG"
+  STUB_RESOLVE="$HERE" install_sh "" install
+  expect "the run succeeds without input" test "$RC" = 0
+  expect ".env is not rewritten" test "$(sum_of "$INST/.env")" = "$env_sum"
+  expect "the two-address Caddyfile is written" cmp -s "$INST/caddy/Caddyfile" /src/caddy/Caddyfile.two
+  local bak; bak="$(find "$INST/caddy" -name 'Caddyfile.bak-*')"
+  expect "one copy of the old Caddyfile" test "$(printf '%s\n' "$bak" | grep -c .)" = 1
+  expect "the copy is the one-address Caddyfile" test "$(sum_of "$bak")" = "$CADDYFILE_0_1_3"
+  expect "the stack file is the deploy copy" cmp -s "$INST/docker-compose.yml" /src/docker-compose.yml
+  bak="$(find "$INST" -maxdepth 1 -name 'docker-compose.yml.bak-*')"
+  expect "one copy of the old stack file" test "$(printf '%s\n' "$bak" | grep -c .)" = 1
+  expect "the copy holds the old bytes" test "$(sum_of "$bak")" = "$old_compose"
+  expect "Caddy is restarted for the new Caddyfile" grep -q 'compose .* restart caddy$' "$LOG"
+  expect "both DNS records are checked" has "$OUT" "$APP resolves to $HERE"
+  expect "both addresses are asked for their role" test "$(asked "$DOMAIN") $(asked "$APP")" = "1 1"
+  expect "says both addresses" has "$OUT" "Tours are at https://$DOMAIN; the app address is https://$APP. Mythicshot keeps using https://$DOMAIN."
+  expect "the setup code is kept and not printed" test "$(setup_code) $(cat "$OUT" "$ERR" | grep -c -- "$code")" = "$code 0"
+  expect "the data is kept" test "$(cat "$DATA/marker")" = marker
+  # The way back: the line taken out again, and install run again.
+  sed -i '/^APP_DOMAIN=/d' "$INST/.env"
+  : >"$LOG"
+  install_sh "" install
+  expect "back to one address succeeds" test "$RC" = 0
+  expect "the one-address Caddyfile is back" test "$(sum_of "$INST/caddy/Caddyfile")" = "$CADDYFILE_0_1_3"
+  expect "the two-address one was saved first" test "$(find "$INST/caddy" -name 'Caddyfile.bak-*' -exec cmp -s {} /src/caddy/Caddyfile.two \; -print | wc -l)" = 1
+  expect "no address is asked any more" test "$(grep -c '^curl' "$LOG")" = 0
+  # An empty line is no second address.
+  printf 'APP_DOMAIN=\n' >>"$INST/.env"
+  install_sh "" install
+  expect "an empty APP_DOMAIN is one address" test "$RC $(sum_of "$INST/caddy/Caddyfile")" = "0 $CADDYFILE_0_1_3"
+}
+
+# update starts the stack from the files on disk: it refuses to while .env and the
+# Caddyfile do not agree on the second address, which only install puts right.
+test_update_refuses_until_install_has_written_the_files_for_the_addresses() {
+  new_sandbox
+  fresh_install
+  printf 'APP_DOMAIN=%s\n' "$APP" >>"$INST/.env"
+  local before; before="$(snapshot)"
+  : >"$LOG"
+  install_sh "" update
+  expect "update is refused" test "$RC" = 1
+  expect "names the command that puts it right" has "$ERR" "Run: sudo bash $SCRIPT install"
+  expect "nothing changed" test "$(snapshot)" = "$before"
+  expect "nothing pulled, backed up or started" test "$(grep -cE ' (up|down|pull|exec) ' "$LOG")" = 0
+  STUB_RESOLVE="$HERE" install_sh "" install
+  expect "install puts it right" test "$RC" = 0
+  : >"$LOG"
+  STUB_RESOLVE="$HERE" install_sh "" update
+  expect "update then succeeds" test "$RC" = 0
+  expect "update asks both addresses for their role" test "$(asked "$DOMAIN") $(asked "$APP")" = "1 1"
+  # The other way round: the line removed, the two-address Caddyfile still there.
+  sed -i '/^APP_DOMAIN=/d' "$INST/.env"
+  : >"$LOG"
+  install_sh "" update
+  expect "update is refused the other way round too" test "$RC" = 1
+  expect "nothing pulled or started" test "$(grep -cE ' (up|down|pull|exec) ' "$LOG")" = 0
+}
+
+test_bad_app_domain_in_env_stops_before_any_change() {
+  new_sandbox
+  fresh_install
+  cp -p "$INST/.env" "$T/env.good"
+  local bad cmd before
+  for bad in "$DOMAIN" "Not a host" "https://app.example.com" "localhost" "app.example.com/x" "APP.example.com"; do
+    cp -p "$T/env.good" "$INST/.env"
+    printf 'APP_DOMAIN=%s\n' "$bad" >>"$INST/.env"
+    before="$(snapshot)"
+    for cmd in install update backup status uninstall; do
+      : >"$LOG"
+      install_sh "" "$cmd" --yes
+      expect "'$bad', $cmd: refused" test "$RC" = 1
+      expect "'$bad', $cmd: says what is wrong and that nothing changed" has "$ERR" "$INST/.env has an APP_DOMAIN that is not a valid host name or is the same as DOMAIN; fix it by hand, nothing was changed"
+      expect "'$bad', $cmd: nothing changed" test "$(snapshot)" = "$before"
+      expect "'$bad', $cmd: nothing started, stopped, pulled or validated" test "$(grep -cE ' (up|down|pull|exec|config|restart) ' "$LOG")" = 0
+    done
+  done
+  cp -p "$T/env.good" "$INST/.env"
+  install_sh "" install
+  expect "the file put right installs again" test "$RC" = 0
+}
+
+test_tunnel_with_app_domain_names_both_published_applications() {
+  new_sandbox
+  tunnel_two_install
+  local code; code="$(setup_code)"
+  local want="# Written by install.sh. Root only: SETUP_CODE claims this install and TUNNEL_TOKEN runs its tunnel. Never share or commit.
+DOMAIN=$DOMAIN
+APP_DOMAIN=$APP
+DEPLOY_MODE=tunnel
+DATA_DIR=/opt/demo-platform/data
+APP_IMAGE=demo-platform:latest
+SETUP_CODE=$code
+TUNNEL_TOKEN=$TOK"
+  expect ".env is the tunnel file with the app address in it" test "$(cat "$INST/.env")" = "$want"
+  expect "compose file is the tunnel copy" cmp -s "$INST/docker-compose.yml" /src/tunnel/docker-compose.yml
+  expect "Caddyfile is the two-address tunnel copy" cmp -s "$INST/caddy/Caddyfile" /src/tunnel/caddy/Caddyfile.two
+  # shellcheck disable=SC2016 # the literal placeholders
+  expect "one site block for both names, plain HTTP" grep -qxF 'http://{$DOMAIN}, http://{$APP_DOMAIN} {' "$INST/caddy/Caddyfile"
+  expect "no certificate is asked for" has "$INST/caddy/Caddyfile" "auto_https off"
+  expect "no service publishes a port" test "$(grep -cE '^[[:space:]]*(ports|network_mode|expose):' "$INST/docker-compose.yml")" = 0
+  expect "the app is not handed the whole .env" test "$(grep -cE '^[[:space:]]*env_file:' "$INST/docker-compose.yml")" = 0
+  # shellcheck disable=SC2016
+  expect "the app gets the tours address by name" grep -qxF '      TOURS_HOST: ${APP_DOMAIN:+${DOMAIN}}' "$INST/docker-compose.yml"
+  # shellcheck disable=SC2016
+  expect "the app gets the app address by name" grep -qxF '      APP_HOST: ${APP_DOMAIN:-}' "$INST/docker-compose.yml"
+  # shellcheck disable=SC2016
+  expect "Caddy gets the app address" grep -qxF '      APP_DOMAIN: ${APP_DOMAIN:-}' "$INST/docker-compose.yml"
+  expect "says what to set up at Cloudflare for both names" has "$OUT" "give the tunnel a published application for each of $DOMAIN and $APP, both with the service URL http://caddy:80"
+  expect "the closing message lists the tours address" has "$OUT" "Hostname:     $DOMAIN"
+  expect "the closing message lists the app address" has "$OUT" "Hostname:     $APP"
+  expect "with the service URL for each" test "$(grep -c 'Service URL:  http://caddy:80' "$OUT")" = 2
+  expect "says both addresses and which one Mythicshot uses" has "$OUT" "Tours are at https://$DOMAIN; the app address is https://$APP. Mythicshot keeps using https://$DOMAIN."
+  expect "no DNS check in tunnel mode" hasnt "$OUT" "points at this server"
+  expect "each address is asked for its role, after the tunnel has connected" test "$(grep -E ' up -d |/healthz$' "$LOG" | sed 's/^docker.*/up/; s/^curl.*/ask/' | tr '\n' ' ')" = "up ask ask "
+  expect "the marker of a tunnel that never connected is gone" test ! -e "$INST/.tunnel-pending"
+  expect "code printed exactly once" test "$(grep -c -- "$code" "$OUT")" = 1
+  expect "no file but .env holds the token" test "$(grep -rlF -- "$TOK" "$R" | sed "s|^$R||")" = /opt/demo-platform/.env
+  expect "the token is not shown" token_not_shown
+  : >"$LOG"
+  install_sh "" status
+  expect "status succeeds" test "$RC" = 0
+  expect "status names both published applications" has "$OUT" "published application for each of $DOMAIN and $APP"
+  expect "status does not show the token" token_not_shown
+  # The app address has no published application yet: it does not answer. No failure.
+  new_sandbox
+  STUB_HEALTH_APP=fail install_sh "$TUNNEL_ANSWERS" install --tunnel --yes "--app-domain=$APP"
+  expect "no published application yet: the run succeeds" test "$RC" = 0
+  expect "no published application yet: says the address did not answer" has "$ERR" "https://$APP/healthz did not answer"
+  expect "no published application yet: points at the published application" has "$ERR" "published application"
+  # The published application rewrites the Host header: the address reports the other role.
+  new_sandbox
+  STUB_HEALTH_APP='{"ok":true,"address":"tours"}' install_sh "$TUNNEL_ANSWERS" install --tunnel --yes "--app-domain=$APP"
+  expect "wrong role: the run fails" test "$RC" = 1
+  expect "wrong role: says which address" has "$ERR" "$(wrong_role "$APP" app)"
+  expect "wrong role: the install stays" test -f "$INST/.env"
+  expect "wrong role: the tunnel did connect, so the marker is gone" test ! -e "$INST/.tunnel-pending"
+  expect "wrong role: the setup code is still printed, once" test "$(grep -c -- "$(setup_code)" "$OUT")" = 1
+  expect "wrong role: nothing is taken down" hasnt "$LOG" " down"
+  expect "wrong role: the token is not shown" token_not_shown
+  # A tunnel that does not connect fails as before, and no address is asked.
+  new_sandbox
+  STUB_FAIL_UP=tunnel install_sh "$TUNNEL_ANSWERS" install --tunnel --yes "--app-domain=$APP"
+  expect "no connection: the run fails" test "$RC" != 0
+  expect "no connection: no address is asked" test "$(grep -c '^curl' "$LOG")" = 0
+  expect "no connection: .env keeps the app address for the next run" grep -qx "APP_DOMAIN=$APP" "$INST/.env"
+  install_sh "
+" install
+  expect "the next run finishes the install with both addresses" test "$RC $(asked "$APP")" = "0 1"
+}
+
+test_dry_run_with_app_domain_writes_nothing() {
+  new_sandbox
+  local before; before="$(snapshot)"
+  STUB_DOCKER_MISSING=1 STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --dry-run --yes "--app-domain=$APP"
+  expect "dry run succeeds" test "$RC" = 0
+  expect "the root is unchanged" test "$(snapshot)" = "$before"
+  expect "prints the .env write with the app address" has "$OUT" "would write DOMAIN, APP_DOMAIN, ACME_EMAIL, DATA_DIR, APP_IMAGE and a new SETUP_CODE"
+  expect "says it would ask both addresses" has "$OUT" "would ask https://$DOMAIN/healthz and https://$APP/healthz"
+  expect "runs no apt-get, curl or compose up" test "$(grep -cE '^(apt-get|curl)| up | config ' "$LOG")" = 0
+  expect "prints no setup code" test "$(cat "$OUT" "$ERR" | grep -cE '[0-9a-f]{32}')" = 0
+  new_sandbox
+  before="$(snapshot)"
+  install_sh "$TUNNEL_ANSWERS" install --tunnel --dry-run --yes "--app-domain=$APP"
+  expect "tunnel dry run succeeds" test "$RC" = 0
+  expect "tunnel: the root is unchanged" test "$(snapshot)" = "$before"
+  expect "tunnel: prints the .env write with the app address" has "$OUT" "would write DOMAIN, APP_DOMAIN, DEPLOY_MODE, DATA_DIR, APP_IMAGE, a new SETUP_CODE and the TUNNEL_TOKEN"
+  expect "tunnel: runs no curl or compose up" test "$(grep -cE '^curl| up | config ' "$LOG")" = 0
+  expect "tunnel: the token is not shown" token_not_shown
+  # On an existing two-address install, for every command.
+  new_sandbox
+  two_install
+  before="$(snapshot)"
+  : >"$LOG"
+  local cmd
+  for cmd in install update backup status uninstall; do
+    STUB_RESOLVE="$HERE" install_sh "" "$cmd" --dry-run --yes
+    expect "$cmd --dry-run succeeds" test "$RC" = 0
+  done
+  expect "nothing changed by any dry run" test "$(snapshot)" = "$before"
+  expect "no dry run asks an address" test "$(grep -c '^curl' "$LOG")" = 0
+  # A line added by hand: the dry run says what it would write and writes nothing.
+  new_sandbox
+  fresh_install
+  printf 'APP_DOMAIN=%s\n' "$APP" >>"$INST/.env"
+  before="$(snapshot)"
+  install_sh "" install --dry-run
+  expect "a dry run after the edit succeeds" test "$RC" = 0
+  expect "and changes nothing" test "$(snapshot)" = "$before"
+}
+
+# An app image from before two addresses answers /healthz without any role: the run
+# says that, not that something changes the Host header.
+test_an_app_older_than_two_addresses_is_named_as_such() {
+  new_sandbox
+  STUB_HEALTH_TOURS='{"ok":true}' STUB_HEALTH_APP='{"ok":true}' STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes "--app-domain=$APP"
+  expect "the run fails" test "$RC" = 1
+  expect "says the platform is older, for the tours address" has "$ERR" "$(old_platform "$DOMAIN")"
+  expect "says the platform is older, for the app address" has "$ERR" "$(old_platform "$APP")"
+  expect "does not use the sentence for a wrong role" hasnt "$ERR" "does not see it as its"
+  expect "the install is not undone" test -f "$INST/.env" -a -f "$INST/docker-compose.yml"
+  expect "nothing is taken down" hasnt "$LOG" " down"
+  # A reply that names the other role keeps the sentence about the Host header.
+  STUB_HEALTH_APP='{"ok":true,"address":"tours"}' STUB_RESOLVE="$HERE" install_sh "" install
+  expect "another role: the run fails" test "$RC" = 1
+  expect "another role: the sentence about the role" has "$ERR" "$(wrong_role "$APP" app)"
+  expect "another role: not called an older platform" hasnt "$ERR" "older than two addresses"
+  # status and the tunnel route say the same.
+  STUB_HEALTH_APP='{"ok":true}' STUB_RESOLVE="$HERE" install_sh "" status
+  expect "status: fails" test "$RC" = 1
+  expect "status: says the platform is older" has "$ERR" "$(old_platform "$APP")"
+  new_sandbox
+  STUB_HEALTH_APP='{"ok":true}' install_sh "$TUNNEL_ANSWERS" install --tunnel --yes "--app-domain=$APP"
+  expect "tunnel: fails" test "$RC" = 1
+  expect "tunnel: says the platform is older" has "$ERR" "$(old_platform "$APP")"
+  expect "tunnel: the token is not shown" token_not_shown
+}
+
+# TOURS_HOST and APP_HOST are the app's own settings; in a Docker install's .env they do
+# nothing, and the script says so instead of leaving the owner to wonder.
+test_host_lines_written_by_hand_are_reported_as_having_no_effect() {
+  new_sandbox
+  fresh_install
+  expect "an install without the lines says nothing about them" test "$(cat "$OUT" "$ERR" | grep -cE 'TOURS_HOST|APP_HOST')" = 0
+  printf 'TOURS_HOST=%s\nAPP_HOST=%s\n' "$DOMAIN" "handwritten.example.net" >>"$INST/.env"
+  local env_sum cmd key; env_sum="$(sum_of "$INST/.env")"
+  for cmd in install status update backup; do
+    install_sh "" "$cmd"
+    expect "$cmd: still succeeds" test "$RC" = 0
+    expect "$cmd: says the lines have no effect and names the setting to use" has "$ERR" "TOURS_HOST or APP_HOST line, which has no effect on an install made by this script: a second address is set with APP_DOMAIN"
+    expect "$cmd: warns once" test "$(grep -c 'has no effect on an install made by this script' "$ERR")" = 1
+    expect "$cmd: prints no value of the lines" test "$(cat "$OUT" "$ERR" | grep -c 'handwritten')" = 0
+  done
+  expect ".env is left as it is" test "$(sum_of "$INST/.env")" = "$env_sum"
+  expect "the one-address Caddyfile stays" test "$(sum_of "$INST/caddy/Caddyfile")" = "$CADDYFILE_0_1_3"
+  expect "no address is asked for a role" test "$(grep -c healthz "$LOG")" = 0
+  for key in TOURS_HOST APP_HOST; do
+    new_sandbox
+    tunnel_install
+    printf '%s=%s\n' "$key" "handwritten.example.net" >>"$INST/.env"
+    install_sh "" install
+    expect "tunnel, $key alone: succeeds with the warning" test "$RC $(grep -c 'has no effect on an install made by this script' "$ERR")" = "0 1"
+    expect "tunnel, $key alone: the token is not shown" token_not_shown
+  done
+}
+
+# Compose reads its own environment before .env, so a DOMAIN or APP_DOMAIN left in the
+# caller's shell must not reach it.
+test_names_in_the_environment_do_not_reach_the_stack() {
+  new_sandbox
+  DOMAIN=other.example.net APP_DOMAIN=other-app.example.net install_sh "$ANSWERS" install --yes
+  expect "a first install succeeds" test "$RC" = 0
+  expect "the domain is the one typed" grep -qx "DOMAIN=tours.example.com" "$INST/.env"
+  expect "no app address is taken from the environment" test "$(grep -c APP_DOMAIN "$INST/.env")" = 0
+  expect "the start was handed neither name by the environment" test "$(sort -u "$STATE/up-names")" = "unset unset"
+  rm -f "$STATE/up-names"
+  DOMAIN=other.example.net APP_DOMAIN=other-app.example.net install_sh "" install
+  expect "a later run succeeds" test "$RC" = 0
+  expect "a later run hands over neither name" test "$(sort -u "$STATE/up-names")" = "unset unset"
+  expect "the names from the environment appear nowhere" test "$(cat "$OUT" "$ERR" "$LOG" | grep -c 'example\.net')" = 0
 }
 
 # ---------------------------------------------------------------- run
