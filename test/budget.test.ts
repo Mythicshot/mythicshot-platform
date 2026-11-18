@@ -385,6 +385,51 @@ describe("the call budget, route by route", () => {
     expect(fresh.json.total).toBe(401);
   }, 600_000);
 
+  it("publish: a fresh start that cancels a publish of an older draft, then loses its own start to an upload and starts again, stays in the budget", async () => {
+    const { deps, a } = await clocked();
+    // 398 steps and a publish started; a 399th step makes that publish one of an older
+    // draft. The next fresh start stops it, reads the draft, loses the job to a 400th step
+    // that commits at that moment, reads the draft again, starts, copies and answers.
+    const tourId = (await uploadTour(deps, a.token, heavyManifest(198, "Part 1", TOUR_PART_BYTES), { kind: "new" }, 0)).tour_id;
+    await uploadTour(deps, a.token, heavyManifest(200, "Part 2", TOUR_PART_BYTES), { kind: "chapter", tour_id: tourId }, 1);
+    await seedLeftovers(deps, a.workspaceId, tourId, 5, 1500, deps.now());
+    const old = await call(deps, "POST", publishPath(tourId), { token: a.token });
+    expect(old.status).toBe(202);
+    await uploadTour(deps, a.token, heavyManifest(1, "One more", 20_000), { kind: "chapter", tour_id: tourId }, 7);
+    const last = await sendAll(deps, a.token, heavyManifest(1, "And another", 20_000), { kind: "chapter", tour_id: tourId }, 8);
+    const realBatch = deps.db.batch.bind(deps.db);
+    let raced = 0;
+    deps.db.batch = async (stmts) => {
+      if (raced === 0 && stmts[0].sql.startsWith("INSERT INTO publish_job")) {
+        raced++;
+        expect((await commit(deps, a.token, last)).status).toBe(201);
+      }
+      return realBatch(stmts);
+    };
+    const fresh = await call(deps, "POST", publishPath(tourId), { token: a.token });
+    deps.db.batch = realBatch;
+    expect(raced).toBe(1);
+    expect(fresh.status).toBe(202);
+    expect(fresh.json.total).toBe(401);
+    // 2 authentication, 4 housekeeping, the state, 4 to stop the old publish, 2 for the start
+    // that lost, one look, 2 for the start that won, then copies sized from what is left
+    // (each a read and a write) and the 2 that mark them.
+    expect(fresh.calls).toBe(16 + 2 * fresh.json.done + 2);
+    expect(fresh.json.done).toBe(9);
+    // Losing twice answers 409 after 2 + 4 + 1 + 2 + 1 + 2 + 1 calls and copies nothing.
+    expect((await call(deps, "POST", `/api/v1/tours/${tourId}/unpublish`, { token: a.token })).status).toBeLessThan(300);
+    let lost = 0;
+    deps.db.batch = async (stmts) => {
+      if (lost < 2 && stmts[0].sql.startsWith("INSERT INTO publish_job")) await deps.db.run("UPDATE tour SET draft_version = draft_version + 1 WHERE id = ?", [tourId]).then(() => lost++);
+      return realBatch(stmts);
+    };
+    const twice = await call(deps, "POST", publishPath(tourId), { token: a.token });
+    deps.db.batch = realBatch;
+    expect(lost).toBe(2);
+    expect([twice.status, twice.json.error]).toEqual([409, "publish_busy"]);
+    expect(twice.calls).toBe(13);
+  }, 600_000);
+
   it("manage: rename with a publish in progress near the snapshot cap; delete of a 400-step tour published twice, with open uploads into it, an abandoned publish and plenty to sweep", async () => {
     const { deps, a, now, advance } = await clocked();
     const tourId = await tour400(deps, a.token);

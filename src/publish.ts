@@ -552,7 +552,8 @@ type Started = { kind: "started"; publishId: string; total: number; steps: numbe
  * the tour still exists at the draft version that was read: when the tour was deleted or
  * its draft changed in between (an upload's commit, or a replace of a chapter, which also
  * removes the pictures it took out), nothing is recorded or written and the answer is
- * "changed", so no publish ever starts on pictures that may be gone.
+ * "changed", so no publish ever starts on pictures that may be gone. The caller then
+ * starts once more from the draft as it is now. Two calls: the read and the batch.
  */
 async function startPublish(deps: Deps, auth: Auth, tourId: string): Promise<Started> {
   const rows = await deps.db.all<DraftRow>(DRAFT_SQL, [tourId, auth.workspaceId, MAX_PUBLISH_STEPS + 1]);
@@ -656,12 +657,17 @@ export function publishRoutes(app: Hono, deps: Deps): void {
       steps = tour.job_steps ?? 0;
       ({ batch, left } = await nextBatch(d, tour.id, publishId, room()));
     } else {
-      const started = await startPublish(d, auth, tour.id);
-      if (started.kind === "answer") return started.res;
+      let started = await startPublish(d, auth, tour.id);
       if (started.kind === "changed") {
-        // One look says which: the tour is gone, or its draft moved on. Nothing was written.
-        return (await tourState(d, auth, tour.id)) === null ? notFound() : draftMoved();
+        // The tour is gone, or its draft moved on while the publish was starting (an upload
+        // or a chapter replace committed). Nothing was written. If the tour is still there,
+        // read the draft again and start once more, in this same request, so the client
+        // gets its publish of the newer draft; only losing a second time answers 409.
+        if ((await tourState(d, auth, tour.id)) === null) return notFound();
+        started = await startPublish(d, auth, tour.id);
+        if (started.kind === "changed") return (await tourState(d, auth, tour.id)) === null ? notFound() : draftMoved();
       }
+      if (started.kind === "answer") return started.res;
       if (started.kind === "started") {
         ({ publishId, total, steps } = started);
         batch = started.copies.slice(0, room());

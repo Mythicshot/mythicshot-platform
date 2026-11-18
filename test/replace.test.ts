@@ -1311,56 +1311,75 @@ describe("replace: the tour's settings and logo travel with its first chapter", 
     expect(await bytesOf(deps.drafts, oldLogo)).toBeNull();
     expect(await ctx.draftKeys()).toHaveLength(2); // the new step and the new logo
   });
+  it("a first-chapter update whose manifest sets no spotlight dim keeps the tour's", async () => {
+    const { deps, a } = await setup();
+    const t = await uploadPics(deps, a.token, [1, 2]);
+    const second = await uploadPics(deps, a.token, [3], "Second", t.tour_id);
+    expect((await tourRow(deps, t.tour_id)).spotlight_dim).toBe(60);
+    // Another chapter's steps have spotlights that are dimmed by the tour's value.
+    await deps.db.run("UPDATE step SET spotlight = '{\"x\":1,\"y\":1,\"w\":10,\"h\":10}' WHERE chapter_id = ?", [second.chapter_id]);
+    const m = manifestOf([5]);
+    m.spotlight_dim = null;
+    const created = await createReplace(deps, a.token, m, t);
+    expect(created.json.settings).toBe(true);
+    expect((await putStep(deps, a.token, created.json.upload_id, 1, picture(m, 0, 5))).status).toBe(204);
+    expect((await commit(deps, a.token, created.json.upload_id)).status).toBe(201);
+    expect((await tourRow(deps, t.tour_id)).spotlight_dim).toBe(60);
+    await publishAll(deps, a.token, t.tour_id);
+    expect(JSON.parse((await snapshotRow(deps, t.tour_id))!.data).spotlight_dim).toBe(60);
+    // A manifest that does set one replaces it.
+    const set = manifestOf([6]);
+    set.spotlight_dim = 35;
+    const next = await createReplace(deps, a.token, set, t);
+    expect((await putStep(deps, a.token, next.json.upload_id, 1, picture(set, 0, 6))).status).toBe(204);
+    expect((await commit(deps, a.token, next.json.upload_id)).status).toBe(201);
+    expect((await tourRow(deps, t.tour_id)).spotlight_dim).toBe(35);
+  });
 });
 
-
 describe("replace: a publish that is starting", { timeout: 60_000 }, () => {
-  /** Runs `between` once, at the moment a publish has read the draft and is about to record its job. */
-  function atPublishStart(deps: Deps, between: () => Promise<void>): { ran: () => boolean; restore: () => void } {
+  /** Runs `between` at the moment a publish has read the draft and is about to record its job, the first `times` times. */
+  function atPublishStart(deps: Deps, between: (n: number) => Promise<void>, times = 1): { ran: () => number; restore: () => void } {
     const realBatch = deps.db.batch.bind(deps.db);
-    let ran = false;
+    let ran = 0;
     deps.db.batch = async (stmts) => {
-      if (!ran && stmts[0].sql.startsWith("INSERT INTO publish_job")) {
-        ran = true;
-        await between();
-      }
+      if (ran < times && stmts[0].sql.startsWith("INSERT INTO publish_job")) await between(++ran);
       return realBatch(stmts);
     };
     return { ran: () => ran, restore: () => (deps.db.batch = realBatch) };
   }
 
-  it("a replace that commits while a publish is starting stops that publish before it copies anything", async () => {
+  it("a replace that commits while a publish is starting is what that publish puts live, never the pictures it removed", async () => {
     const ctx = await setup();
     const { deps, a } = ctx;
     const t = await uploadPics(deps, a.token, [1, 2, 3]);
-    const live = await publishAll(deps, a.token, t.tour_id);
-    const before = { snapshot: await snapshotRow(deps, t.tour_id), keys: await ctx.publicKeys() };
+    await publishAll(deps, a.token, t.tour_id);
     const old = await stepKeys(deps, t.chapter_id);
-    const { id } = await sendReplace(deps, a.token, t, [7, 8]);
+    const { id, manifest } = await sendReplace(deps, a.token, t, [7, 8]);
     let committed: Call | null = null;
     const hook = atPublishStart(deps, async () => {
       committed = await commit(deps, a.token, id);
     });
     const r = await publish(deps, a.token, t.tour_id);
     hook.restore();
-    expect(hook.ran()).toBe(true);
+    expect(hook.ran()).toBe(1);
     expect(committed!.status).toBe(201);
-    // The replace removed the pictures that publish had read; it must not start on them.
+    // The replace removed the pictures the publish had read. The publish did not start on
+    // them: it read the draft again, in the same request, and published that.
     for (const k of old) expect(await bytesOf(deps.drafts, k)).toBeNull();
-    expect(r.status).toBe(409);
-    expect(r.json.error).toBe("publish_busy");
+    expect(r.status).toBe(200);
+    expect(r.json.steps).toBe(2);
+    const row = (await snapshotRow(deps, t.tour_id))!;
+    expect(row.draft_version).toBe(2);
+    const steps = JSON.parse(row.data).chapters[0].steps as Json[];
+    expect(steps).toHaveLength(2);
+    expect(await bytesOf(deps.pub, steps[1].image)).toEqual(picture(manifest, 1, 8));
     expect(await count(deps, "publish_job")).toBe(0);
     expect(await count(deps, "public_object")).toBe(0);
-    expect(await ctx.publicKeys()).toEqual(before.keys);
-    expect(await snapshotRow(deps, t.tour_id)).toEqual(before.snapshot);
-    expect((await send(deps, "GET", live.json.url)).status).toBe(200);
-    // Trying again, as the answer says, publishes the replaced chapter.
-    const again = await publishAll(deps, a.token, t.tour_id);
-    expect(again.json.steps).toBe(2);
-    expect(await count(deps, "public_object")).toBe(0);
+    expect(await ctx.publicKeys()).toHaveLength(2);
   });
 
-  it("a chapter uploaded while a publish is starting is published whole by the retry, never half", async () => {
+  it("a chapter uploaded while a publish is starting is published whole, never half", async () => {
     const ctx = await setup();
     const { deps, a } = ctx;
     const t = await uploadPics(deps, a.token, [1, 2]);
@@ -1369,10 +1388,47 @@ describe("replace: a publish that is starting", { timeout: 60_000 }, () => {
     });
     const r = await publish(deps, a.token, t.tour_id);
     hook.restore();
-    expect([r.status, r.json.error]).toEqual([409, "publish_busy"]);
+    expect(r.status).toBe(200);
+    expect(r.json.steps).toBe(4);
+    expect(await ctx.publicKeys()).toHaveLength(4);
+    expect((await snapshotRow(deps, t.tour_id))!.draft_version).toBe(2);
+  });
+
+  it("a draft that changes twice while one publish is starting answers 409 and writes nothing", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadPics(deps, a.token, [1, 2]);
+    await publishAll(deps, a.token, t.tour_id);
+    const before = { snapshot: await snapshotRow(deps, t.tour_id), keys: await ctx.publicKeys() };
+    const hook = atPublishStart(deps, async (n) => {
+      expect((await replaceChapter(deps, a.token, t, [10 + n])).status).toBe(201);
+    }, 2);
+    const r = await publish(deps, a.token, t.tour_id);
+    hook.restore();
+    expect(hook.ran()).toBe(2);
+    expect(r.status).toBe(409);
+    expect(r.json).toEqual({ error: "publish_busy", detail: "the tour's draft changed while this publish was starting; try again" });
+    expect(await count(deps, "publish_job")).toBe(0);
+    expect(await count(deps, "public_object")).toBe(0);
+    expect(await ctx.publicKeys()).toEqual(before.keys);
+    expect(await snapshotRow(deps, t.tour_id)).toEqual(before.snapshot);
+    // Trying again, as the answer says, publishes the draft as it is now.
+    expect((await publishAll(deps, a.token, t.tour_id)).json.steps).toBe(1);
+  });
+
+  it("a tour deleted after a publish lost its start once answers 404", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const t = await uploadPics(deps, a.token, [1, 2]);
+    const hook = atPublishStart(deps, async (n) => {
+      if (n === 1) expect((await replaceChapter(deps, a.token, t, [9])).status).toBe(201);
+      else expect((await send(deps, "DELETE", `/api/v1/tours/${t.tour_id}`, { token: a.token })).status).toBe(200);
+    }, 2);
+    const r = await publish(deps, a.token, t.tour_id);
+    hook.restore();
+    expect(r.status).toBe(404);
     expect(await ctx.publicKeys()).toEqual([]);
-    expect((await tourRow(deps, t.tour_id)).status).toBe("draft");
-    expect((await publishAll(deps, a.token, t.tour_id)).json.steps).toBe(4);
+    expect(await ctx.draftKeys()).toEqual([]);
   });
 
   it("a tour deleted while its publish is starting answers 404 and nothing is written", async () => {

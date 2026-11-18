@@ -779,22 +779,13 @@ describe("races", () => {
     const { sendAll, commit } = await import("./bundle.ts");
     const id = await sendAll(deps, a.token, more, { kind: "chapter", tour_id: t.tour_id }, 5);
     const [p, c] = await Promise.all([publish(deps, a.token, t.tour_id), commit(deps, a.token, id)]);
+    // A commit that lands after the publish read the draft and before it recorded its job
+    // makes the publish read the draft again in the same request, so it always succeeds.
+    expect(p.status).toBe(200);
     expect(c.status).toBe(201);
-    if (p.status === 409) {
-      // The commit landed after the publish read the draft and before it recorded its job:
-      // the publish did not start, nothing is public, and trying again takes both chapters.
-      expect(p.json.error).toBe("publish_busy");
-      expect(await snapshotOf(deps, t.tour_id)).toBeNull();
-      expect(await ctx.publicKeys()).toEqual([]);
-      const again = await publish(deps, a.token, t.tour_id);
-      expect(again.status).toBe(200);
-      expect(again.json.steps).toBe(6);
-    } else {
-      expect(p.status).toBe(200);
-      const snap = (await snapshotOf(deps, t.tour_id))!;
-      expect([[3], [3, 3]]).toContainEqual(snap.chapters.map((ch) => ch.steps.length));
-      expect(p.json.steps).toBe(stepsOf(snap).length);
-    }
+    const snap = (await snapshotOf(deps, t.tour_id))!;
+    expect([[3], [3, 3]]).toContainEqual(snap.chapters.map((ch) => ch.steps.length));
+    expect(p.json.steps).toBe(stepsOf(snap).length);
     await expectConsistent(ctx);
   });
 });

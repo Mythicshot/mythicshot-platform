@@ -197,7 +197,9 @@ export function replaceStatements(deps: Deps, auth: Auth, up: ReplaceUpload, m: 
       params: [now, tourId, ws, chapterId],
     });
     stmts.push({
-      sql: `UPDATE tour SET spotlight_dim = ?, theme = ?, zoom = ?, cover = ?, cta = ?, end_card = ?, autoplay = ?, logo_key = ?, logo_type = ?
+      // The spotlight dim is replaced only when the manifest sets one, as for a chapter
+      // upload: the other chapters' spotlights are dimmed by the tour's value too.
+      sql: `UPDATE tour SET spotlight_dim = coalesce(?, spotlight_dim), theme = ?, zoom = ?, cover = ?, cta = ?, end_card = ?, autoplay = ?, logo_key = ?, logo_type = ?
              WHERE tour.id = ? AND tour.workspace_id = ? AND ${first}`,
       params: [
         m.spotlight_dim, JSON.stringify(m.theme), JSON.stringify(m.zoom), json01(m.cover), json01(m.cta), json01(m.end), JSON.stringify(m.autoplay),
