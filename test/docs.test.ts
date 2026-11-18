@@ -223,6 +223,24 @@ describe("the docs", () => {
     }
   });
 
+  it("each runbook keeps its Draft warning, as a callout, right under the title", () => {
+    const notices: Record<string, RegExp> = {
+      [DOCKER]: /^> \[!WARNING\]\n> Draft: this runbook has not yet been run end to end on a real server\./m,
+      [CLOUDFLARE]: /^> \[!WARNING\]\n> Draft: this runbook has not yet been run end to end on a real Cloudflare account\./m,
+    };
+    for (const [p, re] of Object.entries(notices)) {
+      const lines = docs[p].split("\n");
+      expect(lines[0], p).toMatch(/^# Runbook: /);
+      expect(lines.slice(1, 6).join("\n"), p).toMatch(re);
+      expect(docs[p], p).toMatch(/\*\*Unconfirmed\*\*/);
+    }
+  });
+
+  it("the Cloudflare runbook warns, in a callout, that attaching an address takes it over", () => {
+    expect(docs[CLOUDFLARE]).toMatch(/^> \[!WARNING\]\n> Attaching an address takes it over/m);
+    expect(docs[CLOUDFLARE]).not.toMatch(/delete that record first/);
+  });
+
   it("every relative link and anchor resolves", () => {
     const problems: string[] = [];
     for (const p of MARKDOWN) {

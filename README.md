@@ -14,7 +14,7 @@ All rights reserved: see [LICENSE](LICENSE). The repository is private and no li
 | What it does | Installs Docker, writes the settings with a generated setup code, starts the app and gets the certificate | Creates the database and buckets, writes the settings, deploys and sets a generated setup code |
 | Runbook | [docs/runbook-docker.md](docs/runbook-docker.md) | [docs/runbook-cloudflare.md](docs/runbook-cloudflare.md) |
 
-Both guided commands say each step before doing it, are safe to run twice, never delete data, and print the setup code once at the end.
+Both guided commands say each step before doing it, are safe to run twice, never delete data, and print the setup code once at the end. On Cloudflare, attaching your own address replaces whatever DNS record that hostname had, so the command asks for a confirmation that `--yes` does not give.
 
 ### Quick start: Docker on Debian
 
@@ -59,7 +59,7 @@ It is built to run on Cloudflare's Free plan, which allows 50 subrequests and 10
 | Generates the setup code, stores it as a secret and prints it once | Export the database now and then and keep the export private |
 | `update` applies new migrations, then deploys; `status` shows what exists | Watch the usage against the free plan's limits |
 | Cloudflare runs the app, serves HTTPS, and creates the DNS record and certificate for your own address | Remove an install by hand, by the written procedure |
-| Never deletes anything; D1 keeps its own point-in-time history (Time Travel) | |
+| Never deletes a database, bucket, Worker or secret; asks before taking over same-named ones or an address in use; D1 keeps its own point-in-time history (Time Travel) | Check what your own address is used for before attaching it: it is taken over |
 
 ## Connect Mythicshot
 

@@ -45,7 +45,7 @@ npm ci
 npx wrangler login
 ```
 
-3. Run the guided setup and answer its questions: a name for the install (press Enter for `demo-platform`), and the address: "I don't have a domain yet" (Cloudflare's free address) or your own, such as `tours.example.com`.
+3. Run the guided setup and answer its questions: a name for the install (press Enter for `demo-platform`), and the address: "I don't have a domain yet" (Cloudflare's free address) or your own, such as `tours.example.com`. For your own address it asks you to type the hostname once, to confirm that whatever it points to today will be replaced. Before changing anything it shows the plan and the account it will use.
 
 ```sh
 npm run setup:cloudflare
@@ -69,16 +69,18 @@ It says each step before doing it, and every step can be run again: it looks fir
 | Step | What happens | On a second run |
 |---|---|---|
 | 1 | Checks Node 24 or later and that Wrangler is installed | Same |
-| 2 | Checks Wrangler is signed in (`npx wrangler whoami`); if not, it says what to run and stops before anything else | Same |
+| 2 | Checks Wrangler is signed in (`npx wrangler whoami`) to exactly one account, and names that account in its plan (an email address in the name is hidden). If not signed in, or the login can use several accounts and `CLOUDFLARE_ACCOUNT_ID` does not choose one, it says what to do and stops before anything else | Same |
 | 3 | Asks for the name and the address | Keeps the answers of the first run |
-| 4 | Creates the D1 database (named after the install) and the buckets `<name>-drafts` and `<name>-public`, if they do not exist. Neither bucket gets public access | Reuses them and says so; it never recreates or deletes one |
+| 3a | If a database, bucket or Worker with that name already exists and this checkout has not set it up, lists what it found and stops unless you confirm with `--adopt-existing` or by typing the name; `--yes` is not enough | Not asked: the install is this checkout's |
+| 3b | For a new own address, warns that whatever the hostname has today will be replaced (see [Your address](#your-address)) and stops unless you confirm with `--replace-existing-domain` or by typing the hostname; `--yes` is not enough | Asked again only when the address changes |
+| 4 | Creates the D1 database (named after the install) if it does not exist, then writes `wrangler.deploy.jsonc` (step 5), then creates the buckets `<name>-drafts` and `<name>-public` if they do not exist. Neither bucket gets public access | Reuses them and says so; it never recreates or deletes one |
 | 5 | Writes `wrangler.deploy.jsonc`: your install's Wrangler settings, built from `wrangler.jsonc` with your names, database id and address. Git ignores it; it holds no secret | Skipped when nothing changed |
 | 6 | Applies the migrations to the remote database | Skipped when all are applied |
-| 7 | Deploys the Worker | Skipped when nothing changed |
+| 7 | Deploys the Worker. If a new own address cannot be attached, it takes the address out of `wrangler.deploy.jsonc` again and says what to do, so the next run is not stuck | Skipped when nothing changed |
 | 8 | Generates a setup code (32 hex characters from Node's cryptographic random source) and stores it as the Worker secret `SETUP_CODE`, handing it to Wrangler on standard input so it never shows in the process list or a file | Kept and not shown again |
 | 9 | Prints the setup wizard's address and the setup code | Prints the address only |
 
-It never deletes anything. Removing an install is a manual procedure (see [Removal](#removal)).
+It never deletes a database, bucket, Worker or secret. Two things it does replace, each only after the confirmation above: the code of a same-named Worker it adopts, and whatever DNS record or Worker domain a new own address had. Removing an install is a manual procedure (see [Removal](#removal)).
 
 ### Modes and options
 
@@ -94,16 +96,20 @@ Run them as `npm run setup:cloudflare -- <mode> <options>`; the `--` passes the 
 | `npm run setup:cloudflare -- --name tours` | Names the install `tours` instead of `demo-platform` (lowercase letters, digits and hyphens, 3 to 56 characters) |
 | `npm run setup:cloudflare -- --domain tours.example.com` | Uses your own address, on a domain active on this account |
 | `npm run setup:cloudflare -- --no-domain` | Uses only the free `workers.dev` address |
+| `npm run setup:cloudflare -- --domain tours.example.com --replace-existing-domain` | Confirms that the new address may replace the DNS record or Worker domain it has today (instead of typing the hostname at the prompt) |
+| `npm run setup:cloudflare -- --adopt-existing` | Confirms taking over a database, bucket or Worker that already has the install's name (instead of typing the name at the prompt) |
 | `npm run setup:cloudflare -- --new-setup-code` | Replaces the setup code; for when it was lost before setup was finished |
 | `npm run setup:cloudflare -- --help` | Shows the modes and options |
 
-One checkout holds one install. For a second install, use a second copy of the repository.
+One checkout holds one install. For a second install, use a second copy of the repository with a different name, such as `npm run setup:cloudflare -- --name tours-two`. With the same name, the second copy would find the first install's database, buckets and Worker, and the command stops there instead of taking them over.
+
+If your login can use several Cloudflare accounts, the command stops and lists them. Choose one by setting `CLOUDFLARE_ACCOUNT_ID` to its id (on the account's overview page in the dashboard) for the command; Wrangler reads the same setting. On macOS or Linux, put `CLOUDFLARE_ACCOUNT_ID=<account id>` in front of the command; in PowerShell, run `$env:CLOUDFLARE_ACCOUNT_ID = "<account id>"` first.
 
 ## Your address
 
 ### Start without a domain
 
-Every Cloudflare account has a `workers.dev` subdomain, and a Worker can be deployed there without any domain of yours. Its address is `https://<worker name>.<your account subdomain>.workers.dev`, such as `https://demo-platform.<your-account>.workers.dev` ([workers.dev](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)). In the guided command this is the first choice, "I don't have a domain yet".
+Each Cloudflare account can have one `workers.dev` subdomain, and a Worker can be deployed there without any domain of yours. Its address is `https://<worker name>.<your account subdomain>.workers.dev`, such as `https://demo-platform.<your-account>.workers.dev` ([workers.dev](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)). In the guided command this is the first choice, "I don't have a domain yet".
 
 Limits Cloudflare states for it, on the same page:
 
@@ -111,7 +117,7 @@ Limits Cloudflare states for it, on the same page:
 - Cloudflare's Browser Integrity Check is always on for `workers.dev` and cannot be turned off. It can refuse some automated clients that send a default library User-Agent, before the app runs (error 1010). `scripts/publish.ts` sends its own User-Agent for this reason. **Unconfirmed:** whether Mythicshot's requests pass it.
 - The Worker's name, which is the install's name, must be 63 characters or fewer.
 
-**Unconfirmed:** if the account has no `workers.dev` subdomain yet, Wrangler's deploy asks to register one, and the guided command runs Wrangler without a terminal for it to ask in, so the deploy stops with Wrangler's message. Register the subdomain in the dashboard under Workers & Pages, then run the same command again.
+An account that has never deployed a Worker may not have registered its subdomain yet. **Unconfirmed:** in that case Wrangler's deploy asks to register one (this is read from Wrangler's source, not seen on an account), and the guided command runs Wrangler without a terminal for it to ask in, so the deploy stops with Wrangler's message. Register the subdomain in the dashboard under Workers & Pages, then run the same command again.
 
 Nothing in the app depends on the address: the setup wizard checks that a request comes from the same host it was opened on, whatever that host is; the published-tour page allows images only from its own address; and the wizard shows the address it was opened on as the server address for Mythicshot. The test suite runs all of this against `tours.example.com`, and the same pages were seen working under `wrangler dev` on `localhost`.
 
@@ -123,14 +129,14 @@ When your domain is active on the account, run the command again with it:
 npm run setup:cloudflare -- --domain tours.example.com
 ```
 
-It adds the address to `wrangler.deploy.jsonc` and deploys; Cloudflare creates the DNS record and the certificate ([Workers Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)). The database, the buckets, the setup code and every tour stay as they are. What changes for you: the server address in Mythicshot's settings (Settings › Output › Tour publishing), and the address you share for published tours. The `workers.dev` address keeps answering, so links already shared keep working. **Unconfirmed:** that both addresses answer at once has not been seen on a real account.
+Because the address is new, the command first warns what attaching it replaces and asks you to type the hostname (or pass `--replace-existing-domain`). It then adds the address to `wrangler.deploy.jsonc` and deploys; Cloudflare creates the DNS record and the certificate ([Workers Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)). The database, the buckets, the setup code and every tour stay as they are. What changes for you: the server address in Mythicshot's settings (Settings › Output › Tour publishing), and the address you share for published tours. The `workers.dev` address keeps answering, so links already shared keep working. **Unconfirmed:** that both addresses answer at once has not been seen on a real account.
 
 > [!WARNING]
-> A custom domain cannot be created on a hostname that already has a CNAME record: delete that record first.
+> Attaching an address takes it over: if the hostname already has a DNS record (a website, a mail service, anything) or is another Worker's custom domain, the deploy points it at this platform instead, without asking again. Wrangler run without a terminal does this, and the command cannot look the hostname up first, so it makes you confirm. Check the domain's DNS records in the dashboard before you confirm, and use a hostname nothing else uses, such as `tours.example.com`.
 
 ### Your domain is already on Cloudflare
 
-Choose "My own address" in the command, or pass `--domain tours.example.com`. The command attaches it as a Workers Custom Domain, which needs an active zone on the account ([Workers Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)). The certificate can take a few minutes after the first deploy.
+Choose "My own address" in the command, or pass `--domain tours.example.com`. After the takeover warning above and your confirmation, the command attaches it as a Workers Custom Domain, which needs an active zone on the account ([Workers Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)). The certificate can take a few minutes after the first deploy.
 
 ### Your domain is registered elsewhere
 
@@ -376,7 +382,7 @@ npm run setup:cloudflare -- --new-setup-code
 
 ## Removal
 
-The guided command never deletes anything. Removing an install is done by hand, in this order, and cannot be undone.
+The guided command never deletes a database, bucket, Worker or secret. Removing an install is done by hand, in this order, and cannot be undone.
 
 > [!WARNING]
 > Deleting the database or a bucket destroys every workspace, tour and image in it for good: export the database first, as in [Back up and restore](#back-up-and-restore).
@@ -432,7 +438,10 @@ The CPU limit has not been measured on Cloudflare. In plain Node on a desktop co
 | The command says Wrangler is not signed in | No `wrangler login` yet on this computer, or it expired | Run `npx wrangler login`, then the same command again. |
 | `wrangler login` cannot reach its callback | Signing in on a remote machine | Use `npx wrangler login --device`. |
 | The deploy stops asking for a `workers.dev` subdomain | The account has none registered yet | Register one in the dashboard under Workers & Pages, then run the command again. |
-| The deploy fails on the custom domain | The hostname already has a CNAME record, or the zone is not active on this account | Delete the CNAME record, or wait for the zone to become active; meanwhile `--no-domain` sets up on `workers.dev`. |
+| The deploy fails on the custom domain | Most often, the domain is not an active zone on this account | The command has already taken the address out of `wrangler.deploy.jsonc`. Run `npm run setup:cloudflare -- --no-domain` to set up on `workers.dev` now, and run it with `--domain` again once the zone is active. |
+| The command stops asking for `--replace-existing-domain` or `--adopt-existing` | A new own address, or a same-named database, bucket or Worker, needs a confirmation `--yes` does not give | Read what it printed; pass the flag only if you accept it, or choose another hostname or `--name`. |
+| The command stops listing several accounts | The login can use more than one account | Set `CLOUDFLARE_ACCOUNT_ID` to the one to use, as in [Modes and options](#modes-and-options). |
+| Something that was at the hostname stopped working after you attached it | Attaching an address replaces its DNS record or Worker domain | Choose another hostname with `--domain`, then restore the old record in the dashboard's DNS settings. |
 | "Please enable R2 through the Cloudflare Dashboard" (code 10042) | R2 is not enabled on the account yet | In the dashboard, open R2 object storage and enable it, then run the command again. |
 | The command stopped half-way | A Cloudflare call failed | Fix what it reported and run the same command again; it reuses what was made. |
 | Requests fail with a database or bucket error | The migrations were not applied, or `wrangler.deploy.jsonc` was edited by hand | Run `npm run setup:cloudflare -- status`, then the setup again. |
