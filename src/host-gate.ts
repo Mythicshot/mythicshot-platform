@@ -62,32 +62,46 @@ function notHere(): Response {
   return new Response('{"error":"not_found"}', { status: 404, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
+/** From the most open rule to the strictest. */
+const STRICTNESS: readonly HostRule[] = ["any", "both", "tours-redirect", "tours"];
+
 /**
- * The key of the route this request reached: the last matched route that is a handler
- * (middleware is registered for every method, as ALL), or null when none matched. A HEAD
- * request is matched as GET, so it gets GET's rule.
+ * The rule for this request: the strictest rule among every route it matched, the gate
+ * itself left out. Hono may answer from any of them, so each one needs a rule: null when
+ * no route matched, "none" when a matched route has no rule. A route is keyed as
+ * "<METHOD> <path>", one registered for every method as "ALL <path>"; a HEAD request is
+ * matched as GET, so it gets GET's rule.
  */
-function routeKey(c: Context): string | null {
-  const route = matchedRoutes(c).findLast((r) => r.method !== "ALL");
-  return route === undefined ? null : `${route.method} ${route.path}`;
+function ruleFor(c: Context, gate: MiddlewareHandler, rules: Readonly<Record<string, HostRule>>): HostRule | "none" | null {
+  let strictest: HostRule | null = null;
+  for (const route of matchedRoutes(c)) {
+    if (route.handler === gate) continue;
+    const key = `${route.method} ${route.path}`;
+    if (!Object.hasOwn(rules, key)) return "none";
+    const rule = rules[key];
+    if (strictest === null || STRICTNESS.indexOf(rule) > STRICTNESS.indexOf(strictest)) strictest = rule;
+  }
+  return strictest;
 }
 
-/** The middleware. Installed first, so nothing runs before the host is known. */
-export function hostGate(config: Config): MiddlewareHandler {
-  return async (c, next) => {
+/**
+ * The middleware. Installed first, so nothing runs before the host is known. `rules` is
+ * HOST_RULES except in tests of the lookup itself.
+ */
+export function hostGate(config: Config, rules: Readonly<Record<string, HostRule>> = HOST_RULES): MiddlewareHandler {
+  const gate: MiddlewareHandler = async (c, next) => {
     const hosts = config.hosts ?? null;
     if (hosts === null) return next();
 
-    const key = routeKey(c);
-    const rule = key === null ? undefined : HOST_RULES[key];
+    const rule = ruleFor(c, gate, rules);
     if (rule === "any") return next();
 
     const role = roleOf(hosts, requestHost(c.req.raw));
     if (role === null) return misdirected();
     // No route matched: the app's own 404.
-    if (key === null) return next();
-    // A route nobody gave a rule: closed on both addresses.
-    if (rule === undefined) return c.notFound();
+    if (rule === null) return next();
+    // A matched route nobody gave a rule: closed on both addresses.
+    if (rule === "none") return c.notFound();
     if (rule === "both" || role === "tours") return next();
     if (rule === "tours-redirect") {
       // The path and query are the request's; the host comes only from configuration.
@@ -104,4 +118,5 @@ export function hostGate(config: Config): MiddlewareHandler {
     }
     return notHere();
   };
+  return gate;
 }

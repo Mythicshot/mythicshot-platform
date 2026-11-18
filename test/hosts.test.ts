@@ -1,10 +1,11 @@
 // Which address answers what: one row per route in the route table, sent to the app in
 // one-address mode and, in two-address mode, to the tours address, the app address and
 // a host the install does not serve.
+import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
-import { HOST_RULES } from "../src/host-gate.ts";
+import { HOST_RULES, hostGate, type HostRule } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
 import { VERSION } from "../src/version.ts";
@@ -134,9 +135,13 @@ async function publishAt(deps: Deps, token: string, tourId: string, origin: stri
 
 describe("the host-routing matrix", () => {
   it("every route in the route table has a row and a rule, and nothing else does", () => {
-    const routes = createApp({ config: { publicImageBase: "", setupCode: null } } as Deps)
-      .routes.filter((r) => r.method !== "ALL")
-      .map((r) => `${r.method} ${r.path}`);
+    const app = createApp({ config: { publicImageBase: "", setupCode: null } } as Deps);
+    // The gate is the route table's only entry for every method; a handler registered
+    // for every method would need its own "ALL <path>" rule and row.
+    const every = app.routes.filter((r) => r.method === "ALL");
+    expect(every.map((r) => r.path), "the only route for every method is the host gate, first in the table").toEqual(["/*"]);
+    expect(app.routes[0]).toBe(every[0]);
+    const routes = app.routes.filter((r) => r !== every[0]).map((r) => `${r.method} ${r.path}`);
     expect(new Set(routes).size, "two routes share a method and a path").toBe(routes.length);
     const rules = Object.keys(HOST_RULES);
     const lacking = (have: string[], want: string[]) => want.filter((k) => !have.includes(k));
@@ -144,8 +149,11 @@ describe("the host-routing matrix", () => {
     expect(lacking(KEYS, routes), "add a row to ROWS in test/hosts.test.ts for each of these routes").toEqual([]);
     expect(lacking(routes, rules), "remove these keys from HOST_RULES in src/host-gate.ts: no route has them").toEqual([]);
     expect(lacking(routes, KEYS), "remove these keys from ROWS in test/hosts.test.ts: no route has them").toEqual([]);
-    // Each row's sample request is one its own route answers.
-    for (const key of KEYS) expect(key.split(" ")[0], key).toBe(ROWS[key].method);
+    // Each row's sample request reaches its own route and no other.
+    for (const key of KEYS) {
+      const matched = app.router.match(ROWS[key].method, ROWS[key].path)[0].map(([[, r]]) => r as unknown as { method: string; path: string });
+      expect(matched.filter((r) => !(r.method === "ALL" && r.path === "/*")).map((r) => `${r.method} ${r.path}`), key).toEqual([key]);
+    }
     // The rules the plan gives each group of routes.
     expect(HOST_RULES["GET /healthz"]).toBe("any");
     for (const key of API_KEYS) expect(HOST_RULES[key], key).toBe("both");
@@ -499,5 +507,108 @@ describe("two addresses", () => {
     expect(notHere.bytes.length).toBe(0);
     expect(notHere.calls).toBe(0);
     expect((await send(deps, "HEAD", "/healthz", { origin: UNKNOWN })).status).toBe(200);
+  });
+});
+
+describe("the rule lookup", () => {
+  const config = { publicImageBase: "", setupCode: null, hosts: HOSTS };
+  type Route = [method: "get" | "all", path: string, name: string];
+
+  /** A small app behind the gate: each route answers 200 with its own name. */
+  function tiny(routes: Route[], rules: Record<string, HostRule>, hosts: Hosts | null = HOSTS): Hono {
+    const app = new Hono();
+    app.use("*", hostGate({ ...config, hosts }, rules));
+    for (const [method, path, name] of routes) app[method](path, (c) => c.text(name));
+    app.notFound((c) => c.json({ error: "not_found" }, 404));
+    return app;
+  }
+
+  async function ask(app: Hono, origin: string, path: string, method = "GET"): Promise<{ status: number; text: string; location: string | null }> {
+    const res = await app.fetch(new Request(origin + path, { method }));
+    return { status: res.status, text: await res.text(), location: res.headers.get("location") };
+  }
+
+  const narrow: Route = ["get", "/setup", "narrow"];
+  const wide: Route = ["get", "/:page", "wide"];
+  const orders: [string, Route[]][] = [
+    ["narrow first", [narrow, wide]],
+    ["wide first", [wide, narrow]],
+  ];
+
+  it("two routes that match one request get the strictest of their rules, in either order", async () => {
+    const cases: [HostRule, HostRule, { tours: number; app: number; unknown: number }][] = [
+      ["tours", "both", { tours: 200, app: 404, unknown: 421 }],
+      ["both", "tours", { tours: 200, app: 404, unknown: 421 }],
+      ["tours-redirect", "both", { tours: 200, app: 308, unknown: 421 }],
+      ["tours", "tours-redirect", { tours: 200, app: 404, unknown: 421 }],
+      ["tours", "any", { tours: 200, app: 404, unknown: 421 }],
+      ["both", "any", { tours: 200, app: 200, unknown: 421 }],
+      ["tours-redirect", "any", { tours: 200, app: 308, unknown: 421 }],
+      ["any", "any", { tours: 200, app: 200, unknown: 200 }],
+      ["both", "both", { tours: 200, app: 200, unknown: 421 }],
+    ];
+    for (const [name, routes] of orders) {
+      for (const [narrowRule, wideRule, want] of cases) {
+        const app = tiny(routes, { "GET /setup": narrowRule, "GET /:page": wideRule });
+        const what = `${name}: ${narrowRule} + ${wideRule}`;
+        const onApp = await ask(app, APP, "/setup?x=1");
+        expect((await ask(app, TOURS, "/setup")).status, what).toBe(want.tours);
+        expect(onApp.status, what).toBe(want.app);
+        expect((await ask(app, UNKNOWN, "/setup")).status, what).toBe(want.unknown);
+        if (want.app === 404) expect(onApp.text, what).toBe(NOT_FOUND);
+        if (want.app === 308) expect(onApp.location, what).toBe("https://tours.example.com/setup?x=1");
+        // A request only the wide route matches keeps the wide route's own rule.
+        const alone = { any: 200, both: 200, tours: 404, "tours-redirect": 308 }[wideRule];
+        expect((await ask(app, APP, "/other")).status, what).toBe(alone);
+      }
+    }
+  });
+
+  it("a matched route without a rule closes the request, whichever route would have answered", async () => {
+    for (const [name, routes] of orders) {
+      for (const rules of [{ "GET /setup": "both" }, { "GET /:page": "both" }, { "GET /setup": "any" }, { "GET /:page": "any" }, {}] as Record<string, HostRule>[]) {
+        const app = tiny(routes, rules);
+        const what = `${name}: ${JSON.stringify(rules)}`;
+        for (const origin of [TOURS, APP]) {
+          const r = await ask(app, origin, "/setup");
+          expect(r.status, `${what} ${origin}`).toBe(404);
+          expect(r.text, `${what} ${origin}`).toBe(NOT_FOUND);
+        }
+        const unknown = await ask(app, UNKNOWN, "/setup");
+        expect(unknown.status, what).toBe(421);
+        expect(unknown.text, what).toBe("");
+      }
+    }
+  });
+
+  it("a handler for every method needs its own rule and is not taken for the gate", async () => {
+    const secret: Route = ["all", "/secret", "secret"];
+    for (const routes of [[secret], [secret, wide], [wide, secret], [["all", "*", "secret"]], [["all", "/*", "secret"]]] as Route[][]) {
+      const app = tiny(routes, { "GET /:page": "both" });
+      for (const method of ["GET", "POST", "HEAD"]) {
+        for (const origin of [TOURS, APP]) expect((await ask(app, origin, "/secret", method)).status, `${JSON.stringify(routes)} ${method} ${origin}`).toBe(404);
+        expect((await ask(app, UNKNOWN, "/secret", method)).status, `${JSON.stringify(routes)} ${method}`).toBe(421);
+      }
+    }
+    // With a rule under "ALL <path>" it answers where the rule says.
+    const ruled = tiny([secret], { "ALL /secret": "tours" });
+    expect((await ask(ruled, TOURS, "/secret", "POST")).text).toBe("secret");
+    expect((await ask(ruled, APP, "/secret", "POST")).status).toBe(404);
+    expect((await ask(ruled, UNKNOWN, "/secret", "POST")).status).toBe(421);
+
+    // A mounted app is such a handler too.
+    const mounted = new Hono();
+    mounted.use("*", hostGate(config, {}));
+    mounted.mount("/m", () => new Response("mounted"));
+    mounted.notFound((c) => c.json({ error: "not_found" }, 404));
+    for (const origin of [TOURS, APP]) expect((await ask(mounted, origin, "/m/x")).status, origin).toBe(404);
+    expect((await ask(mounted, UNKNOWN, "/m/x")).status).toBe(421);
+  });
+
+  it("one-address mode asks for no rule at all", async () => {
+    const app = tiny([narrow, wide, ["all", "/secret", "secret"]], {}, null);
+    expect((await ask(app, UNKNOWN, "/setup")).text).toBe("narrow");
+    expect((await ask(app, UNKNOWN, "/other")).text).toBe("wide");
+    expect((await ask(app, UNKNOWN, "/secret", "POST")).text).toBe("secret");
   });
 });
