@@ -46,6 +46,7 @@ APP_CJS="$HERE/app.cjs"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/dp-cpanel-test.XXXXXX")"
 trap 'rm -rf -- "$WORK"' EXIT
 DOMAIN=tours.example.com
+APP_DOMAIN=app.example.com
 REAL_TOUCH="$(command -v touch)"
 PASSES=0
 FAILS=0
@@ -158,10 +159,25 @@ EOF
 printf 'curl %s\n' "$*" >>"$STUB_LOG"
 n=$(cat "$STUB_STATE/curls" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$STUB_STATE/curls"
 mode="${STUB_HEALTH:-ok}"
+# STUB_HEALTH=roles: an app in two-address mode. It answers by the host name it is asked
+# on: its tours address reports "tours", its app address "app", any other name nothing.
+# STUB_HEALTH_TOURS and STUB_HEALTH_APP change what one of the two addresses answers:
+# tours, app, ok (no role, like an app whose settings lack the two lines), fail or parked.
+if [ "$mode" = roles ]; then
+  url=""; for a in "$@"; do url="$a"; done
+  host="${url#https://}"; host="${host%%/*}"
+  case "$host" in
+    tours.example.com) mode="${STUB_HEALTH_TOURS:-tours}" ;;
+    app.example.com) mode="${STUB_HEALTH_APP:-app}" ;;
+    *) mode=ok ;;
+  esac
+fi
 # STUB_HEALTH_AFTER=n: the first n-1 calls fail, like an app that is still starting.
 if [ -n "${STUB_HEALTH_AFTER:-}" ] && [ "$n" -lt "$STUB_HEALTH_AFTER" ]; then mode=fail; fi
 case "$mode" in
   ok) echo '{"ok":true}' ;;
+  tours) echo '{"ok":true,"address":"tours"}' ;;
+  app) echo '{"ok":true,"address":"app"}' ;;
   fail) echo "curl: (22) The requested URL returned error: 503" >&2; exit 22 ;;
   parked) echo '<html><body>This domain is parked</body></html>' ;;
 esac
@@ -1449,6 +1465,349 @@ test_status_without_curl_is_honest() {
   cpanel "" status
   expect "reports the check as not made" has "$OUT" "health: NOT CHECKED"
   expect "and not as ok" hasnt "$OUT" "health: ok"
+}
+
+# ---------------------------------------------------------------- a second address, for the app
+
+# The two lines a settings file needs for two addresses, and the sentence the script
+# prints when an address does not report its own role: wrong_role <host> <role>.
+HOST_LINES="TOURS_HOST=$DOMAIN
+APP_HOST=$APP_DOMAIN"
+wrong_role() {
+  printf '%s' "https://$1/healthz answered, but the platform does not see it as its $2 address. The settings file $SETTINGS must hold TOURS_HOST=$DOMAIN and APP_HOST=$APP_DOMAIN, and the app must be restarted after a change."
+}
+# An install with both addresses, on an app that reports the role of each.
+two_address_install() {
+  STUB_HEALTH=roles cpanel "" install --domain "$DOMAIN" --app-domain "$APP_DOMAIN" --yes
+  [ "$RC" = 0 ] || { cat "$OUT" "$ERR"; die "install with two addresses failed"; }
+}
+# The health addresses that were asked, in order, one per line.
+asked() { sed -n 's/^curl .*https:\/\/\([^/]*\)\/healthz$/\1/p' "$LOG"; }
+
+test_app_domain_is_checked() {
+  new_sandbox
+  local before; before="$(snapshot)"
+  local bad
+  for bad in "App.Example.com" "https://app.example.com" "app.example.com/x" "localhost" "203.0.113.10" "app_1.example.com" "app.example.com:8443" "*.example.com" "app.example.com;id"; do
+    cpanel "" install --domain "$DOMAIN" --app-domain "$bad" --yes
+    [ "$RC" = 2 ] || die "accepted (exit $RC): $bad"
+    has "$ERR" "ERROR: --app-domain must be a host name in lowercase, such as app.example.com, without https:// and without a path" || die "no reason given for: $bad"
+    cpanel "" install --domain "$DOMAIN" "--app-domain=$bad" --yes
+    [ "$RC" = 2 ] || die "accepted with = (exit $RC): $bad"
+  done
+  cpanel "" install --domain "$DOMAIN" --app-domain "$DOMAIN" --yes
+  expect "the same name twice is refused" test "$RC" = 2
+  expect "and says why" has "$ERR" "ERROR: --app-domain must be a different name than --domain"
+  cpanel "" install --domain "$DOMAIN" "--app-domain=$DOMAIN" --yes
+  expect "the same name twice is refused, written with =" test "$RC" = 2
+  cpanel "" install --domain "$DOMAIN" --yes --app-domain
+  expect "the option needs a value" test "$RC" = 2
+  expect "and says so" has "$ERR" "--app-domain needs a value"
+  cpanel "" backup --app-domain "$APP_DOMAIN"
+  expect "it does not go with backup" test "$RC" = 2
+  expect "and says where it goes" has "$ERR" "--app-domain goes only with install, update and status"
+  expect "no stand-in was called" test ! -s "$LOG"
+  expect "nothing was written" test "$(snapshot)" = "$before"
+  cpanel "" --help
+  expect "the usage text names the option as the plan has it" grep -qxF \
+    "  --app-domain <name> A second address, for the app, such as app.example.com. With it, --domain is the address of the tours. Remembered after the first time." "$OUT"
+
+  # On an install, the name is also checked against the address that is remembered.
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  before="$(snapshot)"
+  : >"$LOG"
+  local cmd
+  for cmd in update status; do
+    cpanel_in "$T/new" "" "$cmd" --yes --app-domain "$DOMAIN"
+    expect "$cmd: the remembered tours address is refused as the app address" test "$RC" != 0
+    expect "$cmd: says why" has "$ERR" "ERROR: --app-domain must be a different name than --domain"
+  done
+  expect "nothing was called, not even a backup" test ! -s "$LOG"
+  expect "nothing was changed" test "$(snapshot)" = "$before"
+
+  # A record someone changed by hand so that both names are the same: the commands that
+  # check the addresses say so, and a backup, which checks none, is still made.
+  printf 'APP_DOMAIN=%s\n' "$DOMAIN" >>"$APP/.cpanel-install"
+  cpanel "" status
+  expect "the same name recorded twice: status refuses" test "$RC" != 0
+  expect "the same name recorded twice: says why" has "$ERR" "--app-domain must be a different name than --domain"
+  expect "the same name recorded twice: no address was asked" test ! -s "$LOG"
+  cpanel "" backup
+  expect "the same name recorded twice: a backup is still made (stderr: $(cat "$ERR"))" test "$RC" = 0
+  # A record that is not a host name is not used, and the script says so.
+  sed -i 's/^APP_DOMAIN=.*/APP_DOMAIN=https:\/\/app.example.com\/x/' "$APP/.cpanel-install"
+  : >"$LOG"
+  cpanel "" status
+  expect "a record that is no host name: status goes on" test "$RC" = 0
+  expect "a record that is no host name: says it is not used" has "$ERR" "the APP_DOMAIN line in $APP/.cpanel-install does not hold a host name and is not used"
+  expect "a record that is no host name: only the tours address is asked" test "$(asked | tr '\n' ' ')" = "$DOMAIN "
+}
+
+test_install_with_app_domain_writes_both_host_lines() {
+  new_sandbox
+  STUB_HEALTH=roles cpanel "" install --domain "$DOMAIN" --app-domain "$APP_DOMAIN" --yes
+  expect "exit code 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
+  local code; code="$(setup_code)"
+  expect "a setup code was written" test "$(printf '%s\n' "$code" | grep -cE '^[0-9a-f]{64}$')" = 1
+  local want="# Settings of the tour platform in $APP. Keep this file private.
+DATA_DIR=$DATA
+SETUP_CODE=$code
+$HOST_LINES"
+  expect "the settings file is today's, with the two host lines after it (got: $(grep -v '^SETUP_CODE=' "$SETTINGS"))" test "$(cat "$SETTINGS")" = "$want"
+  [ "$MODES" = 0 ] || expect "the settings file is mode 600" test "$(mode_of "$SETTINGS")" = 600
+  # The script creates no domain: the hosting is asked for the tours address only.
+  expect "the Node.js app is created for --domain only, exactly as before" grep -qxF \
+    "cloudlinux-selector create --json --interpreter nodejs --version 24 --app-root apps/tours --domain $DOMAIN --app-uri / --startup-file app.cjs --app-mode production" "$LOG"
+  expect "the hosting's command is called once" test "$(grep -c '^cloudlinux-selector ' "$LOG")" = 1
+  expect "the hosting's command never gets the app address" test "$(grep '^cloudlinux-selector ' "$LOG" | grep -cF "$APP_DOMAIN")" = 0
+  expect "says that attaching the second name is done by hand" has "$OUT" "This script creates no domain"
+  expect "both addresses are remembered" test "$(cat "$APP/.cpanel-install")" = "# Written by cpanel.sh. Nothing secret: the settings are in $SETTINGS.
+DOMAIN=$DOMAIN
+APP_DOMAIN=$APP_DOMAIN
+NODE=24
+FINISHED=yes"
+  expect "health is asked at each address, the tours address first" test "$(asked | tr '\n' ' ')" = "$DOMAIN $APP_DOMAIN "
+  expect "create, packages, restart, then health twice" test "$(calls)" = "cloudlinux-selector npm touch curl curl "
+  expect "reports each address by its role" has "$OUT" "health of the tours address: ok"
+  expect "reports the app address too" has "$OUT" "health of the app address: ok"
+  expect "ends with both addresses" has "$OUT" "==> Installed version 0.1.1, and it answers at https://$DOMAIN and https://$APP_DOMAIN"
+  expect "the wizard is on the tours address" has "$OUT" "https://$DOMAIN/setup"
+  expect "the wizard is not named on the app address" hasnt "$OUT" "https://$APP_DOMAIN/setup"
+  expect "the setup code is not shown" code_not_shown
+  expect "the setup code is in no file but the settings file" test "$(grep -rlF -- "$code" "$H" | tr '\n' ' ')" = "$SETTINGS "
+  # Written with = it is the same install.
+  new_sandbox
+  STUB_HEALTH=roles cpanel "" install "--domain=$DOMAIN" "--app-domain=$APP_DOMAIN" --yes
+  expect "with =: exit code 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "with =: the two host lines are written" test "$(grep -E '^(TOURS|APP)_HOST=' "$SETTINGS")" = "$HOST_LINES"
+}
+
+test_install_without_app_domain_writes_todays_settings() {
+  new_sandbox
+  cpanel "" install --domain "$DOMAIN" --yes
+  expect "exit code 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
+  # Byte for byte what the version before this option wrote.
+  printf '# Settings of the tour platform in %s. Keep this file private.\nDATA_DIR=%s\nSETUP_CODE=%s\n' "$APP" "$DATA" "$(setup_code)" >"$T/want-settings"
+  expect "the settings file is byte for byte today's" cmp -s "$T/want-settings" "$SETTINGS"
+  printf '# Written by cpanel.sh. Nothing secret: the settings are in %s.\nDOMAIN=%s\nNODE=24\nFINISHED=yes\n' "$SETTINGS" "$DOMAIN" >"$T/want-state"
+  expect "the state file is byte for byte today's" cmp -s "$T/want-state" "$APP/.cpanel-install"
+  expect "no host line anywhere in the home folder" test "$(grep -rlE 'TOURS_HOST|APP_HOST|APP_DOMAIN' "$H" --exclude=cpanel.sh --exclude=app.cjs | wc -l | tr -d ' ')" = 0
+  expect "health is asked once, at the one address" test "$(asked | tr '\n' ' ')" = "$DOMAIN "
+  expect "reports health as before" grep -qxF "    health: ok" "$OUT"
+  expect "ends as before" grep -qxF "==> Installed version 0.1.1, and it answers at https://$DOMAIN" "$OUT"
+  expect "says nothing about a second address" test "$(cat "$OUT" "$ERR" | grep -ciE 'app address|TOURS_HOST|APP_HOST|creates no domain')" = 0
+  # An app in two-address mode that this install does not know about still passes, as
+  # any reply with "ok":true did before.
+  app_has_run
+  : >"$LOG"
+  STUB_HEALTH=roles cpanel "" status
+  expect "one recorded address: a reply that names a role is still ok" grep -qxF "    health: ok" "$OUT"
+  expect "one recorded address: asked once" test "$(asked | tr '\n' ' ')" = "$DOMAIN "
+}
+
+test_existing_settings_file_is_kept_and_the_two_lines_are_printed() {
+  new_sandbox
+  mkdir -p "$DATA" "$H/apps"
+  printf 'DATA_DIR=%s\nSETUP_CODE=an-earlier-code-0123456789abcdef\n' "$DATA" >"$SETTINGS"
+  local sum; sum="$(sha256sum <"$SETTINGS")"
+  # The sentence and, right under it, the two lines; printed once.
+  kept_lines_printed() {
+    [ "$(grep -xF -A 2 -- "    the settings file $SETTINGS is kept as it is. For two addresses it must hold these two lines; add them by hand if they are not there, then restart the app:" "$OUT")" = "    the settings file $SETTINGS is kept as it is. For two addresses it must hold these two lines; add them by hand if they are not there, then restart the app:
+    TOURS_HOST=$DOMAIN
+    APP_HOST=$APP_DOMAIN" ]
+  }
+  # The file lacks the two lines, so the app answers without a role: the install says
+  # what to add and does not call the result healthy.
+  CPANEL_HEALTH_TRIES=1 cpanel "" install --domain "$DOMAIN" --app-domain "$APP_DOMAIN" --yes
+  expect "install: exit code non-zero while the lines are missing" test "$RC" != 0
+  expect "install: the settings file is unchanged" test "$(sha256sum <"$SETTINGS")" = "$sum"
+  expect "install: prints the sentence and the two lines, as the plan has them" kept_lines_printed
+  expect "install: the earlier code is not shown" hasnt "$OUT" "an-earlier-code"
+  expect "install: names the address that has no role" has "$OUT" "$(wrong_role "$DOMAIN" tours)"
+  expect "install: does not claim it answers" hasnt "$OUT" "and it answers at"
+  expect "install: the app address is remembered all the same" grep -qxF "APP_DOMAIN=$APP_DOMAIN" "$APP/.cpanel-install"
+  expect "install: recorded as not finished" grep -qxF "FINISHED=no" "$APP/.cpanel-install"
+
+  # An update that is given the option on an install that had one address: the same.
+  new_sandbox
+  fresh_install
+  app_has_run
+  sum="$(sha256sum <"$SETTINGS")"
+  make_release "$T/new" 0.2.0
+  STUB_HEALTH=roles cpanel_in "$T/new" "" update --yes --app-domain "$APP_DOMAIN"
+  expect "update: succeeds once the app reports both roles (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "update: the settings file is unchanged" test "$(sha256sum <"$SETTINGS")" = "$sum"
+  expect "update: no host line was written to it" test "$(grep -cE 'TOURS_HOST|APP_HOST' "$SETTINGS")" = 0
+  expect "update: prints the sentence and the two lines" kept_lines_printed
+  expect "update: the app address is remembered" grep -qxF "APP_DOMAIN=$APP_DOMAIN" "$APP/.cpanel-install"
+  expect "update: the setup code is not shown" code_not_shown
+  # Once it is remembered, the lines are not printed again at every update.
+  make_release "$T/v3" 0.3.0
+  STUB_HEALTH=roles cpanel_in "$T/v3" "" update --yes
+  expect "next update: succeeds" test "$RC" = 0
+  expect "next update: does not repeat the two lines" hasnt "$OUT" "TOURS_HOST=$DOMAIN"
+}
+
+test_app_domain_is_remembered_by_update_and_status() {
+  new_sandbox
+  two_address_install
+  app_has_run
+  : >"$LOG"
+  STUB_HEALTH=roles cpanel "" status
+  expect "status: exit code 0" test "$RC" = 0
+  expect "status: asks both addresses without being told" test "$(asked | tr '\n' ' ')" = "$DOMAIN $APP_DOMAIN "
+  expect "status: shows both addresses" grep -qE "^    addresses: +https://$DOMAIN \(tours\) and https://$APP_DOMAIN \(app\)$" "$OUT"
+  expect "status: each reports its role" test "$(grep -cE '^    health of the (tours|app) address: ok$' "$OUT")" = 2
+  expect "status: changes nothing but asks health" test "$(calls)" = "curl curl "
+  make_release "$T/new" 0.2.0
+  : >"$LOG"
+  STUB_HEALTH=roles cpanel_in "$T/new" "" update --yes
+  expect "update: exit code 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "update: asks both addresses without being told" test "$(asked | tr '\n' ' ')" = "$DOMAIN $APP_DOMAIN "
+  expect "update: shows the app address before it starts" grep -qE "^    app address: +https://$APP_DOMAIN$" "$OUT"
+  expect "update: ends with both addresses" has "$OUT" "==> Updated to version 0.2.0, and it answers at https://$DOMAIN and https://$APP_DOMAIN"
+  expect "update: both are still remembered" test "$(grep -E '^(APP_)?DOMAIN=' "$APP/.cpanel-install" | tr '\n' ' ')" = "DOMAIN=$DOMAIN APP_DOMAIN=$APP_DOMAIN "
+  expect "update: the state file still says it finished" grep -qxF "FINISHED=yes" "$APP/.cpanel-install"
+  # A backup has no use for the addresses and still works.
+  cpanel "" backup
+  expect "backup: still works" test "$RC" = 0
+  expect "backup: the state file in it holds the app address" test "$(tar -xzOf "$(backup_dirs | tail -n 1)/app.tgz" .cpanel-install | grep -c "^APP_DOMAIN=$APP_DOMAIN\$")" = 1
+
+  # status with the option on an install with one address checks both and records nothing.
+  new_sandbox
+  fresh_install
+  app_has_run
+  local before; before="$(snapshot)"
+  : >"$LOG"
+  STUB_HEALTH=roles cpanel "" status --app-domain "$APP_DOMAIN"
+  expect "status --app-domain: exit code 0" test "$RC" = 0
+  expect "status --app-domain: asks both addresses" test "$(asked | tr '\n' ' ')" = "$DOMAIN $APP_DOMAIN "
+  expect "status --app-domain: each reports its role" test "$(grep -cE '^    health of the (tours|app) address: ok$' "$OUT")" = 2
+  expect "status --app-domain: writes nothing" test "$(snapshot)" = "$before"
+  : >"$LOG"
+  cpanel "" status
+  expect "afterwards status asks the one recorded address" test "$(asked | tr '\n' ' ')" = "$DOMAIN "
+}
+
+test_health_needs_each_address_to_report_its_own_role() {
+  new_sandbox
+  # Both names answer with the platform's reply, but without a role: the app is not in
+  # two-address mode, so the second name is not what the person thinks it is.
+  CPANEL_HEALTH_TRIES=2 cpanel "" install --domain "$DOMAIN" --app-domain "$APP_DOMAIN" --yes
+  expect "no role: exit code non-zero" test "$RC" != 0
+  expect "no role: not reported as ok" test "$(grep -cE 'health.*: ok' "$OUT")" = 0
+  expect "no role: does not claim it answers" hasnt "$OUT" "and it answers at"
+  expect "no role: the tours address is named" has "$OUT" "    health of the tours address: FAILED. $(wrong_role "$DOMAIN" tours)"
+  expect "no role: the app address is named" has "$OUT" "    health of the app address: FAILED. $(wrong_role "$APP_DOMAIN" app)"
+  expect "no role: each address was tried as often as asked" test "$(asked | tr '\n' ' ')" = "$DOMAIN $DOMAIN $APP_DOMAIN $APP_DOMAIN "
+  expect "no role: the install is not recorded as finished" grep -qxF "FINISHED=no" "$APP/.cpanel-install"
+  expect "no role: the hints name the second address" has "$OUT" "$APP_DOMAIN must be attached to the same Node.js app"
+  expect "no role: the setup code is not shown" code_not_shown
+  # The same app, once it reports the roles: status is content, and update finishes.
+  : >"$LOG"
+  STUB_HEALTH=roles cpanel "" status
+  expect "roles: each address is ok" test "$(grep -cE '^    health of the (tours|app) address: ok$' "$OUT")" = 2
+  expect "roles: one try each is enough" test "$(asked | tr '\n' ' ')" = "$DOMAIN $APP_DOMAIN "
+  # An app that is still starting is waited for, per address.
+  : >"$LOG"; rm -f "$STATE/curls"
+  STUB_HEALTH=roles STUB_HEALTH_AFTER=3 cpanel "" status
+  expect "starting: the first address is asked until it answers, then the second" test "$(asked | tr '\n' ' ')" = "$DOMAIN $DOMAIN $DOMAIN $APP_DOMAIN "
+  expect "starting: both end up ok" test "$(grep -cE '^    health of the (tours|app) address: ok$' "$OUT")" = 2
+  # Another site answering for the second name is not the platform.
+  STUB_HEALTH=roles STUB_HEALTH_APP=parked CPANEL_HEALTH_TRIES=1 cpanel "" status
+  expect "parked: the tours address is ok" has "$OUT" "    health of the tours address: ok"
+  expect "parked: the app address is not" has "$OUT" "    health of the app address: FAILED. https://$APP_DOMAIN/healthz answered, but not with the platform's reply; another site may be answering for this name"
+  # A second name without a certificate yet, or not attached at all.
+  STUB_HEALTH=roles STUB_HEALTH_APP=fail CPANEL_HEALTH_TRIES=1 cpanel "" status
+  expect "no answer: the tours address is ok" has "$OUT" "    health of the tours address: ok"
+  expect "no answer: the app address is named with curl's reason" has "$OUT" "    health of the app address: FAILED. https://$APP_DOMAIN/healthz did not answer (curl: (22) The requested URL returned error: 503)"
+}
+
+test_health_names_the_address_that_reports_the_wrong_role() {
+  new_sandbox
+  two_address_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  # The app sees every request as its tours address: something in front of it changes
+  # the host name, or the second name is not the one in the settings file.
+  STUB_HEALTH=roles STUB_HEALTH_APP=tours CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "update: exit code non-zero" test "$RC" != 0
+  expect "update: the tours address is ok" grep -qxF "    health of the tours address: ok" "$OUT"
+  expect "update: the app address is named, with the sentence as the plan has it" grep -qxF "    health of the app address: FAILED. $(wrong_role "$APP_DOMAIN" app)" "$OUT"
+  expect "update: the tours address is not blamed" hasnt "$OUT" "$(wrong_role "$DOMAIN" tours)"
+  expect "update: does not claim success" hasnt "$OUT" "Updated to version"
+  expect "update: says the version is in place but not healthy" has "$OUT" "Version 0.2.0 is in place, but the health check did not pass"
+  expect "update: nothing was rolled back for the person" has "$OUT" "Nothing was rolled back for you"
+  expect "update: the app address stays remembered" grep -qxF "APP_DOMAIN=$APP_DOMAIN" "$APP/.cpanel-install"
+  expect "update: the setup code is not shown" code_not_shown
+  # The two swapped: each is named with the role it should have had.
+  STUB_HEALTH=roles STUB_HEALTH_TOURS=app STUB_HEALTH_APP=tours CPANEL_HEALTH_TRIES=1 cpanel "" status
+  expect "swapped: status itself still exits 0, as for any failed check" test "$RC" = 0
+  expect "swapped: the tours address is named" grep -qxF "    health of the tours address: FAILED. $(wrong_role "$DOMAIN" tours)" "$OUT"
+  expect "swapped: the app address is named" grep -qxF "    health of the app address: FAILED. $(wrong_role "$APP_DOMAIN" app)" "$OUT"
+  expect "swapped: nothing is reported as ok" test "$(grep -cE 'health.*: ok' "$OUT")" = 0
+  # Only the tours address is wrong: the app address is still reported, as ok.
+  STUB_HEALTH=roles STUB_HEALTH_TOURS=ok CPANEL_HEALTH_TRIES=1 cpanel "" status
+  expect "tours wrong: named" grep -qxF "    health of the tours address: FAILED. $(wrong_role "$DOMAIN" tours)" "$OUT"
+  expect "tours wrong: the app address is ok" grep -qxF "    health of the app address: ok" "$OUT"
+  # The reply itself is never printed, whatever answered.
+  expect "the reply is not echoed" test "$(cat "$OUT" "$ERR" | grep -c '"address"')" = 0
+}
+
+test_dry_run_with_app_domain_changes_nothing() {
+  new_sandbox
+  local before; before="$(snapshot)"
+  cpanel "" install --domain "$DOMAIN" --app-domain "$APP_DOMAIN" --dry-run
+  expect "install --dry-run exits 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "install: nothing was called" test ! -s "$LOG"
+  expect "install: nothing was written" test "$(snapshot)" = "$before"
+  expect "install: shows the create command, for --domain only" grep -qxF \
+    "    \$ cloudlinux-selector create --json --interpreter nodejs --version 24 --app-root apps/tours --domain $DOMAIN --app-uri / --startup-file app.cjs --app-mode production" "$OUT"
+  expect "install: shows the app address" grep -qE "^    app address: +https://$APP_DOMAIN$" "$OUT"
+  expect "install: says the settings file would get the two host lines" has "$OUT" "would write the settings file $SETTINGS (mode 600) with DATA_DIR, a new setup code, TOURS_HOST=$DOMAIN and APP_HOST=$APP_DOMAIN"
+  expect "install: names both health addresses" has "$OUT" "Checking https://$DOMAIN/healthz and https://$APP_DOMAIN/healthz"
+  expect "install: does not claim health" test "$(grep -cE 'health.*: ok' "$OUT")" = 0
+  expect "install: says it was a dry run" has "$OUT" "Dry run: nothing was changed"
+
+  # On an install with one address, a dry run with the option records nothing.
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  before="$(snapshot)"
+  : >"$LOG"
+  local cmd
+  for cmd in update status; do
+    cpanel_in "$T/new" "" "$cmd" --app-domain "$APP_DOMAIN" --dry-run
+    expect "$cmd --dry-run exits 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
+    expect "$cmd: nothing was called" test ! -s "$LOG"
+    expect "$cmd: nothing was written, the app address included" test "$(snapshot)" = "$before"
+    expect "$cmd: names both health addresses" has "$OUT" "Checking https://$DOMAIN/healthz and https://$APP_DOMAIN/healthz"
+  done
+  expect "the state file still holds one address" test "$(grep -c APP_DOMAIN "$APP/.cpanel-install")" = 0
+}
+
+test_app_domain_never_shows_the_setup_code() {
+  new_sandbox
+  two_address_install
+  expect "install: not on stdout, stderr or any command line" code_not_shown
+  local c; c="$(setup_code)"
+  expect "install: in no file but the settings file" test "$(grep -rlF -- "$c" "$H" | tr '\n' ' ')" = "$SETTINGS "
+  app_has_run
+  local mode
+  for mode in roles ok fail parked; do
+    STUB_HEALTH="$mode" CPANEL_HEALTH_TRIES=1 cpanel "" status
+    expect "status, health $mode: does not show the setup code" code_not_shown
+  done
+  make_release "$T/new" 0.2.0
+  STUB_HEALTH=roles STUB_HEALTH_APP=tours CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "a failed update does not show it" code_not_shown
+  STUB_HEALTH=roles cpanel_in "$T/new" "" update --yes --app-domain other.example.com
+  expect "an update with another app address does not show it" code_not_shown
+  expect "and the settings file still holds the code it was given" test "$(setup_code)" = "$c"
+  cpanel "" install --domain "$DOMAIN" --app-domain "$APP_DOMAIN" --dry-run
+  expect "a dry run does not show it" code_not_shown
 }
 
 # ---------------------------------------------------------------- run

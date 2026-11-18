@@ -25,6 +25,7 @@ Examples use `tours.example.com` for the platform's address and `you` for your c
 - [11. Restore from a backup](#11-restore-from-a-backup)
 - [12. Roll back an update](#12-roll-back-an-update)
 - [13. Troubleshooting](#13-troubleshooting)
+- [14. A second address for the app](#14-a-second-address-for-the-app)
 - [What has been run where](#what-has-been-run-where)
 
 ## 1. What you need
@@ -149,6 +150,7 @@ Options, for when the defaults do not fit:
 |---|---|
 | `--app-root <path>` | Another app folder, relative to your home folder. The default is `apps/tours`. The data folder and the settings file are named after it: `apps/demo` gets `apps/demo-data` and `apps/demo-config.env`. The script refuses a folder the web server serves: `public_html`, `www`, or a path that starts with a folder named after a domain. Give the same option to every later command |
 | `--node <major>` | Another Node.js version than 24. The platform needs 24 or later |
+| `--app-domain <name>` | A second address, for the app, such as `app.example.com`; `--domain` is then the address of the tours. It goes with `install`, `update` and `status`, and is remembered after an install or an update. See [step 14](#14-a-second-address-for-the-app) |
 | `--yes` | Do not ask before starting |
 | `--dry-run` | Print what would be done and change nothing |
 
@@ -379,8 +381,93 @@ cd ~/apps/tours && ./cpanel.sh status
 | An update or a backup stops, saying there is no database | This install has run before, so it has a database, and the script will not go on without backing it up. It looks in the folder the `DATA_DIR` line of the settings file names: that line points at the wrong folder, or the database was moved or removed. Put the line right, or restore the database as in [step 11](#11-restore-from-a-backup) |
 | `./cpanel.sh status` says an update was cut off | Unpack the archive of that update again if needed and run `./cpanel.sh update` from it; see [step 9](#9-updates) |
 | The setup wizard says the setup code is not right | Copy the code again from the settings file, without spaces around it, as in [step 6](#6-read-the-setup-code) |
+| The script says the platform does not see an address as its tours or its app address | The address answered, but the platform reports no role for it, or the role of the other address. Check that the settings file holds both lines of [step 14](#14-a-second-address-for-the-app), each with the right name, and restart the app. If the lines are right, the name does not reach the app as it was typed: the second name is not attached to this app, or something in front of the app changes the host name. **Unconfirmed:** whether your hosting does that |
+| With two addresses, a name shows an empty page with status 421 | The platform then refuses every name but the two in the settings file. Check the spelling of the names after `TOURS_HOST=` and `APP_HOST=`. To go back to one address, see the way back in [step 14](#14-a-second-address-for-the-app) |
+| After adding the two lines the app does not start | The app's log names the line that is wrong: both lines must be there, each must hold a plain host name, and the two names must differ. Put them right, or remove both, and restart |
 
 `./cpanel.sh status` shows the installed version, the folders, the size of the data folder, the newest backup and the health in one place. It changes nothing.
+
+## 14. A second address for the app
+
+The platform can answer on two names instead of one: the address of the tours, `tours.example.com`, and a second address for the app, `app.example.com`. This is optional. With one address, which is what the steps above set up, everything works as described there.
+
+| Address | What answers there |
+|---|---|
+| `tours.example.com`, the tours address | The tours and their pictures, the setup wizard, and the token API that Mythicshot uses |
+| `app.example.com`, the app address | The token API. A link to a tour or a picture is sent on to the tours address. The setup wizard is not there |
+| Any other name that reaches the app | Nothing: the platform refuses it with an empty answer, status 421 |
+
+> [!WARNING]
+> A wrong name in either of the two lines of step 4 makes the platform refuse its own address, tour links included, and one line without the other stops it from starting. Removing both lines and restarting brings one address back.
+
+Do the steps in this order. Steps 1 to 3 change nothing for the platform; it goes over to two addresses with the restart in step 5.
+
+1. Create the subdomain `app.example.com`, as in [step 2](#2-create-the-subdomain). The script creates no domain and changes none; this step and the next are yours.
+2. Attach it to the same Node.js app. **Unconfirmed:** whether your hosting lets one Node.js app answer for a second name, and where that is set; this has not been tried on real hosting. One thing to try is to give the new subdomain the same document root as `tours.example.com` when you create it, so that the hosting applies the app's settings to both names. If your hosting has no way to do it, ask your hosting provider and stay with one address.
+3. Wait for its certificate, as in [step 8](#8-https). The second name needs one of its own.
+
+**How to tell the first three steps worked:** `https://app.example.com/healthz` opens in a browser without a warning and shows `{"ok":true}`. That is the platform answering on the new name, still with one address. If it shows a page from the hosting instead, the name is not attached to the app yet: do not go on.
+
+4. Add the two lines to the settings file. Open the file in a text editor and add the two lines at the end, with your own names in lowercase, without `https` in front and without a path. Change nothing else, and save.
+
+```sh
+nano ~/apps/tours-config.env
+```
+
+```text
+TOURS_HOST=tours.example.com
+APP_HOST=app.example.com
+```
+
+5. Restart the app.
+
+```sh
+touch ~/apps/tours/tmp/restart.txt
+```
+
+6. Check both addresses. The script asks each one and looks for the role the platform reports for it.
+
+```sh
+cd ~/apps/tours && ./cpanel.sh status --app-domain app.example.com
+```
+
+**How to tell it worked:** the status shows `health of the tours address: ok` and `health of the app address: ok`. In a browser, `https://tours.example.com/healthz` shows `{"ok":true,"address":"tours"}` and `https://app.example.com/healthz` shows `{"ok":true,"address":"app"}`. If the status says the platform does not see an address as its tours or its app address, see [step 13](#13-troubleshooting).
+
+**Let the script remember it.** The `status` command checks and records nothing. At the next update, give the option once. The script then keeps the app address in its own file, `.cpanel-install` in the app folder, and checks both addresses after every update and in every status without being told. The update does not change the settings file either: it prints the two lines it expects there.
+
+```sh
+./cpanel.sh update --app-domain app.example.com
+```
+
+**A new install.** The simplest way is to install with one address, as in [step 5](#5-install-the-platform), and then follow the six steps above. The install takes the option too, and then writes the two lines into the new settings file itself. It still creates the Node.js app for `tours.example.com` only, so its check of the app address fails until steps 2 and 3 are done; check again afterwards with `./cpanel.sh status`.
+
+```sh
+./cpanel.sh install --domain tours.example.com --app-domain app.example.com
+```
+
+**An install that has one address today.** Moving it is the six steps above, and their order is what keeps it reachable. Make a backup first, as in [step 10](#10-backups). Do steps 1 to 3 while the platform runs as it does: they change nothing for the tours address, and until the two lines are there the platform answers on the new name exactly as on the old one. Only then do steps 4 to 6; the restart is a short moment in which the platform does not answer. What you give as `--domain` stays `tours.example.com`, the name the tours were published at, so every link that is out there keeps working, and Mythicshot keeps the address it has.
+
+**The way back.** Remove the two lines from the settings file again and restart: the platform answers on one address as before.
+
+```sh
+nano ~/apps/tours-config.env
+```
+
+```sh
+touch ~/apps/tours/tmp/restart.txt
+```
+
+If the script has remembered the app address, also remove the line that starts with `APP_DOMAIN=` from its own file, which holds nothing secret, so that it checks one address again. Then check.
+
+```sh
+nano ~/apps/tours/.cpanel-install
+```
+
+```sh
+cd ~/apps/tours && ./cpanel.sh status
+```
+
+The subdomain `app.example.com` can stay or be removed in cPanel. With one address the platform answers on every name the hosting sends to it.
 
 ## What has been run where
 
@@ -399,6 +486,7 @@ cd ~/apps/tours && ./cpanel.sh status
 - The `app.cjs` in the archive. It is tested by starting it with Node.js, not under Passenger.
 - The database copy for backups. The copy made with Node.js was run against a real database in use on a development computer; the copy made with the `sqlite3` tool was only run against a stand-in.
 - Resuming an update that was cut off, and the commands to go back. Both were run against stand-ins, with the cut made at the points the tests can reach.
+- The second address of [step 14](#14-a-second-address-for-the-app): the `--app-domain` option, the two lines in a new settings file, and the check that each address reports its own role. All of it was run against stand-ins only.
 - The restore steps in [step 11](#11-restore-from-a-backup), and the labels of cPanel's pages and buttons throughout, which are written from memory of cPanel and may differ at your provider.
 
 **Not yet confirmed on real hosting,** in the order to check them on the first real run:
@@ -407,5 +495,6 @@ cd ~/apps/tours && ./cpanel.sh status
 2. That `cloudlinux-selector create` answers the way the script expects when it succeeds and when it refuses.
 3. That the app's Node.js environment is at `/home/you/nodevenv/apps/tours/24/bin/activate` right after the script creates the app.
 4. That the hosting's Bash runs the script: it was run with Bash 5.2 only.
+5. That one Node.js app can answer for a second subdomain, and that the host name reaches the app unchanged. [Step 14](#14-a-second-address-for-the-app) marks the step; the script creates no domain and only checks the result.
 
 The files this guide describes are [deploy/cpanel/cpanel.sh](../../deploy/cpanel/cpanel.sh), [deploy/cpanel/app.cjs](../../deploy/cpanel/app.cjs) and [scripts/package-cpanel.ts](../../scripts/package-cpanel.ts).

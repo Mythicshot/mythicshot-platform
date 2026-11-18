@@ -6,15 +6,18 @@
 #   ./cpanel.sh install --domain tours.example.com [--app-root apps/tours] [--node 24]
 #   ./cpanel.sh update | backup | status          [--app-root apps/tours]
 #   options: --yes, --dry-run, and for update: --allow-downgrade
+#   a second address, for the app: --app-domain app.example.com with install, update
+#   or status (see "Two addresses" below)
 #
 # Where things go, for the default --app-root apps/tours (always relative to $HOME):
 #   ~/apps/tours             the app: dist/, migrations/, package.json, package-lock.json,
 #                            app.cjs, cpanel.sh, VERSION, and .cpanel-install (the
-#                            domain, the Node version and whether the install
-#                            finished; nothing secret)
+#                            domain, the app's own domain when there is one, the Node
+#                            version and whether the install finished; nothing secret)
 #   ~/apps/tours-data        db.sqlite, drafts/, public/ (install writes this path to
 #                            the settings file; later commands read it from there)
-#   ~/apps/tours-config.env  the settings, DATA_DIR and SETUP_CODE, mode 600. It sits
+#   ~/apps/tours-config.env  the settings, DATA_DIR and SETUP_CODE, and for two
+#                            addresses TOURS_HOST and APP_HOST, mode 600. It sits
 #                            beside the app folder, outside it and outside the web root.
 #   ~/backups/tours-<YYYYMMDD-HHMMSS>   one folder per backup, mode 700
 #
@@ -54,6 +57,20 @@
 # - --dry-run prints what would be done and runs nothing. Steps that replace files ask
 #   first unless --yes is given.
 #
+# Two addresses. With --app-domain the platform answers on two names: --domain is the
+# address of the tours, --app-domain the address of the app. What this script does
+# about it, and what it leaves alone:
+# - It creates no domain and changes none. The hosting's create command gets --domain
+#   only; attaching the second name to the same Node.js app is done by hand in cPanel.
+# - A first install writes TOURS_HOST and APP_HOST into the settings file it creates. A
+#   settings file that is already there is never changed: the script prints the two
+#   lines to add by hand.
+# - The app address is kept in .cpanel-install (APP_DOMAIN) by install and update, and
+#   used from there afterwards. status with --app-domain checks and records nothing.
+# - The health check then asks both addresses, and each must report its own role
+#   ("address":"tours" and "address":"app" in the reply of /healthz). An app that
+#   answers without the role it should have is reported as failed, by name.
+#
 # Every outside command (cloudlinux-selector, npm, node, sqlite3, curl, and touch for
 # the restart file) is found through PATH, so the tests put stand-ins in front.
 # CPANEL_HEALTH_TRIES and CPANEL_HEALTH_WAIT (seconds) change how long the health check
@@ -81,6 +98,10 @@ esac
 COMMAND=""
 APP_ROOT="$DEFAULT_APP_ROOT"
 DOMAIN=""
+# The second address, for the app; empty for an install with one address.
+APP_DOMAIN=""
+# 1 when --app-domain came from the command line and is not the one already recorded.
+APP_DOMAIN_NEW=0
 NODE_MAJOR=""
 ASSUME_YES=0
 DRY_RUN=0
@@ -137,6 +158,7 @@ Options:
                       It must be outside the folders the web server serves.
   --domain <name>     The address the app answers on, such as tours.example.com. Needed
                       for install; update remembers it.
+  --app-domain <name> A second address, for the app, such as app.example.com. With it, --domain is the address of the tours. Remembered after the first time.
   --node <major>      The Node.js version to run on (default 24).
   --yes               Do not ask "continue?" questions.
   --dry-run           Print what would be done and change nothing.
@@ -158,12 +180,13 @@ run() {
 # ---------------------------------------------------------------- arguments
 
 parse_args() {
-  local seen=0 a want=""
+  local seen=0 a want="" app_domain_given=0
   for a in "$@"; do
     if [ -n "$want" ]; then
       case "$want" in
         --app-root) APP_ROOT="$a" ;;
         --domain) DOMAIN="$a" ;;
+        --app-domain) APP_DOMAIN="$a"; app_domain_given=1 ;;
         --node) NODE_MAJOR="$a" ;;
       esac
       want=""
@@ -173,9 +196,10 @@ parse_args() {
       install | update | backup | status)
         [ "$seen" = 0 ] || usage_error "give only one command"
         COMMAND="$a"; seen=1 ;;
-      --app-root | --domain | --node) want="$a" ;;
+      --app-root | --domain | --app-domain | --node) want="$a" ;;
       --app-root=*) APP_ROOT="${a#*=}" ;;
       --domain=*) DOMAIN="${a#*=}" ;;
+      --app-domain=*) APP_DOMAIN="${a#*=}"; app_domain_given=1 ;;
       --node=*) NODE_MAJOR="${a#*=}" ;;
       --yes | -y) ASSUME_YES=1 ;;
       --dry-run) DRY_RUN=1 ;;
@@ -188,6 +212,12 @@ parse_args() {
   [ -n "$COMMAND" ] || usage_error "give a command: install, update, backup or status"
   valid_app_root "$APP_ROOT" || usage_error "--app-root must be a folder path relative to your home folder, made of letters, digits, dots, hyphens and underscores, and the app folder must be outside the folders the web server serves (public_html, www, or a folder named after a domain): $APP_ROOT"
   [ -z "$DOMAIN" ] || valid_domain "$DOMAIN" || usage_error "--domain must be a host name in lowercase, such as tours.example.com, without https:// and without a path"
+  if [ "$app_domain_given" = 1 ]; then
+    valid_domain "$APP_DOMAIN" || usage_error "--app-domain must be a host name in lowercase, such as app.example.com, without https:// and without a path"
+    [ "$APP_DOMAIN" != "$DOMAIN" ] || usage_error "--app-domain must be a different name than --domain"
+    [ "$COMMAND" != backup ] || usage_error "--app-domain goes only with install, update and status"
+    APP_DOMAIN_NEW=1
+  fi
   [ -z "$NODE_MAJOR" ] || [[ "$NODE_MAJOR" =~ ^[1-9][0-9]?$ ]] || usage_error "--node must be a major version number, such as 24"
   if [ "$ALLOW_DOWNGRADE" = 1 ] && [ "$COMMAND" != update ]; then usage_error "--allow-downgrade goes only with update"; fi
   if [ "$COMMAND" = install ] && [ -z "$DOMAIN" ]; then usage_error "install needs --domain <name>"; fi
@@ -277,13 +307,23 @@ value_in() {
   sed -n "s/^$2=//p" "$1" | head -n 1
 }
 
-# Fills in the domain and the Node version from the state file where the command line
-# did not give them.
+# Fills in the domain, the app's domain and the Node version from the state file where
+# the command line did not give them.
 read_state() {
   local v
   if [ -z "$DOMAIN" ]; then
     v="$(value_in "$STATE_FILE" DOMAIN)"
     if [ -n "$v" ] && valid_domain "$v"; then DOMAIN="$v"; fi
+  fi
+  v="$(value_in "$STATE_FILE" APP_DOMAIN)"
+  if [ -n "$v" ] && ! valid_domain "$v"; then
+    warn "the APP_DOMAIN line in $STATE_FILE does not hold a host name and is not used; give the app address again with --app-domain <name>"
+    v=""
+  fi
+  if [ -z "$APP_DOMAIN" ]; then
+    APP_DOMAIN="$v"
+  elif [ "$APP_DOMAIN" = "$v" ]; then
+    APP_DOMAIN_NEW=0
   fi
   if [ -z "$NODE_MAJOR" ]; then
     v="$(value_in "$STATE_FILE" NODE)"
@@ -291,6 +331,15 @@ read_state() {
   fi
   v="$(value_in "$STATE_FILE" FINISHED)"
   case "$v" in yes | no) STATE_FINISHED="$v" ;; esac
+}
+
+# For the commands that check the addresses (update and status), once the state file is
+# read: the two names must differ, also when one of them is the remembered one, and an
+# app address needs the address of the tours beside it. Stops before anything is changed.
+check_addresses() {
+  [ -n "$APP_DOMAIN" ] || return 0
+  [ "$APP_DOMAIN" != "$DOMAIN" ] || die "--app-domain must be a different name than --domain: $APP_DOMAIN is the address of the tours of this install (remembered in $STATE_FILE). Nothing was changed"
+  [ -n "$DOMAIN" ] || die "an app address needs the address of the tours beside it, and none is recorded for this install; add --domain <name>. Nothing was changed"
 }
 
 set_node_paths() {
@@ -305,6 +354,7 @@ write_state() {
     {
       printf '# Written by cpanel.sh. Nothing secret: the settings are in %s.\n' "$SETTINGS"
       printf 'DOMAIN=%s\n' "$DOMAIN"
+      [ -z "$APP_DOMAIN" ] || printf 'APP_DOMAIN=%s\n' "$APP_DOMAIN"
       printf 'NODE=%s\n' "$NODE_MAJOR"
       # FINISHED=yes: an install or an update got as far as a passed health check, so
       # the app has run and has a database. FINISHED=no: the first install has not.
@@ -444,32 +494,42 @@ restart_app() {
 
 # ---------------------------------------------------------------- health
 
-# Asks the app's health address through the hosting's web server. Sets HEALTH to ok,
-# failed or unknown, and HEALTH_NOTE to the reason when it is not ok.
-check_health() {
-  local tries="${CPANEL_HEALTH_TRIES:-6}" wait="${CPANEL_HEALTH_WAIT:-5}" i=1 reply
+# Asks one address for the app's health through the hosting's web server:
+# check_address <host> [role]. Sets HEALTH to ok, failed or unknown, and HEALTH_NOTE to
+# the reason when it is not ok. With a role (tours or app), the platform must also
+# report that role for the address: that is how a second name that reaches another app,
+# a settings file without the two host lines, or something in front of the app that
+# changes the host name is noticed. The reply itself is never printed.
+check_address() {
+  local host="$1" role="${2:-}" tries="${CPANEL_HEALTH_TRIES:-6}" wait="${CPANEL_HEALTH_WAIT:-5}" i=1 reply
   [[ "$tries" =~ ^[1-9][0-9]?$ ]] || tries=6
   [[ "$wait" =~ ^[0-9]{1,3}$ ]] || wait=5
   HEALTH=unknown
   HEALTH_NOTE=""
-  if [ -z "$DOMAIN" ]; then
+  if [ -z "$host" ]; then
     HEALTH_NOTE="no domain is recorded for this install; add --domain <name> (an update then remembers it)"
     return 1
   fi
   if ! command -v curl >/dev/null 2>&1; then
-    HEALTH_NOTE="the curl tool is not available here; open https://$DOMAIN/healthz in a browser instead"
+    HEALTH_NOTE="the curl tool is not available here; open https://$host/healthz in a browser instead"
     return 1
   fi
   HEALTH=failed
   while :; do
-    if reply="$(curl -fsS --max-time 20 "https://$DOMAIN/healthz" 2>&1)"; then
+    if reply="$(curl -fsS --max-time 20 "https://$host/healthz" 2>&1)"; then
       case "$reply" in
-        *'"ok":true'*) HEALTH=ok; HEALTH_NOTE=""; return 0 ;;
+        *'"ok":true'*)
+          if [ -z "$role" ]; then HEALTH=ok; HEALTH_NOTE=""; return 0; fi
+          case "$reply" in
+            *"\"address\":\"$role\""*) HEALTH=ok; HEALTH_NOTE=""; return 0 ;;
+          esac
+          HEALTH_NOTE="https://$host/healthz answered, but the platform does not see it as its $role address. The settings file $SETTINGS must hold TOURS_HOST=$DOMAIN and APP_HOST=$APP_DOMAIN, and the app must be restarted after a change."
+          ;;
+        *) HEALTH_NOTE="https://$host/healthz answered, but not with the platform's reply; another site may be answering for this name" ;;
       esac
-      HEALTH_NOTE="https://$DOMAIN/healthz answered, but not with the platform's reply; another site may be answering for this name"
     else
       reply="$(printf '%s\n' "$reply" | tail -n 1)"
-      HEALTH_NOTE="https://$DOMAIN/healthz did not answer (${reply:-curl failed})"
+      HEALTH_NOTE="https://$host/healthz did not answer (${reply:-curl failed})"
     fi
     [ "$i" -lt "$tries" ] || return 1
     i=$((i + 1))
@@ -477,15 +537,50 @@ check_health() {
   done
 }
 
-report_health() {
-  say "Checking https://${DOMAIN:-<no domain recorded>}/healthz"
-  if [ "$DRY_RUN" = 1 ]; then info "would ask the health address with curl"; HEALTH=unknown; HEALTH_NOTE="dry run"; return 0; fi
-  if check_health; then
-    info "health: ok"
+# One address with a role, checked and reported: report_address <host> <role>.
+report_address() {
+  if check_address "$1" "$2"; then
+    info "health of the $2 address: ok"
     return 0
   fi
-  if [ "$HEALTH" = unknown ]; then info "health: NOT CHECKED. $HEALTH_NOTE"; else info "health: FAILED. $HEALTH_NOTE"; fi
+  if [ "$HEALTH" = unknown ]; then info "health of the $2 address: NOT CHECKED. $HEALTH_NOTE"; else info "health of the $2 address: FAILED. $HEALTH_NOTE"; fi
   return 1
+}
+
+# Checks the health of every recorded address and says what it found. With one address
+# this is the check as it always was. With an app address, both are asked, each for its
+# own role, and both results are shown, so that the one that is wrong is named. Returns
+# 0 only when every address is ok.
+report_health() {
+  local rc=0
+  if [ -z "$APP_DOMAIN" ]; then
+    say "Checking https://${DOMAIN:-<no domain recorded>}/healthz"
+    if [ "$DRY_RUN" = 1 ]; then info "would ask the health address with curl"; HEALTH=unknown; HEALTH_NOTE="dry run"; return 0; fi
+    if check_address "$DOMAIN"; then
+      info "health: ok"
+      return 0
+    fi
+    if [ "$HEALTH" = unknown ]; then info "health: NOT CHECKED. $HEALTH_NOTE"; else info "health: FAILED. $HEALTH_NOTE"; fi
+    return 1
+  fi
+  say "Checking https://$DOMAIN/healthz and https://$APP_DOMAIN/healthz"
+  if [ "$DRY_RUN" = 1 ]; then info "would ask both health addresses with curl, and look for the role each reports"; HEALTH=unknown; HEALTH_NOTE="dry run"; return 0; fi
+  report_address "$DOMAIN" tours || rc=1
+  report_address "$APP_DOMAIN" app || rc=1
+  return "$rc"
+}
+
+# Where the app answers, for the closing line: one address, or both.
+answers_at() {
+  if [ -n "$APP_DOMAIN" ]; then printf 'https://%s and https://%s' "$DOMAIN" "$APP_DOMAIN"; else printf 'https://%s' "$DOMAIN"; fi
+}
+
+# The two lines a settings file needs for two addresses. The script never changes a
+# settings file that is there, so it says what to add.
+print_host_lines() {
+  info "the settings file $SETTINGS is kept as it is. For two addresses it must hold these two lines; add them by hand if they are not there, then restart the app:"
+  info "TOURS_HOST=$DOMAIN"
+  info "APP_HOST=$APP_DOMAIN"
 }
 
 health_hints() {
@@ -493,6 +588,10 @@ health_hints() {
   info "- the app's log: in cPanel, Setup Node.js App, edit the app and set a log file for it, restart, load the address and read the file"
   info "- the name: $DOMAIN must be a domain or subdomain of this hosting account, and the Node.js app must be set to it"
   info "- the certificate: on a new subdomain the hosting's automatic certificate can take a while; until then curl refuses the address"
+  if [ -n "$APP_DOMAIN" ]; then
+    info "- the second address: $APP_DOMAIN must be attached to the same Node.js app as $DOMAIN, by hand in cPanel (this script creates no domain), and needs a certificate of its own"
+    info "- the settings file: $SETTINGS must hold TOURS_HOST=$DOMAIN and APP_HOST=$APP_DOMAIN, and the app must be restarted after a change"
+  fi
   info "Check again at any time with: $SELF status --app-root $APP_ROOT"
 }
 
@@ -656,10 +755,15 @@ create_settings_and_data() {
     info "the settings file $SETTINGS is already there and is kept as it is, with the setup code it holds"
     read_data_dir || die "$DATA_PROBLEM. The file must hold a line DATA_DIR=<the data folder's full path>; put that right and finish with: $SELF update --yes --app-root $APP_ROOT"
     [ "$DRY_RUN" = 1 ] || chmod 600 -- "$SETTINGS"
+    [ -z "$APP_DOMAIN" ] || print_host_lines
   else
     DATA_DIR="$APP_DIR-data"
     if [ "$DRY_RUN" = 1 ]; then
-      info "would write the settings file $SETTINGS (mode 600) with DATA_DIR and a new setup code"
+      if [ -n "$APP_DOMAIN" ]; then
+        info "would write the settings file $SETTINGS (mode 600) with DATA_DIR, a new setup code, TOURS_HOST=$DOMAIN and APP_HOST=$APP_DOMAIN"
+      else
+        info "would write the settings file $SETTINGS (mode 600) with DATA_DIR and a new setup code"
+      fi
     else
       code="$(new_setup_code)"
       [[ "$code" =~ ^[0-9a-f]{64}$ ]] || die "could not make a setup code from /dev/urandom"
@@ -669,11 +773,20 @@ create_settings_and_data() {
         printf '# Settings of the tour platform in %s. Keep this file private.\n' "$APP_DIR"
         printf 'DATA_DIR=%s\n' "$DATA_DIR"
         printf 'SETUP_CODE=%s\n' "$code"
+        # Two addresses: the app reads from these which host name has which role.
+        if [ -n "$APP_DOMAIN" ]; then
+          printf 'TOURS_HOST=%s\n' "$DOMAIN"
+          printf 'APP_HOST=%s\n' "$APP_DOMAIN"
+        fi
       } >"$tmp"
       chmod 600 -- "$tmp"
       mv -- "$tmp" "$SETTINGS"
       code=""
-      info "wrote the settings file $SETTINGS (mode 600)"
+      if [ -n "$APP_DOMAIN" ]; then
+        info "wrote the settings file $SETTINGS (mode 600), with TOURS_HOST=$DOMAIN and APP_HOST=$APP_DOMAIN"
+      else
+        info "wrote the settings file $SETTINGS (mode 600)"
+      fi
     fi
   fi
   if [ -d "$DATA_DIR" ]; then
@@ -706,6 +819,10 @@ cmd_install() {
 
   say "Install version $version"
   info "address:        https://$DOMAIN"
+  if [ -n "$APP_DOMAIN" ]; then
+    info "app address:    https://$APP_DOMAIN"
+    info "This script creates no domain. The Node.js app is created for $DOMAIN only; $APP_DOMAIN must exist on this hosting account and be attached to the same app by hand, as the guide describes."
+  fi
   info "app folder:     $APP_DIR (Node.js $NODE_MAJOR)"
   info "settings file:  $SETTINGS"
   info "data folder:    $APP_DIR-data, unless an existing settings file names another"
@@ -750,7 +867,7 @@ cmd_install() {
   if report_health; then
     STATE_FINISHED=yes
     write_state
-    say "Installed version $version, and it answers at https://$DOMAIN"
+    say "Installed version $version, and it answers at $(answers_at)"
   else
     say "Installed version $version, but the health check did not pass"
     health_hints
@@ -851,6 +968,7 @@ cmd_update() {
   read_state
   set_node_paths
   [ -n "$DOMAIN" ] || die "the address of this install is not recorded, so the update could not be checked afterwards; nothing was changed. Give it once and it is remembered: $SELF update --domain <name> --app-root $APP_ROOT"
+  check_addresses
   new="$(version_in "$SRC_DIR")"
   old="$(version_in "$APP_DIR" || true)"
   if [ -n "$old" ] && version_lt "$new" "$old" && [ "$ALLOW_DOWNGRADE" != 1 ]; then
@@ -866,9 +984,16 @@ cmd_update() {
   if [ "$RESUME" = 1 ]; then info "An earlier update was cut off. This run finishes it; dist.old and migrations.old from before it are kept."; fi
   if [ "$NO_DATABASE" = 1 ]; then info "The app has never started, so there is no database to back up yet; the backup holds the files only."; fi
   info "address:        https://$DOMAIN"
+  [ -z "$APP_DOMAIN" ] || info "app address:    https://$APP_DOMAIN"
   info "app folder:     $APP_DIR (Node.js $NODE_MAJOR)"
   info "data folder:    $DATA_DIR (not touched)"
   info "settings file:  $SETTINGS (not touched)"
+  # An app address this install did not have before: the settings file is not written
+  # for it, and no domain is created.
+  if [ "$APP_DOMAIN_NEW" = 1 ]; then
+    print_host_lines
+    info "This script creates no domain: $APP_DOMAIN must exist on this hosting account and be attached to the same Node.js app as $DOMAIN by hand, as the guide describes."
+  fi
   confirm "Back up, replace the app files and restart?" || die "stopped; nothing was changed"
 
   do_backup || die "the backup failed, so the update did not start; nothing was changed"
@@ -923,7 +1048,7 @@ cmd_update() {
   if report_health; then
     STATE_FINISHED=yes
     write_state
-    say "Updated to version $new, and it answers at https://$DOMAIN"
+    say "Updated to version $new, and it answers at $(answers_at)"
     info "The previous version stays in dist.old and migrations.old until the next update."
     return 0
   fi
@@ -946,12 +1071,14 @@ cmd_status() {
   local version last size
   installed || die "nothing is installed at $APP_DIR"
   read_state
+  check_addresses
   set_node_paths
   version="$(version_in "$APP_DIR" || true)"
   last="$(last_backup)"
   say "Status"
   info "version:        ${version:-unknown}"
   info "app folder:     $APP_DIR (app root $APP_ROOT, Node.js $NODE_MAJOR)"
+  [ -z "$APP_DOMAIN" ] || info "addresses:      https://$DOMAIN (tours) and https://$APP_DOMAIN (app)"
   if [ -f "$MARKER" ]; then info "update:         an update was cut off before it finished; run the update again from the unpacked archive to finish it"; fi
   if [ -f "$SETTINGS" ]; then info "settings file:  $SETTINGS"; else info "settings file:  $SETTINGS is MISSING; the app cannot start without it"; fi
   if ! read_data_dir; then
