@@ -4,6 +4,7 @@
 import type { Hono } from "hono";
 import { requireAuth } from "./auth.ts";
 import { apiError, json } from "./http.ts";
+import { housekeeping } from "./publish.ts";
 import type { Deps } from "./ports.ts";
 
 const TOUR_ID = /^tour_[0-9a-f]{24}$/;
@@ -39,6 +40,9 @@ export function tourRoutes(app: Hono, deps: Deps): void {
   app.get("/api/v1/tours", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
+    // Publish housekeeping rides on this frequent, cheap request too (at most 4 calls), so
+    // an abandoned publish or an image past its grace is cleared without a later publish.
+    await housekeeping(deps, auth.workspaceId, null, 1);
     const tours = await deps.db.all<{ id: string; title: string; status: string; chapters: number; steps: number; updated_at: number }>(
       `SELECT t.id, t.title, t.status,
               (SELECT count(*) FROM chapter c WHERE c.tour_id = t.id) AS chapters,

@@ -131,6 +131,10 @@ describe("the call budget, route by route", () => {
     // Five full-size uploads, every step sent, then left for more than a day.
     for (let i = 0; i < 5; i++) await sendAll(deps, a.token, big, { kind: "new" }, i);
     advance(UPLOAD_MAX_AGE_MS + HOUR);
+    // Plenty for the publish housekeeping that rides on this request too.
+    const anchor = "tour_" + "d".repeat(24);
+    await deps.db.run("INSERT INTO tour (id, workspace_id, title, slug, status, created_at, updated_at) VALUES (?, ?, 'Anchor', 'anchor2222', 'draft', 1, 1)", [anchor, a.workspaceId]);
+    await seedLeftovers(deps, a.workspaceId, anchor, 5, 1500, deps.now());
     const created = await call(deps, "POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: big, target: { kind: "new" } }), headers: { "content-type": "application/json" } });
     expect(created.status).toBe(201);
     expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM upload"))!.n).toBe(1);
@@ -247,6 +251,103 @@ describe("the call budget, route by route", () => {
       for (const x of rs) noted(x, at("POST", publishPath(tourId)));
       if (rs.every((x) => x.status === 200)) break;
     }
+  }, 600_000);
+
+  it("publish: a call that joins another start, then fails its commit, stays in the budget", async () => {
+    const { deps, a } = await clocked({ retiredGraceMs: 0 });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const tourId = (await uploadTour(deps, a.token, heavyManifest(20, "Twenty"), { kind: "new" }, 1)).tour_id; // 21 images with the logo
+    await seedLeftovers(deps, a.workspaceId, tourId, 5, 1500, deps.now());
+    const realBatch = deps.db.batch.bind(deps.db);
+    let raced = false;
+    deps.db.batch = async (stmts) => {
+      if (!raced && stmts[0].sql.startsWith("INSERT INTO publish_job")) {
+        // Another start of the same tour lands first, so this one joins it.
+        raced = true;
+        expect((await send(deps, "POST", publishPath(tourId), { token: a.token })).status).toBe(202);
+      }
+      if (stmts[0].sql.includes("INSERT INTO snapshot ")) throw new Error("database unavailable");
+      return realBatch(stmts);
+    };
+    const r = await call(deps, "POST", publishPath(tourId), { token: a.token });
+    deps.db.batch = realBatch;
+    expect(raced).toBe(true);
+    expect(r.status).toBe(500);
+  }, 300_000);
+
+  it("publish: start, unpublish, another start, then a joining call whose commit fails, stays in the budget", async () => {
+    const { deps, a } = await clocked({ retiredGraceMs: 0 });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const tourId = (await uploadTour(deps, a.token, heavyManifest(20, "Twenty"), { kind: "new" }, 1)).tour_id;
+    await seedLeftovers(deps, a.workspaceId, tourId, 5, 1500, deps.now());
+    const realBatch = deps.db.batch.bind(deps.db);
+    let raced = false;
+    deps.db.batch = async (stmts) => {
+      if (!raced && stmts[0].sql.startsWith("INSERT INTO publish_job")) {
+        raced = true;
+        await send(deps, "POST", publishPath(tourId), { token: a.token }); // start A
+        await send(deps, "POST", `/api/v1/tours/${tourId}/unpublish`, { token: a.token }); // cancels A
+        await send(deps, "POST", publishPath(tourId), { token: a.token }); // start C
+      }
+      if (stmts[0].sql.includes("INSERT INTO snapshot ")) throw new Error("database unavailable");
+      return realBatch(stmts);
+    };
+    const r = await call(deps, "POST", publishPath(tourId), { token: a.token });
+    deps.db.batch = realBatch;
+    expect(raced).toBe(true);
+    expect([409, 500]).toContain(r.status);
+  }, 300_000);
+
+  it("publish: a fresh start that cancels a publish of an older draft stays in the budget", async () => {
+    const { deps, a } = await clocked();
+    // 399 steps, a publish started, then a 400th step in a new chapter: the next fresh start
+    // stops the old publish and starts a new one, copies and answers, all in one request.
+    const tourId = (await uploadTour(deps, a.token, heavyManifest(199, "Part 1", TOUR_PART_BYTES), { kind: "new" }, 0)).tour_id;
+    await uploadTour(deps, a.token, heavyManifest(200, "Part 2", TOUR_PART_BYTES), { kind: "chapter", tour_id: tourId }, 1);
+    await seedLeftovers(deps, a.workspaceId, tourId, 5, 1500, deps.now());
+    const old = await call(deps, "POST", publishPath(tourId), { token: a.token });
+    expect(old.status).toBe(202);
+    await uploadTour(deps, a.token, heavyManifest(1, "One more", 20_000), { kind: "chapter", tour_id: tourId }, 7);
+    const fresh = await call(deps, "POST", publishPath(tourId), { token: a.token });
+    expect(fresh.status).toBe(202);
+    expect(fresh.json.publish_id).not.toBe(old.json.publish_id);
+    expect(fresh.json.total).toBe(401);
+  }, 600_000);
+
+  it("rows written: a 400-step publish writes each image's row a bounded number of times", async () => {
+    const { deps, a } = await clocked();
+    const tourId = await tour400(deps, a.token);
+    // Count rows changed by every statement, running a batch's statements one by one (this
+    // test makes no concurrent calls, so their order is all that matters).
+    const real = deps.db;
+    let rows = 0;
+    deps.db = {
+      all: (s, p) => real.all(s, p),
+      first: (s, p) => real.first(s, p),
+      run: async (s, p) => {
+        const r = await real.run(s, p);
+        rows += r.changes;
+        return r;
+      },
+      batch: async (stmts) => {
+        for (const st of stmts) rows += (await real.run(st.sql, st.params)).changes;
+      },
+    };
+    const perCall: number[] = [];
+    let r = await send(deps, "POST", publishPath(tourId), { token: a.token });
+    perCall.push(rows);
+    while (r.status === 202) {
+      const before = rows;
+      r = await send(deps, "POST", publishPath(tourId), resumeOpts(a.token, r.json.publish_id));
+      perCall.push(rows - before);
+    }
+    deps.db = real;
+    expect(r.status).toBe(200);
+    const total = perCall.reduce((x, y) => x + y, 0);
+    console.log(`rows written for a 400-step publish: ${total} (first call ${perCall[0]}, middle calls ${perCall[1]}, final ${perCall.at(-1)})`);
+    // Every middle call writes its token touch, its last-used touch, the job heartbeat and one row per image copied.
+    for (const n of perCall.slice(1, -1)) expect(n).toBeLessThanOrEqual(COPY_BATCH + 3);
+    expect(total).toBeLessThan(3000);
   }, 600_000);
 
   it("the page, the public images and a publish that is too large stay in the budget", async () => {

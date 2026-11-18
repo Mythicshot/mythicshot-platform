@@ -1092,6 +1092,106 @@ describe("publishing in bounded steps", () => {
     expect(maxParams).toBeLessThanOrEqual(100);
     expect(maxSql).toBeLessThanOrEqual(100_000);
   }, 300_000);
+
+  it("a fresh start after a publish abandoned for longer than the stale period begins a new publish in that same request", async () => {
+    const ctx = await setup();
+    const { deps, a, publicKeys } = ctx;
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const tourId = await bigTour(deps, a.token, 30);
+    const first = await publish(deps, a.token, tourId);
+    expect(first.json).toMatchObject({ status: "in_progress", done: 12, total: 30 });
+    now += 16 * 60_000;
+    const fresh = await publish(deps, a.token, tourId);
+    expect(fresh.status).toBe(202);
+    expect(fresh.json.publish_id).not.toBe(first.json.publish_id);
+    expect(fresh.json.done).toBeGreaterThan(0);
+    // The abandoned publish's rows and images are gone; only the new one's are pending.
+    const pending = await deps.db.all<{ publish_id: string }>("SELECT DISTINCT publish_id FROM public_object WHERE state = 'pending'");
+    expect(pending).toEqual([{ publish_id: fresh.json.publish_id }]);
+    expect(await count(deps, "publish_job")).toBe(1);
+    expect((await resume(deps, a.token, tourId, first.json.publish_id)).status).toBe(409);
+    let r = fresh;
+    while (r.status === 202) r = await resume(deps, a.token, tourId, fresh.json.publish_id);
+    expect(r.status).toBe(200);
+    expect(await publicKeys()).toHaveLength(30);
+    expect(await count(deps, "public_object")).toBe(0);
+    await expectConsistent(ctx);
+  }, 120_000);
+
+  it("a fresh start finding a running publish of an older draft cancels it and starts from the current draft", async () => {
+    const ctx = await setup();
+    const { deps, a, publicKeys } = ctx;
+    const tourId = await bigTour(deps, a.token, 30);
+    const old = await publish(deps, a.token, tourId);
+    const more = clone(v2);
+    more.title = "Added after the first call";
+    await uploadTour(deps, a.token, more, { kind: "chapter", tour_id: tourId }, 60);
+    const fresh = await publish(deps, a.token, tourId);
+    expect(fresh.status).toBe(202);
+    expect(fresh.json.publish_id).not.toBe(old.json.publish_id);
+    expect(fresh.json.total).toBe(33);
+    expect((await resume(deps, a.token, tourId, old.json.publish_id)).status).toBe(409);
+    let r = fresh;
+    while (r.status === 202) r = await resume(deps, a.token, tourId, fresh.json.publish_id);
+    expect(r.json.steps).toBe(33);
+    expect((await snapshotOf(deps, tourId))!.chapters.map((c) => c.title)).toEqual(["Part 1", "Added after the first call"]);
+    expect(await publicKeys()).toHaveLength(33);
+    expect(await count(deps, "public_object")).toBe(0);
+    await expectConsistent(ctx);
+  }, 120_000);
+
+  it("a fresh start finding a running publish of the current draft joins it", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const tourId = await bigTour(deps, a.token, 30);
+    const one = await publish(deps, a.token, tourId);
+    const two = await publish(deps, a.token, tourId);
+    expect(two.json.publish_id).toBe(one.json.publish_id);
+    expect(two.json.done).toBe(24);
+  }, 120_000);
+
+  it("a call marks only the images it copied and keeps the publish alive on its job row", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const tourId = await bigTour(deps, a.token, 40);
+    const first = await publish(deps, a.token, tourId);
+    const created = await deps.db.all<{ created_at: number }>("SELECT DISTINCT created_at FROM public_object WHERE state = 'pending'");
+    // Each call within the stale period keeps the publish alive, however long it takes in all.
+    for (let i = 0; i < 2; i++) {
+      now += STALE_PUBLISH_MS - 1000;
+      const r = await resume(deps, a.token, tourId, first.json.publish_id);
+      expect(r.status).toBe(202);
+    }
+    expect(await deps.db.all("SELECT DISTINCT created_at FROM public_object WHERE state = 'pending'")).toEqual(created);
+    expect((await deps.db.first<{ touched_at: number }>("SELECT touched_at FROM publish_job"))!.touched_at).toBe(now);
+    expect(await count(deps, "public_object WHERE copied = 1")).toBe(36);
+  }, 120_000);
+});
+
+describe("housekeeping on other requests", () => {
+  it("listing tours or creating an upload clears an abandoned publish of the workspace, and never another workspace's", async () => {
+    const ctx = await setup();
+    const { deps, a, b, publicKeys } = ctx;
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const mine = (await uploadTour(deps, a.token, manyStepManifest(30))).tour_id;
+    const theirs = (await uploadTour(deps, b.token, manyStepManifest(30), { kind: "new" }, 3)).tour_id;
+    await publish(deps, a.token, mine);
+    await publish(deps, b.token, theirs);
+    expect(await publicKeys()).toHaveLength(24);
+    now += STALE_PUBLISH_MS + 60_000;
+    expect((await send(deps, "GET", "/api/v1/tours", { token: a.token })).status).toBe(200);
+    expect(await count(deps, "publish_job")).toBe(1);
+    expect(await publicKeys()).toHaveLength(12); // B's half-done publish is B's to clear
+    expect((await send(deps, "POST", "/api/v1/uploads", { token: b.token, body: JSON.stringify({ manifest: v2, target: { kind: "new" } }), headers: { "content-type": "application/json" } })).status).toBe(201);
+    expect(await publicKeys()).toEqual([]);
+    expect(await count(deps, "public_object")).toBe(0);
+    expect(await count(deps, "publish_job")).toBe(0);
+    await expectConsistent(ctx);
+  }, 120_000);
 });
 
 describe("the snapshot size cap", () => {
