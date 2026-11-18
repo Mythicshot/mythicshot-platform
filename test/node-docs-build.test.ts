@@ -39,6 +39,8 @@ describe("the documentation build", () => {
     expect(viewer.VIEWER_JS_ETAG).not.toBe(viewer.VIEWER_CSS_ETAG);
     // Its dependency's install script reports the install to its maker: it is never allowed to run.
     for (const name of Object.keys(pkg.allowScripts ?? {})) expect(name).toMatch(/^(esbuild|workerd)@/);
+    // And should it ever run, it is told not to report: the package's own off switch, beside the block above.
+    expect((pkg as { scarfSettings?: unknown }).scarfSettings).toEqual({ enabled: false });
   });
 
   it("the committed site module is what the sources build to", async () => {

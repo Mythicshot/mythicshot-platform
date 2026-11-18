@@ -16,14 +16,14 @@ The tests cannot open a browser, so this list is what a person looks at before t
 
 ## The policy
 
-- [ ] Repeat the loading check and every "Try it" below with `style-src-attr 'unsafe-inline'` taken out of the page's policy in `src/docs/page.ts` (rebuild and restart): if the console stays clean and nothing looks different, remove it for good, there and in the test that pins the policy; if not, note what broke.
+- [ ] The page's policy no longer allows inline style attributes (`style-src-attr 'unsafe-inline'` was taken out on trial): through the loading check and every "Try it" below, the console stays clean and nothing of the viewer looks broken (open a request, its schemas, an answer, a picture); if not, note what broke and put the directive back in `src/docs/page.ts` and in the test that pins the policy.
 
 ## The viewer's parts
 
 - [ ] The viewer's own title block (title, version, the long introduction) is not shown.
 - [ ] The viewer's own bar with the servers list and the green "Authorize" button is not shown.
 - [ ] Nothing else of the viewer is missing: every request can be opened, shows its description, its parameters, its answers with their schemas, and "Try it out".
-- [ ] Note what the small lock button on each request does when pressed (it opens the viewer's own token dialog); say whether it should stay.
+- [ ] No request shows a lock button: the viewer's own token dialog lives in the hidden bar, so the button would do nothing, and the token box is the one way to give a token.
 
 ## The token box
 
@@ -41,7 +41,8 @@ The tests cannot open a browser, so this list is what a person looks at before t
 - [ ] `GET /healthz` under Server answers 200 with and without a token, and the request shown carries no `Authorization` header.
 - [ ] `GET /api/v1/tours` answers 200; a draft step's image (`GET /api/v1/tours/{id}/steps/{step_id}/image`, ids from an uploaded tour) shows the picture.
 - [ ] Every "Execute" request in the network panel goes to this site, without a `Cookie` header.
-- [ ] "Forget token" says "Token forgotten.", removes the answers and commands shown under the requests tried before, and the next "Execute" on `GET /api/v1/me` answers 401.
+- [ ] "Forget token" says "Token forgotten." and draws the reference afresh: every request is closed again, no answer or command from before is shown anywhere, the console reports nothing, and the next "Execute" on `GET /api/v1/me` answers 401.
+- [ ] The same fresh reference appears when a second token is put in with "Use token" while one is in use, and when that second one is not a token or is not known to the server.
 - [ ] After all of it, the Application panel shows nothing of this site in local storage, session storage, IndexedDB or cookies.
 - [ ] A reload forgets the token: "Execute" on `GET /api/v1/me` answers 401 again.
 

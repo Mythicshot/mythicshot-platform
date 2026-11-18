@@ -5,6 +5,11 @@
 // site's /api/v1/me and through the viewer's interceptor, never with a cookie, never into
 // any store, and "Forget token" really forgets.
 //
+// The stand-in viewer does what the real one does with a request it sends: it keeps the
+// request as the interceptor left it (Authorization header included) in its own store and
+// draws it on the page. So a token that is forgotten, replaced or refused must be gone
+// from every viewer still on the page, which is only true if the old viewer is thrown away.
+//
 // Node only: it uses node:vm, which the Workers runtime does not have.
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
@@ -77,7 +82,8 @@ function standIn(opts: { dark?: boolean; viewer?: boolean; clipboard?: boolean; 
   const answers: Answer[] = [];
   const copied: string[] = [];
   const timers: (() => void)[] = [];
-  const cleared: string[] = [];
+  /** Every viewer started: its options, the requests it keeps, and what it drew. */
+  const viewers: { options: Record<string, any>; store: string[]; el: El }[] = [];
   const started: Record<string, any>[] = [];
   const touched: string[] = [];
   const forbidden = (name: string) => ({ get: () => (touched.push(name), undefined), set: () => void touched.push(name), enumerable: true });
@@ -107,14 +113,15 @@ function standIn(opts: { dark?: boolean; viewer?: boolean; clipboard?: boolean; 
     URL,
   };
   if (opts.viewer !== false) {
-    const operations = [new Map([["path", "/api/v1/me"], ["method", "get"]]), new Map([["path", "/api/v1/tours"], ["method", "get"]])];
     sandbox.SwaggerUIBundle = Object.assign(
       (options: Record<string, any>) => {
         started.push(options);
-        return {
-          specSelectors: { operations: () => operations },
-          specActions: { clearRequest: (p: string, m: string) => cleared.push(`request ${m} ${p}`), clearResponse: (p: string, m: string) => cleared.push(`response ${m} ${p}`) },
-        };
+        // A viewer draws itself into the mount, replacing what was there, and has a store of its own.
+        const viewer = { options, store: [] as string[], el: new El() };
+        viewers.push(viewer);
+        mount.children = [viewer.el];
+        // Its store has no way to forget a request, like the real one's.
+        return { getStore: () => viewer.store };
       },
       { presets: { apis: "the apis preset" } },
     );
@@ -131,7 +138,18 @@ function standIn(opts: { dark?: boolean; viewer?: boolean; clipboard?: boolean; 
     for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
   };
   return {
-    byId, commands, mount, classes, media, fetched, answers, copied, timers, cleared, started, touched, scrolled, settle,
+    byId, commands, mount, classes, media, fetched, answers, copied, timers, viewers, started, touched, scrolled, settle,
+    /** "Execute" in the viewer on the page: the request passes the interceptor, then the viewer keeps it and draws it. */
+    execute(url: string): string {
+      const viewer = viewers.find((v) => mount.children.includes(v.el));
+      if (viewer === undefined) throw new Error("no viewer on the page");
+      const sent = JSON.stringify(viewer.options.requestInterceptor({ url, headers: {} }));
+      viewer.store.push(sent);
+      viewer.el.textContent += `curl ${sent}\n`;
+      return sent;
+    },
+    /** Everything a viewer that is still on the page holds or shows. */
+    viewersOnPage: () => JSON.stringify(viewers.filter((v) => mount.children.includes(v.el)).map((v) => [v.store, v.el.textContent])),
     /** Types into the field and presses "Use token", then lets the answer arrive. */
     async use(text: string, answer?: Answer) {
       if (answer !== undefined) answers.push(answer);
@@ -142,7 +160,7 @@ function standIn(opts: { dark?: boolean; viewer?: boolean; clipboard?: boolean; 
     /** What a request of the viewer becomes on its way out: its headers, or the refusal. */
     through(url: string, more: Partial<ViewerRequest> = {}): ViewerRequest | string {
       try {
-        return started[0].requestInterceptor({ url, headers: {}, ...more }) as ViewerRequest;
+        return started[started.length - 1].requestInterceptor({ url, headers: {}, ...more }) as ViewerRequest;
       } catch (err) {
         return (err as Error).message;
       }
@@ -190,7 +208,7 @@ describe("the documentation page's script on a stand-in page", () => {
     });
     expect(typeof requestInterceptor).toBe("function");
     expect(typeof onComplete).toBe("function");
-    expect(page.mount.children).toEqual([]);
+    expect(page.mount.children).toEqual([page.viewers[0].el]);
     // Without a token the viewer's requests go out bare, and only to this site's API.
     expect(page.through("/api/v1/me")).toEqual({ url: "/api/v1/me", credentials: "omit", headers: {} });
     expect(page.through("/api/v1/openapi.json", { loadSpec: true })).toEqual({ url: "/api/v1/openapi.json", loadSpec: true, credentials: "omit", headers: {} });
@@ -308,11 +326,15 @@ describe("the documentation page's script on a stand-in page", () => {
     expect(page.through("/api/v1/me")).toEqual({ url: "/api/v1/me", credentials: "omit", headers: {} });
   });
 
-  it("Forget token empties the variable, clears what the viewer showed of earlier calls and says so", async () => {
+  it("Forget token empties the variable and throws the viewer away, so nothing on the page holds or shows the token", async () => {
     const page = standIn();
     await page.use(TOKEN, { status: 200, body: { workspace: "Acme" } });
-    expect(page.through("/api/v1/me")).toEqual({ url: "/api/v1/me", credentials: "omit", headers: { Authorization: `Bearer ${TOKEN}` } });
-    expect(page.cleared).toEqual([]);
+    expect(page.viewers).toHaveLength(1);
+    // The visitor tries two calls: the viewer now keeps and shows the token.
+    expect(page.execute("/api/v1/me")).toContain(TOKEN);
+    page.execute("/api/v1/tours");
+    expect(page.viewersOnPage().split(TOKEN).length - 1).toBe(4);
+    expect(page.everything()).toContain(TOKEN);
 
     page.byId["forget-token"].fire("click");
     await page.settle();
@@ -321,15 +343,24 @@ describe("the documentation page's script on a stand-in page", () => {
     expect(page.byId["forget-token"].hidden).toBe(true);
     expect(page.byId.token.value).toBe("");
     expect(page.byId.token.focused).toBe(1);
-    expect(page.through("/api/v1/me")).toEqual({ url: "/api/v1/me", credentials: "omit", headers: {} });
-    // After "Execute" the viewer shows the request it sent, token included: those are cleared, for every request.
-    expect(page.cleared).toEqual(["response get /api/v1/me", "request get /api/v1/me", "response get /api/v1/tours", "request get /api/v1/tours"]);
-    expect(page.fetched).toHaveLength(1);
+    // A new viewer is on the page, the old one is not, and the new one holds nothing.
+    expect(page.viewers).toHaveLength(2);
+    expect(page.mount.children).toEqual([page.viewers[1].el]);
+    expect(page.viewers[1].store).toEqual([]);
+    expect(page.viewersOnPage()).toBe('[[[],""]]');
+    expect(page.viewersOnPage()).not.toContain("dp_");
     expect(page.everything()).not.toContain(TOKEN);
+    // The new viewer was started exactly as the first, and its calls go out bare; so would the old one's.
+    const { requestInterceptor: _a, onComplete: _b, ...first } = page.viewers[0].options;
+    const { requestInterceptor: _c, onComplete: _d, ...second } = page.viewers[1].options;
+    expect(second).toEqual(first);
+    expect(page.execute("/api/v1/me")).toBe('{"url":"/api/v1/me","headers":{},"credentials":"omit"}');
+    expect(page.viewers[0].options.requestInterceptor({ url: "/api/v1/me", headers: {} })).toEqual({ url: "/api/v1/me", credentials: "omit", headers: {} });
+    expect(page.fetched).toHaveLength(1);
     expect(page.touched).toEqual([]);
     expect(page.added()).toEqual([]);
 
-    // Forgetting while a check is on its way drops that check's answer, too.
+    // Forgetting while a check is on its way drops that check's answer, too; no token was in use, so the viewer stays.
     page.answers.push({ status: 200, body: { workspace: "Acme" } });
     page.byId.token.value = TOKEN;
     page.byId["use-token"].fire("click");
@@ -337,6 +368,54 @@ describe("the documentation page's script on a stand-in page", () => {
     await page.settle();
     expect(page.byId["token-status"].textContent).toBe("Token forgotten.");
     expect(page.through("/api/v1/me")).toEqual({ url: "/api/v1/me", credentials: "omit", headers: {} });
+    expect(page.viewers).toHaveLength(2);
+  });
+
+  it("a token that is replaced, or lost to a failed attempt, is gone from the viewer on the page as well", async () => {
+    // What is typed next, the answer to it, and what the box says; in every case the old token must be gone.
+    const cases: [string, Answer | undefined, string][] = [
+      [OTHER, { status: 200, body: { workspace: "Other" } }, "Connected to Other. The calls on this page now use this token."],
+      [OTHER, { status: 401, body: { error: "unauthorized" } }, "The server does not know this token. Check that you pasted all of it."],
+      [OTHER, "network error", "The server could not be reached. Try again."],
+      [TOKEN, { status: 401, body: { error: "unauthorized" } }, "The server does not know this token. Check that you pasted all of it."],
+      ["not a token", undefined, "That does not look like a token. A token starts with dp_ and is 43 characters long."],
+      ["", undefined, "That does not look like a token. A token starts with dp_ and is 43 characters long."],
+    ];
+    for (const [typed, answer, says] of cases) {
+      const page = standIn();
+      await page.use(TOKEN, { status: 200, body: { workspace: "Acme" } });
+      page.execute("/api/v1/me");
+      page.execute("/api/v1/tours");
+      expect(page.viewersOnPage(), typed).toContain(TOKEN);
+
+      // The viewer is replaced as soon as the new attempt starts, before any answer.
+      if (answer !== undefined) page.answers.push(answer);
+      page.byId.token.value = typed;
+      page.byId["use-token"].fire("click");
+      expect(page.viewers, typed).toHaveLength(2);
+      expect(page.viewersOnPage(), typed).toBe('[[[],""]]');
+      await page.settle();
+
+      expect(page.byId["token-status"].textContent, typed).toBe(says);
+      expect(page.mount.children, typed).toEqual([page.viewers[1].el]);
+      // Nothing of the first token is held or shown by a viewer on the page, whatever came of the attempt.
+      expect(page.everything().includes(TOKEN), typed).toBe(false);
+      expect(page.viewersOnPage(), typed).toBe('[[[],""]]');
+      const connected = says.startsWith("Connected");
+      expect(page.execute("/api/v1/me").includes(TOKEN), typed).toBe(false);
+      expect(page.execute("/api/v1/me").includes(OTHER), typed).toBe(connected);
+      expect(page.byId["forget-token"].hidden, typed).toBe(!connected);
+      // The old viewer, should anything of it still run, sends no more than the new one.
+      expect(JSON.stringify(page.viewers[0].options.requestInterceptor({ url: "/api/v1/me", headers: {} })).includes(TOKEN), typed).toBe(false);
+      expect(page.touched, typed).toEqual([]);
+    }
+
+    // An attempt with no token in use starts no second viewer: there is nothing to throw away.
+    const fresh = standIn();
+    await fresh.use("nope");
+    await fresh.use(TOKEN, { status: 401 });
+    await fresh.use(TOKEN, { status: 200, body: { workspace: "Acme" } });
+    expect(fresh.viewers).toHaveLength(1);
   });
 
   it("Copy copies the command with this site's address and the placeholder token, never the real one", async () => {

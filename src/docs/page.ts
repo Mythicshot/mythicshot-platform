@@ -16,7 +16,7 @@ import type { Hono } from "hono";
 import { matchesEtag, PLAYER_FILE_IMMUTABLE } from "../page.ts";
 import type { Deps } from "../ports.ts";
 import { VERSION } from "../version.ts";
-import { CODE_MEANINGS, errorCodes, GUIDES, limitLines, type Guide, type GuideStep } from "./guides.ts";
+import { CODE_MEANINGS, errorCodes, GUIDES, HISTORY_NOTE, limitLines, type Guide, type GuideStep } from "./guides.ts";
 import { GET_STARTED, openapi } from "./openapi.ts";
 import { DOCS_CSS, DOCS_CSS_ETAG, DOCS_CSS_PATH, DOCS_JS, DOCS_JS_ETAG, DOCS_JS_PATH, OPENAPI_JSON, OPENAPI_JSON_ETAG, OPENAPI_YAML, OPENAPI_YAML_ETAG } from "./site-assets.ts";
 import { VIEWER_CSS, VIEWER_CSS_ETAG, VIEWER_CSS_PATH, VIEWER_JS, VIEWER_JS_ETAG, VIEWER_JS_PATH, VIEWER_LICENCES } from "./viewer-assets.ts";
@@ -25,11 +25,15 @@ import { VIEWER_CSS, VIEWER_CSS_ETAG, VIEWER_CSS_PATH, VIEWER_JS, VIEWER_JS_ETAG
  * The page's policy. Scripts, style sheets and requests come from this origin only:
  * nothing inline, nothing evaluated as code, no other host. `data:` is for the icons
  * inside the viewer's stylesheet, `blob:` shows a picture a request on the page fetched.
- * Inline style attributes alone are allowed, for the viewer; it is not known yet whether
- * it needs them. Unlike a tour page, this page may not be framed.
+ * Not even inline style attributes are allowed. The viewer's script has nothing that
+ * writes one as text, and it was first shipped with `style-src-attr 'unsafe-inline'` only
+ * as a precaution; that is now taken out on trial. The integrator checks the page in a
+ * browser: if the viewer breaks or the console reports a violation, that one directive is
+ * put back here and in the test that pins this text. Unlike a tour page, this page may
+ * not be framed.
  */
 export const DOCS_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /** Five minutes, then a cheap 304 by ETag: a new version of the app shows up soon after an update. */
 export const DOCS_PAGE_CACHE = "public, max-age=300";
@@ -83,7 +87,7 @@ function guideHtml(guide: Guide): string {
   return `<section class="own block guide" id="guide-${guide.id}">
 <h2>${esc(guide.title)}</h2>
 <p>${esc(guide.intro)}</p>
-<p class="legend">In the examples, ${legend}.</p>
+<p class="legend">In the examples, ${legend}. ${esc(HISTORY_NOTE)}</p>
 <ol class="steps">
 ${guide.steps.map(stepHtml).join("\n")}
 </ol>
@@ -125,7 +129,7 @@ export function docsHtml(): string {
 <h2>Get connected</h2>
 <ol class="steps">
 <li>Create a token in your workspace. Today the setup wizard shows it once, at the end of setup; keep it in a password manager.</li>
-<li>Send it with every request, as the header <code>Authorization: Bearer YOUR_TOKEN</code>.</li>
+<li>Send it with every request, as the header <code>Authorization: Bearer YOUR_TOKEN</code>. ${esc(HISTORY_NOTE)}</li>
 <li>Try the first call. It answers with your workspace's name and the server's version.</li>
 </ol>
 <div class="token-box" id="token-box" hidden>

@@ -5,7 +5,11 @@
 /** A request the viewer is about to send, as its interceptor sees it. */
 export type ViewerRequest = { url: string; method?: string; credentials?: string; loadSpec?: boolean; headers?: Record<string, string> };
 
-/** The shape of a token, as TOKEN_PATTERN in src/auth.ts has it (a test holds them equal). */
+/**
+ * The shape of a token, written again here from TOKEN_PATTERN in src/auth.ts, which is not
+ * exported. Nothing holds the two patterns equal: the tests only check that a token the
+ * server makes passes this one, and that a list of malformed ones does not.
+ */
 export const TOKEN_SHAPE = /^dp_[0-9a-f]{40}$/;
 
 export function looksLikeToken(text: string): boolean {

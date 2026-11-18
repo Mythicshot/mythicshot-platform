@@ -469,6 +469,8 @@ The API documentation page (`/docs`, see [API documentation](../README.md#api-do
 
 **Unconfirmed:** whether the Free plan's 10 ms of CPU time allows the first answer of the viewer's script. That file is 1,685,697 bytes, and the Worker turns it into bytes once, on the first request for it after a start, then keeps them: in plain Node on a desktop computer that first answer took about 20 ms and every later one about 0.5 ms; the page itself took under 2 ms the first time. A browser asks for the file once and then keeps it for a year, so the request is rare. If Cloudflare refuses it for CPU (error 1102 on `/docs/viewer.<hash>.js`, and a documentation page without its reference), the rest of the site is not affected: say so before changing anything, since the way out is to serve these files as static assets, which is not built.
 
+**Unconfirmed:** the Worker's startup time. With the viewer built in, every cold start parses a script of about 2.3 MB before it answers anything, and that is true for a tour page and an API request as much as for the documentation page. It has not been measured on Cloudflare: at the first deploy of this version, check that the deploy is accepted (Cloudflare refuses a Worker whose startup takes too long; the [Workers limits page](https://developers.cloudflare.com/workers/platform/limits/) gives the time allowed) and that the first tour page after a quiet period opens as quickly as before. If either this or the CPU limit above is hit, the follow-up is the same: serve the documentation page's four files (the viewer's script and stylesheet, and the page's own two) as static assets instead of from the Worker's script.
+
 ## Troubleshooting by symptom
 
 | Symptom | Likely cause | What to do |

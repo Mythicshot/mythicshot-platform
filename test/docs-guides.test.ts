@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { looksLikeToken } from "../src/docs/client/rules.ts";
-import { ANY_REQUEST_CODES, CODE_MEANINGS, errorCodes, GUIDE_ORIGIN, GUIDES, limitLines, type GuideExample } from "../src/docs/guides.ts";
+import { ANY_REQUEST_CODES, CODE_MEANINGS, errorCodes, GUIDE_ORIGIN, GUIDES, HISTORY_NOTE, limitLines, type GuideExample } from "../src/docs/guides.ts";
 import { GET_STARTED, openapi } from "../src/docs/openapi.ts";
 import { docsHtml } from "../src/docs/page.ts";
 import type { Deps } from "../src/ports.ts";
@@ -283,6 +283,40 @@ describe("the guides of the documentation page", () => {
     expect(bare.status).toBe(401);
     const unfilled = await send(deps, "GET", "/api/v1/me", { headers: { authorization: "Bearer YOUR_TOKEN" } });
     expect(unfilled.status).toBe(401);
+  });
+
+  it("the page says how to keep the token out of the shell's history, and a command written that way works", async () => {
+    expect(HISTORY_NOTE).toBe("A token typed into a command stays in your shell's history. Put it in a variable first, with read -rs TOKEN, and write $TOKEN in place of YOUR_TOKEN.");
+    // Once under "Get connected", in the step about the header, and once in every guide's legend.
+    const html = docsHtml();
+    const connected = /<section class="own block" id="get-connected">([\s\S]*?)<\/section>/.exec(html)![1];
+    expect(textOf(connected)).toContain(`as the header Authorization: Bearer YOUR_TOKEN. ${HISTORY_NOTE}`);
+    for (const guide of pageGuides()) {
+      const legend = textOf(/<p class="legend">(.*?)<\/p>/.exec(guide.html)![1]);
+      expect(legend.endsWith(`. ${HISTORY_NOTE}`), guide.id).toBe(true);
+    }
+    expect(textOf(html).split(HISTORY_NOTE).length - 1).toBe(4);
+    // The examples themselves keep the placeholder.
+    for (const g of GUIDES) for (const s of g.steps) if (s.example) expect(s.example.curl).not.toContain("$");
+
+    // What the note tells the reader to type is a command the reader of commands takes, and it works.
+    const { deps } = await makeDeps();
+    const a = await seedWorkspace(deps, "Acme");
+    for (const curl of [GET_STARTED, ...pageGuides().flatMap((g) => g.examples.map((e) => e.curl))]) {
+      const safe = curl.split("YOUR_TOKEN").join("$TOKEN");
+      // Without the variable the shell would send nothing in its place; this reader refuses instead.
+      if (safe !== curl) expect(() => parseCurl(safe), safe).toThrow();
+      const asTyped = parseCurl(safe, { TOKEN: a.token });
+      const asPrinted = parseCurl(curl.split("YOUR_TOKEN").join(a.token));
+      expect(asTyped, curl).toEqual(asPrinted);
+    }
+    const first = parseCurl(GET_STARTED.split("YOUR_TOKEN").join("$TOKEN").split(GUIDE_ORIGIN).join(ORIGIN), { TOKEN: a.token });
+    const answer = await send(deps, first.method, first.url.slice(ORIGIN.length), { headers: first.headers });
+    expect(answer.status).toBe(200);
+    expect(answer.json.workspace).toBe("Acme");
+    // Only a named variable inside double quotes is taken; nothing else a shell would expand.
+    for (const bad of ['curl "$(id)"', 'curl "${TOKEN}"', "curl $TOKEN", "curl '$TOKEN' \"$OTHER\"", 'curl "$"']) expect(() => parseCurl(bad, { TOKEN: "x" }), bad).toThrow();
+    expect(parseCurl("curl '$TOKEN'", { TOKEN: "x" }).url).toBe("$TOKEN");
   });
 
   it("the table of error codes is the description's codes, each with its statuses and a meaning", () => {

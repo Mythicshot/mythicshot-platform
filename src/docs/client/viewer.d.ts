@@ -19,13 +19,5 @@ type ViewerOptions = {
   onComplete: () => void;
 };
 
-/** One request of the description, as the viewer lists it: an immutable map with "path" and "method". */
-type ViewerOperation = { get(key: "path" | "method"): string };
-
-/** What starting the viewer gives back; only what "Forget token" needs. */
-type ViewerSystem = {
-  specSelectors?: { operations?: () => Iterable<ViewerOperation> };
-  specActions?: { clearRequest?: (path: string, method: string) => void; clearResponse?: (path: string, method: string) => void };
-};
-
-declare const SwaggerUIBundle: { (options: ViewerOptions): ViewerSystem; presets: { apis: unknown } } | undefined;
+/** Starting the viewer gives back its own object, which the page script does not keep. */
+declare const SwaggerUIBundle: { (options: ViewerOptions): unknown; presets: { apis: unknown } } | undefined;

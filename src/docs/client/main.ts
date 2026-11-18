@@ -1,11 +1,16 @@
 // The documentation page's script: the token box, the page's own address in the examples,
 // the copy buttons, the viewer's dark look, and the start of the reference viewer.
 //
-// The token a visitor pastes is held in the one variable below and nowhere else: it is
-// not written to any of the browser's stores, to a cookie, or into the address, and a
-// reload forgets it. It is sent only by this page's own check of it and by "Try it", both
-// to this site's API, both without cookies (see intercept in rules.ts, which every request
-// of the viewer passes).
+// The token a visitor pastes is held by this script in the one variable below. It is not
+// written to any of the browser's stores, to a cookie, or into the address, and a reload
+// forgets it. It is sent only by this page's own check of it and by "Try it", both to this
+// site's API, both without cookies (see intercept in rules.ts, which every request of the
+// viewer passes).
+//
+// One copy does exist outside that variable: after "Execute" the viewer keeps the request
+// it sent, Authorization header included, in its own state, and shows it as a command.
+// So whenever the token is forgotten, replaced or found wrong, the viewer is thrown away
+// whole and started again, which leaves no viewer in use holding or showing the old token.
 //
 // Every text reaches the page as a text node. Nothing is styled from here but by class
 // names and the hidden attribute, so the page's policy needs no inline style for it.
@@ -33,10 +38,8 @@ const TEXT = {
   noViewer: "The reference could not be loaded. Reload the page, or read the description as JSON or YAML.",
 };
 
-/** The token in use, or "". The only place it is kept. */
+/** The token in use, or "". */
 let token = "";
-/** The running viewer, once started. */
-let viewer: ViewerSystem | null = null;
 
 /** Asks the API whose token this is. Never sends a cookie, follows no redirect, leaves nothing in a cache. */
 async function whoIs(candidate: string): Promise<{ kind: "ok"; workspace: string } | { kind: "unknown" } | { kind: "unreachable" }> {
@@ -52,22 +55,52 @@ async function whoIs(candidate: string): Promise<{ kind: "ok"; workspace: string
   }
 }
 
-/**
- * Takes what the viewer still shows of earlier calls off the page: after "Execute" it
- * shows the request it sent as a command, token included. The viewer's own "Clear" does
- * the same for one request.
- */
-function clearCalls(): void {
+/** A link to a guide scrolled before the reference above it was drawn; go there again once it is. */
+function backToGuide(): void {
+  const id = location.hash.slice(1);
+  if (id.startsWith("guide-")) document.getElementById(id)?.scrollIntoView();
+}
+
+function startViewer(): void {
+  const mount = document.querySelector(MOUNT);
+  if (mount === null) return;
   try {
-    const operations = viewer?.specSelectors?.operations?.();
-    if (operations === undefined) return;
-    for (const op of operations) {
-      viewer?.specActions?.clearResponse?.(op.get("path"), op.get("method"));
-      viewer?.specActions?.clearRequest?.(op.get("path"), op.get("method"));
-    }
+    if (typeof SwaggerUIBundle === "undefined") throw new Error("no viewer");
+    SwaggerUIBundle({
+      url: "/api/v1/openapi.json",
+      dom_id: MOUNT,
+      layout: "BaseLayout",
+      presets: [SwaggerUIBundle.presets.apis],
+      // The viewer would otherwise load a badge from its maker's validator site.
+      validatorUrl: null,
+      // Nothing a visitor enters is written to the browser's storage.
+      persistAuthorization: false,
+      deepLinking: true,
+      docExpansion: "list",
+      defaultModelsExpandDepth: -1,
+      requestSnippetsEnabled: true,
+      withCredentials: false,
+      requestInterceptor: (req) => intercept(req, location.href, token),
+      onComplete: backToGuide,
+    });
   } catch {
-    // The viewer is not what this was written for; a reload clears everything.
+    const line = document.createElement("p");
+    line.className = "status bad";
+    line.textContent = TEXT.noViewer;
+    mount.replaceChildren(line);
   }
+}
+
+/**
+ * Stops using the token. If one was in use, the viewer may hold and show requests that
+ * carried it, so everything the viewer drew is taken off the page and a new viewer is
+ * started in its place; this script keeps no reference to the old one.
+ */
+function dropToken(): void {
+  if (token === "") return;
+  token = "";
+  document.querySelector(MOUNT)?.replaceChildren();
+  startViewer();
 }
 
 function tokenBox(): void {
@@ -89,7 +122,7 @@ function tokenBox(): void {
     const candidate = input.value.trim();
     const mine = ++round;
     // A new attempt replaces the token in use, whatever comes of it.
-    token = "";
+    dropToken();
     forget.hidden = true;
     if (!looksLikeToken(candidate)) {
       say(TEXT.notAToken, "bad");
@@ -118,10 +151,9 @@ function tokenBox(): void {
   });
   forget.addEventListener("click", () => {
     round++;
-    token = "";
+    dropToken();
     input.value = "";
     forget.hidden = true;
-    clearCalls();
     say(TEXT.forgotten, "");
     input.focus();
   });
@@ -160,42 +192,6 @@ function followColourScheme(): void {
   const apply = () => document.documentElement.classList.toggle(DARK, dark.matches);
   apply();
   dark.addEventListener("change", apply);
-}
-
-/** A link to a guide scrolled before the reference above it was drawn; go there again once it is. */
-function backToGuide(): void {
-  const id = location.hash.slice(1);
-  if (id.startsWith("guide-")) document.getElementById(id)?.scrollIntoView();
-}
-
-function startViewer(): void {
-  const mount = document.querySelector(MOUNT);
-  if (mount === null) return;
-  try {
-    if (typeof SwaggerUIBundle === "undefined") throw new Error("no viewer");
-    viewer = SwaggerUIBundle({
-      url: "/api/v1/openapi.json",
-      dom_id: MOUNT,
-      layout: "BaseLayout",
-      presets: [SwaggerUIBundle.presets.apis],
-      // The viewer would otherwise load a badge from its maker's validator site.
-      validatorUrl: null,
-      // Nothing a visitor enters is written to the browser's storage.
-      persistAuthorization: false,
-      deepLinking: true,
-      docExpansion: "list",
-      defaultModelsExpandDepth: -1,
-      requestSnippetsEnabled: true,
-      withCredentials: false,
-      requestInterceptor: (req) => intercept(req, location.href, token),
-      onComplete: backToGuide,
-    });
-  } catch {
-    const line = document.createElement("p");
-    line.className = "status bad";
-    line.textContent = TEXT.noViewer;
-    mount.replaceChildren(line);
-  }
 }
 
 followColourScheme();

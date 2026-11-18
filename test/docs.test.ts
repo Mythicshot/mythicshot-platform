@@ -918,6 +918,10 @@ describe("the API documentation in the docs", () => {
     expect(limits).toContain("`test/node-docs-build.test.ts` prints the figure and fails above 1,000,000 compressed");
     expect(limits).toMatch(/^\*\*Unconfirmed:\*\* whether the Free plan's 10 ms of CPU time allows the first answer of the viewer's script\./m);
     expect(limits).toContain("which is not built");
+    // The size also costs at every cold start, for every kind of request; that is said, and what the way out is.
+    expect(limits).toContain("\n**Unconfirmed:** the Worker's startup time. With the viewer built in, every cold start parses a script of about 2.3 MB");
+    expect(limits).toContain("a tour page and an API request as much as for the documentation page");
+    expect(limits).toContain("serve the documentation page's four files (the viewer's script and stylesheet, and the page's own two) as static assets");
   });
 });
 

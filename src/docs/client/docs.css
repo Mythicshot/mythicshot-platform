@@ -317,9 +317,12 @@ body {
 }
 
 /* The viewer's title block and its authorise bar: the page has its own header and token
-   box. Nothing else of the viewer is hidden. Both class names are the viewer's own
+   box. With the bar goes the lock button on each request: it opens the viewer's own token
+   dialog, which the viewer draws inside that bar, so with the bar hidden the button would
+   do nothing. Nothing else of the viewer is hidden. The class names are the viewer's own
    (test/docs-page.test.ts checks its script still uses them). */
 .swagger-ui .information-container,
-.swagger-ui .scheme-container {
+.swagger-ui .scheme-container,
+.swagger-ui .authorization__btn {
   display: none;
 }

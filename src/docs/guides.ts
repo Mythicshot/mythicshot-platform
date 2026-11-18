@@ -29,6 +29,12 @@ export type Guide = {
 /** What the HTML carries as the site's address; the page script swaps in `location.origin`. */
 export const GUIDE_ORIGIN = "https://YOUR-SITE";
 
+/**
+ * Said once under "Get connected" and once in every guide's legend. The examples keep
+ * YOUR_TOKEN, which reads plainly; this says how not to leave the real one behind.
+ */
+export const HISTORY_NOTE = "A token typed into a command stays in your shell's history. Put it in a variable first, with read -rs TOKEN, and write $TOKEN in place of YOUR_TOKEN.";
+
 const AUTH = '-H "Authorization: Bearer YOUR_TOKEN"';
 const JSON_BODY = '-H "Content-Type: application/json"';
 const PNG_BODY = '-H "Content-Type: image/png"';

@@ -103,10 +103,10 @@ describe("the documentation page", () => {
   it("the page sends the docs policy, forbids framing and relaxes nothing", async () => {
     // The policy, exactly. A change here is a decision, not a refactoring.
     expect(DOCS_CSP).toBe(
-      "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     );
     const d = directives(DOCS_CSP);
-    expect(Object.keys(d)).toEqual(["default-src", "script-src", "style-src", "style-src-attr", "img-src", "connect-src", "base-uri", "form-action", "frame-ancestors"]);
+    expect(Object.keys(d)).toEqual(["default-src", "script-src", "style-src", "img-src", "connect-src", "base-uri", "form-action", "frame-ancestors"]);
     // Scripts and style sheets come from this origin only: nothing inline, nothing evaluated.
     expect(d["script-src"]).toEqual(["'self'"]);
     expect(d["style-src"]).toEqual(["'self'"]);
@@ -115,13 +115,15 @@ describe("the documentation page", () => {
     expect(d["frame-ancestors"]).toEqual(["'none'"]);
     expect(DOCS_CSP).not.toContain("unsafe-eval");
     expect(DOCS_CSP).not.toContain("wasm");
-    // 'unsafe-inline' is allowed for style attributes alone, never for a script or a style sheet.
-    for (const [name, sources] of Object.entries(d)) expect(sources.includes("'unsafe-inline'"), name).toBe(name === "style-src-attr");
-    for (const name of ["script-src-elem", "script-src-attr", "style-src-elem"]) expect(d[name], name).toBeUndefined();
+    // Nothing inline at all: not a script, not a style sheet, and (on trial, to be checked
+    // in a browser) not a style attribute either. If the viewer needs those, the one
+    // directive "style-src-attr 'unsafe-inline'" comes back, here and in src/docs/page.ts.
+    expect(DOCS_CSP).not.toContain("unsafe-inline");
+    for (const name of ["script-src-elem", "script-src-attr", "style-src-elem", "style-src-attr"]) expect(d[name], name).toBeUndefined();
     // No wildcard, no scheme but data: and blob: for pictures, no host name.
     expect(DOCS_CSP).not.toMatch(/\*|https?:|wss?:|\/\/|\.[a-z]/);
     for (const [name, sources] of Object.entries(d)) {
-      for (const s of sources) expect(["'self'", "'none'", "'unsafe-inline'", ...(name === "img-src" ? ["data:", "blob:"] : [])], `${name} ${s}`).toContain(s);
+      for (const s of sources) expect(["'self'", "'none'", ...(name === "img-src" ? ["data:", "blob:"] : [])], `${name} ${s}`).toContain(s);
     }
 
     for (const make of [() => makeDeps(), () => twoAddress()]) {
@@ -413,7 +415,7 @@ describe("the documentation page's parts", () => {
       // Get connected, with its three steps.
       "<h2>Get connected</h2>",
       "<li>Create a token in your workspace. Today the setup wizard shows it once, at the end of setup; keep it in a password manager.</li>",
-      "<li>Send it with every request, as the header <code>Authorization: Bearer YOUR_TOKEN</code>.</li>",
+      "<li>Send it with every request, as the header <code>Authorization: Bearer YOUR_TOKEN</code>. A token typed into a command stays in your shell&#39;s history. Put it in a variable first, with read -rs TOKEN, and write $TOKEN in place of YOUR_TOKEN.</li>",
       "<li>Try the first call. It answers with your workspace's name and the server's version.</li>",
       // The token box.
       '<label for="token">Paste a token to try the calls on this page</label>',
@@ -576,7 +578,11 @@ describe("the documentation page's parts", () => {
     expect(DOCS_JS.startsWith('"use strict";\n(() => {')).toBe(true);
     expect(DOCS_JS.trimEnd().endsWith("})();")).toBe(true);
     expect(DOCS_JS.match(/\bvar token = "";/g)).toHaveLength(1);
-    expect([...DOCS_JS.matchAll(/^\s*token = (.+);$/gm)].map((m) => m[1]).sort()).toEqual(['""', '""', "candidate"]);
+    // It is emptied in one place, which also throws the viewer away and starts a new one,
+    // since the viewer keeps and shows the requests it sent.
+    expect([...DOCS_JS.matchAll(/^\s*token = (.+);$/gm)].map((m) => m[1]).sort()).toEqual(['""', "candidate"]);
+    expect(DOCS_JS).toMatch(/function dropToken\(\) \{\s*if \(token === ""\) return;\s*token = "";\s*document\.querySelector\(MOUNT\)\?\.replaceChildren\(\);\s*startViewer\(\);\s*\}/);
+    expect(DOCS_JS.match(/\bdropToken\(\);/g)).toHaveLength(2);
     expect(DOCS_JS).not.toMatch(/(window|globalThis|self|document)\.[A-Za-z_$]+\s*=[^=]/);
     // It is read in one place only: where a request of the viewer is let through.
     expect(DOCS_JS).toContain("requestInterceptor: (req) => intercept(req, location.href, token)");
@@ -614,11 +620,12 @@ describe("the documentation page's parts", () => {
     for (const name of ["validatorUrl", "persistAuthorization", "requestInterceptor", "withCredentials", "deepLinking", "docExpansion", "defaultModelsExpandDepth", "requestSnippetsEnabled", "onComplete", "BaseLayout"]) {
       expect(VIEWER_JS.includes(name), name).toBe(true);
     }
-    // What "Forget token" clears, the viewer still has under these names.
-    for (const name of ["clearRequest", "clearResponse", "specSelectors", "specActions"]) {
-      expect(VIEWER_JS.includes(name), name).toBe(true);
-      expect(DOCS_JS.includes(name), name).toBe(true);
-    }
+    // The script keeps nothing of the viewer it starts, and reaches into none of its insides:
+    // to forget a token it starts a new viewer instead.
+    expect(DOCS_JS).not.toMatch(/=\s*SwaggerUIBundle\(/);
+    for (const name of ["clearRequest", "clearResponse", "specSelectors", "specActions", "mutatedRequests", "getSystem"]) expect(DOCS_JS.includes(name), name).toBe(false);
+    // Why: the viewer keeps each request it sent, as the interceptor left it, under this name.
+    expect(VIEWER_JS).toContain("mutatedRequests");
   });
 
   it("the interceptor refuses another origin and a path outside the API", () => {
@@ -716,7 +723,7 @@ describe("the documentation page's parts", () => {
       "Download the description: JSON YAML",
       "Get connected",
       "Create a token in your workspace. Today the setup wizard shows it once, at the end of setup; keep it in a password manager.",
-      "Send it with every request, as the header Authorization: Bearer YOUR_TOKEN .",
+      "Send it with every request, as the header Authorization: Bearer YOUR_TOKEN . A token typed into a command stays in your shell's history. Put it in a variable first, with read -rs TOKEN, and write $TOKEN in place of YOUR_TOKEN.",
       "Try the first call. It answers with your workspace's name and the server's version.",
       "Paste a token to try the calls on this page",
       "Use token",
@@ -761,10 +768,16 @@ describe("the documentation page beside the viewer", () => {
   /** Every selector of the stylesheet, media queries opened up. */
   const selectors = [...css.replace(/@media[^{]*\{/g, "").matchAll(/([^{}]+)\{/g)].flatMap((m) => m[1].split(",").map((s) => s.trim())).filter((s) => s !== "");
 
-  it("hides the viewer's own title block and authorise bar, and nothing else of it", () => {
+  it("hides the viewer's own title block, its authorise bar and the lock buttons that open it, and nothing else of it", () => {
     const viewerRules = selectors.filter((s) => s.includes("swagger-ui"));
-    expect(viewerRules).toEqual([".swagger-ui .information-container", ".swagger-ui .scheme-container"]);
-    expect(css).toMatch(/\.swagger-ui \.information-container,\s*\.swagger-ui \.scheme-container \{\s*display: none;\s*\}/);
+    expect(viewerRules).toEqual([".swagger-ui .information-container", ".swagger-ui .scheme-container", ".swagger-ui .authorization__btn"]);
+    expect(css).toMatch(/\.swagger-ui \.information-container,\s*\.swagger-ui \.scheme-container,\s*\.swagger-ui \.authorization__btn \{\s*display: none;\s*\}/);
+    // The lock button on each request opens the viewer's token dialog, which the viewer
+    // draws inside the hidden bar: left visible, the button would do nothing. The dialog
+    // itself stays hidden with the bar; the page's token box is the one way to give a token.
+    expect(VIEWER_JS).toContain('className:"authorization__btn"');
+    expect(VIEWER_CSS).toContain(".swagger-ui .authorization__btn{");
+    expect(css).not.toMatch(/auth-wrapper|auth-container|dialog-ux|modal-ux/);
     // Both names are the viewer's own, as its script writes them: the block around its
     // title and introduction, and the bar that holds the servers and the Authorize button.
     expect(VIEWER_JS).toContain('{className:"information-container"}');
@@ -779,7 +792,7 @@ describe("the documentation page beside the viewer", () => {
     expect(VIEWER_JS).toContain('className:"auth-wrapper"');
 
     // display: none appears for those two and for [hidden] alone, and nothing is hidden another way.
-    expect(css.match(/display:\s*none/g)).toHaveLength(2);
+    expect(css.match(/display:\s*none/g)).toHaveLength(2); // the one rule for the viewer's three parts, and [hidden]
     expect(css).not.toMatch(/visibility:\s*hidden|opacity:\s*0|height:\s*0|clip-path|text-indent/);
     // Every other rule is about our own blocks, so nothing here restyles the viewer: it is
     // under ".own", names a class or id only our markup has, or is the page itself.

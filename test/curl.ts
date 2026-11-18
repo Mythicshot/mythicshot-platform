@@ -6,7 +6,9 @@
 // The subset: one command, `curl`, with -X <method>, -H "<name>: <value>", -d <text>,
 // --data-binary @<file> and exactly one address. Words are split as a POSIX shell splits
 // them: single quotes keep everything as it is, double quotes keep everything but allow
-// \" and \\, and no word may hold anything the shell would expand or act on.
+// \" and \\, and no word may hold anything the shell would expand or act on, with one
+// exception: inside double quotes, $NAME is filled in from the variables the caller says
+// the shell has (the page tells readers to keep their token in $TOKEN).
 
 export type Curl = {
   method: string;
@@ -19,11 +21,14 @@ export type Curl = {
 
 /** Characters a shell acts on outside quotes; none may appear there. */
 const SHELL_ACTIVE = /[|&;<>()$`\\!*?[\]{}~#\n\r]/;
-/** Inside double quotes these still do something in a shell. */
-const ACTIVE_IN_DOUBLE = /[$`!\n\r]/;
+/** Inside double quotes these still do something in a shell. ($ is looked at on its own.) */
+const ACTIVE_IN_DOUBLE = /[`!\n\r]/;
 
-/** The command's words, as a shell would hand them to curl. Throws on a quote left open or anything a shell would expand. */
-export function shellWords(command: string): string[] {
+/**
+ * The command's words, as a shell would hand them to curl. Throws on a quote left open or
+ * anything a shell would expand, but for $NAME inside double quotes when `env` has NAME.
+ */
+export function shellWords(command: string, env: Readonly<Record<string, string>> = {}): string[] {
   const words: string[] = [];
   let word: string | null = null;
   let i = 0;
@@ -52,6 +57,13 @@ export function shellWords(command: string): string[] {
           i += 2;
           continue;
         }
+        if (c === "$") {
+          const name = /^\$([A-Za-z_][A-Za-z0-9_]*)/.exec(command.slice(i))?.[1];
+          if (name === undefined || !Object.hasOwn(env, name)) throw new Error(`$ inside double quotes that is not a variable the shell was given: ${command}`);
+          text += env[name];
+          i += name.length + 1;
+          continue;
+        }
         if (ACTIVE_IN_DOUBLE.test(c)) throw new Error(`${JSON.stringify(c)} inside double quotes, which a shell would act on: ${command}`);
         text += c;
         i++;
@@ -69,8 +81,8 @@ export function shellWords(command: string): string[] {
 }
 
 /** What curl would send for `command`. Throws on anything outside the subset. */
-export function parseCurl(command: string): Curl {
-  const words = shellWords(command);
+export function parseCurl(command: string, env: Readonly<Record<string, string>> = {}): Curl {
+  const words = shellWords(command, env);
   if (words[0] !== "curl") throw new Error(`not a curl command: ${command}`);
   let method: string | null = null;
   let url: string | null = null;
