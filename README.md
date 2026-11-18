@@ -23,7 +23,7 @@ Both guided commands say each step before doing it, are safe to run twice, never
 3. On the server, run `sudo bash install.sh`. If it installs Docker first, it then stops and asks for the image: load it with `sudo docker load -i demo-platform.tar` and run `sudo bash install.sh` again.
 4. Open `https://tours.example.com/setup` and enter the setup code the script printed.
 
-The full steps, with what you need before you start, backup, restore, moving servers and troubleshooting, are in the [Docker runbook](docs/runbook-docker.md).
+The full steps, with what you need before you start, backup, restore, moving servers and troubleshooting, are in the [Docker runbook](docs/runbook-docker.md). Step-by-step guides for specific providers (DigitalOcean, AWS Lightsail, Azure, Akamai/Linode, Namecheap VPS and Fly.io) are in [docs/hosting](docs/hosting/README.md).
 
 ### Quick start: Cloudflare
 
