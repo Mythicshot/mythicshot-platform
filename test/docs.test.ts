@@ -553,6 +553,9 @@ describe("the tunnel route", () => {
       "cloudflared could not reach Cloudflare",
       "what was pasted had more than one line",
       "--new-token is for an install in tunnel mode",
+      "nothing is installed on this machine",
+      "the new token was not saved",
+      "this install is still not finished",
     ]) {
       expect(runbook, s).toContain(s);
       expect(installSh, s).toContain(s);
@@ -589,6 +592,34 @@ describe("a tunnel token that does not connect", () => {
     expect(runbook).not.toMatch(/edit the `TUNNEL_TOKEN=` line/);
     expect(runbook).toContain(".tunnel-pending");
     expect(installSh).toContain('PENDING_FILE="$INSTALL_DIR/.tunnel-pending"');
+  });
+
+  it("the runbook says a new token is saved only after it has connected, and what update does with an unfinished install", () => {
+    expect(runbook).toContain("saved to `.env` before the stack starts");
+    // A trial is not free: the tunnel restarts, and neither text may claim otherwise.
+    const started = "The site is started again on the previous token";
+    expect(runbook).toContain(started);
+    expect(installSh).toContain(started);
+    expect(runbook).toContain("the site cannot be reached for a moment");
+    expect(installSh).toContain("the site cannot be reached for a moment");
+    expect(runbook).not.toContain("keeps running");
+    expect(installSh.split("\n").filter((l) => !l.startsWith("#")).join("\n")).not.toContain("keeps running");
+    // The new token is saved straight after the start, before Caddy is restarted.
+    const start = installSh.match(/^start_stack\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    expect(start.indexOf("save_new_token")).toBeGreaterThan(0);
+    expect(start.indexOf("save_new_token")).toBeLessThan(start.indexOf("restart caddy"));
+    expect(runbook).toContain("Only once the tunnel has connected does the script rewrite the `TUNNEL_TOKEN` line of `.env`");
+    expect(runbook).not.toContain("puts the previous token back");
+    expect(installSh).not.toContain("Putting the previous token back");
+    const said = "The last install here did not finish: its tunnel never connected to Cloudflare, so the site cannot be reached yet";
+    expect(runbook).toContain(said);
+    expect(installSh).toContain(said);
+    expect(runbook).toContain("`sudo bash install.sh update` leaves the file where it is");
+    // update has no line that removes the mark: only finish, in an install run, does.
+    const update = installSh.match(/^cmd_update\(\) \{\n([\s\S]*?)^\}/m)?.[1] ?? "";
+    expect(update).toContain("PENDING_FILE");
+    expect(update).not.toMatch(/\brm\b|safe_rm_file/);
+    expect(installSh.match(/safe_rm_file "\$PENDING_FILE"/g)?.length).toBe(1);
   });
 
   it("starting the stack removes no container the script did not make", () => {

@@ -2,6 +2,13 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.2 (2026-11-18)
+
+- Tunnel mode: a new tunnel token is tried first and saved only once the tunnel connects. If the change fails or is interrupted, the site is started again on the previous token.
+- Changing the token on a machine with no install, or on an install that does not use a tunnel, stops early and says which command to use.
+- An install whose tunnel never connected stays marked as unfinished after an update, and the update says what to do.
+- Clearer messages when the install script asks for the token again.
+
 ## 0.1.1 (2026-11-18)
 
 - Rename a tour: the title changes on the public page, and the link stays the same.

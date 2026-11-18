@@ -40,9 +40,20 @@
 # - It never removes or overwrites the data folder, the .env file or a backup. The
 #   exceptions: `uninstall --delete-data`, after the exact domain name is typed (--yes
 #   does not skip that); and, in tunnel mode, the TUNNEL_TOKEN line of .env, which is
-#   replaced when a new token is given (--new-token, or while the tunnel has never
-#   connected). Every other line of .env, the setup code included, is carried over
+#   replaced once a new token (--new-token, or while the tunnel has never connected)
+#   has connected. Every other line of .env, the setup code included, is carried over
 #   unchanged, and no copy of the old file is kept.
+# - A new token for an install whose tunnel has connected before (--new-token) is
+#   tried before it is saved: the stack is started with the token in that one command's
+#   environment, which Compose reads before .env, and the token is written to .env as
+#   soon as the tunnel has connected with it, before any later step. Trying it restarts
+#   the tunnel, so the site is out of reach meanwhile. A run that fails or is
+#   interrupted before the token is saved leaves .env as it was and puts the containers
+#   back in line with it: the stack is started again on the previous token, or, if it
+#   was not running before the run, taken down again.
+# - While the tunnel has never connected there is no working token to protect: a token
+#   given then is written to .env before the start, so the containers never run on a
+#   token that .env does not hold.
 # - The data folder is a new or empty folder outside the system folders, recorded in
 #   .env as its resolved path; later runs accept only that folder, and only while it
 #   still resolves to itself.
@@ -57,12 +68,16 @@
 #   argument. In tunnel mode it is printed once at the end of the first run whose
 #   tunnel connects, which may be a later run than the one that made it.
 # - A tunnel that has never connected is marked by the file .tunnel-pending in the
-#   install folder. While it is there, a run asks for the token again, so a wrong token
-#   is put right by running the script again.
+#   install folder. While it is there, an install run asks for the token again, so a
+#   wrong token is put right by running the script again. Only an install run whose
+#   tunnel connects removes the file; update leaves it and says what to run.
 # - The tunnel token is read at a hidden prompt (or from the TUNNEL_TOKEN environment
-#   variable), checked for shape only, and written only to .env. It is never printed,
-#   never passed as a command argument and never written to the compose file or a
-#   backup archive; cloudflared's log lines are masked for it before they are shown.
+#   variable), checked for shape only, and written only to .env (mode 600, and so is
+#   the temporary file it is written to first, which is removed when the run ends,
+#   however it ends; one left by a run that was killed outright is removed, unread, by
+#   the next run). It is never printed, not even in part, never passed as a command
+#   argument and never written to the compose file or a backup archive; cloudflared's
+#   log lines are masked for it before they are shown.
 # - The mode is recorded in .env (DEPLOY_MODE=tunnel; no such line means direct). A run
 #   never switches an existing install to the other mode: --tunnel or --direct against
 #   the recorded mode is refused, with the steps to do it by hand.
@@ -132,8 +147,13 @@ NEW_TOKEN=0
 MODE=""       # direct or tunnel
 TOKEN=""      # the tunnel token; never printed
 OLD_TOKEN=""  # the token .env held when this run began
-TOKEN_CHANGED=0
+TOKEN_CHANGED=0   # 1 when TOKEN is not the token .env held when this run began
+TOKEN_ON_TRIAL=0  # 1 while TOKEN is tried first and is not in .env yet (see renew_token)
+STACK_ON_TRIAL=0  # 1 while the containers run on that token: every way out ends the trial
+STACK_WAS_RUNNING=0  # 1 when the stack was running before the token was tried
+TRIAL_END=""      # what end_trial did, as a sentence for the closing message
 PENDING=0     # 1 when this install's tunnel has never connected (PENDING_FILE was there)
+UNFINISHED=0  # 1 when update found PENDING_FILE; on_exit then repeats what to run
 SECRET_EXTRA=0
 DOMAIN=""
 ACME_EMAIL=""
@@ -177,7 +197,7 @@ Options:
   --direct        With install: publish ports 80 and 443 and get a certificate (the
                   default at the question a first install asks).
   --new-token     With install, on a tunnel install: ask for the tunnel token again and
-                  replace the one in .env.
+                  replace the one in .env once the new one has connected.
   --dry-run       Print every command and file write without doing any.
   --yes           Do not ask "continue?" questions (never skips the data deletion check).
   --force         Try on a system other than Debian 13 or 12.
@@ -406,14 +426,58 @@ undo_created() {
   done
 }
 
+# Ends the trial of a new token that was not saved, and puts the containers back in line
+# with .env, which still holds the previous token: files this run replaced are put
+# back, then the stack is started again from .env, or, if it was not running before
+# this run, what this run started is taken down. Sets TRIAL_END. Never exits early.
+end_trial() {
+  ( restore_replaced ) || warn "could not put back every file this run replaced; see the lines above"
+  # A signal can end the run inside with_trial_token, where the new token is still in
+  # the environment that commands get: take it out, so that Compose reads .env.
+  unset TUNNEL_TOKEN
+  [ -z "${TUNNEL_TOKEN+set}" ] || unset TUNNEL_TOKEN
+  if [ "$STACK_WAS_RUNNING" = 1 ]; then
+    say "Starting the site again on the previous token"
+    if run "${DC[@]}" up -d; then
+      TRIAL_END="The site is started again on the previous token; it could not be reached while the new one was tried."
+    else
+      TRIAL_END="The previous setup did not start: start it with: sudo bash $SELF install (the previous token is still in $ENV_FILE)."
+    fi
+  else
+    say "The platform was not running before this run, so what this run started is taken down again"
+    if run "${DC[@]}" down; then
+      TRIAL_END="The platform was not running before this run and is stopped again."
+    else
+      TRIAL_END="The platform was not running before this run, and what this run started could not be taken down: stop it with: sudo bash $SELF uninstall (the data, $ENV_FILE and the backups stay)."
+    fi
+  fi
+  STACK_ON_TRIAL=0
+}
+
+# Runs however the script ends, a signal included (see main). Temporary files go first:
+# one of them may hold a token.
 on_exit() {
   local status=$? f
   trap - EXIT
+  # A further Ctrl-C, hang-up or kill must not cut short what follows: the containers
+  # are put back in line with .env and the closing message is printed.
+  trap : INT TERM HUP
+  # Every step below is tried even if one before it fails, such as a message to a
+  # terminal that is gone.
+  set +e
   for f in ${TMP_FILES[@]+"${TMP_FILES[@]}"}; do
     if [ -e "$f" ] || [ -L "$f" ]; then safe_rm_file "$f"; fi
   done
   for f in ${TMP_DIRS[@]+"${TMP_DIRS[@]}"}; do remove_own_tmpdir "$f"; done
+  if [ "$STACK_ON_TRIAL" = 1 ] && [ "$DRY_RUN" = 0 ]; then
+    warn "this run stopped before the new tunnel token had connected, so the new token was not saved. $ENV_FILE still holds the previous token."
+    end_trial
+    warn "$TRIAL_END To replace the token, run: sudo bash $SELF install --new-token"
+  fi
   if [ "$status" != 0 ] && [ "$DRY_RUN" = 0 ] && [ "${#CREATED[@]}" -gt 0 ]; then undo_created; fi
+  if [ "$UNFINISHED" = 1 ] && [ -e "$PENDING_FILE" ]; then
+    printf "NOTE: this install is still not finished: its tunnel had never connected to Cloudflare when it was installed, and update leaves that as it is. Run: sudo bash %s install. It asks for the tunnel token again (paste it from the tunnel's page in Cloudflare's dashboard, or press Enter to keep the stored one) and prints the setup code once the tunnel has connected.\n" "$SELF" >&2
+  fi
   exit "$status"
 }
 
@@ -468,19 +532,38 @@ commit_file() {
   if [ "$existed" = 0 ] && inside "$(canon "$target")" "$INSTALL_REAL"; then CREATED+=("$target"); fi
 }
 
+# Puts back every file this run replaced, from the copy saved first. Each step is
+# checked by itself, so that a copy that fails is never followed by a move: a file
+# that cannot be put back is left as this run wrote it, and the return value is 1.
 restore_replaced() {
-  local entry target bak tmp
+  local entry target bak tmp failed=0
   for entry in ${REPLACED[@]+"${REPLACED[@]}"}; do
     target="${entry%%|*}"
     bak="${entry#*|}"
     guard_path "$target"
     guard_path "$bak"
-    tmp="$(mktemp -- "$(dirname -- "$target")/.restore.XXXXXX")"
+    if ! tmp="$(mktemp -- "$(dirname -- "$target")/.restore.XXXXXX")"; then
+      warn "could not put back $target: no temporary file could be made. It is left as this run wrote it; the earlier one is $bak"
+      failed=1
+      continue
+    fi
     TMP_FILES+=("$tmp")
-    cp -p -- "$bak" "$tmp"
-    safe_mv "$tmp" "$target"
+    guard_path "$tmp"
+    if ! cp -p -- "$bak" "$tmp"; then
+      warn "could not put back $target: copying $bak failed. It is left as this run wrote it; the earlier one is $bak"
+      rm -f -- "$tmp"
+      failed=1
+      continue
+    fi
+    if ! mv -f -- "$tmp" "$target"; then
+      warn "could not put back $target: the move failed. It is left as this run wrote it; the earlier one is $bak"
+      rm -f -- "$tmp"
+      failed=1
+      continue
+    fi
     info "restored $target from $bak"
   done
+  return "$failed"
 }
 
 # ---------------------------------------------------------------- questions
@@ -554,6 +637,17 @@ ask_mode() {
   die "no valid choice given; nothing was changed"
 }
 
+# Stops a run that got no usable token, saying what state that leaves and what to run.
+no_token() {
+  if [ "$FIRST_RUN" = 1 ]; then
+    die "$1. Nothing was installed and nothing was changed. Copy the token from the tunnel's page in Cloudflare's dashboard, then run: sudo bash $SELF install --tunnel"
+  fi
+  if [ "$PENDING" = 1 ]; then
+    die "$1. Nothing was changed, and the install here is still not finished. Copy the token from the tunnel's page in Cloudflare's dashboard, then run: sudo bash $SELF install"
+  fi
+  die "$1. Nothing was changed: the token already stored is still the one in use. To try again, run: sudo bash $SELF install --new-token"
+}
+
 # The token is never echoed: not while it is typed, and not in a refusal. With "keep",
 # an empty answer keeps the token already in TOKEN.
 ask_token() {
@@ -568,7 +662,7 @@ ask_token() {
   fi
   for tries in 1 2 3; do
     printf '%s' "$prompt" >&2
-    read_secret answer || die "no answer given; run the script in a terminal"
+    read_secret answer || no_token "no answer was given at the token question (run the script in a terminal)"
     printf '\n' >&2
     if [ "$SECRET_EXTRA" = 1 ]; then
       warn "what was pasted had more than one line, so none of it was taken: paste the token as one line (try $tries of 3)"
@@ -578,7 +672,7 @@ ask_token() {
     if valid_token "$answer"; then TOKEN="$answer"; return 0; fi
     warn "that is not a tunnel token: paste the long word starting with eyJ, or the install command that ends with it (try $tries of 3)"
   done
-  die "no valid tunnel token given; nothing was changed"
+  no_token "none of the three answers was a tunnel token"
 }
 
 ask_domain() {
@@ -714,9 +808,17 @@ check_image() {
 }
 
 # The stack's own container for a service is running (so it may hold ports 80 and 443).
+# Asked of Docker by the labels Compose gives its containers, not through the stack
+# file: that one cannot be read while .env has no value for a variable it requires.
 stack_running() {
   [ -f "$COMPOSE_FILE" ] && [ -f "$ENV_FILE" ] && compose_present || return 1
-  [ -n "$("${DC[@]}" ps -q "$1" 2>/dev/null || true)" ]
+  [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=$1" 2>/dev/null || true)" ]
+}
+
+# Any container of the stack is running.
+project_running() {
+  compose_present || return 1
+  [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null || true)" ]
 }
 
 check_ports() {
@@ -848,11 +950,11 @@ load_or_ask_config() {
   if [ -f "$ENV_FILE" ]; then
     say "Reading the earlier answers from $ENV_FILE"
     read_env_file
+    if [ "$NEW_TOKEN" = 1 ] && [ "$MODE" != tunnel ]; then
+      die "--new-token is for an install in tunnel mode, and this install is not in tunnel mode: it is in direct mode (ports 80 and 443, its own certificate) and has no tunnel token. Nothing was changed. Run it without the option: sudo bash $SELF install"
+    fi
     check_recorded_data strict
     if [ -n "$MODE_FLAG" ] && [ "$MODE_FLAG" != "$MODE" ]; then refuse_mode_switch; fi
-    if [ "$NEW_TOKEN" = 1 ] && [ "$MODE" != tunnel ]; then
-      die "--new-token is for an install in tunnel mode; this install is in direct mode and has no tunnel token. Nothing was changed."
-    fi
     if [ "$MODE" = tunnel ]; then
       info "tunnel mode, domain $DOMAIN, data folder $DATA_DIR, image $IMAGE"
     else
@@ -876,26 +978,47 @@ load_or_ask_config() {
 # On an existing tunnel install: asks for the token again when the tunnel has never
 # connected (so a wrong token is put right by running the script again) or when
 # --new-token was given. Otherwise the token in .env stays, whatever the environment
-# holds.
+# holds. A new token for an install whose tunnel has connected on the stored one is
+# tried first (TOKEN_ON_TRIAL) and saved once it has connected (save_new_token). While
+# there is no working token to protect (the tunnel never connected, or the stored token
+# is unusable), the new one is saved before the start (write_env_file).
 renew_token() {
   OLD_TOKEN="$TOKEN"
   [ ! -e "$PENDING_FILE" ] || PENDING=1
   if [ "$PENDING" = 1 ] || [ "$NEW_TOKEN" = 1 ]; then
     if [ "$PENDING" = 1 ]; then
-      say "The tunnel of this install has never connected, so the tunnel token is asked for again"
+      say "The last install here did not finish: its tunnel never connected to Cloudflare, so the site cannot be reached yet"
+      if [ -n "$ENV_TOKEN" ]; then
+        info "This run tries again, with the token given in the TUNNEL_TOKEN environment variable."
+      elif valid_token "$OLD_TOKEN"; then
+        info "Paste the tunnel token again at the question below; copy it fresh from the tunnel's page in Cloudflare's dashboard. If the token was not the problem, press Enter to keep the token already stored."
+      else
+        info "Paste the tunnel token again at the question below; copy it fresh from the tunnel's page in Cloudflare's dashboard."
+      fi
     else
       say "Replacing the tunnel token"
+      if valid_token "$OLD_TOKEN" && project_running; then
+        info "The token in use now stays in $LOGICAL_INSTALL_DIR/.env until the new one has connected. Trying the new one restarts the tunnel, so the site cannot be reached for a moment. If the new one does not connect within ${WAIT_SECONDS}s, it is not saved and the site is started again on the previous token; until then the site stays out of reach."
+      elif valid_token "$OLD_TOKEN"; then
+        info "The token in use now stays in $LOGICAL_INSTALL_DIR/.env until the new one has connected. The platform is not running now: this run starts it on the new token. If the new one does not connect within ${WAIT_SECONDS}s, it is not saved and the platform is stopped again."
+      else
+        info "The token stored in $LOGICAL_INSTALL_DIR/.env cannot be used, so the new one is saved as soon as it is given."
+      fi
     fi
     if valid_token "$OLD_TOKEN"; then ask_token keep; else ask_token; fi
-    [ "$TOKEN" = "$OLD_TOKEN" ] || TOKEN_CHANGED=1
+    if [ "$TOKEN" != "$OLD_TOKEN" ]; then
+      TOKEN_CHANGED=1
+      if [ "$PENDING" = 0 ] && valid_token "$OLD_TOKEN"; then TOKEN_ON_TRIAL=1; fi
+    fi
   elif [ -n "$ENV_TOKEN" ]; then
     warn "TUNNEL_TOKEN is set in the environment, but this install already has a token that connected, so it is not taken. To replace the token: sudo bash $SELF install --new-token"
   fi
 }
 
 # Rewrites .env with one line changed, TUNNEL_TOKEN, and every other line as it was.
-# The new file is complete before it takes the old one's place; no copy of the old
-# file is kept, so no file but .env ever holds a token.
+# The new file is made by mktemp (mode 600 from its first byte), is complete before it
+# takes the old one's place in one move, and is removed by on_exit if the run ends
+# before that; no copy of the old file is kept, so no file but .env ever holds a token.
 replace_env_token() {
   local new="$1" tmp line found=0
   valid_token "$new" || die "no tunnel token to write"
@@ -950,13 +1073,29 @@ require_installed() {
   [ -f "$COMPOSE_FILE" ] || die "$COMPOSE_FILE is missing. Run: sudo bash $SELF install"
 }
 
-# Holds a lock for the rest of the run, so two runs cannot interleave.
+# Holds a lock for the rest of the run, so two runs cannot interleave. With the lock
+# held, no other run is writing .env, so a temporary .env still lying there was left by
+# a run that was killed outright: it is removed.
 take_lock() {
   [ "$DRY_RUN" = 0 ] && [ -d "$INSTALL_DIR" ] || return 0
-  command -v flock >/dev/null 2>&1 || return 0
-  [ -e "$LOCK_FILE" ] || CREATED+=("$LOCK_FILE")
-  exec 9>>"$LOCK_FILE"
-  flock -n 9 || die "another run of this script is in progress"
+  if command -v flock >/dev/null 2>&1; then
+    [ -e "$LOCK_FILE" ] || CREATED+=("$LOCK_FILE")
+    exec 9>>"$LOCK_FILE"
+    flock -n 9 || die "another run of this script is in progress"
+  fi
+  remove_stale_env_tmp
+}
+
+# Removes temporary .env files (the names replace_env_token and write_env_file give
+# them) that an earlier run left behind. They may hold a token: they are not read, and
+# only their names are printed.
+remove_stale_env_tmp() {
+  local f
+  for f in "$INSTALL_DIR"/.env.new.??????; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    safe_rm_file "$f"
+    info "removed $f, a temporary file left by an earlier run that was stopped"
+  done
 }
 
 new_setup_code() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
@@ -1052,8 +1191,12 @@ EOF
 }
 
 write_env_file() {
+  if [ -e "$ENV_FILE" ] && [ "$TOKEN_ON_TRIAL" = 1 ]; then
+    say "Keeping $ENV_FILE as it is for now: the new tunnel token is saved in it only once it has connected"
+    return 0
+  fi
   if [ -e "$ENV_FILE" ] && [ "$TOKEN_CHANGED" = 1 ]; then
-    say "Replacing the tunnel token in $ENV_FILE (every other line stays as it is; the setup code does not change)"
+    say "Saving the tunnel token in $ENV_FILE (every other line stays as it is; the setup code does not change)"
     replace_env_token "$TOKEN"
     return 0
   fi
@@ -1139,7 +1282,7 @@ install_stack_files() {
     stage_file "$COMPOSE_FILE" 0600 < <(compose_file_content)
   fi
   local staged_compose="$STAGED"
-  run docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged_compose" config --quiet \
+  with_trial_token run docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged_compose" config --quiet \
     || die "the new compose file does not validate; nothing was replaced"
   STAGED="$staged_compose"
   commit_file "$COMPOSE_FILE" "$INSTALL_DIR"
@@ -1152,6 +1295,31 @@ install_stack_files() {
   CADDY_CHANGED="$COMMITTED"
 }
 
+# Runs a command. While a new token is on trial, that command alone gets it, as
+# TUNNEL_TOKEN in its environment, which Compose reads before .env. So the token is on
+# no command line and in no file until it has connected.
+with_trial_token() {
+  if [ "$TOKEN_ON_TRIAL" = 1 ]; then
+    local -x TUNNEL_TOKEN="$TOKEN"
+  fi
+  "$@"
+}
+
+# The new token has connected: only now does it take the old one's place in .env. Run
+# straight after the start, before any other step, so that nothing later in the run can
+# undo a token that works.
+save_new_token() {
+  [ "$TOKEN_ON_TRIAL" = 1 ] || return 0
+  if [ "$DRY_RUN" = 1 ]; then
+    info "would save the new tunnel token in $ENV_FILE once it has connected"
+    return 0
+  fi
+  say "The new tunnel token connected; saving it in $ENV_FILE (every other line stays as it is; the setup code does not change)"
+  replace_env_token "$TOKEN"
+  TOKEN_ON_TRIAL=0
+  STACK_ON_TRIAL=0
+}
+
 # Shows cloudflared's last log lines, masked for the token, and says in plain words what
 # the known ones mean. The messages matched here are cloudflared's own (see the top of
 # this file); the text Cloudflare adds after a refused registration is not relied on.
@@ -1159,8 +1327,9 @@ explain_tunnel_failure() {
   local logs
   say "cloudflared's last log lines"
   info "\$ ${DC[*]} logs --no-color --tail 40 cloudflared"
-  logs="$("${DC[@]}" logs --no-color --tail 40 cloudflared 2>&1 || true)"
+  logs="$(with_trial_token "${DC[@]}" logs --no-color --tail 40 cloudflared 2>&1 || true)"
   if [ -n "$TOKEN" ]; then logs="${logs//"$TOKEN"/<tunnel token hidden>}"; fi
+  if [ -n "$OLD_TOKEN" ]; then logs="${logs//"$OLD_TOKEN"/<tunnel token hidden>}"; fi
   printf '%s\n' "$logs"
   case "$logs" in
     *"Provided Tunnel token is not valid"*)
@@ -1182,41 +1351,45 @@ start_stack() {
   else
     say "Starting the platform: pulling any image not on this server yet, then waiting up to ${WAIT_SECONDS}s for it to report healthy"
   fi
-  if ! run "${DC[@]}" up -d --pull missing --wait --wait-timeout "$WAIT_SECONDS"; then
+  # A new token on trial: from here until it is saved, every way out of this run ends
+  # the trial (end_trial: below when the start fails, in on_exit when the run is
+  # interrupted), so that the containers and .env agree again.
+  if [ "$TOKEN_ON_TRIAL" = 1 ] && [ "$DRY_RUN" = 0 ]; then
+    if project_running; then STACK_WAS_RUNNING=1; fi
+    STACK_ON_TRIAL=1
+  fi
+  if ! with_trial_token run "${DC[@]}" up -d --pull missing --wait --wait-timeout "$WAIT_SECONDS"; then
     warn "the platform did not start"
     if [ "$MODE" = tunnel ]; then explain_tunnel_failure; fi
+    if [ "$STACK_ON_TRIAL" = 1 ]; then
+      say "The new token did not connect, so it is not saved: $ENV_FILE still holds the previous token, which connected before"
+      end_trial
+      die "the tunnel did not connect with the new token, so the new token was not saved. $TRIAL_END $ENV_FILE, the data folder and the backups were not changed. Copy the current token from the tunnel's page in Cloudflare's dashboard, then run: sudo bash $SELF install --new-token"
+    fi
     if [ "$COMPOSE_CREATED" = 1 ]; then
       say "The app's last log lines"
       run "${DC[@]}" logs --tail 50 app || true
       say "Taking the half-started stack down again"
       run "${DC[@]}" down || warn "could not take the stack down"
       if [ "$MODE" = tunnel ]; then
-        die "starting failed; see the log lines above. Run this script again: it asks for the tunnel token again, and prints the setup code once the tunnel has connected. The files this run created are removed below; .env stays if the app has already written to the data folder."
+        die "starting failed; see the log lines above. Run: sudo bash $SELF install; it asks for the tunnel token again and prints the setup code once the tunnel has connected. The files this run created are removed below; .env stays if the app has already written to the data folder."
       fi
       die "starting failed; see the log lines above. The files this run created are removed below."
     fi
-    local token_put_back=0
-    if [ "$TOKEN_CHANGED" = 1 ] && [ "$PENDING" = 0 ] && valid_token "$OLD_TOKEN"; then
-      say "Putting the previous token back into $ENV_FILE: it connected before"
-      replace_env_token "$OLD_TOKEN"
-      token_put_back=1
-    fi
-    if [ "${#REPLACED[@]}" -gt 0 ] || [ "$token_put_back" = 1 ]; then
+    if [ "${#REPLACED[@]}" -gt 0 ]; then
       say "Putting back the files this run replaced and starting the previous setup"
-      restore_replaced
+      restore_replaced || warn "could not put back every file this run replaced; see the lines above"
       run "${DC[@]}" up -d || warn "the previous setup did not start either"
     fi
-    if [ "$token_put_back" = 1 ]; then
-      die "starting failed with the new token. The previous token is back in $ENV_FILE; the data folder and the backups were not changed. See the logs with: ${DC[*]} logs"
-    fi
     if [ "$MODE" = tunnel ] && [ "$PENDING" = 1 ]; then
-      die "starting failed. Run this script again: it asks for the tunnel token again. The data folder and the backups were not changed. See the logs with: ${DC[*]} logs"
+      die "starting failed: the tunnel still did not connect, so the site cannot be reached yet. The data folder and the backups were not changed. Run: sudo bash $SELF install; it asks for the tunnel token again. See the logs with: ${DC[*]} logs"
     fi
     if [ "$MODE" = tunnel ]; then
       die "starting failed. The data folder, $ENV_FILE and the backups were not changed. If the token is the cause, replace it with: sudo bash $SELF install --new-token. See the logs with: ${DC[*]} logs"
     fi
     die "starting failed. The data folder, $ENV_FILE and the backups were not changed. See the logs with: ${DC[*]} logs"
   fi
+  save_new_token
   if [ "$CADDY_CHANGED" = 1 ] && [ "$caddy_was_running" = 1 ]; then
     say "Restarting Caddy so it reads the new Caddyfile"
     run "${DC[@]}" restart caddy
@@ -1251,6 +1424,10 @@ finish() {
 }
 
 cmd_install() {
+  # Before any question or check: --new-token has nothing to replace without an install.
+  if [ "$NEW_TOKEN" = 1 ] && [ ! -f "$ENV_FILE" ]; then
+    die "nothing is installed on this machine ($LOGICAL_INSTALL_DIR/.env is missing), so there is no tunnel token to replace. Nothing was changed. To install in tunnel mode, run: sudo bash $SELF install --tunnel"
+  fi
   say "Installing the demo platform"
   load_or_ask_config
   if [ "$MODE" = tunnel ]; then
@@ -1342,7 +1519,15 @@ do_backup() {
 }
 
 cmd_update() {
+  # Noted before anything can stop this command, so that every way out of it repeats
+  # what to run (on_exit). update never removes the file: only an install run confirms
+  # the tunnel, and it is the one that prints the setup code.
+  if [ -f "$ENV_FILE" ] && [ -e "$PENDING_FILE" ]; then UNFINISHED=1; fi
   require_installed
+  [ "$MODE" = tunnel ] || UNFINISHED=0
+  if [ "$UNFINISHED" = 1 ]; then
+    warn "this install was never finished: its tunnel has not connected to Cloudflare yet. update leaves that as it is; what to run is repeated at the end."
+  fi
   check_recorded_data strict
   refuse_snap
   check_docker_ready
@@ -1686,6 +1871,10 @@ main() {
   require_root
   check_os
   trap on_exit EXIT
+  # Ctrl-C, a closed terminal or a kill ends the run through on_exit as well.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
   case "$COMMAND" in
     install) cmd_install ;;
     update) cmd_update ;;
