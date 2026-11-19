@@ -3,8 +3,9 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp } from "../app.ts";
 import { withBudget } from "../budget.ts";
-import type { Deps } from "../ports.ts";
-import { configFromEnv, guardTarget } from "./config.ts";
+import { setClientAddress } from "../client.ts";
+import { DEFER_FAILED, deferTracker, type Deps } from "../ports.ts";
+import { clientAddressReader, configFromEnv, guardTarget, mailFromEnv, type Incoming } from "./config.ts";
 import { APP_UID, prepareDataDir } from "./datadir.ts";
 import { NodeDb } from "./db.ts";
 import { NodeFileStore } from "./files.ts";
@@ -36,6 +37,17 @@ async function main(): Promise<void> {
   // Read before anything is created or opened: a pair of addresses that cannot be used
   // stops the start here, with its one line and nothing else.
   const config = configFromEnv(process.env);
+  // Mail and the client address never stop the start. A mail block that cannot be used
+  // leaves mail off, and a header name that cannot be used leaves every address unknown;
+  // each says so in one fixed line that holds no value. The mail server is not contacted
+  // here: the first connection is made by the first mail.
+  const mail = mailFromEnv(process.env, config);
+  if (mail.problem !== null) console.error(mail.problem);
+  const client = clientAddressReader(process.env.CLIENT_ADDRESS_HEADER);
+  if (client.problem !== null) console.error(client.problem);
+  // Work that goes on after an answer (a mail being sent) is tracked here, so a stop can
+  // wait for it. A failure is one fixed line; the error itself is never written.
+  const background = deferTracker(() => console.error(DEFER_FAILED));
 
   const root = prepareDataDir(dataDir);
   const dbPath = join(root, "db.sqlite");
@@ -54,6 +66,9 @@ async function main(): Promise<void> {
     pub: new NodeFileStore(join(root, "public")),
     config,
     now: () => Date.now(),
+    // No mailer at all while mail is off, so the deps are then the ones of a site without mail.
+    ...(mail.mode === "smtp" ? { mail: mail.mailer } : {}),
+    defer: background.defer,
   };
 
   // Each request gets its own metered ports, as on Cloudflare, so one that goes over the
@@ -62,7 +77,13 @@ async function main(): Promise<void> {
   // With two addresses the host is read from the Host header only. A request line that
   // carries a full address instead of a path would name its own host, so the guard answers
   // it as a host this install does not serve. With one address nothing is checked, as before.
-  const fetchOne = guardTarget(config.hosts, serveOne);
+  const guarded = guardTarget(config.hosts, serveOne);
+  // The client address is noted before the app sees the request: the socket's, or the last
+  // value of the header CLIENT_ADDRESS_HEADER names. The app itself reads no header for it.
+  const fetchOne = (req: Request, env: { incoming: Incoming & { url?: string } }) => {
+    setClientAddress(req, client.read(env.incoming));
+    return guarded(req, env);
+  };
   const server = serve({ fetch: fetchOne, port, serverOptions: { headersTimeout: HEADERS_TIMEOUT_MS, requestTimeout: REQUEST_TIMEOUT_MS } }, (info) => {
     console.log(`listening on port ${info.port}`);
   });
@@ -77,9 +98,15 @@ async function main(): Promise<void> {
     stopping = true;
     console.log(`${signal} received, stopping`);
     const finish = () => {
-      db.close();
-      console.log("stopped");
-      process.exit(0);
+      // Work still going on after its answer (a mail on its way) is given the same grace
+      // as open requests before the database is closed under it. Nothing is tried again:
+      // a mail cut off here is not sent a second time.
+      const grace = new Promise<void>((done) => setTimeout(done, STOP_GRACE_MS));
+      void Promise.race([background.settle(), grace]).then(() => {
+        db.close();
+        console.log("stopped");
+        process.exit(0);
+      });
     };
     server.close(finish);
     if ("closeIdleConnections" in server) server.closeIdleConnections();

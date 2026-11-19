@@ -1,13 +1,16 @@
 // The Node target's settings: what configFromEnv makes of the environment, and what the
 // real startup does with a bad pair of addresses.
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createServer, type AddressInfo } from "node:net";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
-import { configFromEnv, guardTarget, isPathTarget } from "../src/node/config.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { linkOrigin, NO_MAIL, type Mailer } from "../src/mail.ts";
+import { clientAddressFrom, clientAddressReader, configFromEnv, guardTarget, isPathTarget, mailFromEnv } from "../src/node/config.ts";
+import type { SmtpSettings } from "../src/node/smtp.ts";
+import type { Config } from "../src/ports.ts";
 
 const ENTRY = fileURLToPath(new URL("../src/node/entry.ts", import.meta.url));
 
@@ -189,4 +192,294 @@ describe("the storage allowance setting on the Node target", () => {
       expect(existsSync(dataDir), raw).toBe(false);
     }
   }, 180_000);
+});
+
+const mailOff = (setting: string) => `mail: off, because ${setting} is missing or not usable. The site runs; sign-in mails are not sent.`;
+const NO_LINK_HOST = "mail: off, because no address for sign-in links is set. Set APP_HOST and TOURS_HOST, or SITE_HOST.";
+const BAD_HEADER = "client address: unknown, because CLIENT_ADDRESS_HEADER is not a header name. The site runs; no request is counted by its network address.";
+
+/** A mail block that can be used, with a made-up password that must never be shown. */
+const PASSWORD = "made-up-password-9f3c";
+const BLOCK: Record<string, string> = { MAIL_MODE: "smtp", MAIL_FROM: "no-reply@example.com", SMTP_HOST: "mail.example.com", SMTP_USER: "no-reply@example.com", SMTP_PASSWORD: PASSWORD };
+const TWO = { TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com" };
+const ONE = { SITE_HOST: "tours.example.com" };
+
+/** mailFromEnv on this environment, with a maker that records the settings instead of making a client. */
+function mailOf(env: Record<string, string>): { result: ReturnType<typeof mailFromEnv>; settings: SmtpSettings[]; made: Mailer } {
+  const settings: SmtpSettings[] = [];
+  const made: Mailer = { send: () => Promise.reject(new Error("a test mailer sends nothing")) };
+  const result = mailFromEnv(env, configFromEnv(env), (s) => {
+    settings.push(s);
+    return made;
+  });
+  return { result, settings, made };
+}
+
+describe("the link host setting on the Node target", () => {
+  it("configFromEnv reads SITE_HOST for a one-address install, and leaves the config as it was without it", () => {
+    expect(configFromEnv({ SITE_HOST: " Tours.Example.com. " })).toEqual({ publicImageBase: "", setupCode: null, hosts: null, siteHost: "tours.example.com" });
+    expect(linkOrigin(configFromEnv({ SITE_HOST: "tours.example.com:443" }))).toBe("https://tours.example.com");
+    expect(linkOrigin(configFromEnv({ SITE_HOST: "localhost:3000" }))).toBe("http://localhost:3000");
+    // Unset, empty, or not a host name: the key is not there, the start goes on, and there is no link host.
+    for (const env of [{}, { SITE_HOST: "" }, { SITE_HOST: "  " }, { SITE_HOST: "https://made-up.example.com" }, { SITE_HOST: "made-up.example.com/path" }, { SITE_HOST: "made up" }]) {
+      const config = configFromEnv(env);
+      expect(Object.keys(config).sort()).toEqual(["hosts", "publicImageBase", "setupCode"]);
+      expect(linkOrigin(config)).toBeNull();
+    }
+  });
+
+  it("SITE_HOST is ignored when APP_HOST is set", () => {
+    for (const site of ["site.example.com", "https://made-up.example.com", ""]) {
+      const env = { ...TWO, SITE_HOST: site };
+      const config = configFromEnv(env);
+      expect(Object.keys(config).sort(), site).toEqual(["hosts", "publicImageBase", "setupCode"]);
+      expect(linkOrigin(config), site).toBe("https://app.example.com");
+      // Also for mail: a SITE_HOST that is not a host name is no problem beside two addresses.
+      const { result, settings } = mailOf({ ...BLOCK, ...env });
+      expect([result.mode, result.problem], site).toEqual(["smtp", null]);
+      expect(settings[0].helo, site).toBe("app.example.com");
+    }
+  });
+});
+
+describe("the mail settings on the Node target", () => {
+  it("with no mail setting mail is off and nothing is logged", () => {
+    const lines: unknown[][] = [];
+    const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) => vi.spyOn(console, m).mockImplementation((...args: unknown[]) => void lines.push(args)));
+    const quiet: Record<string, string>[] = [
+      {},
+      TWO,
+      ONE,
+      { MAIL_MODE: "" },
+      { MAIL_MODE: "  " },
+      { MAIL_MODE: "off" },
+      { MAIL_MODE: " OFF " },
+      // Off is off, whatever else is written, usable or not.
+      { ...BLOCK, ...TWO, MAIL_MODE: "off" },
+      { ...BLOCK, ...TWO, MAIL_MODE: "" },
+      { MAIL_MODE: "off", MAIL_FROM: "not an address", SMTP_PORT: "made-up", SITE_HOST: "https://made-up.example.com" },
+      // Without a mode the rest of a block switches nothing on.
+      { MAIL_FROM: "no-reply@example.com", SMTP_HOST: "mail.example.com", SMTP_USER: "no-reply@example.com", SMTP_PASSWORD: PASSWORD, ...TWO },
+    ];
+    for (const env of quiet) {
+      const { result, settings } = mailOf(env);
+      expect(result, JSON.stringify(Object.keys(env))).toEqual({ mailer: NO_MAIL, mode: "off", problem: null });
+      expect(result.mailer).toBe(NO_MAIL);
+      expect(settings).toEqual([]);
+    }
+    expect(lines).toEqual([]);
+    for (const spy of spies) spy.mockRestore();
+  });
+
+  it("a full SMTP block gives the SMTP mailer", () => {
+    const two = mailOf({ ...BLOCK, ...TWO });
+    expect(two.result).toEqual({ mailer: two.made, mode: "smtp", problem: null });
+    expect(two.result.mailer).toBe(two.made);
+    // TLS from the first byte on port 465 unless another port is written; the site names itself by its link host.
+    expect(two.settings).toEqual([{ host: "mail.example.com", port: 465, user: "no-reply@example.com", password: PASSWORD, from: "no-reply@example.com", helo: "app.example.com" }]);
+
+    const one = mailOf({ MAIL_MODE: " SMTP ", MAIL_FROM: " No-Reply@Example.com ", SMTP_HOST: " Mail.Example.com. ", SMTP_PORT: " 2465 ", SMTP_USER: " mailbox-user ", SMTP_PASSWORD: " pass word with spaces ", SITE_HOST: "tours.example.com:8443" });
+    expect([one.result.mode, one.result.problem]).toEqual(["smtp", null]);
+    // Names and the address are tidied; the password is taken as written, and the name given to the server has no port.
+    expect(one.settings).toEqual([{ host: "mail.example.com", port: 2465, user: "mailbox-user", password: " pass word with spaces ", from: "no-reply@example.com", helo: "tours.example.com" }]);
+    expect(mailOf({ ...BLOCK, ...TWO, SMTP_PORT: "" }).settings[0].port).toBe(465);
+    expect(mailOf({ ...BLOCK, ...TWO, SMTP_HOST: "192.0.2.25" }).settings[0].host).toBe("192.0.2.25");
+
+    // With the real maker the mailer is the SMTP client. Nothing is sent, so nothing is contacted.
+    const env = { ...BLOCK, ...TWO };
+    const real = mailFromEnv(env, configFromEnv(env));
+    expect([real.mode, real.problem]).toEqual(["smtp", null]);
+    expect(real.mailer).not.toBe(NO_MAIL);
+    expect(typeof real.mailer.send).toBe("function");
+    // The result holds the mailer and two words about it: no setting, no password.
+    expect(Object.keys(real).sort()).toEqual(["mailer", "mode", "problem"]);
+    expect(JSON.stringify(real)).not.toContain(PASSWORD);
+  });
+
+  /** Each missing or malformed value, with the setting its line must name. `made-up` marks what must never be repeated. */
+  const BAD: [string, Record<string, string | undefined>, string][] = [
+    ["a mode that is neither off nor smtp", { MAIL_MODE: "made-up-mode" }, "MAIL_MODE"],
+    ["a mode of another kind of server", { MAIL_MODE: "sendmail" }, "MAIL_MODE"],
+    ["no sender", { MAIL_FROM: undefined }, "MAIL_FROM"],
+    ["an empty sender", { MAIL_FROM: "  " }, "MAIL_FROM"],
+    ["a sender that is not an address", { MAIL_FROM: "made-up-sender" }, "MAIL_FROM"],
+    ["a sender with a name around it", { MAIL_FROM: "Made-Up <no-reply@example.com>" }, "MAIL_FROM"],
+    ["a sender with a line break", { MAIL_FROM: "no-reply@example.com\r\nBcc: made-up@example.com" }, "MAIL_FROM"],
+    ["no server", { SMTP_HOST: undefined }, "SMTP_HOST"],
+    ["a server with a scheme", { SMTP_HOST: "smtps://made-up.example.com" }, "SMTP_HOST"],
+    ["a server with its port in the name", { SMTP_HOST: "made-up.example.com:465" }, "SMTP_HOST"],
+    ["a server with a line break", { SMTP_HOST: "mail.example.com\r\nmade-up" }, "SMTP_HOST"],
+    ["a port that is not a number", { SMTP_PORT: "made-up" }, "SMTP_PORT"],
+    ["a port of zero", { SMTP_PORT: "0" }, "SMTP_PORT"],
+    ["a port past the last one", { SMTP_PORT: "65536" }, "SMTP_PORT"],
+    ["a port with a sign", { SMTP_PORT: "-465" }, "SMTP_PORT"],
+    ["a port with a decimal", { SMTP_PORT: "465.0" }, "SMTP_PORT"],
+    ["no mailbox name", { SMTP_USER: undefined }, "SMTP_USER"],
+    ["an empty mailbox name", { SMTP_USER: "   " }, "SMTP_USER"],
+    ["a mailbox name with a line break", { SMTP_USER: "made-up\nuser" }, "SMTP_USER"],
+    ["a mailbox name with a NUL", { SMTP_USER: "made-up\0user" }, "SMTP_USER"],
+    ["no password", { SMTP_PASSWORD: undefined }, "SMTP_PASSWORD"],
+    ["an empty password", { SMTP_PASSWORD: "" }, "SMTP_PASSWORD"],
+    ["a password with a line break", { SMTP_PASSWORD: "made-up\r\npassword" }, "SMTP_PASSWORD"],
+    ["a password with a NUL", { SMTP_PASSWORD: "made-up\0password" }, "SMTP_PASSWORD"],
+    ["a link host that is not a host name", { TOURS_HOST: undefined, APP_HOST: undefined, SITE_HOST: "https://made-up.example.com" }, "SITE_HOST"],
+  ];
+
+  it("each missing or malformed value leaves mail off with one line that names the setting and repeats no value", () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const [label, change, setting] of BAD) {
+      const env: Record<string, string> = { ...BLOCK, ...TWO };
+      for (const [key, value] of Object.entries(change)) {
+        if (value === undefined) delete env[key];
+        else env[key] = value;
+      }
+      const { result, settings } = mailOf(env);
+      expect(result, label).toEqual({ mailer: NO_MAIL, mode: "off", problem: mailOff(setting) });
+      expect(result.mailer, label).toBe(NO_MAIL);
+      // No client was made, so the password went nowhere.
+      expect(settings, label).toEqual([]);
+      const line = result.problem as string;
+      expect(line.split("\n").length, label).toBe(1);
+      expect(line.toLowerCase(), label).not.toContain("made-up");
+      for (const value of Object.values(env)) if (value.trim().length > 3) expect(line, `${label}: ${setting}`).not.toContain(value.trim());
+      expect(line, label).not.toContain(PASSWORD);
+    }
+    // The function itself writes nothing: the entry writes the line, once.
+    expect(logged).not.toHaveBeenCalled();
+    logged.mockRestore();
+    // The first setting that cannot be used is the one named.
+    expect(mailOf({ MAIL_MODE: "smtp" }).result.problem).toBe(mailOff("MAIL_FROM"));
+    expect(mailOf({ MAIL_MODE: "smtp", MAIL_FROM: "no-reply@example.com", SMTP_PASSWORD: PASSWORD }).result.problem).toBe(mailOff("SMTP_HOST"));
+  });
+
+  it("SMTP without a link host leaves mail off", () => {
+    for (const hosts of [{}, { SITE_HOST: "" }, { SITE_HOST: "   " }] as Record<string, string>[]) {
+      const { result, settings } = mailOf({ ...BLOCK, ...hosts });
+      expect(result).toEqual({ mailer: NO_MAIL, mode: "off", problem: NO_LINK_HOST });
+      expect(settings).toEqual([]);
+    }
+    // A configuration handed in without a usable link host is refused the same way, whatever the environment says.
+    const forged: Config = { publicImageBase: "", setupCode: null, hosts: null, siteHost: "https://made-up.example.com" };
+    expect(mailFromEnv({ ...BLOCK }, forged, () => ({ send: () => Promise.resolve() })).problem).toBe(NO_LINK_HOST);
+    // With either address setting it is on.
+    expect(mailOf({ ...BLOCK, ...ONE }).result.mode).toBe("smtp");
+    expect(mailOf({ ...BLOCK, ...TWO }).result.mode).toBe("smtp");
+  });
+});
+
+describe("the client address on the Node target", () => {
+  const incoming = (headers: Record<string, string | string[] | undefined>, remoteAddress?: string) => ({ headers, socket: { remoteAddress } });
+
+  it("the client address is the socket's, or the last value of the named header", () => {
+    // No header named: the socket's address, whatever the request claims.
+    const claims = { "x-forwarded-for": "203.0.113.7", "x-real-ip": "203.0.113.8", forwarded: "for=203.0.113.9" };
+    expect(clientAddressFrom(undefined, incoming(claims, "198.51.100.4"))).toBe("198.51.100.4");
+    expect(clientAddressFrom(undefined, incoming({}, "2001:db8::1"))).toBe("2001:db8::1");
+    // An IPv4 address written as IPv6 is the IPv4 address.
+    expect(clientAddressFrom(undefined, incoming({}, "::ffff:198.51.100.4"))).toBe("198.51.100.4");
+    expect(clientAddressFrom(undefined, incoming({}, undefined))).toBeNull();
+    expect(clientAddressFrom(undefined, incoming({}, "not an address"))).toBeNull();
+
+    // A header named: its last value, which is the one the nearest proxy wrote.
+    expect(clientAddressFrom("x-forwarded-for", incoming({ "x-forwarded-for": "203.0.113.7" }, "127.0.0.1"))).toBe("203.0.113.7");
+    expect(clientAddressFrom("x-forwarded-for", incoming({ "x-forwarded-for": "192.0.2.66, 203.0.113.7" }, "127.0.0.1"))).toBe("203.0.113.7");
+    expect(clientAddressFrom("x-forwarded-for", incoming({ "x-forwarded-for": "192.0.2.66,198.51.100.1 ,  2001:db8::7 " }, "127.0.0.1"))).toBe("2001:db8::7");
+    expect(clientAddressFrom("x-real-ip", incoming({ "x-real-ip": ["192.0.2.66", "192.0.2.67, 203.0.113.7"] }, "127.0.0.1"))).toBe("203.0.113.7");
+    // The name is matched as Node writes header names, in lower case.
+    expect(clientAddressFrom("X-Real-IP", incoming({ "x-real-ip": "203.0.113.7" }, "127.0.0.1"))).toBe("203.0.113.7");
+    // The header is missing, empty, or its last value is no address: no address, never the socket's, which is the proxy's.
+    for (const headers of [{}, { "x-real-ip": "" }, { "x-real-ip": "203.0.113.7, " }, { "x-real-ip": "203.0.113.7, made-up" }, { "x-real-ip": "203.0.113.7:4711" }, { "x-real-ip": [] as string[] }, { "x-forwarded-for": "203.0.113.7" }]) {
+      expect(clientAddressFrom("x-real-ip", incoming(headers, "198.51.100.4")), JSON.stringify(headers)).toBeNull();
+    }
+  });
+
+  it("CLIENT_ADDRESS_HEADER unset reads the socket, set reads the header, and a value that is no header name reads nothing and says so once", () => {
+    const from = incoming({ "x-real-ip": "203.0.113.7", "x-forwarded-for": "203.0.113.8" }, "198.51.100.4");
+    for (const raw of [undefined, "", "   "]) {
+      const reader = clientAddressReader(raw);
+      expect(reader.problem).toBeNull();
+      expect(reader.read(from)).toBe("198.51.100.4");
+    }
+    const named = clientAddressReader(" X-Real-IP ");
+    expect(named.problem).toBeNull();
+    expect(named.read(from)).toBe("203.0.113.7");
+    expect(named.read(incoming({}, "198.51.100.4"))).toBeNull();
+    for (const raw of ["x real ip", "x-real-ip: made-up", "made-up\r\nheader", "x-real-ip,x-forwarded-for", "é-made-up", "x".repeat(65)]) {
+      const reader = clientAddressReader(raw);
+      expect(reader.problem, raw).toBe(BAD_HEADER);
+      expect(reader.problem, raw).not.toContain("made-up");
+      // Unknown is the safe reading: the socket's address could be a proxy's, shared by every visitor.
+      expect(reader.read(from), raw).toBeNull();
+    }
+  });
+});
+
+describe("the real Node startup with mail settings", () => {
+  const made: string[] = [];
+  let child: ChildProcess | null = null;
+  const end = async () => {
+    if (child !== null && child.exitCode === null) {
+      const gone = new Promise((done) => child!.once("exit", done));
+      child.kill();
+      await gone;
+    }
+    child = null;
+  };
+  afterEach(async () => {
+    await end();
+    for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  });
+
+  /** Starts src/node/entry.ts with these settings, waits until it listens, and returns the port and what it wrote. */
+  async function start(settings: Record<string, string>): Promise<{ port: number; out: () => { stdout: string; stderr: string } }> {
+    const root = mkdtempSync(join(tmpdir(), "dp-node-mail-"));
+    made.push(root);
+    const base: Record<string, string> = {};
+    for (const k of ["PATH", "Path", "SystemRoot", "TEMP", "TMP"]) if (process.env[k] !== undefined) base[k] = process.env[k] as string;
+    const port = await freePort();
+    let stdout = "";
+    let stderr = "";
+    child = spawn(process.execPath, [ENTRY], { env: { ...base, DATA_DIR: join(root, "data"), PORT: String(port), NODE_NO_WARNINGS: "1", ...settings }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    child.stderr!.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
+    await new Promise<void>((resolve, reject) => {
+      child!.stdout!.on("data", (c: Buffer) => {
+        stdout += c.toString("utf8");
+        if (stdout.includes(`listening on port ${port}`)) resolve();
+      });
+      child!.once("exit", (code) => reject(new Error(`the app stopped with code ${code}: ${stderr}`)));
+    });
+    return { port, out: () => ({ stdout, stderr }) };
+  }
+
+  const health = async (port: number) => {
+    const res = await fetch(`http://127.0.0.1:${port}/healthz`);
+    return { status: res.status, body: await res.text() };
+  };
+
+  it("a mail block that cannot be used leaves the site up, with one line that holds no value", async () => {
+    const plain = await start({});
+    const expected = await health(plain.port);
+    expect(expected.status).toBe(200);
+    expect(plain.out().stderr).toBe("");
+    await end();
+
+    const cases: [Record<string, string>, string][] = [
+      [{ ...BLOCK, SMTP_HOST: "smtps://made-up.example.com", ...ONE }, mailOff("SMTP_HOST") + "\n"],
+      [{ ...BLOCK }, NO_LINK_HOST + "\n"],
+      [{ ...BLOCK, ...ONE, CLIENT_ADDRESS_HEADER: "made-up header" }, BAD_HEADER + "\n"],
+      // A block that can be used, and mail that is off, write nothing; neither contacts the mail server at the start.
+      [{ ...BLOCK, ...ONE, SMTP_HOST: "127.0.0.1", SMTP_PORT: "9", CLIENT_ADDRESS_HEADER: "x-real-ip" }, ""],
+      [{ ...BLOCK, MAIL_MODE: "off" }, ""],
+    ];
+    for (const [settings, line] of cases) {
+      const site = await start(settings);
+      // Health answers exactly as without any mail setting: it says nothing about mail.
+      expect(await health(site.port)).toEqual(expected);
+      const { stdout, stderr } = site.out();
+      expect(stderr).toBe(line);
+      expect(stdout + stderr).not.toContain(PASSWORD);
+      expect((stdout + stderr).toLowerCase()).not.toContain("made-up");
+      await end();
+    }
+  }, 240_000);
 });

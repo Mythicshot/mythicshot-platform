@@ -7,9 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { metered, SUBREQUEST_BUDGET } from "../src/budget.ts";
 import { LIMITS } from "../src/manifest.ts";
-import type { Deps } from "../src/ports.ts";
+import { MailOff, NO_MAIL } from "../src/mail.ts";
+import { deferOf, mailOf, type Deps } from "../src/ports.ts";
 import { COPY_BATCH, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../src/publish.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
+import { FakeMailer } from "./fake-mail.ts";
 import { clone, commit, createUpload, fixtures, logoPng, ORIGIN, putLogo, putStep, routeOf, send, sendAll, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 
 const v3 = fixtures.v3 as Json;
@@ -571,6 +573,46 @@ describe("the call budget, route by route", () => {
     await m.deps.drafts.get("u/x/a.png");
     await m.deps.db.first("SELECT 1");
     expect(m.calls()).toBe(6);
+  });
+
+  it("a mail counts as one call against the budget", async () => {
+    const { deps, mail, settle } = await makeDeps();
+    const m = metered(deps);
+    const letter = { to: "someone@example.com", subject: "A subject", text: "A text\n" };
+    expect(m.calls()).toBe(0);
+    await mailOf(m.deps).send(letter);
+    expect(m.calls()).toBe(1);
+    expect(mail.sent).toEqual([letter]);
+    // A send that fails was still a call, as a subrequest that fails is.
+    mail.failNext();
+    await expect(mailOf(m.deps).send(letter)).rejects.toThrow();
+    expect(m.calls()).toBe(2);
+    // The mailer is looked up at call time, like the other ports.
+    const other = new FakeMailer();
+    deps.mail = other;
+    await mailOf(m.deps).send(letter);
+    expect(other.sent.length).toBe(1);
+    expect(m.calls()).toBe(3);
+    // A site whose mail is off is off through the meter too: nothing is sent, so nothing is counted.
+    delete deps.mail;
+    expect(m.deps.mail).toBeUndefined();
+    expect(mailOf(m.deps)).toBe(NO_MAIL);
+    await expect(mailOf(m.deps).send(letter)).rejects.toBeInstanceOf(MailOff);
+    expect(m.calls()).toBe(3);
+    await m.deps.db.first("SELECT 1");
+    expect(m.calls()).toBe(4);
+    // Deferred work goes to the same place through the meter, and is not a call itself;
+    // what it does through the metered ports is counted like anything else.
+    let done = false;
+    deferOf(m.deps)(
+      (async () => {
+        await m.deps.db.first("SELECT 1");
+        done = true;
+      })(),
+    );
+    await settle();
+    expect(done).toBe(true);
+    expect(m.calls()).toBe(5);
   });
 
   it("reports the highest count seen per route (run with --silent=false to see it)", () => {

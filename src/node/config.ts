@@ -1,11 +1,16 @@
 // The Node target's settings, read from the environment, and the guard it puts in front
 // of the app. Pure: no file, no network and no listener, so all of it can be tested
-// without starting the app.
+// without starting the app. (The SMTP client it makes for a usable mail block opens its
+// first connection only when a mail is sent.)
+import { isIP } from "node:net";
+import { parseEmail } from "../accounts.ts";
 import { misdirected } from "../host-gate.ts";
-import { resolveHosts, type Hosts } from "../hosts.ts";
+import { normaliseHost, resolveHosts, type Hosts } from "../hosts.ts";
+import { linkOrigin, NO_MAIL, type Mailer } from "../mail.ts";
 import type { Config } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
 import { allowanceFromSetting } from "../usage.ts";
+import { smtpMailer, type SmtpSettings } from "./smtp.ts";
 
 /**
  * The app's configuration from the environment: PUBLIC_IMAGE_BASE, SETUP_CODE and the two
@@ -18,18 +23,150 @@ import { allowanceFromSetting } from "../usage.ts";
  * empty, the config has no such key and nothing is limited, as before the setting
  * existed. A value that is not digits only throws its own fixed line the same way: a
  * mistyped limit stops the start rather than quietly lifting the limit.
+ *
+ * SITE_HOST is the host name sign-in links use on a one-address site. It is read only
+ * when the two addresses are not set (with them, links use the app address and SITE_HOST
+ * is ignored), and it never stops the start: unset, empty or not a host name, the config
+ * has no such key and the site has no address for links. mailFromEnv says so when mail
+ * is switched on.
  */
 export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   const hosts = resolveHosts({ tours: env.TOURS_HOST, app: env.APP_HOST });
   if (!hosts.ok) throw new Error(hosts.problem);
   const allowance = allowanceFromSetting(env.STORAGE_ALLOWANCE_BYTES);
   if (!allowance.ok) throw new Error(allowance.problem);
+  const siteHost = hosts.hosts === null && typeof env.SITE_HOST === "string" ? normaliseHost(env.SITE_HOST) : null;
   return {
     publicImageBase: env.PUBLIC_IMAGE_BASE ?? "",
     setupCode: setupCodeFromEnv(env.SETUP_CODE),
     hosts: hosts.hosts,
     ...(allowance.bytes === null ? {} : { storageAllowanceBytes: allowance.bytes }),
+    ...(siteHost === null ? {} : { siteHost }),
   };
+}
+
+/** The line for a mail setting that is missing or cannot be used. It names the setting and never repeats a value. */
+function mailOffBecause(setting: string): string {
+  return `mail: off, because ${setting} is missing or not usable. The site runs; sign-in mails are not sent.`;
+}
+
+/** The line for mail switched on at a site that has no address to put in a sign-in link. */
+const NO_LINK_HOST = "mail: off, because no address for sign-in links is set. Set APP_HOST and TOURS_HOST, or SITE_HOST.";
+
+/** The port of SMTP over TLS from the first byte, used when SMTP_PORT is not set. */
+const SMTP_TLS_PORT = 465;
+
+// A mailbox sign-in name or password: at least one character, at most 255, none of them a
+// control character (a line break or a NUL could end the line or the field it is sent in).
+const NO_CONTROL = /^[^\p{Cc}\p{Zl}\p{Zp}]{1,255}$/u;
+
+/**
+ * The mailer from the mail settings, and what to say at the start. Never throws and
+ * writes nothing itself: a mail block that cannot be used leaves mail off and the site
+ * running, and `problem` is then the one fixed line for the entry to write. It names the
+ * first setting that is missing or not usable and never holds a value, so no address,
+ * host name or password can reach a log through it.
+ *
+ * MAIL_MODE is `off` (also when unset or empty; nothing else is then read and nothing is
+ * said) or `smtp`. For `smtp` every one of these must be usable, or mail stays off:
+ * MAIL_FROM, one plain address; SMTP_HOST, a host name or IPv4 address without a port;
+ * SMTP_PORT, 1 to 65535, 465 when unset or empty (the connection is TLS from the first
+ * byte on whatever port is given; there is no STARTTLS); SMTP_USER and SMTP_PASSWORD,
+ * the mailbox's sign-in; and an address for sign-in links from `config` (the app address,
+ * else SITE_HOST), without which a mail would have no link to carry.
+ *
+ * The password is read here and handed to the SMTP client only. It is taken exactly as
+ * written; the other values are trimmed. Making the mailer contacts nothing: the first
+ * connection is made by the first send. `make` replaces how the client is made (tests).
+ */
+export function mailFromEnv(
+  env: NodeJS.ProcessEnv,
+  config: Config,
+  make: (settings: SmtpSettings) => Mailer = smtpMailer,
+): { mailer: Mailer; mode: "off" | "smtp"; problem: string | null } {
+  const off = (problem: string | null) => ({ mailer: NO_MAIL, mode: "off" as const, problem });
+  const text = (value: string | undefined) => (typeof value === "string" ? value.trim() : "");
+
+  const mode = text(env.MAIL_MODE).toLowerCase();
+  if (mode === "" || mode === "off") return off(null);
+  if (mode !== "smtp") return off(mailOffBecause("MAIL_MODE"));
+
+  const from = parseEmail(env.MAIL_FROM);
+  if (from === null) return off(mailOffBecause("MAIL_FROM"));
+
+  const host = normaliseHost(text(env.SMTP_HOST));
+  if (host === null || host.includes(":")) return off(mailOffBecause("SMTP_HOST"));
+
+  const portText = text(env.SMTP_PORT);
+  const port = portText === "" ? SMTP_TLS_PORT : /^[1-9][0-9]{0,4}$/.test(portText) ? Number(portText) : 0;
+  if (port < 1 || port > 65535) return off(mailOffBecause("SMTP_PORT"));
+
+  const user = text(env.SMTP_USER);
+  if (!NO_CONTROL.test(user)) return off(mailOffBecause("SMTP_USER"));
+
+  const password = env.SMTP_PASSWORD;
+  if (typeof password !== "string" || !NO_CONTROL.test(password)) return off(mailOffBecause("SMTP_PASSWORD"));
+
+  // Last: where a sign-in link points. A SITE_HOST that was written but is not a host
+  // name is named as the setting to fix; with nothing written the line says what to set.
+  const origin = linkOrigin(config);
+  if (origin === null) {
+    const written = (config.hosts ?? null) === null && text(env.SITE_HOST) !== "" && normaliseHost(text(env.SITE_HOST)) === null;
+    return off(written ? mailOffBecause("SITE_HOST") : NO_LINK_HOST);
+  }
+  // The name this site gives the mail server is its own link host, without a port.
+  const helo = origin.replace(/^https?:\/\//, "").split(":")[0];
+
+  return { mailer: make({ host, port, user, password, from, helo }), mode: "smtp", problem: null };
+}
+
+/** The line for a CLIENT_ADDRESS_HEADER that is not a header name. It never repeats the value. */
+const BAD_CLIENT_HEADER = "client address: unknown, because CLIENT_ADDRESS_HEADER is not a header name. The site runs; no request is counted by its network address.";
+
+const HEADER_NAME = /^[A-Za-z0-9-]{1,64}$/;
+
+/** What clientAddressFrom reads of an incoming request: its headers as Node gives them, and its socket. */
+export type Incoming = { headers: Record<string, string | string[] | undefined>; socket: { remoteAddress?: string } };
+
+/** `text` as one IP address, an IPv4 address written as IPv6 (`::ffff:192.0.2.1`) as the IPv4 address, or null. */
+function addressOf(text: string | undefined): string | null {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  const mapped = /^::ffff:([0-9.]+)$/i.exec(trimmed);
+  const address = mapped !== null && isIP(mapped[1]) === 4 ? mapped[1] : trimmed;
+  return isIP(address) === 0 ? null : address;
+}
+
+/**
+ * The client address of one incoming request, for rate limits only, or null when it is
+ * not known. Without `headerName` it is the address of the socket, which is right when
+ * clients connect to the app directly. Behind a proxy the socket's address is the
+ * proxy's, so the install names the header its proxy writes: the address is then the
+ * last value of that header (a proxy appends to what the client sent, so the last value
+ * is the one the nearest proxy wrote, and anything before it is the client's own claim),
+ * and never the socket's. A header that is missing, or whose last value is not an IP
+ * address, gives null: unknown, not a guess.
+ */
+export function clientAddressFrom(headerName: string | undefined, incoming: Incoming): string | null {
+  if (headerName === undefined) return addressOf(incoming.socket.remoteAddress);
+  const value = incoming.headers[headerName.toLowerCase()];
+  const last = Array.isArray(value) ? value[value.length - 1] : value;
+  if (typeof last !== "string") return null;
+  return addressOf(last.slice(last.lastIndexOf(",") + 1));
+}
+
+/**
+ * How the Node entry reads the client address, from the CLIENT_ADDRESS_HEADER setting.
+ * Unset or empty: the socket's address. A header name: that header's last value. Anything
+ * else never stops the start: every address is then unknown (reading the socket instead
+ * could give every visitor the proxy's address, and so one shared limit), and `problem`
+ * is the one fixed line for the entry to write.
+ */
+export function clientAddressReader(raw: string | undefined): { read: (incoming: Incoming) => string | null; problem: string | null } {
+  const name = typeof raw === "string" ? raw.trim() : "";
+  if (name === "") return { read: (incoming) => clientAddressFrom(undefined, incoming), problem: null };
+  if (!HEADER_NAME.test(name)) return { read: () => null, problem: BAD_CLIENT_HEADER };
+  return { read: (incoming) => clientAddressFrom(name, incoming), problem: null };
 }
 
 /**

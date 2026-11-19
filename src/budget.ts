@@ -13,8 +13,13 @@
 // - FileStore.get, FileStore.put: one each. Each is one R2 operation.
 // - FileStore.delete: one per 1,000 keys, the most one R2 delete call takes. The app never
 //   passes more than 1,000 keys at once, so in practice one.
+// - Mailer.send: one. A mail handed to a mail API is one subrequest on Cloudflare, and it
+//   is counted the same on the Node target, where it is one connection to a mail server.
 // Reading an object's body after get is the same subrequest, not another.
-import type { Db, Deps, FileStore } from "./ports.ts";
+// Deferring work (Deps.defer) is not a call; what the work does through these ports is
+// counted like anything else, also when it happens after the answer was given.
+import type { Mailer } from "./mail.ts";
+import { deferOf, mailOf, type Db, type Deps, type FileStore } from "./ports.ts";
 
 /** The real limit on Cloudflare's free plan: subrequests per request. */
 export const FREE_PLAN_SUBREQUESTS = 50;
@@ -43,6 +48,7 @@ export function metered(deps: Deps): Meter {
     get: (key) => (n++, pick().get(key)),
     delete: (keys) => ((n += Math.max(1, Math.ceil(keys.length / DELETE_KEYS_PER_CALL))), pick().delete(keys)),
   });
+  const mail: Mailer = { send: (m) => (n++, mailOf(deps).send(m)) };
   return {
     deps: {
       db,
@@ -52,6 +58,12 @@ export function metered(deps: Deps): Meter {
         return deps.config;
       },
       now: () => deps.now(),
+      // Looked up at call time too. A site without a mailer has none here either, so
+      // mailOf says "off" on metered deps exactly as on the deps they wrap.
+      get mail() {
+        return deps.mail === undefined ? undefined : mail;
+      },
+      defer: (work) => deferOf(deps)(work),
     },
     calls: () => n,
   };

@@ -5,10 +5,11 @@ import { fileURLToPath } from "node:url";
 import { NodeDb } from "../src/node/db.ts";
 import { NodeFileStore } from "../src/node/files.ts";
 import { migrate } from "../src/node/migrate.ts";
-import type { Config, Deps } from "../src/ports.ts";
+import { DEFER_FAILED, deferTracker, type Config, type Deps } from "../src/ports.ts";
 import { newId } from "../src/auth.ts";
 import { createWorkspace, workspaceStatements } from "../src/workspaces.ts";
 import { counted } from "./counting.ts";
+import { FakeMailer } from "./fake-mail.ts";
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url));
 
@@ -20,15 +21,23 @@ export async function makeDeps(config?: Partial<Config>) {
   const drafts = new NodeFileStore(join(root, "drafts"));
   const pub = new NodeFileStore(join(root, "public"));
   const c = counted(db, drafts, pub);
+  const mail = new FakeMailer();
+  const background = deferTracker(() => console.error(DEFER_FAILED));
   const deps: Deps = {
     db: c.db,
     drafts: c.drafts,
     pub: c.pub,
     config: { publicImageBase: "", setupCode: null, ...config },
     now: () => Date.now(),
+    mail,
+    defer: background.defer,
   };
   return {
     deps,
+    /** The mailer of these deps: it keeps every mail it is handed and contacts nothing. Not counted in `calls`. */
+    mail,
+    /** Resolves when all work deferred so far has ended. A failure of that work is the fixed line, as on a real target. */
+    settle: () => background.settle(),
     draftKeys: () => drafts.keys(),
     publicKeys: () => pub.keys(),
     calls: c.calls,

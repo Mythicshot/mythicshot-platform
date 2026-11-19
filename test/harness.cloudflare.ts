@@ -2,10 +2,11 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { D1Db } from "../src/cloudflare/db.ts";
 import { R2FileStore } from "../src/cloudflare/files.ts";
-import type { Config, Deps } from "../src/ports.ts";
+import { DEFER_FAILED, deferTracker, type Config, type Deps } from "../src/ports.ts";
 import { newId } from "../src/auth.ts";
 import { createWorkspace, workspaceStatements } from "../src/workspaces.ts";
 import { counted } from "./counting.ts";
+import { FakeMailer } from "./fake-mail.ts";
 
 type TestEnv = Env & { TEST_MIGRATIONS: D1Migration[]; TEST_STORAGE_IS_LOCAL?: unknown };
 const testEnv = env as TestEnv;
@@ -57,15 +58,23 @@ async function reset(): Promise<void> {
 export async function makeDeps(config?: Partial<Config>) {
   await reset();
   const c = counted(new D1Db(testEnv.DB), new R2FileStore(testEnv.DRAFTS), new R2FileStore(testEnv.PUB));
+  const mail = new FakeMailer();
+  const background = deferTracker(() => console.error(DEFER_FAILED));
   const deps: Deps = {
     db: c.db,
     drafts: c.drafts,
     pub: c.pub,
     config: { publicImageBase: "", setupCode: null, ...config },
     now: () => Date.now(),
+    mail,
+    defer: background.defer,
   };
   return {
     deps,
+    /** The mailer of these deps: it keeps every mail it is handed and contacts nothing. Not counted in `calls`. */
+    mail,
+    /** Resolves when all work deferred so far has ended. A failure of that work is the fixed line, as on a real target. */
+    settle: () => background.settle(),
     draftKeys: () => listAll(testEnv.DRAFTS),
     publicKeys: () => listAll(testEnv.PUB),
     calls: c.calls,

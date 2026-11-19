@@ -2,6 +2,7 @@
 // share. Nothing in this file, or in any file outside src/cloudflare/ and src/node/,
 // may import a platform API.
 import type { Hosts } from "./hosts.ts";
+import { NO_MAIL, type Mailer } from "./mail.ts";
 
 /**
  * A bound parameter. Both back ends bind every JS number as REAL, so a TEXT column
@@ -117,6 +118,83 @@ export type Config = {
    * null: no limit. 0 is a limit.
    */
   storageAllowanceBytes?: number | null;
+  /**
+   * The host name sign-in links use on a one-address site, from the SITE_HOST setting, as
+   * normaliseHost writes it. Used for links only: no request is checked against it.
+   * Absent or null: none. It is not set in two-address mode, where the app address is used.
+   */
+  siteHost?: string | null;
 };
 
-export type Deps = { db: Db; drafts: FileStore; pub: FileStore; config: Config; now: () => number };
+export type Deps = {
+  db: Db;
+  drafts: FileStore;
+  pub: FileStore;
+  config: Config;
+  now: () => number;
+  /** What sends mail. Absent: mail is off. Read it through mailOf. */
+  mail?: Mailer;
+  /**
+   * Takes work that goes on after the answer was given (a mail being sent), so the target
+   * can keep it alive and wait for it. Absent: the work just runs. Use it through deferOf.
+   */
+  defer?: (work: Promise<unknown>) => void;
+};
+
+/** The mailer of these deps: the one they carry, or the one that is off and sends nothing. */
+export function mailOf(deps: Deps): Mailer {
+  return deps.mail ?? NO_MAIL;
+}
+
+/**
+ * The one line written when deferred work fails. Fixed: the failure itself is never
+ * written, since it could carry anything a mail server or a back end put in its message.
+ */
+export const DEFER_FAILED = "background: work after an answer failed";
+
+/**
+ * Hands work that outlives the answer to the target. The answer never waits for it, and
+ * it must never be given something to retry: a mail that failed after its text was sent
+ * may have been delivered. Without a `defer` of their own the deps let the work run, and
+ * a failure is the fixed line, so no rejection is ever left unhandled.
+ */
+export function deferOf(deps: Deps): (work: Promise<unknown>) => void {
+  return (
+    deps.defer ??
+    ((work) => {
+      void Promise.resolve(work).catch(() => console.error(DEFER_FAILED));
+    })
+  );
+}
+
+/**
+ * Keeps track of deferred work for a target that has to wait for it itself. `defer` takes
+ * the work; `settle` resolves when everything taken so far, and anything that work took
+ * in turn, has ended. Work that fails calls `onFailure` once, with nothing of the error,
+ * and counts as ended; `settle` never rejects.
+ */
+export function deferTracker(onFailure: () => void): { defer(work: Promise<unknown>): void; settle(): Promise<void> } {
+  const open = new Set<Promise<void>>();
+  return {
+    defer(work) {
+      const tracked: Promise<void> = Promise.resolve(work)
+        .then(
+          () => {},
+          () => {
+            try {
+              onFailure();
+            } catch {
+              // A handler that fails changes nothing: the work has ended.
+            }
+          },
+        )
+        .then(() => {
+          open.delete(tracked);
+        });
+      open.add(tracked);
+    },
+    async settle() {
+      while (open.size > 0) await Promise.all([...open]);
+    },
+  };
+}
