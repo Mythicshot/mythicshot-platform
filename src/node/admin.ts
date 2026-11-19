@@ -49,6 +49,20 @@ const RECOVERY_SETTING = "RECOVERY_LINKS";
  */
 export const ADMIN_SETTINGS: readonly string[] = [...NODE_SETTINGS, RECOVERY_SETTING];
 
+/**
+ * True for the command line of this application's server as the image starts it (the
+ * Dockerfile's CMD ["node", "dist/node/entry.js"]): a program named `node`, options
+ * after it allowed, then a script that is `dist/node/entry.js` by a relative or an
+ * absolute path. A shell, an init wrapper, another script or another program is not it.
+ */
+function isAppServer(args: string[]): boolean {
+  if (args.length < 2 || !/^node(\.exe)?$/.test(basename(args[0]))) return false;
+  const script = args.slice(1).find((a) => !a.startsWith("-"));
+  if (script === undefined) return false;
+  const path = script.replace(/\\/g, "/");
+  return path === "dist/node/entry.js" || path.endsWith("/dist/node/entry.js");
+}
+
 /** The gate's rule for a written value: `on`, in any case, with spaces around it. Anything else, absent included, is closed. */
 export function isRecoveryOn(value: unknown): boolean {
   return typeof value === "string" && value.trim().toLowerCase() === "on";
@@ -65,6 +79,8 @@ export function recoveryFromProcessOne(at: { pid: number; platform: NodeJS.Platf
   if (at.pid === 1 || at.platform !== "linux") return false;
   let text: string;
   try {
+    // Process 1 counts only when it is this application's own server.
+    if (!isAppServer(at.read("/proc/1/cmdline").toString("utf8").split("\0").filter((s) => s !== ""))) return false;
     text = at.read("/proc/1/environ").toString("utf8");
   } catch {
     return false;
