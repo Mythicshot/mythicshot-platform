@@ -747,7 +747,6 @@ copy_database() {
   [ "$(head -c 15 "$to" | tr -d '\0')" = "SQLite format 3" ] || { warn "the database copy is not a SQLite file"; return 1; }
 }
 
-
 # True when the sqlite3 tool says it is version 3.37 or newer, the first that reads
 # STRICT tables. A tool that fails or answers anything else is not used.
 sqlite3_reads_strict_tables() {
