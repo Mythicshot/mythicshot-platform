@@ -219,6 +219,11 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[] }> 
   "GET /docs/licences.txt": { reason: "licence notices, fixed text", samples: () => [{ method: "GET", path: "/docs/licences.txt" }] },
   "GET /api/v1/openapi.json": { reason: "the API description, fixed text", samples: () => [{ method: "GET", path: "/api/v1/openapi.json" }] },
   "GET /api/v1/openapi.yaml": { reason: "the API description, fixed text", samples: () => [{ method: "GET", path: "/api/v1/openapi.yaml" }] },
+  "GET /signin": { reason: "the sign-in page, fixed text the same for everyone; what it shows of an account its script asks the API for", samples: () => [{ method: "GET", path: "/signin" }] },
+  "GET /signin/link": { reason: "the page a sign-in link opens, fixed text; the code stays in the browser until the press sends it to the API", samples: () => [{ method: "GET", path: "/signin/link" }] },
+  "GET /account": { reason: "the account page, fixed text the same for everyone; the account it shows is fetched by its script from the API", samples: () => [{ method: "GET", path: "/account" }] },
+  "GET /signin/signin.css": { reason: "the sign-in pages' stylesheet, fixed text", samples: () => [{ method: "GET", path: "/signin/signin.css" }] },
+  "GET /signin/signin.js": { reason: "the sign-in pages' script, fixed text", samples: () => [{ method: "GET", path: "/signin/signin.js" }] },
   "POST /api/v1/signin/request": {
     reason: "asks for a sign-in link: the answer is the same for every address and every caller, and a link goes only to the address's own mailbox",
     samples: () => [{ method: "POST", path: "/api/v1/signin/request", json: { email: "nobody-here@example.com" }, headers: { origin: ORIGIN } }],
