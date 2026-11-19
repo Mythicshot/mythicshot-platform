@@ -554,6 +554,8 @@ describe("sessions", () => {
     const freshCode = await createSignInCode(deps, a.userId);
 
     const hash = (kind: string, i: number) => kind + i.toString(16).padStart(63, "0");
+    // Row ids of the form every id has: a prefix and 24 hex characters.
+    const rowId = (prefix: string, kind: string, i: number) => `${prefix}_${kind}${i.toString(16).padStart(23, "0")}`;
     const session = (id: string, h: string, expiresAt: number, revokedAt: number | null) => ({
       sql: "INSERT INTO session (id, user_id, hash, label, created_at, last_used_at, expires_at, revoked_at) VALUES (?, ?, ?, 'Unknown browser', ?, ?, ?, ?)",
       params: [id, a.userId, h, NOW - SESSION_MS, NOW - SESSION_MS, expiresAt, revokedAt],
@@ -562,19 +564,22 @@ describe("sessions", () => {
       sql: "INSERT INTO signin_code (id, user_id, hash, created_at, expires_at, used_at) VALUES (?, ?, ?, ?, ?, ?)",
       params: [id, a.userId, h, expiresAt - SIGNIN_CODE_MS, expiresAt, usedAt],
     });
+    const KEPT_REVOKED = rowId("ses", "b", 2);
+    const ALMOST = rowId("ses", "b", 3);
+    const RECENT_CODE = rowId("sic", "d", 1);
     const expired = SWEEP_PAGE + 50;
     const rows = [];
-    for (let i = 0; i < expired; i++) rows.push(session(`ses_expired${i}`, hash("a", i), i % 2 === 0 ? NOW : NOW - 1 - i, null));
+    for (let i = 0; i < expired; i++) rows.push(session(rowId("ses", "e", i), hash("a", i), i % 2 === 0 ? NOW : NOW - 1 - i, null));
     // Revoked long ago and not yet expired; revoked a little less long ago; expiring in a millisecond.
-    rows.push(session("ses_longrevoked", hash("b", 1), NOW + SESSION_MS, NOW - REVOKED_KEPT_MS));
-    rows.push(session("ses_keptrevoked", hash("b", 2), NOW + SESSION_MS, NOW - REVOKED_KEPT_MS + 1));
-    rows.push(session("ses_almost", hash("b", 3), NOW + 1, null));
+    rows.push(session(rowId("ses", "b", 1), hash("b", 1), NOW + SESSION_MS, NOW - REVOKED_KEPT_MS));
+    rows.push(session(KEPT_REVOKED, hash("b", 2), NOW + SESSION_MS, NOW - REVOKED_KEPT_MS + 1));
+    rows.push(session(ALMOST, hash("b", 3), NOW + 1, null));
     // Codes: long past, used or not, go; one past by less than the keeping time stays.
-    for (let i = 0; i < SWEEP_PAGE + 5; i++) rows.push(code(`sic_old${i}`, hash("c", i), NOW - CODE_KEPT_MS - i, i % 2 === 0 ? NOW - CODE_KEPT_MS - SIGNIN_CODE_MS : null));
-    rows.push(code("sic_recent", hash("d", 1), NOW - CODE_KEPT_MS + 1, null));
+    for (let i = 0; i < SWEEP_PAGE + 5; i++) rows.push(code(rowId("sic", "c", i), hash("c", i), NOW - CODE_KEPT_MS - i, i % 2 === 0 ? NOW - CODE_KEPT_MS - SIGNIN_CODE_MS : null));
+    rows.push(code(RECENT_CODE, hash("d", 1), NOW - CODE_KEPT_MS + 1, null));
     for (let i = 0; i < rows.length; i += 50) await deps.db.batch(rows.slice(i, i + 50));
 
-    const keptSessions = [live.sessionId, theirs.sessionId, justRevoked.sessionId, "ses_keptrevoked", "ses_almost"].sort();
+    const keptSessions = [live.sessionId, theirs.sessionId, justRevoked.sessionId, KEPT_REVOKED, ALMOST].sort();
     const total = expired + 1 + keptSessions.length;
     expect(await count(deps, "session")).toBe(total);
 
@@ -583,18 +588,18 @@ describe("sessions", () => {
     expect(await sweepSessions(deps)).toBeUndefined();
     expect(calls() - before).toBe(1);
     expect(await count(deps, "session")).toBe(total - SWEEP_PAGE);
-    expect(await count(deps, "signin_code", "id GLOB 'sic_old*'")).toBe(5);
+    expect(await count(deps, "signin_code", "id GLOB 'sic_c*'")).toBe(5);
 
     before = calls();
     await sweepSessions(deps);
     expect(calls() - before).toBe(1);
     expect((await deps.db.all<{ id: string }>("SELECT id FROM session ORDER BY id")).map((r) => r.id)).toEqual(keptSessions);
-    expect(await count(deps, "signin_code", "id GLOB 'sic_old*'")).toBe(0);
+    expect(await count(deps, "signin_code", "id GLOB 'sic_c*'")).toBe(0);
 
     // Nothing left to remove: a third sweep changes nothing.
     await sweepSessions(deps);
     expect((await deps.db.all<{ id: string }>("SELECT id FROM session ORDER BY id")).map((r) => r.id)).toEqual(keptSessions);
-    expect(await count(deps, "signin_code", "id = 'sic_recent'")).toBe(1);
+    expect(await count(deps, "signin_code", `id = '${RECENT_CODE}'`)).toBe(1);
     expect(await count(deps, "signin_code", `hash = '${await sha(freshCode)}'`)).toBe(1);
     // The live sessions still resolve, and the fresh code still works.
     expect(await resolveSession(withCookie(cookieOf(live.secret)), deps)).toMatchObject({ sessionId: live.sessionId });

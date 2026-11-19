@@ -10,10 +10,11 @@
 // Neither is ever stored, logged, put in an error or in the audit record: the database
 // holds the SHA-256 hex digest of each, and a secret is found by looking its digest up.
 //
-// This file imports nothing from src/auth.ts (which imports this one), so the two can be
-// loaded in either order.
+// src/auth.ts imports this file and this file takes `newId` from it. Neither uses the
+// other while it is being loaded (only inside functions), so the two load in either order.
 import { workspaceOf } from "./accounts.ts";
 import { auditStatement } from "./audit.ts";
+import { newId } from "./auth.ts";
 import { requestHost, roleOf } from "./hosts.ts";
 import { isNotNullViolation, type Deps, type Stmt } from "./ports.ts";
 
@@ -202,7 +203,7 @@ export async function createSignInCode(deps: Deps, userId: string): Promise<stri
   const code = "dpl_" + randomHex(20);
   const now = deps.now();
   await deps.db.run("INSERT INTO signin_code (id, user_id, hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)", [
-    "sic_" + randomHex(12),
+    newId("sic"),
     userId,
     await sha256Hex(code),
     now,
@@ -253,7 +254,7 @@ export async function redeemSignInCode(
     return null;
   }
 
-  const sessionId = "ses_" + randomHex(12);
+  const sessionId = newId("ses");
   const secret = "dps_" + randomHex(32);
   const stored = typeof label === "string" && label.length <= LABEL_MAX_CHARS && LABEL_PATTERN.test(label) ? label : UNKNOWN_LABEL;
   const stmts: Stmt[] = [

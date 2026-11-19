@@ -42,7 +42,7 @@ export async function hashToken(token: string): Promise<string> {
 }
 
 /** A new row id: the prefix, "_" and 24 lowercase hex characters (96 random bits). */
-export function newId(prefix: "ws" | "usr" | "tok" | "tour" | "ch" | "st" | "up"): string {
+export function newId(prefix: "ws" | "usr" | "tok" | "tour" | "ch" | "st" | "up" | "ses" | "sic"): string {
   return prefix + "_" + hex(randomBytes(12));
 }
 
@@ -153,6 +153,20 @@ async function sessionAuth(req: Request, deps: Deps, adminOnly: boolean, refused
  * workspace by its membership or, for a row an older build wrote without one, by the
  * workspace its own row names. A workspace with no account at all still resolves.
  */
+const TOKEN_LOOKUP_BEFORE_ACCOUNTS = "SELECT id, workspace_id, hash FROM api_token WHERE hash = ? AND revoked_at IS NULL";
+const TOKEN_LOOKUP =
+  TOKEN_LOOKUP_BEFORE_ACCOUNTS +
+  " AND NOT EXISTS (SELECT 1 FROM user u WHERE u.status = 'disabled'" +
+  " AND (u.workspace_id = api_token.workspace_id OR u.id IN (SELECT m.user_id FROM membership m WHERE m.workspace_id = api_token.workspace_id)))";
+
+/** True when `err` is either adapter's report that the account column or the membership table does not exist yet. */
+function isBeforeAccounts(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
+    if (/no such column: u\.status|no such table: membership/.test(e.message)) return true;
+  }
+  return false;
+}
+
 async function tokenAuth(header: string, deps: Deps, touch: boolean): Promise<Auth | Response> {
   const sp = header.indexOf(" ");
   const scheme = sp < 0 ? "" : header.slice(0, sp);
@@ -163,12 +177,17 @@ async function tokenAuth(header: string, deps: Deps, touch: boolean): Promise<Au
   // nothing useful about any stored token; the row's hash is compared again in
   // constant time before it is trusted.
   const hash = await hashToken(token);
-  const row = await deps.db.first<{ id: string; workspace_id: string; hash: string }>(
-    "SELECT id, workspace_id, hash FROM api_token WHERE hash = ? AND revoked_at IS NULL" +
-      " AND NOT EXISTS (SELECT 1 FROM user u WHERE u.status = 'disabled'" +
-      " AND (u.workspace_id = api_token.workspace_id OR u.id IN (SELECT m.user_id FROM membership m WHERE m.workspace_id = api_token.workspace_id)))",
-    [hash],
-  );
+  type Row = { id: string; workspace_id: string; hash: string };
+  let row: Row | null;
+  try {
+    row = await deps.db.first<Row>(TOKEN_LOOKUP, [hash]);
+  } catch (err) {
+    // A database the accounts migration has not reached yet (a build started before its
+    // migration ran) has no account that could be disabled, so the lookup of the version
+    // before accounts is the whole rule there. Any other failure is a failure.
+    if (!isBeforeAccounts(err)) throw err;
+    row = await deps.db.first<Row>(TOKEN_LOOKUP_BEFORE_ACCOUNTS, [hash]);
+  }
   if (row === null || !constantTimeEqual(row.hash, hash)) return unauthorized();
 
   if (touch) {
