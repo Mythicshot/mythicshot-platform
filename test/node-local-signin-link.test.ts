@@ -72,7 +72,7 @@ describe("the local sign-in link tool", () => {
 
   it("refuses a site whose links do not go to this computer", async () => {
     const site = await scratch();
-    for (const env of [{}, { SITE_HOST: "tours.example.com" }, { SITE_HOST: "localhost.example.com" }, { TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com" }, { TOURS_HOST: "tours.localhost", APP_HOST: "app.example.com" }, { SITE_HOST: "192.168.1.10:3000" }]) {
+    for (const env of <Record<string, string>[]>[{}, { SITE_HOST: "tours.example.com" }, { SITE_HOST: "localhost.example.com" }, { TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com" }, { TOURS_HOST: "tours.localhost", APP_HOST: "app.example.com" }, { SITE_HOST: "192.168.1.10:3000" }]) {
       const r = await run(["--email", site.email], { ...env, DATA_DIR: site.dir });
       expect([r.code, r.lines], JSON.stringify(env)).toEqual([1, [TOOL_LINE, SAID.host]]);
     }
