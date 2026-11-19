@@ -23,8 +23,8 @@ async function everything(db: NodeDb): Promise<Record<string, unknown[]>> {
 
 /** The same rows without the three columns the migration adds. */
 function withoutNewColumns(rows: Record<string, unknown[]>): Record<string, unknown[]> {
-  const drop: Record<string, string> = { workspace: "storage_allowance_bytes", upload: "reserved_bytes", tour: "logo_bytes" };
-  return Object.fromEntries(Object.entries(rows).map(([t, list]) => [t, list.map((r) => Object.fromEntries(Object.entries(r as Record<string, unknown>).filter(([k]) => k !== drop[t])))]));
+  const drop: Record<string, string[]> = { workspace: ["storage_allowance_bytes"], upload: ["reserved_bytes", "logo_declared_bytes"], tour: ["logo_bytes"] };
+  return Object.fromEntries(Object.entries(rows).map(([t, list]) => [t, list.map((r) => Object.fromEntries(Object.entries(r as Record<string, unknown>).filter(([k]) => !(drop[t] ?? []).includes(k))))]));
 }
 
 describe("migration 0007 on an existing install", () => {
@@ -81,7 +81,7 @@ describe("migration 0007 on an existing install", () => {
         { id: "ws_1", storage_allowance_bytes: null },
         { id: "ws_2", storage_allowance_bytes: null },
       ]);
-      expect(await db.first("SELECT reserved_bytes FROM upload WHERE id = 'up_open'")).toEqual({ reserved_bytes: 0 });
+      expect(await db.first("SELECT reserved_bytes, logo_declared_bytes FROM upload WHERE id = 'up_open'")).toEqual({ reserved_bytes: 0, logo_declared_bytes: null });
       expect(await db.all("SELECT id, logo_bytes FROM tour ORDER BY id")).toEqual([
         { id: "tour_draft", logo_bytes: null },
         { id: "tour_live", logo_bytes: null },
@@ -102,7 +102,7 @@ describe("migration 0007 on an existing install", () => {
       expect(await db.first("SELECT storage_allowance_bytes AS a, (SELECT reserved_bytes FROM upload WHERE id = 'up_later') AS r, (SELECT logo_bytes FROM tour WHERE id = 'tour_later') AS l FROM workspace WHERE id = 'ws_3'")).toEqual({ a: null, r: 0, l: null });
 
       // The database refuses a negative size in either new column, for old rows and new.
-      for (const sql of ["UPDATE upload SET reserved_bytes = -1 WHERE id = 'up_open'", "UPDATE tour SET logo_bytes = -1 WHERE id = 'tour_live'", "UPDATE upload SET reserved_bytes = NULL WHERE id = 'up_later'"]) {
+      for (const sql of ["UPDATE upload SET reserved_bytes = -1 WHERE id = 'up_open'", "UPDATE tour SET logo_bytes = -1 WHERE id = 'tour_live'", "UPDATE upload SET reserved_bytes = NULL WHERE id = 'up_later'", "UPDATE upload SET logo_declared_bytes = 0 WHERE id = 'up_open'"]) {
         await expect(db.run(sql), sql).rejects.toThrow(/constraint failed/);
       }
       await db.run("UPDATE tour SET logo_bytes = 0 WHERE id = 'tour_later'");
@@ -131,6 +131,7 @@ describe("migration 0007 on an existing install", () => {
     expect(statements).toEqual([
       "ALTER TABLE workspace ADD COLUMN storage_allowance_bytes INTEGER CHECK (storage_allowance_bytes IS NULL OR storage_allowance_bytes >= 0)",
       "ALTER TABLE upload ADD COLUMN reserved_bytes INTEGER NOT NULL DEFAULT 0 CHECK (reserved_bytes >= 0)",
+      "ALTER TABLE upload ADD COLUMN logo_declared_bytes INTEGER CHECK (logo_declared_bytes IS NULL OR logo_declared_bytes > 0)",
       "ALTER TABLE tour ADD COLUMN logo_bytes INTEGER CHECK (logo_bytes IS NULL OR logo_bytes >= 0)",
     ]);
   });

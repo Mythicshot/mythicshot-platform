@@ -138,6 +138,8 @@ describe("the API description", () => {
     expect(s.EndCard.properties.text.maxLength).toBe(LIMITS.endText);
     expect(s.RenameBody.properties.title.maxLength).toBe(LIMITS.title);
     expect(s.UploadCreate.properties.sha256.maxItems).toBe(LIMITS.steps);
+    expect(s.UploadCreate.properties.logo_bytes).toMatchObject({ type: "integer", minimum: 1, maximum: LOGO_RULE.maxBytes });
+    expect(s.UploadCreate.required).toEqual(["manifest", "target"]);
 
     // The limits section of the introduction states every one of them, in words.
     const intro = doc.info.description;

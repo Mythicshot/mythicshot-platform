@@ -174,7 +174,7 @@ The setting is `STORAGE_ALLOWANCE_BYTES` (see [Settings](#settings)): the allowa
 
 | | What |
 |---|---|
-| Counted | The image of every step of every tour, published or not; each tour's logo; and the room every unfinished upload holds from the moment it is started (all its images as the manifest gives them, and 200,000 bytes for a logo until its real size is known) until it is finished, aborted or removed |
+| Counted | The image of every step of every tour, published or not; each tour's logo; and the room every unfinished upload holds from the moment it is started (all its images as the manifest gives them, and for a logo it carries the `logo_bytes` it was started with, or 200,000 bytes without, until the logo's real size is recorded when the upload is finished) until it is finished, aborted or removed |
 | Not counted | The copies of images a published tour serves, so a fully published workspace can hold about twice its count on disk; images that wait to be removed after a delete or a replace; a logo stored by a server older than 0.1.8; the database itself |
 
 `GET /api/v1/usage`, with a token, answers the workspace's own numbers, on either address:
@@ -191,10 +191,16 @@ An upload that would take the workspace over its allowance is refused when it is
 {"error":"storage_full","detail":"this tour needs 14.2 MB of room, but the workspace has 3.10 MB left of its 1.00 GB allowance. Nothing was uploaded. Delete tours you no longer need, or ask the site's admin for more room","used_bytes":1070491238,"allowance_bytes":1073741824,"needed_bytes":14889779}
 ```
 
-A new tour or a new chapter needs room for all its images. Replacing a chapter needs room only for what the chapter grows by, so an update that does not grow it works in a full workspace. Deleting a tour makes room at once; waiting does not, except that an upload nobody finished gives its room back when it is removed after 24 hours.
+A new tour or a new chapter needs room for all its images. Replacing a chapter needs room only for what its images come to above the chapter's present ones.
+
+An upload that carries a logo (a new tour, or an update of a tour's first chapter, when the manifest names a logo) also needs room for the logo. The create request can say the logo's size with an optional `logo_bytes` beside `manifest` and `target`, a whole number from 1 to 200,000: the upload then needs exactly that much room for the logo, and the logo sent must have exactly that length (`400 bad_image` otherwise). Without `logo_bytes`, an upload that carries a logo needs up to 200,000 bytes of room for it. For an update, only what the logo's room comes to above the size recorded for the tour's present logo is needed; a logo stored by a server older than 0.1.8 has no recorded size and counts as 0, so the first update after it needs room for the whole logo.
+
+So an update that does not grow the chapter works in a full workspace when it carries no logo, or when it gives a `logo_bytes` no larger than the present logo's recorded size. Without `logo_bytes`, an update of a first chapter with a logo needs up to 200,000 bytes free even when nothing changed.
+
+Deleting a tour makes room at once; waiting does not, except that an upload nobody finished gives its room back when it is removed after 24 hours.
 
 > [!warning] Lowering an allowance deletes nothing
-> A workspace that is over its allowance keeps every tour, link and image: listing, publishing, unpublishing, renaming, deleting and updates that do not grow it still work, and only new tours, new chapters and growing updates are refused until tours are deleted or the allowance is raised.
+> A workspace that is over its allowance keeps every tour, link and image: listing, publishing, unpublishing, renaming, deleting and updates that need no room still work, and only new tours, new chapters and updates that need room (a larger chapter, or a logo sent without its size) are refused until tours are deleted or the allowance is raised.
 
 ## One address or two
 

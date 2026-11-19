@@ -387,6 +387,14 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     expect((await api.unpublish(a.token, t.tour_id)).status).toBe(204);
     expect((await api.unpublish(a.token, t.tour_id)).status).toBe(204); // a draft answers the same
 
+    // A declared logo size: the upload starts, a logo of another length is refused, the right one is taken.
+    const sized = await api.call("POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: v3, target: NEW, logo_bytes: 1000 }), headers: JSON_HEADERS });
+    expect(sized.status, sized.text).toBe(201);
+    refused(await api.logo(a.token, sized.json.upload_id, logoPng(999)), 400, "bad_image");
+    expect((await api.logo(a.token, sized.json.upload_id, logoPng(1000))).status).toBe(204);
+    expect((await api.cancel(a.token, sized.json.upload_id)).status).toBe(204);
+    refused(await api.call("POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: v3, target: NEW, logo_bytes: 0 }), headers: JSON_HEADERS }), 400, "bad_request");
+
     // The oldest manifest version starts an upload as well.
     const open = await api.create(a.token, fixtures.v1);
     expect((await api.cancel(a.token, open.json.upload_id)).status).toBe(204);

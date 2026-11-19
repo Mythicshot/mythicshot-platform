@@ -142,14 +142,15 @@ export function usageRoutes(app: Hono, deps: Deps): void {
 }
 
 /**
- * What an upload reserves at create: the declared bytes of all its steps, plus the most a
- * logo may weigh when the upload takes a logo and its manifest names one (a logo's size
- * is not declared, so the room for the largest is held until commit records the real one).
+ * What an upload reserves at create: the declared bytes of all its steps and, when the
+ * upload takes a logo and its manifest names one, room for the logo: `logoBytes` when the
+ * create declared the logo's size, else the most a logo may weigh, held until commit
+ * records the real size.
  */
-export function reservedFor(m: Manifest, takesLogo: boolean): number {
+export function reservedFor(m: Manifest, takesLogo: boolean, logoBytes: number | null = null): number {
   let bytes = 0;
   for (const step of m.steps) bytes += step.bytes;
-  if (takesLogo && m.cover?.logo) bytes += LOGO_RULE.maxBytes;
+  if (takesLogo && m.cover?.logo) bytes += logoBytes ?? LOGO_RULE.maxBytes;
   return bytes;
 }
 

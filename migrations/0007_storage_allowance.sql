@@ -1,4 +1,4 @@
--- A storage allowance per workspace: three columns, each nullable or with a default, so
+-- A storage allowance per workspace: four columns, each nullable or with a default, so
 -- rows written before this migration stay valid and the statements of the version before
 -- it, which name none of them, still run. Nothing is dropped, renamed or rebuilt.
 
@@ -10,6 +10,10 @@ ALTER TABLE workspace ADD COLUMN storage_allowance_bytes INTEGER CHECK (storage_
 -- What an open upload holds against the allowance: the declared bytes of its steps, plus
 -- room for a logo it takes. 0 for an upload created before this migration. Never negative.
 ALTER TABLE upload ADD COLUMN reserved_bytes INTEGER NOT NULL DEFAULT 0 CHECK (reserved_bytes >= 0);
+
+-- The size of its logo as the create declared it (`logo_bytes` in the request), which the
+-- logo sent must then have. Null when none was declared: any size within the rule is taken.
+ALTER TABLE upload ADD COLUMN logo_declared_bytes INTEGER CHECK (logo_declared_bytes IS NULL OR logo_declared_bytes > 0);
 
 -- The size of the tour's logo, carried over from the upload at commit. Null for a logo
 -- stored before this migration, which counts as nothing. Never negative.

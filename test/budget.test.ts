@@ -204,8 +204,9 @@ describe("the call budget, route by route", () => {
     const same = await call(deps, "POST", "/api/v1/uploads", jsonBody({ manifest: big, target, sha256: hashes }));
     expect(same.status).toBe(201);
     expect(same.json.have).toHaveLength(200);
-    // 2 authentication, the chapter, 26 for the sweep, 4 housekeeping, the pictures, the batch, one look.
-    expect(same.calls).toBe(36);
+    // 2 authentication, the chapter, 17 for the sweep (one statement closes every stale
+    // upload, one lists five, three remove each), 4 housekeeping, the pictures, the batch, one look.
+    expect(same.calls).toBe(27);
     expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM upload"))!.n).toBe(1);
     noted(await putStep(deps, a.token, same.json.upload_id, 7, stepImage(big.steps[6], 7)), STEP); // 409: the chapter has it
     // An abort of it deletes none of the 200 pictures it points at.
@@ -250,6 +251,50 @@ describe("the call budget, route by route", () => {
     // The tour list removes a page of what is left.
     expect((await call(deps, "GET", "/api/v1/tours", { token: a.token })).status).toBe(200);
     expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM replaced_object"))!.n).toBe(0);
+  }, 600_000);
+
+  it("the worst refused create: a replace with hashes, five stale uploads to sweep, a second try, and still no room", async () => {
+    const ctx = await clocked({ maxOpenUploads: 6 });
+    const { deps, a, advance } = ctx;
+    const big = heavyManifest(200);
+    const jsonBody = (o: unknown) => ({ token: a.token, body: JSON.stringify(o), headers: { "content-type": "application/json" } });
+    const first = (await createUpload(deps, a.token, big)).json.upload_id as string;
+    for (let n = 1; n <= 200; n++) expect((await putStep(deps, a.token, first, n, stepImage(big.steps[n - 1], n))).status).toBe(204);
+    expect((await putLogo(deps, a.token, first, logoPng())).status).toBe(204);
+    const t = (await commit(deps, a.token, first)).json as { tour_id: string; chapter_id: string };
+    const hashes = await Promise.all(big.steps.map((s: Json, i: number) => sha256Hex(stepImage(s, i + 1))));
+    advance(UPLOAD_MAX_AGE_MS + HOUR);
+    await seedLeftovers(deps, a.workspaceId, t.tour_id, 5, 1500, deps.now());
+    // The workspace is exactly full, with an open upload holding the last of its room, and
+    // five full-size uploads beside it that were left for more than a day.
+    const holder = (await createUpload(deps, a.token, heavyManifest(1, "Holder"))).json.upload_id as string;
+    for (let i = 0; i < 5; i++) await sendAll(deps, a.token, big, { kind: "new" }, 210 + i);
+    await deps.db.run("UPDATE upload SET created_at = ? WHERE id <> ?", [deps.now() - UPLOAD_MAX_AGE_MS - HOUR, holder]);
+    const used = (await deps.db.first<{ n: number }>("SELECT (SELECT coalesce(sum(bytes), 0) FROM step) + (SELECT coalesce(sum(logo_bytes), 0) FROM tour) + (SELECT reserved_bytes FROM upload WHERE id = ?) AS n", [holder]))!.n;
+    await deps.db.run("UPDATE workspace SET storage_allowance_bytes = ? WHERE id = ?", [used, a.workspaceId]);
+
+    // The replace grows the chapter by one step. It is refused; the holder is aborted at
+    // that moment, so the look finds room and the create is tried again; the allowance
+    // drops before that, so it is refused again and the second look gives the answer.
+    const grown = clone(big);
+    grown.steps[199] = { ...grown.steps[199], bytes: 500 };
+    const realBatch = deps.db.batch.bind(deps.db);
+    let creates = 0;
+    deps.db.batch = async (stmts) => {
+      const create = stmts.some((s) => s.sql.startsWith("INSERT INTO upload (id"));
+      if (create && ++creates === 2) await deps.db.run("UPDATE workspace SET storage_allowance_bytes = 100 WHERE id = ?", [a.workspaceId]);
+      await realBatch(stmts);
+      if (create && creates === 1) await deps.db.run("UPDATE upload SET closing_at = 1 WHERE id = ?", [holder]);
+    };
+    const target = { kind: "replace", tour_id: t.tour_id, chapter_id: t.chapter_id };
+    const refused = await call(deps, "POST", "/api/v1/uploads", jsonBody({ manifest: grown, target, sha256: hashes, logo_bytes: 1000 }));
+    deps.db.batch = realBatch;
+    expect(creates).toBe(2);
+    expect([refused.status, refused.json.error, refused.json.needed_bytes], refused.text).toEqual([413, "storage_full", 380]);
+    // 2 authentication, the chapter, 17 for the sweep, 4 housekeeping, the pictures, and
+    // twice: the batch, one look, the cap and the chapter, usage.
+    expect(refused.calls).toBe(33);
+    expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM upload WHERE closing_at IS NULL"))!.n).toBe(0);
   }, 600_000);
 
   it("publish: every call of a 400-step tour of 20 notes per step, with plenty to sweep, then a re-publish and unpublish", async () => {

@@ -335,9 +335,14 @@ describe("an upload against the allowance", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const realAll = deps.db.all.bind(deps.db);
     deps.db.all = (async (sql: string, params?: unknown[]) => {
-      if (sql.startsWith("SELECT id FROM upload WHERE workspace_id = ? AND created_at <")) throw new Error("database busy");
+      if (sql.startsWith("SELECT id, manifest, logo_key FROM upload WHERE workspace_id = ? AND created_at <")) throw new Error("database busy");
       return realAll(sql, params as never);
     }) as typeof deps.db.all;
+    const realRun = deps.db.run.bind(deps.db);
+    deps.db.run = (async (sql: string, params?: unknown[]) => {
+      if (sql.startsWith("UPDATE upload SET closing_at = ? WHERE workspace_id = ? AND created_at <")) throw new Error("database busy");
+      return realRun(sql, params as never);
+    }) as typeof deps.db.run;
     expect((await usageOf(deps, a.workspaceId)).uploads).toBe(100);
     expectFull(await createUpload(deps, a.token, manifestOf([901], "New")), 100, 1000, 901);
     const fresh = manifestOf([900], "New");
@@ -350,6 +355,7 @@ describe("an upload against the allowance", () => {
     expect((await finish(deps, a.token, created, fresh)).status).toBe(201);
     expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures: 1000, logos: 0, uploads: 0, used: 1000, allowance: 1000, over: false, tours: 2 });
     deps.db.all = realAll;
+    deps.db.run = realRun;
   });
 
   it("the database refuses a negative reservation and a negative logo size", async () => {
@@ -663,5 +669,258 @@ describe("GET /api/v1/usage", () => {
     expect(answers[1]).toBe(answers[0]);
     const elsewhere = await send(deps, "GET", "/api/v1/usage", { token: a.token, origin: "https://other.example.net" });
     expect([elsewhere.status, elsewhere.bytes.byteLength]).toEqual([421, 0]);
+  });
+});
+
+/** A created upload with its one step sent and not committed; returns its id. */
+async function openWithStep(deps: Deps, token: string, manifest: Json, fill: number): Promise<string> {
+  const created = await createUpload(deps, token, manifest);
+  if (created.status !== 201) throw new Error(`create failed: ${created.status} ${created.text}`);
+  const r = await putStep(deps, token, created.json.upload_id, 1, stepImage(manifest.steps[0], fill));
+  if (r.status !== 204) throw new Error(`step failed: ${r.status}`);
+  return created.json.upload_id as string;
+}
+
+describe("a declared logo size", () => {
+  /** A create that also says how many bytes its logo has. */
+  const createDeclared = (deps: Deps, token: string, manifest: Json, target: unknown, logo_bytes: unknown) =>
+    send(deps, "POST", "/api/v1/uploads", { token, body: JSON.stringify({ manifest, target, logo_bytes }), headers: JSON_HEADERS });
+
+  it("an unchanged update of a tour with a logo needs no room when the logo's size is declared", async () => {
+    const { deps, a } = await setup();
+    const m = withLogo([1000, 2000]);
+    const first = await createUpload(deps, a.token, m);
+    const tour = (await finish(deps, a.token, first, m, 4, logoPng(1234))).json as Tour;
+    // Exactly full.
+    await setAllowance(deps, a, 4234);
+    expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures: 3000, logos: 1234, uploads: 0, used: 4234, allowance: 4234, over: false, tours: 1 });
+    const update = await createDeclared(deps, a.token, m, replaceOf(tour), 1234);
+    expect([update.status, update.json.settings], update.text).toEqual([201, true]);
+    expect(await reservedOf(deps, update.json.upload_id)).toBe(0);
+    expect((await finish(deps, a.token, update, m, 5, logoPng(1234))).status).toBe(201);
+    expect((await usageOf(deps, a.workspaceId)).used).toBe(4234);
+
+    // And with the allowance lowered below what is used.
+    await setAllowance(deps, a, 10);
+    const over = await createDeclared(deps, a.token, m, replaceOf(tour), 1234);
+    expect(over.status, over.text).toBe(201);
+    expect(await reservedOf(deps, over.json.upload_id)).toBe(0);
+    expect((await finish(deps, a.token, over, m, 6, logoPng(1234))).status).toBe(201);
+    expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures: 3000, logos: 1234, uploads: 0, used: 4234, allowance: 10, over: true, tours: 1 });
+    // A smaller logo fits as well; a larger one needs its growth and nothing more.
+    const smaller = await createDeclared(deps, a.token, m, replaceOf(tour), 1000);
+    expect(await reservedOf(deps, smaller.json.upload_id)).toBe(0);
+    await abort(deps, a.token, smaller.json.upload_id);
+    expectFull(await createDeclared(deps, a.token, m, replaceOf(tour), 1300), 4234, 10, 66);
+    // Without the size, the same update needs room for the largest logo there can be.
+    expectFull(await createUpload(deps, a.token, m, replaceOf(tour)), 4234, 10, LOGO_RULE.maxBytes - 1234);
+  });
+
+  it("a declared logo size is held to at upload", async () => {
+    const { deps, a, draftKeys } = await setup(100_000);
+    const m = withLogo([1000]);
+    const created = await createDeclared(deps, a.token, m, NEW, 1234);
+    expect(created.status, created.text).toBe(201);
+    expect(created.json).toEqual({ upload_id: created.json.upload_id, steps: 1 });
+    const id = created.json.upload_id as string;
+    expect(await reservedOf(deps, id)).toBe(2234);
+    // A logo of any other length is refused, as a step of the wrong length is, and nothing is stored.
+    for (const size of [1233, 1235, 5000]) {
+      const r = await putLogo(deps, a.token, id, logoPng(size));
+      expect([r.status, r.text], String(size)).toEqual([400, '{"error":"bad_image","detail":"logo: image length differs from the declared logo_bytes"}']);
+    }
+    expect(await draftKeys()).toEqual([]);
+    expect((await commit(deps, a.token, id)).status).toBe(409);
+    expect((await putLogo(deps, a.token, id, logoPng(1234))).status).toBe(204);
+    const tour = (await finish(deps, a.token, created, m)).json as Tour;
+    expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures: 1000, logos: 1234, uploads: 0, used: 2234, allowance: 100_000, over: false, tours: 1 });
+
+    // Not a whole number of bytes from 1 to the most a logo may weigh: refused, nothing made.
+    for (const bad of [0, -1, 1.5, LOGO_RULE.maxBytes + 1, "1234", null, true, [1234]]) {
+      const r = await createDeclared(deps, a.token, m, NEW, bad);
+      expect([r.status, r.text], JSON.stringify(bad)).toEqual([400, `{"error":"bad_request","detail":"logo_bytes must be a whole number of bytes from 1 to ${LOGO_RULE.maxBytes}"}`]);
+    }
+    expect((await counts(deps)).upload).toBe(0);
+    // The most a logo may weigh is taken as a size, and held against the allowance like any other.
+    const most = await createDeclared(deps, a.token, withLogo([1000]), NEW, LOGO_RULE.maxBytes);
+    expectFull(most, 2234, 100_000, 201_000);
+
+    // Where the upload carries no logo the number means nothing: nothing is reserved for it.
+    const chapter = await createDeclared(deps, a.token, withLogo([500], "Second"), chapterOf(tour), 9999);
+    expect(await reservedOf(deps, chapter.json.upload_id)).toBe(500);
+    const bare = await createDeclared(deps, a.token, manifestOf([500]), NEW, 9999);
+    expect(await reservedOf(deps, bare.json.upload_id)).toBe(500);
+  });
+
+  it("without a declared size a logo reserves 200,000 bytes", async () => {
+    const { deps, a } = await setup();
+    const m = withLogo([1000]);
+    const plain = await createUpload(deps, a.token, m);
+    expect(await reservedOf(deps, plain.json.upload_id)).toBe(1000 + 200_000);
+    const declared = await createDeclared(deps, a.token, m, NEW, 5000);
+    expect(await reservedOf(deps, declared.json.upload_id)).toBe(6000);
+    // Without a declared size any logo within the rule is taken, as before.
+    const tour = (await finish(deps, a.token, plain, m, 0, logoPng(4321))).json as Tour;
+    expect((await usageOf(deps, a.workspaceId)).logos).toBe(4321);
+    const update = await createUpload(deps, a.token, m, replaceOf(tour));
+    expect(await reservedOf(deps, update.json.upload_id)).toBe(200_000 - 4321);
+  });
+
+  it("a tour whose logo size was never recorded counts its logo as nothing until an update records it", async () => {
+    const { deps, a } = await setup();
+    const m = withLogo([1000, 2000]);
+    const tour = await uploadTour(deps, a.token, m, NEW, 1);
+    // As every tour made before this version: a logo, and no size for it.
+    await deps.db.run("UPDATE tour SET logo_bytes = NULL WHERE id = ?", [tour.tour_id]);
+    await setAllowance(deps, a, 3000);
+    expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures: 3000, logos: 0, uploads: 0, used: 3000, allowance: 3000, over: false, tours: 1 });
+    // Its logo now counts for the first time, so the update needs room for it.
+    expectFull(await createDeclared(deps, a.token, m, replaceOf(tour), 1000), 3000, 3000, 1000);
+    expectFull(await createUpload(deps, a.token, m, replaceOf(tour)), 3000, 3000, 200_000);
+    await setAllowance(deps, a, 4000);
+    const update = await createDeclared(deps, a.token, m, replaceOf(tour), 1000);
+    expect(update.status, update.text).toBe(201);
+    expect(await reservedOf(deps, update.json.upload_id)).toBe(1000);
+    expect((await finish(deps, a.token, update, m, 2, logoPng(1000))).status).toBe(201);
+    expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures: 3000, logos: 1000, uploads: 0, used: 4000, allowance: 4000, over: false, tours: 1 });
+    // From then on the same update needs nothing.
+    const again = await createDeclared(deps, a.token, m, replaceOf(tour), 1000);
+    expect(await reservedOf(deps, again.json.upload_id)).toBe(0);
+    // An update of another chapter never touches the logo, recorded or not.
+    await deps.db.run("UPDATE tour SET logo_bytes = NULL WHERE id = ?", [tour.tour_id]);
+    await abort(deps, a.token, again.json.upload_id);
+    await setAllowance(deps, a, null);
+    const second = await uploadTour(deps, a.token, manifestOf([500], "Second"), chapterOf(tour), 3);
+    await setAllowance(deps, a, 3500);
+    const other = await createDeclared(deps, a.token, manifestOf([500], "Second"), { kind: "replace", tour_id: tour.tour_id, chapter_id: second.chapter_id }, 1000);
+    expect([other.status, other.json.settings], other.text).toEqual([201, false]);
+    expect(await reservedOf(deps, other.json.upload_id)).toBe(0);
+  });
+});
+
+describe("a create refused while room appears", () => {
+  const isCreate = (sql: string) => sql.startsWith("INSERT INTO upload (id");
+
+  /** Runs `between` once, right after the first create statement ran. Counts the create statements. */
+  function afterFirstCreate(deps: Deps, between: () => Promise<void>) {
+    const real = { run: deps.db.run.bind(deps.db), batch: deps.db.batch.bind(deps.db) };
+    let creates = 0;
+    deps.db.run = async (sql, params) => {
+      const res = await real.run(sql, params);
+      if (isCreate(sql) && ++creates === 1) await between();
+      return res;
+    };
+    deps.db.batch = async (stmts) => {
+      await real.batch(stmts);
+      if (stmts.some((s) => isCreate(s.sql)) && ++creates === 1) await between();
+    };
+    return {
+      creates: () => creates,
+      restore: () => {
+        deps.db.run = real.run;
+        deps.db.batch = real.batch;
+      },
+    };
+  }
+
+  it("room that appears between the refusal and the look at why is used: the create is tried once more", async () => {
+    const { deps, a } = await setup(1000);
+    const held = await createUpload(deps, a.token, manifestOf([800]));
+    // Another request aborts the upload that held the room, at that very moment.
+    const hook = afterFirstCreate(deps, async () => {
+      await deps.db.run("UPDATE upload SET closing_at = ? WHERE id = ?", [T0, held.json.upload_id]);
+    });
+    const made = await createUpload(deps, a.token, manifestOf([900]));
+    hook.restore();
+    expect(made.status, made.text).toBe(201);
+    expect(hook.creates()).toBe(2);
+    expect(await reservedOf(deps, made.json.upload_id)).toBe(900);
+    expect((await usageOf(deps, a.workspaceId)).used).toBe(900);
+  });
+
+  it("the cap's answer is given only when the cap is reached", async () => {
+    const { deps, a } = await setup(null, { maxOpenUploads: 2 });
+    const one = await createUpload(deps, a.token, manifestOf([100]));
+    await createUpload(deps, a.token, manifestOf([100]));
+    // The cap is full when the statement runs, and free again when the request looks.
+    const hook = afterFirstCreate(deps, async () => {
+      await deps.db.run("UPDATE upload SET closing_at = ? WHERE id = ?", [T0, one.json.upload_id]);
+    });
+    const made = await createUpload(deps, a.token, manifestOf([100]));
+    hook.restore();
+    expect(made.status, made.text).toBe(201);
+    expect(hook.creates()).toBe(2);
+    // Really full: the cap's answer, after one statement and no second try.
+    const again = afterFirstCreate(deps, async () => {});
+    const capped = await createUpload(deps, a.token, manifestOf([100]));
+    again.restore();
+    expect([capped.status, capped.json.error, capped.headers.get("retry-after")]).toEqual([429, "too_many_uploads", "60"]);
+    expect(again.creates()).toBe(1);
+    expect(capped.json.detail).toBe("this workspace already has 2 open uploads; finish or cancel one first");
+  });
+
+  it("a replace with hashes is tried once more too, and a second refusal answers what is true then", async () => {
+    const { deps, a } = await setup(5000);
+    const m = manifestOf([1000, 1000]);
+    const tour = await uploadTour(deps, a.token, m, NEW, 1);
+    const held = await createUpload(deps, a.token, manifestOf([2900]));
+    const grown = manifestOf([1000, 1000, 500]);
+    // Room appears, then the allowance drops before the second try: storage is the true answer.
+    const hook = afterFirstCreate(deps, async () => {
+      await deps.db.run("UPDATE upload SET closing_at = ? WHERE id = ?", [T0, held.json.upload_id]);
+    });
+    const hooked = deps.db.batch.bind(deps.db);
+    let batches = 0;
+    deps.db.batch = async (stmts) => {
+      if (stmts.some((s) => isCreate(s.sql)) && ++batches === 2) await setAllowance(deps, a, 2100);
+      return hooked(stmts);
+    };
+    const refused = await createWithHashes(deps, a.token, grown, replaceOf(tour), 1);
+    hook.restore();
+    expect(batches).toBe(2);
+    expectFull(refused, 2000, 2100, 500);
+    expect((await counts(deps)).upload_step).toBe(0);
+    // Left alone, it is created at the second try, with its reused steps.
+    await setAllowance(deps, a, null);
+    const other = await createUpload(deps, a.token, manifestOf([2900]));
+    const hook2 = afterFirstCreate(deps, async () => {
+      await deps.db.run("UPDATE upload SET closing_at = ? WHERE id = ?", [T0, other.json.upload_id]);
+    });
+    const made = await createWithHashes(deps, a.token, grown, replaceOf(tour), 1);
+    hook2.restore();
+    expect([made.status, made.json.have], made.text).toEqual([201, [1, 2]]);
+    expect(hook2.creates()).toBe(2);
+  });
+});
+
+describe("the sweep and the allowance", () => {
+  it("stale uploads whose files cannot be deleted are all closed at once and never hold room or a place", async () => {
+    const { deps, a, advance } = await setup(10_000, { maxOpenUploads: 8 });
+    const old = manifestOf([1000], "Old");
+    const stale: string[] = [];
+    for (let i = 0; i < 8; i++) stale.push(await openWithStep(deps, a.token, old, i));
+    expect((await usageOf(deps, a.workspaceId)).uploads).toBe(8000);
+    advance(UPLOAD_MAX_AGE_MS + 1);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const realDelete = deps.drafts.delete.bind(deps.drafts);
+    deps.drafts.delete = async () => {
+      throw new Error("bucket unavailable");
+    };
+    // One create closes all eight, although it can remove none of them.
+    const made = await createUpload(deps, a.token, manifestOf([9500], "New"));
+    expect(made.status, made.text).toBe(201);
+    expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM upload WHERE closing_at IS NULL"))!.n).toBe(1);
+    expect((await counts(deps)).upload).toBe(9);
+    expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures: 0, logos: 0, uploads: 9500, used: 9500, allowance: 10_000, over: false, tours: 0 });
+    // None of them can be committed any more.
+    for (const id of stale) expect((await commit(deps, a.token, id)).status, id).toBe(404);
+    expect((await usageOf(deps, a.workspaceId)).used).toBe(9500);
+    // Once the store works again, later creates remove them, five at a time.
+    deps.drafts.delete = realDelete;
+    expect((await createUpload(deps, a.token, manifestOf([100], "Next"))).status).toBe(201);
+    expect((await counts(deps)).upload).toBe(2 + 3);
+    expect((await createUpload(deps, a.token, manifestOf([100], "Next"))).status).toBe(201);
+    expect((await counts(deps)).upload).toBe(3);
+    expect((await counts(deps)).upload_step).toBe(0);
   });
 });
