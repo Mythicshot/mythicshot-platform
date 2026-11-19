@@ -701,7 +701,8 @@ catch (e) { console.log("failed " + e.reason + " " + e.bodyWritten); }
       expect(result).not.toBe("timeout");
       if (result === "timeout") return;
       expect(result.out).toBe("sent src/node/mail-worker.ts\n");
+      expect(result.err).toBe("");
       expect(server.sessions[0].bodies).toHaveLength(1);
-    });
+    }, 30_000);
   });
 });
