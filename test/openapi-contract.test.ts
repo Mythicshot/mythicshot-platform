@@ -219,6 +219,7 @@ function client(deps: Deps) {
     call,
     health: (origin?: string) => call("GET", "/healthz", origin === undefined ? {} : { origin }),
     me: (token: string | null, origin?: string) => call("GET", "/api/v1/me", origin === undefined ? { token } : { token, origin }),
+    usage: (token: string | null) => call("GET", "/api/v1/usage", { token }),
     list: (token: string | null) => call("GET", "/api/v1/tours", { token }),
     rename: (token: string | null, tourId: string, body: unknown) => call("PATCH", `/api/v1/tours/${tourId}`, withJson(token, body)),
     del: (token: string | null, tourId: string) => call("DELETE", `/api/v1/tours/${tourId}`, { token }),
@@ -316,6 +317,8 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
 
     expect((await api.health()).json).toEqual({ ok: true });
     expect((await api.me(a.token)).json).toEqual({ workspace: "Workspace A", version: VERSION });
+    // Usage: nothing yet, and no limit unless the site or the workspace has one.
+    expect((await api.usage(a.token)).json).toEqual({ used_bytes: 0, allowance_bytes: null, over: false, tours: 0, counted: { pictures: 0, logos: 0, uploads_in_progress: 0 } });
 
     // A new tour with a logo, request by request.
     const created = await api.create(a.token, v3);
@@ -383,6 +386,14 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
 
     expect((await api.unpublish(a.token, t.tour_id)).status).toBe(204);
     expect((await api.unpublish(a.token, t.tour_id)).status).toBe(204); // a draft answers the same
+
+    // A declared logo size: the upload starts, a logo of another length is refused, the right one is taken.
+    const sized = await api.call("POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: v3, target: NEW, logo_bytes: 1000 }), headers: JSON_HEADERS });
+    expect(sized.status, sized.text).toBe(201);
+    refused(await api.logo(a.token, sized.json.upload_id, logoPng(999)), 400, "bad_image");
+    expect((await api.logo(a.token, sized.json.upload_id, logoPng(1000))).status).toBe(204);
+    expect((await api.cancel(a.token, sized.json.upload_id)).status).toBe(204);
+    refused(await api.call("POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: v3, target: NEW, logo_bytes: 0 }), headers: JSON_HEADERS }), 400, "bad_request");
 
     // The oldest manifest version starts an upload as well.
     const open = await api.create(a.token, fixtures.v1);
@@ -482,6 +493,14 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     refused(await api.call("POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: v2 }), headers: JSON_HEADERS }), 400, "bad_target");
     refused(await api.create(a.token, v2, { kind: "copy" }), 400, "bad_target");
     refused(await api.call("POST", "/api/v1/uploads", { token: a.token, body: "x".repeat(300_000), headers: JSON_HEADERS }), 413, "too_large");
+    // The storage allowance, in workspace B: an upload that would go over it. The other
+    // form of this request's 413 is the request that is too long, just above.
+    await deps.db.run("UPDATE workspace SET storage_allowance_bytes = 100 WHERE id = ?", [b.workspaceId]);
+    const full = await api.create(b.token, small(1));
+    refused(full, 413, "storage_full");
+    expect(full.json).toEqual({ error: "storage_full", detail: full.json.detail, used_bytes: 0, allowance_bytes: 100, needed_bytes: 120 });
+    expect((await api.usage(b.token)).json).toEqual({ used_bytes: 0, allowance_bytes: 100, over: false, tours: 0, counted: { pictures: 0, logos: 0, uploads_in_progress: 0 } });
+    await deps.db.run("UPDATE workspace SET storage_allowance_bytes = NULL WHERE id = ?", [b.workspaceId]);
     // The open-upload cap, in workspace B, which has none open: one more than allowed.
     const open: string[] = [];
     for (let i = 0; i < DEFAULT_MAX_OPEN_UPLOADS; i++) open.push((await api.create(b.token, v2)).json.upload_id);
@@ -761,16 +780,26 @@ describe("the error codes in the code", () => {
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
     expect(callers).toEqual(["../src/http.ts", "../src/publish.ts", "../src/tours.ts", "../src/uploads.ts"]);
 
+    // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
+    // status and code in place; nothing else there answers an error.
+    const storage = [...source("usage.ts").matchAll(/\bjson\((\d{3}), \{ error: "([a-z_]+)"/g)];
+    expect(storage.map((m) => `${m[1]} ${m[2]}`)).toEqual(["413 storage_full"]);
+    expect([...source("usage.ts").matchAll(/\berror: "/g)]).toHaveLength(1);
+    inCode.add("413 storage_full");
+
     const described = new Set<string>();
     for (const op of OPS) {
       for (const status of Object.keys(op.op.responses)) {
         const res = responseOf(op, status);
         for (const media of Object.values((res.content ?? {}) as Record<string, Json>)) {
           const schema = deref(DOC, media.schema) as Json;
-          for (const code of (schema.properties?.error?.enum ?? []) as string[]) described.add(`${status} ${code}`);
+          // A status with several shapes names its codes in each of them.
+          const shapes = Array.isArray(schema.oneOf) ? (schema.oneOf as Json[]).map((s) => deref(DOC, s) as Json) : [schema];
+          for (const shape of shapes) for (const code of (shape.properties?.error?.enum ?? []) as string[]) described.add(`${status} ${code}`);
         }
       }
     }
+    expect(described.has("413 storage_full")).toBe(true);
     expect([...described].sort(), "a status and code only one side has; the code wins: correct src/docs/openapi.ts").toEqual([...inCode].sort());
 
     // The three that are not made by apiError: the token guard's, and the app's own two.

@@ -29,14 +29,16 @@
 import type { Hono } from "hono";
 import { newId, newSlug, requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
+import { UPLOAD_MAX_AGE_MS } from "./limits.ts";
 import { LIMITS, parseManifest, type Manifest } from "./manifest.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 import { housekeeping } from "./publish.ts";
-import { chapterPictures, clearReplaced, findChapter, firstChapterSql, parseHashes, replaceAnswer, replaceStatements, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
+import { chapterPictures, clearReplaced, findChapter, firstChapterSql, parseHashes, replaceAnswer, replaceStatements, replacedBytes, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, type ImageType } from "./sniff.ts";
+import { ALLOWANCE_OF_SQL, USED_SQL, allowanceParams, reservedFor, storageFull, usageOf } from "./usage.ts";
 
-/** An upload older than this is swept by the workspace's next create. */
-export const UPLOAD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** An upload older than this is swept by the workspace's next create. It lives in src/limits.ts; the name stays here for the files that import it from this one. */
+export { UPLOAD_MAX_AGE_MS };
 /** At most this many stale uploads are swept per create, to bound the work of one request. */
 const SWEEP_LIMIT = 5;
 /** The create body without a hash list: the manifest's cap plus room for the envelope around it. */
@@ -68,6 +70,8 @@ type UploadRow = {
   manifest: string;
   logo_key: string | null;
   logo_bytes: number | null;
+  /** The logo's size as the create declared it (`logo_bytes` in its body), or null: then any size within the rule is taken. */
+  logo_declared_bytes: number | null;
   closing_at: number | null;
   /** The chapter this upload replaces, or null for a new tour or a new chapter. */
   replaces_chapter_id: string | null;
@@ -100,7 +104,7 @@ const notFound = (what: string) => apiError(404, "not_found", `no such ${what}`)
 async function loadUpload(deps: Deps, auth: Auth, id: string): Promise<UploadRow | null> {
   if (!UPLOAD_ID.test(id)) return null;
   const row = await deps.db.first<Omit<UploadRow, "settings"> & { first: number }>(
-    `SELECT id, tour_id, manifest, logo_key, logo_bytes, closing_at, replaces_chapter_id,
+    `SELECT id, tour_id, manifest, logo_key, logo_bytes, logo_declared_bytes, closing_at, replaces_chapter_id,
             (replaces_chapter_id IS NOT NULL AND ${firstChapterSql("upload.replaces_chapter_id", "upload.tour_id")}) AS first
        FROM upload WHERE id = ? AND workspace_id = ?`,
     [id, auth.workspaceId],
@@ -124,10 +128,23 @@ function possibleKeys(id: string, manifest: Manifest): string[] {
  * the chapter names a key the chapter still uses, so reused rows are left out of the keys.
  */
 export async function abortUpload(deps: Deps, workspaceId: string, id: string): Promise<void> {
-  const row = await deps.db.first<UploadRow>("SELECT id, manifest, logo_key FROM upload WHERE id = ? AND workspace_id = ?", [id, workspaceId]);
+  const row = await deps.db.first<Closing>("SELECT id, manifest, logo_key FROM upload WHERE id = ? AND workspace_id = ?", [id, workspaceId]);
   if (row === null) return;
   const marked = await deps.db.run("UPDATE upload SET closing_at = coalesce(closing_at, ?) WHERE id = ? AND workspace_id = ?", [deps.now(), id, workspaceId]);
   if (marked.changes === 0) return; // committed (or aborted) since the read: nothing of it is ours to delete
+  await removeClosing(deps, workspaceId, row);
+}
+
+/** What removing an upload needs of its row. */
+type Closing = { id: string; manifest: string; logo_key: string | null };
+
+/**
+ * Removes an upload of this workspace that is already marked closing: exactly its own
+ * objects, then its rows. Three calls. Only for a row whose closing_at is set: from then
+ * on no commit can take it, so what it stored is nobody else's.
+ */
+async function removeClosing(deps: Deps, workspaceId: string, row: Closing): Promise<void> {
+  const id = row.id;
   const recorded = await deps.db.all<{ image_key: string }>(
     "SELECT s.image_key FROM upload_step s JOIN upload u ON u.id = s.upload_id WHERE s.upload_id = ? AND u.workspace_id = ? AND s.reused = 0",
     [id, workspaceId],
@@ -142,15 +159,25 @@ export async function abortUpload(deps: Deps, workspaceId: string, id: string): 
   ]);
 }
 
-/** Aborts up to SWEEP_LIMIT of the workspace's uploads older than UPLOAD_MAX_AGE_MS. */
+/**
+ * Closes every upload of the workspace older than UPLOAD_MAX_AGE_MS, in one statement, then
+ * removes up to SWEEP_LIMIT of them (files and rows). Closing comes first and covers all of
+ * them, however many there are and whether or not their files can be deleted: from then on
+ * none can be committed, and none holds room against the storage allowance or a place
+ * under the open-upload cap. What could not be removed now is tried again by a later sweep.
+ */
 async function sweep(deps: Deps, workspaceId: string): Promise<void> {
-  const stale = await deps.db.all<{ id: string }>(
-    "SELECT id FROM upload WHERE workspace_id = ? AND created_at < ? ORDER BY created_at LIMIT ?",
-    [workspaceId, deps.now() - UPLOAD_MAX_AGE_MS, SWEEP_LIMIT],
+  const now = deps.now();
+  const floor = now - UPLOAD_MAX_AGE_MS;
+  await deps.db.run("UPDATE upload SET closing_at = ? WHERE workspace_id = ? AND created_at < ? AND closing_at IS NULL", [now, workspaceId, floor]);
+  const stale = await deps.db.all<Closing>(
+    "SELECT id, manifest, logo_key FROM upload WHERE workspace_id = ? AND created_at < ? AND closing_at IS NOT NULL ORDER BY created_at LIMIT ?",
+    [workspaceId, floor, SWEEP_LIMIT],
   );
-  for (const { id } of stale) {
+  for (const row of stale) {
+    const id = row.id;
     try {
-      await abortUpload(deps, workspaceId, id);
+      await removeClosing(deps, workspaceId, row);
     } catch {
       // The upload stays closed to commits and is tried again by a later sweep. The error
       // itself is not logged: it could carry anything a back end put in its message.
@@ -194,12 +221,14 @@ function commitStatements(deps: Deps, auth: Auth, up: UploadRow, m: Manifest, to
   if (up.tour_id === null) {
     const logoType = m.cover?.logo ? extOf(m.cover.logo) : null;
     stmts.push({
-      sql: `INSERT INTO tour (id, workspace_id, title, slug, status, spotlight_dim, theme, zoom, cover, cta, end_card, autoplay, logo_key, logo_type, created_at, updated_at, draft_version)
-            VALUES (?, (SELECT workspace_id ${openUpload}), ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      // The logo's size comes over from the upload with its key: from here on the storage
+      // count holds what the logo weighs, in place of the room the upload reserved for it.
+      sql: `INSERT INTO tour (id, workspace_id, title, slug, status, spotlight_dim, theme, zoom, cover, cta, end_card, autoplay, logo_key, logo_type, logo_bytes, created_at, updated_at, draft_version)
+            VALUES (?, (SELECT workspace_id ${openUpload}), ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       params: [
         tourId, up.id, auth.workspaceId, m.title, slug, m.spotlight_dim,
         JSON.stringify(m.theme), JSON.stringify(m.zoom), json01(m.cover), json01(m.cta), json01(m.end), JSON.stringify(m.autoplay),
-        logoType === null ? null : up.logo_key, logoType, now, now,
+        logoType === null ? null : up.logo_key, logoType, logoType === null ? null : up.logo_bytes, now, now,
       ],
     });
     stmts.push({
@@ -274,6 +303,16 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       hashes = parseHashes(b.sha256, parsed.manifest.steps.length);
       if (hashes === null) return apiError(400, "bad_request", "sha256 must be a list of one lowercase hex SHA-256 (64 characters) per step");
     }
+    // The logo's size, when the client says it: then exactly that much room is held for the
+    // logo, not the most a logo may weigh, and the logo sent must have that length.
+    let logoBytes: number | null = null;
+    if (Object.hasOwn(b, "logo_bytes")) {
+      const v = b.logo_bytes;
+      if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > LOGO_RULE.maxBytes) {
+        return apiError(400, "bad_request", `logo_bytes must be a whole number of bytes from 1 to ${LOGO_RULE.maxBytes}`);
+      }
+      logoBytes = v;
+    }
     let tourId: string | null = null;
     let replaces: { chapterId: string; revision: string | null; first: boolean } | null = null;
     if (t.kind === "chapter") {
@@ -311,31 +350,69 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       reused = reusedSteps(parsed.manifest, hashes, await chapterPictures(deps, auth, tourId, replaces.chapterId));
     }
 
-    // One statement, so creates at the same moment can never pass the cap together.
+    // One statement, so creates at the same moment can never pass the cap together, nor
+    // the storage allowance. It works out what the upload reserves (`r.reserved`): all of
+    // its declared bytes and the room for a logo it takes; for a replace, only what that
+    // comes to above what the chapter holds now (and the logo it replaces), never below 0.
+    // The row is written only when the open-upload cap allows it and the reservation is 0,
+    // or the workspace has no limit, or what it uses plus the reservation is within its
+    // allowance. Parameters, in the order they stand in the text: the row's eight values;
+    // what the upload needs; the replaced chapter's (none for another target); the
+    // workspace id of USED_SQL; ALLOWANCE_OF_SQL's three; the cap's three.
     const id = newId("up");
     const now = deps.now();
+    const floor = now - UPLOAD_MAX_AGE_MS;
     const cap = deps.config.maxOpenUploads ?? DEFAULT_MAX_OPEN_UPLOADS;
+    // A new tour takes a logo, and so does a replace of a tour's first chapter. A declared
+    // logo size counts only for an upload that takes a logo and whose manifest names one;
+    // then the room held for the logo is that size, else the most a logo may weigh.
+    const takes = tourId === null || replaces?.first === true;
+    const declared = takes && parsed.manifest.cover?.logo ? logoBytes : null;
+    const wanted = reservedFor(parsed.manifest, takes, declared);
+    const current = replaces === null || tourId === null ? null : replacedBytes(auth.workspaceId, tourId, replaces.chapterId, replaces.first);
     const insert: Stmt = {
-      sql: `INSERT INTO upload (id, workspace_id, tour_id, manifest, created_at, replaces_chapter_id, base_revision) SELECT ?, ?, ?, ?, ?, ?, ?
-             WHERE (SELECT count(*) FROM upload WHERE workspace_id = ? AND closing_at IS NULL AND created_at >= ?) < ?`,
+      sql: `INSERT INTO upload (id, workspace_id, tour_id, manifest, created_at, replaces_chapter_id, base_revision, logo_declared_bytes, reserved_bytes)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, r.reserved
+              FROM (SELECT CAST(max(0, ? - ${current === null ? "0" : current.sql}) AS INTEGER) AS reserved, ${USED_SQL} AS used, ${ALLOWANCE_OF_SQL} AS allowance) r
+             WHERE (SELECT count(*) FROM upload WHERE workspace_id = ? AND closing_at IS NULL AND created_at >= ?) < ?
+               AND (r.reserved = 0 OR r.allowance IS NULL OR r.used + r.reserved <= r.allowance)`,
       params: [
-        id, auth.workspaceId, tourId, JSON.stringify(parsed.manifest), now, replaces?.chapterId ?? null, replaces?.revision ?? null,
-        auth.workspaceId, now - UPLOAD_MAX_AGE_MS, cap,
+        id, auth.workspaceId, tourId, JSON.stringify(parsed.manifest), now, replaces?.chapterId ?? null, replaces?.revision ?? null, declared,
+        wanted, ...(current?.params ?? []), auth.workspaceId, ...allowanceParams(deps, auth.workspaceId),
+        auth.workspaceId, floor, cap,
       ],
     };
-    let made: boolean;
-    if (reused.length === 0) {
-      made = (await deps.db.run(insert.sql, insert.params)).changes === 1;
-    } else {
+    const attempt = async (): Promise<boolean> => {
+      if (reused.length === 0) return (await deps.db.run(insert.sql, insert.params)).changes === 1;
       // The upload and its reused steps in one batch, so an upload never exists without
-      // them; the batch tells no row count, so one look says whether the cap let it in.
+      // them; the batch tells no row count, so one look says whether it was let in.
       await deps.db.batch([insert, reusedStatement(auth.workspaceId, id, reused, now)]);
-      made = (await deps.db.first("SELECT 1 AS x FROM upload WHERE id = ? AND workspace_id = ?", [id, auth.workspaceId])) !== null;
-    }
-    if (!made) {
-      const res = apiError(429, "too_many_uploads", `this workspace already has ${cap} open uploads; finish or cancel one first`);
-      res.headers.set("retry-after", String(CAP_RETRY_AFTER_S));
-      return res;
+      return (await deps.db.first("SELECT 1 AS x FROM upload WHERE id = ? AND workspace_id = ?", [id, auth.workspaceId])) !== null;
+    };
+    // A refused statement does not say why, so the reason is read afterwards: the open
+    // uploads and, for a replace, what the chapter holds now, then usage. When the upload
+    // does not fit the allowance the answer is the storage one, also when the cap is full
+    // as well, since waiting does not make room. When the cap is reached it is the cap's.
+    // When neither is so, room appeared between the statement and the look (an upload was
+    // finished or aborted at that moment): the statement is tried once more, and its own
+    // refusal is read again. The cap's answer is never given unless the cap is reached.
+    let made = await attempt();
+    for (let tries = 1; !made; tries++) {
+      const state = await deps.db.first<{ open: number; held: number }>(
+        `SELECT (SELECT count(*) FROM upload WHERE workspace_id = ? AND closing_at IS NULL AND created_at >= ?) AS open, ${current === null ? "0" : current.sql} AS held`,
+        [auth.workspaceId, floor, ...(current?.params ?? [])],
+      );
+      const needed = Math.max(0, wanted - (state?.held ?? 0));
+      const usage = await usageOf(deps, auth.workspaceId);
+      if (needed > 0 && usage.allowance !== null && usage.used + needed > usage.allowance) return storageFull(usage, needed);
+      if ((state?.open ?? 0) >= cap) {
+        const res = apiError(429, "too_many_uploads", `this workspace already has ${cap} open uploads; finish or cancel one first`);
+        res.headers.set("retry-after", String(CAP_RETRY_AFTER_S));
+        return res;
+      }
+      // Refused twice with room both times it was looked for: no answer here would be true.
+      if (tries >= 2) throw new Error("upload create refused twice with room for it");
+      made = await attempt();
     }
     if (replaces === null) return json(201, { upload_id: id, steps: parsed.manifest.steps.length });
     // `have`: the step numbers not to send. `settings`: whether this replace also carries
@@ -468,10 +545,20 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     if (up.logo_key !== null) return apiError(409, "already_sent", "the logo was already sent");
     const type = extOf(m.cover.logo);
 
+    // A size the create declared is the size the room was held for: any other is refused,
+    // as a step whose length differs from its manifest's is, before anything is stored.
+    const wrongLength = () => apiError(400, "bad_image", "logo: image length differs from the declared logo_bytes");
+    const declared = up.logo_declared_bytes;
+    const length = c.req.header("content-length");
+    if (declared !== null && length !== undefined && Number(length) <= LOGO_RULE.maxBytes && Number(length) !== declared) {
+      await c.req.raw.body?.cancel().catch(() => {});
+      return wrongLength();
+    }
     const data = await readImage(c.req.raw, LOGO_RULE.maxBytes);
     if (data instanceof Response) return data;
     const checked = checkImage(data, { ...LOGO_RULE, type });
     if (!checked.ok) return apiError(400, "bad_image", `logo: ${checked.error}`);
+    if (declared !== null && data.byteLength !== declared) return wrongLength();
 
     const key = logoKey(up.id, type);
     const claim = await deps.db.run(

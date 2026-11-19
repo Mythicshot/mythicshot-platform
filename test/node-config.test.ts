@@ -132,3 +132,61 @@ describe("the Node startup with a bad pair of addresses", () => {
     }, 90_000);
   }
 });
+
+const BAD_ALLOWANCE = "STORAGE_ALLOWANCE_BYTES is not a number of bytes. Write digits only, such as 1073741824, or leave it out for no limit.";
+
+describe("the storage allowance setting on the Node target", () => {
+  it("configFromEnv reads STORAGE_ALLOWANCE_BYTES, and leaves the config as it was without it", () => {
+    expect(configFromEnv({ STORAGE_ALLOWANCE_BYTES: "1073741824" })).toEqual({ publicImageBase: "", setupCode: null, hosts: null, storageAllowanceBytes: 1_073_741_824 });
+    expect(configFromEnv({ STORAGE_ALLOWANCE_BYTES: "0" }).storageAllowanceBytes).toBe(0);
+    expect(configFromEnv({ STORAGE_ALLOWANCE_BYTES: " 500 ", TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com" })).toEqual({
+      publicImageBase: "",
+      setupCode: null,
+      hosts: { tours: "tours.example.com", app: "app.example.com" },
+      storageAllowanceBytes: 500,
+    });
+    // Unset or empty is no limit: the key is not there at all, so the config is 0.1.7's.
+    for (const env of [{}, { STORAGE_ALLOWANCE_BYTES: "" }, { STORAGE_ALLOWANCE_BYTES: "  " }]) {
+      const config = configFromEnv(env);
+      expect(config.storageAllowanceBytes ?? null).toBeNull();
+      expect(Object.keys(config).sort()).toEqual(["hosts", "publicImageBase", "setupCode"]);
+    }
+  });
+
+  it("configFromEnv throws the fixed line for a bad allowance", () => {
+    for (const raw of ["-1", "1.5", "1GB", "9007199254740992", "12made-up34"]) {
+      let thrown: unknown = null;
+      try {
+        configFromEnv({ STORAGE_ALLOWANCE_BYTES: raw });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown, raw).toBeInstanceOf(Error);
+      expect((thrown as Error).message, raw).toBe(BAD_ALLOWANCE);
+    }
+  });
+
+  const made: string[] = [];
+  afterEach(() => {
+    for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  it("a bad allowance stops the start with one line that does not repeat the value", async () => {
+    for (const raw of ["12made-up34", "1GB", "-5"]) {
+      const root = mkdtempSync(join(tmpdir(), "dp-node-config-"));
+      made.push(root);
+      const dataDir = join(root, "data");
+      // Only what Node itself needs, so nothing from the test runner's environment leaks in.
+      const base: Record<string, string> = {};
+      for (const k of ["PATH", "Path", "SystemRoot", "TEMP", "TMP"]) if (process.env[k] !== undefined) base[k] = process.env[k] as string;
+      const port = await freePort();
+      const r = spawnSync(process.execPath, [ENTRY], { env: { ...base, DATA_DIR: dataDir, PORT: String(port), NODE_NO_WARNINGS: "1", STORAGE_ALLOWANCE_BYTES: raw }, encoding: "utf8", timeout: 60_000, windowsHide: true });
+      expect(r.status, raw).toBe(1);
+      expect(r.stderr, raw).toBe(BAD_ALLOWANCE + "\n");
+      expect(r.stderr, raw).not.toContain(raw);
+      expect(r.stdout, raw).toBe("");
+      // Stopped before the data folder was made or the database opened.
+      expect(existsSync(dataDir), raw).toBe(false);
+    }
+  }, 180_000);
+});

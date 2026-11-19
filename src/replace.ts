@@ -28,7 +28,7 @@
 //   exists for its tour. Deleting the tour takes whatever is left (src/tours.ts).
 import { newId, type Auth } from "./auth.ts";
 import type { Manifest } from "./manifest.ts";
-import type { Deps, Stmt } from "./ports.ts";
+import type { Deps, Stmt, Value } from "./ports.ts";
 
 /**
  * Replaced pictures one request removes: the same page a tour delete removes per call
@@ -51,6 +51,8 @@ export type ReplaceUpload = {
   replaces_chapter_id: string | null;
   /** The key of the logo this upload stored, if any. */
   logo_key: string | null;
+  /** The size of that logo, which the tour records for its storage count. */
+  logo_bytes: number | null;
   /** Whether the replaced chapter is the tour's first, so the tour's settings and logo come with it. */
   settings: boolean;
 };
@@ -64,6 +66,22 @@ export type ReplaceUpload = {
 export function firstChapterSql(chapterId: string, tourId: string): string {
   return `NOT EXISTS (SELECT 1 FROM chapter fc JOIN chapter fo ON fo.tour_id = fc.tour_id AND (fo.position < fc.position OR (fo.position = fc.position AND fo.id < fc.id))
                        WHERE fc.id = ${chapterId} AND fc.tour_id = ${tourId})`;
+}
+
+/**
+ * The bytes a replace of this chapter takes out of the workspace's storage count when it
+ * commits, as a scalar SQL expression with its parameters: the bytes of the chapter's
+ * steps as they are now and, for the tour's first chapter (`first`), the recorded size of
+ * the tour's logo, which such a replace always replaces or removes. It is 0, never null,
+ * for a chapter or tour that is gone or another workspace's. The create statement sets it
+ * against what the new chapter needs, inside that statement, so a replace is held to its
+ * growth as the chapter is at that moment.
+ */
+export function replacedBytes(workspaceId: string, tourId: string, chapterId: string, first: boolean): { sql: string; params: Value[] } {
+  const steps = "(SELECT coalesce(sum(s.bytes), 0) FROM step s JOIN tour t ON t.id = s.tour_id WHERE s.chapter_id = ? AND s.tour_id = ? AND t.workspace_id = ?)";
+  if (!first) return { sql: steps, params: [chapterId, tourId, workspaceId] };
+  const logo = "coalesce((SELECT t.logo_bytes FROM tour t WHERE t.id = ? AND t.workspace_id = ?), 0)";
+  return { sql: `(${steps} + ${logo})`, params: [chapterId, tourId, workspaceId, tourId, workspaceId] };
 }
 
 /** A picture a chapter has now whose bytes the server has hashed. */
@@ -198,12 +216,13 @@ export function replaceStatements(deps: Deps, auth: Auth, up: ReplaceUpload, m: 
     });
     stmts.push({
       // The spotlight dim is replaced only when the manifest sets one, as for a chapter
-      // upload: the other chapters' spotlights are dimmed by the tour's value too.
-      sql: `UPDATE tour SET spotlight_dim = coalesce(?, spotlight_dim), theme = ?, zoom = ?, cover = ?, cta = ?, end_card = ?, autoplay = ?, logo_key = ?, logo_type = ?
+      // upload: the other chapters' spotlights are dimmed by the tour's value too. The
+      // logo's size goes with its key, so the storage count holds the new logo, or none.
+      sql: `UPDATE tour SET spotlight_dim = coalesce(?, spotlight_dim), theme = ?, zoom = ?, cover = ?, cta = ?, end_card = ?, autoplay = ?, logo_key = ?, logo_type = ?, logo_bytes = ?
              WHERE tour.id = ? AND tour.workspace_id = ? AND ${first}`,
       params: [
         m.spotlight_dim, JSON.stringify(m.theme), JSON.stringify(m.zoom), json01(m.cover), json01(m.cta), json01(m.end), JSON.stringify(m.autoplay),
-        logoType === null ? null : up.logo_key, logoType, tourId, ws, chapterId,
+        logoType === null ? null : up.logo_key, logoType, logoType === null ? null : up.logo_bytes, tourId, ws, chapterId,
       ],
     });
   }

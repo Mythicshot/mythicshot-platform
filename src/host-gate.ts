@@ -41,6 +41,7 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "POST /api/v1/uploads/:id/commit": "both",
   "DELETE /api/v1/uploads/:id": "both",
   "GET /api/v1/me": "both",
+  "GET /api/v1/usage": "both",
   "GET /api/v1/tours": "both",
   "PATCH /api/v1/tours/:id": "both",
   "DELETE /api/v1/tours/:id": "both",

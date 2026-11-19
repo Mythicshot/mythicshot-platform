@@ -9,7 +9,8 @@ import type { Deps } from "../src/ports.ts";
 type HostVars = { TOURS_HOST?: unknown; APP_HOST?: unknown };
 type Entry = {
   hostsFromWorkerEnv(env: HostVars): HostsResult;
-  depsFromEnv(env: Record<string, unknown>, hosts: Hosts | null): Deps;
+  depsFromEnv(env: Record<string, unknown>, hosts: Hosts | null, storageAllowanceBytes?: number | null): Deps;
+  allowanceFromWorkerEnv(env: { STORAGE_ALLOWANCE_BYTES?: unknown }): { ok: true; bytes: number | null } | { ok: false; problem: string };
   default: { fetch(request: Request, env: Record<string, unknown>, ctx: unknown): Response | Promise<Response> };
 };
 
@@ -160,5 +161,77 @@ describe("the Worker with a good pair of addresses", () => {
     const hosts = { tours: "tours.example.com", app: "app.example.com" };
     expect(entry.depsFromEnv({ ...bindings(), SETUP_CODE: " correct-horse-battery-staple " }, hosts).config).toEqual({ publicImageBase: "", setupCode: "correct-horse-battery-staple", hosts });
     expect(entry.depsFromEnv({ ...bindings(), PUBLIC_IMAGE_BASE: "https://images.example.com" }, null).config).toEqual({ publicImageBase: "https://images.example.com", setupCode: null, hosts: null });
+  });
+});
+
+const BAD_ALLOWANCE = "STORAGE_ALLOWANCE_BYTES is not a number of bytes. Write digits only, such as 1073741824, or leave it out for no limit.";
+
+/** Each value the Worker cannot use as an allowance; text ones hold a made-up part that must never be logged. */
+const BAD_ALLOWANCES: [string, unknown][] = [
+  ["a unit", "1GB-made-up"],
+  ["a sign", "-1"],
+  ["a decimal", "1.5"],
+  ["past the safe range", "9007199254740992"],
+  // Present but not text (a JSON var): never read as unset, which would quietly lift the limit.
+  ["a number", 1073741824],
+  ["null", null],
+  ["an object", { bytes: "made-up" }],
+];
+
+describe("the Worker's storage allowance", () => {
+  const REQUESTS: [string, string][] = [
+    ["GET", "https://tours.example.com/healthz"],
+    ["GET", "https://tours.example.com/"],
+    ["GET", "https://tours.example.com/api/v1/me"],
+    ["POST", "https://tours.example.com/api/v1/uploads"],
+    ["GET", "https://tours.example.com/setup"],
+    ["GET", "https://tours.example.com/t/abc"],
+    ["GET", "https://tours.example.com/p/a.png"],
+    ["HEAD", "https://app.example.com/healthz"],
+    ["GET", "https://demo-platform.example-account.workers.dev/no/such/path"],
+  ];
+
+  it("a bad allowance answers 500 misconfigured on every path", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const [label, value] of BAD_ALLOWANCES) {
+      // With one address and with a good pair of addresses alike.
+      for (const hosts of [{}, { TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com" }]) {
+        for (const [method, url] of REQUESTS) {
+          logged.mockClear();
+          const res = await entry.default.fetch(new Request(url, { method, headers: { authorization: "Bearer made-up-token" } }), { ...bindings(), ...hosts, STORAGE_ALLOWANCE_BYTES: value }, CTX);
+          expect(res.status, `${label} ${url}`).toBe(500);
+          expect(res.headers.get("content-type"), label).toBe("application/json");
+          expect(res.headers.get("cache-control"), label).toBe("no-store");
+          expect(await res.text(), label).toBe('{"error":"misconfigured"}');
+          // One fixed line, without the value; no binding was used (each would have thrown).
+          expect(logged.mock.calls, label).toEqual([[`storage: ${BAD_ALLOWANCE}`]]);
+          expect(String(logged.mock.calls[0][0]).toLowerCase(), label).not.toContain("made-up");
+        }
+      }
+    }
+  });
+
+  it("no allowance, or an empty one, leaves the Worker as it was", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const extra of [{}, { STORAGE_ALLOWANCE_BYTES: "" }, { STORAGE_ALLOWANCE_BYTES: "  " }, { STORAGE_ALLOWANCE_BYTES: undefined }]) {
+      expect((await entry.default.fetch(new Request("https://tours.example.com/api/v1/me"), { ...bindings(), ...extra }, CTX)).status).toBe(401);
+    }
+    // A good one serves too.
+    expect((await entry.default.fetch(new Request("https://tours.example.com/api/v1/me"), { ...bindings(), STORAGE_ALLOWANCE_BYTES: "1073741824" }, CTX)).status).toBe(401);
+    expect(logged).not.toHaveBeenCalled();
+  });
+
+  it("allowanceFromWorkerEnv reads the var, and depsFromEnv carries the number", () => {
+    expect(entry.allowanceFromWorkerEnv({})).toEqual({ ok: true, bytes: null });
+    expect(entry.allowanceFromWorkerEnv({ STORAGE_ALLOWANCE_BYTES: "" })).toEqual({ ok: true, bytes: null });
+    expect(entry.allowanceFromWorkerEnv({ STORAGE_ALLOWANCE_BYTES: "0" })).toEqual({ ok: true, bytes: 0 });
+    expect(entry.allowanceFromWorkerEnv({ STORAGE_ALLOWANCE_BYTES: "1073741824" })).toEqual({ ok: true, bytes: 1_073_741_824 });
+    for (const [label, value] of BAD_ALLOWANCES) expect(entry.allowanceFromWorkerEnv({ STORAGE_ALLOWANCE_BYTES: value }), label).toEqual({ ok: false, problem: BAD_ALLOWANCE });
+    const hosts = { tours: "tours.example.com", app: "app.example.com" };
+    expect(entry.depsFromEnv(bindings(), hosts, 1_073_741_824).config).toEqual({ publicImageBase: "", setupCode: null, hosts, storageAllowanceBytes: 1_073_741_824 });
+    expect(entry.depsFromEnv(bindings(), null, 0).config).toEqual({ publicImageBase: "", setupCode: null, hosts: null, storageAllowanceBytes: 0 });
+    // No limit: the config is exactly what it was before the setting existed.
+    expect(Object.keys(entry.depsFromEnv(bindings(), null, null).config).sort()).toEqual(["hosts", "publicImageBase", "setupCode"]);
+    expect(Object.keys(entry.depsFromEnv(bindings(), null).config).sort()).toEqual(["hosts", "publicImageBase", "setupCode"]);
   });
 });

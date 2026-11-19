@@ -138,6 +138,8 @@ describe("the API description", () => {
     expect(s.EndCard.properties.text.maxLength).toBe(LIMITS.endText);
     expect(s.RenameBody.properties.title.maxLength).toBe(LIMITS.title);
     expect(s.UploadCreate.properties.sha256.maxItems).toBe(LIMITS.steps);
+    expect(s.UploadCreate.properties.logo_bytes).toMatchObject({ type: "integer", minimum: 1, maximum: LOGO_RULE.maxBytes });
+    expect(s.UploadCreate.required).toEqual(["manifest", "target"]);
 
     // The limits section of the introduction states every one of them, in words.
     const intro = doc.info.description;
@@ -228,8 +230,58 @@ describe("the API description", () => {
       "Finish an upload",
       "Cancel an upload",
       "The workspace and the server version",
+      "The workspace's storage use",
       "Whether the server is up",
     ]);
+  });
+
+  it("usage is described with the fields it answers, closed", () => {
+    const doc = openapi();
+    const op = operations(doc).find((o) => o.key === "GET /api/v1/usage")!.op;
+    expect(op.tags).toEqual(["Workspace"]);
+    expect(op.operationId).toBe("getUsage");
+    expect(Object.keys(op.responses)).toEqual(["200", "401"]);
+    expect(op.responses["200"].content["application/json"].schema).toEqual({ $ref: "#/components/schemas/Usage" });
+    const usage = (doc.components.schemas as Json).Usage;
+    const fields = ["used_bytes", "allowance_bytes", "over", "tours", "counted"];
+    expect(Object.keys(usage.properties)).toEqual(fields);
+    expect(usage.required).toEqual(fields);
+    expect(usage.additionalProperties).toBe(false);
+    expect(usage.properties.allowance_bytes.type).toEqual(["integer", "null"]);
+    const counted = ["pictures", "logos", "uploads_in_progress"];
+    expect(Object.keys(usage.properties.counted.properties)).toEqual(counted);
+    expect(usage.properties.counted.required).toEqual(counted);
+    expect(usage.properties.counted.additionalProperties).toBe(false);
+    // What is counted and what is not is said where a client reads it.
+    for (const text of ["published", "24 hours", "No limit", "never deletes"]) expect(op.description, text).toContain(text);
+  });
+
+  it("the create's 413 has two documented forms", () => {
+    const doc = openapi();
+    const res = operations(doc).find((o) => o.key === "POST /api/v1/uploads")!.op.responses["413"];
+    const shapes = res.content["application/json"].schema.oneOf as Json[];
+    expect(shapes).toHaveLength(2);
+    // The request is too long: the plain refusal, as before.
+    expect(shapes[0].properties.error.enum).toEqual(["too_large"]);
+    expect(shapes[0].additionalProperties).toBe(false);
+    // The workspace's storage is full: the closed schema StorageFull, with the three numbers.
+    expect(shapes[1]).toEqual({ $ref: "#/components/schemas/StorageFull" });
+    const full = (doc.components.schemas as Json).StorageFull;
+    const fields = ["error", "detail", "used_bytes", "allowance_bytes", "needed_bytes"];
+    expect(Object.keys(full.properties)).toEqual(fields);
+    expect(full.required).toEqual(fields);
+    expect(full.additionalProperties).toBe(false);
+    expect(full.properties.error.enum).toEqual(["storage_full"]);
+    for (const f of fields.slice(2)) expect(full.properties[f], f).toMatchObject({ type: "integer", minimum: 0 });
+    expect(res.description).toContain("storage_full");
+    expect(res.description).toContain("too_large");
+    // No other request answers storage_full: only a create is ever refused for storage.
+    for (const { key, op } of operations(doc)) {
+      if (key !== "POST /api/v1/uploads") expect(JSON.stringify(op.responses), key).not.toContain("StorageFull");
+    }
+    // The limits section and the create's own text both say it.
+    expect(doc.info.description).toContain("413 `storage_full`");
+    expect(operations(doc).find((o) => o.key === "POST /api/v1/uploads")!.op.description).toContain("storage_full");
   });
 
   it("only health is public", () => {

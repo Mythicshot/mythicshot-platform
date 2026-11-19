@@ -46,5 +46,13 @@
     // and keeps what an install's own file (wrangler.deploy.jsonc) holds, as it is.
     "TOURS_HOST": "",
     "APP_HOST": ""
+    // STORAGE_ALLOWANCE_BYTES: not listed here, so by default no workspace is limited.
+    // An install that wants a limit adds the var to its own file, as digits only, in
+    // quotes, such as "STORAGE_ALLOWANCE_BYTES": "1073741824" for 1 GB: the most bytes a
+    // workspace may use, unless it has a number of its own. "0" is a limit; empty is no
+    // limit. Anything else (a sign, a decimal, a unit, a number written without quotes):
+    // every request answers 500 `misconfigured`, /healthz included, until the value is
+    // fixed or removed. `npm run setup:cloudflare` does not keep this var yet: it writes
+    // the install's file from this one, so the var must be added again after each run.
   }
 }
