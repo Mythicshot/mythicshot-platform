@@ -104,6 +104,11 @@ export function adminRoutes(app: Hono, deps: Deps): void {
     // its workspace (its one membership) as p.ws. An account belongs to a workspace by its
     // membership only, as everywhere else; every account has one (the migration and the
     // start of the server give it one).
+    //
+    // For a later phase, when an account can be deleted: the cursor is found by looking the
+    // account up, so a cursor that names an account deleted since the previous page lists
+    // nobody, and the list is cut short there. Such a phase must page by the cursor's
+    // (created_at, id) values themselves, or keep deleted accounts' positions.
     const rows = await deps.db.all<Row>(
       `SELECT p.id, p.username, p.email, p.status, p.is_admin, p.created_at, p.ws AS workspace_id, p.own, p.allowance, ${USAGE_COLUMNS}
          FROM (SELECT u.id, u.username, u.email, u.status, u.is_admin, u.created_at, m.workspace_id AS ws,
@@ -165,6 +170,10 @@ export function adminRoutes(app: Hono, deps: Deps): void {
     const id = c.req.param("id");
     if (!WORKSPACE_ID.test(id)) return notFound();
 
+    // For a later phase, when a workspace can be deleted: a workspace deleted between the read
+    // below and the batch is not updated (no row matches), but the batch still writes its
+    // audit row, which then records a change that never happened. Such a phase must make the
+    // batch fail when no row was updated, as the old value's check does here.
     for (let attempt = 1; ; attempt++) {
       const found = await deps.db.first<{ own: number | null }>("SELECT storage_allowance_bytes AS own FROM workspace WHERE id = ?", [id]);
       if (found === null) return notFound();

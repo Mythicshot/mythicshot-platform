@@ -63,6 +63,13 @@ function ask(deps: Deps, method: string, path: string, opts: Ask = {}): Promise<
   return send(deps, method, path, { token: opts.token ?? null, body, headers, origin: opts.origin });
 }
 
+/** A new session of the account, made as completing a sign-in makes one: its cookie and anti-forgery value. */
+async function signInAs(deps: Deps, userId: string): Promise<{ id: string; cookie: string; csrf: string }> {
+  const made = await redeemSignInCode(deps, await createSignInCode(deps, userId), null, null);
+  if (made === null) throw new Error("the sign-in was refused");
+  return { id: made.sessionId, cookie: `${SESSION_COOKIE}=${made.secret}`, csrf: await csrfFor(made.secret) };
+}
+
 /** The admin's list, asked with the admin's session. */
 const list = (w: World, query = "") => ask(w.deps, "GET", ACCOUNTS + query, { headers: page(w.a.session) });
 /** Sets a workspace's allowance with the admin's session. */
@@ -199,6 +206,12 @@ describe("who may call an admin route", () => {
       ["the admin's session id as the cookie", { headers: page({ cookie: `${SESSION_COOKIE}=${a.session.id}`, csrf: a.session.csrf }) }],
       ["the hash of the admin's token as a token", { token: await hashToken(a.token) }],
     ];
+    // Two more sessions of the admin: one signed out, one past its end.
+    const revoked = await signInAs(deps, a.userId);
+    const expired = await signInAs(deps, a.userId);
+    await deps.db.run("UPDATE session SET revoked_at = ? WHERE id = ?", [deps.now(), revoked.id]);
+    await deps.db.run("UPDATE session SET expires_at = ? WHERE id = ?", [deps.now() - 1, expired.id]);
+    callers.push(["the admin's signed-out session", { headers: page(revoked) }], ["the admin's expired session", { headers: page(expired) }]);
     const before = await dumpOf(deps, w.keys, { files: true, touched: [a.session.id, b.session.id] });
     for (const route of routes(w)) {
       for (const [who, opts] of callers) {
@@ -211,11 +224,21 @@ describe("who may call an admin route", () => {
     await deps.db.run("UPDATE user SET is_admin = 0 WHERE id = ?", [a.userId]);
     for (const route of routes(w)) expect(seen(await ask(deps, route.method, route.path, { headers: page(a.session), json: route.json })), `${route.what}: a former admin`).toEqual(REFUSED);
     await deps.db.run("UPDATE user SET is_admin = 1 WHERE id = ?", [a.userId]);
+    // So is a disabled admin: nobody at all.
+    await deps.db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [a.userId]);
+    for (const route of routes(w)) expect(seen(await ask(deps, route.method, route.path, { headers: page(a.session), json: route.json })), `${route.what}: a disabled admin`).toEqual(REFUSED);
+    await deps.db.run("UPDATE user SET status = 'active' WHERE id = ?", [a.userId]);
+    // HEAD of the list: the same status and headers, without the body.
+    for (const [who, opts] of [["nobody", {}], ["a member's session", { headers: page(b.session) }], ["the admin's own token", { token: a.token }]] as [string, Ask][]) {
+      const r = await ask(deps, "HEAD", ACCOUNTS, opts);
+      expect(seen(r), `HEAD of the list: ${who}`).toEqual({ ...REFUSED, body: "" });
+    }
     // Nothing changed, nothing was stored.
     expect(w.writes()).toEqual([]);
     expect(await dumpOf(deps, w.keys, { files: true, touched: [a.session.id, b.session.id] })).toEqual(before);
     // The admin's session itself is answered: the refusals were about the caller.
     for (const route of routes(w)) expect((await ask(deps, route.method, route.path, { headers: page(a.session), json: route.json })).status, route.what).toBe(200);
+    expect((await ask(deps, "HEAD", ACCOUNTS, { headers: page(a.session) })).status).toBe(200);
   });
 
   it("the change needs the anti-forgery header", SLOW, async () => {
@@ -384,6 +407,8 @@ describe("setting a workspace's allowance", () => {
       ["JSON null", "null"],
       ["another field beside it", '{"storage_allowance_bytes":100,"tour_id":"tour_0123456789abcdef01234567"}'],
       ["a body past the cap", `{"storage_allowance_bytes":100,"x":"${"y".repeat(5000)}"}`],
+      // Valid in every other way: only its length is wrong.
+      ["a good body padded past the cap", `{"storage_allowance_bytes":100}${" ".repeat(1100)}`],
     ];
     for (const [cases, code] of [[badValues, "bad_allowance"], [badBodies, "bad_request"]] as const) {
       for (const [what, body] of cases) {
@@ -399,6 +424,51 @@ describe("setting a workspace's allowance", () => {
     expect(r.json).toEqual({ error: "bad_allowance", detail: "storage_allowance_bytes must be a whole number of bytes from 0 to 9007199254740991, or null for the site's default" });
     // Nothing changed and nothing was recorded.
     expect(await dumpOf(deps, w.keys, { touched: [a.session.id] })).toEqual(before);
+    // The padded body is refused for its length alone: within the cap, the same value is taken.
+    const within = await ask(deps, "PATCH", workspacePath(b.workspaceId), { headers: page(a.session), body: `{"storage_allowance_bytes":100}${" ".repeat(900)}` });
+    expect(within.json).toMatchObject({ storage_allowance_bytes: 100 });
+  });
+
+  it("a change that another change overtakes is read again, and its audit row names the number it really replaced", SLOW, async () => {
+    const w = await build();
+    const { deps, b } = w;
+    await deps.db.run("UPDATE workspace SET storage_allowance_bytes = 4000 WHERE id = ?", [b.workspaceId]);
+    const name = async () => (await deps.db.first<{ name: string }>("SELECT name FROM workspace WHERE id = ?", [b.workspaceId]))!.name;
+    const audit = () => deps.db.all<{ detail: string }>("SELECT detail FROM audit WHERE event = 'allowance_set'");
+    const realBatch = deps.db.batch.bind(deps.db);
+    /** Before each write of the allowance (up to `times` of them), another change lands with a number of its own. */
+    const compete = (times: number) => {
+      let n = 0;
+      deps.db.batch = async (stmts) => {
+        if (stmts[0]?.sql.startsWith("UPDATE workspace SET storage_allowance_bytes") && n < times) {
+          n++;
+          await deps.db.run("UPDATE workspace SET storage_allowance_bytes = ? WHERE id = ?", [990 + n, b.workspaceId]);
+        }
+        return realBatch(stmts);
+      };
+      return () => n;
+    };
+
+    // Overtaken once: the second try reads 991 and replaces it.
+    const once = compete(1);
+    const r = await setAllowance(w, b.workspaceId, 5000);
+    deps.db.batch = realBatch;
+    expect(once()).toBe(1);
+    expect(r.status, r.text).toBe(200);
+    expect(r.json).toMatchObject({ allowance_bytes: 5000, storage_allowance_bytes: 5000 });
+    expect((await audit()).map((x) => JSON.parse(x.detail))).toEqual([{ old_bytes: 991, new_bytes: 5000 }]);
+    expect(await name()).toBe(b.workspaceName);
+
+    // Overtaken on every try: it gives up with the server's one failure, and records nothing.
+    const always = compete(Number.MAX_SAFE_INTEGER);
+    const failed = await setAllowance(w, b.workspaceId, 6000);
+    deps.db.batch = realBatch;
+    expect(always()).toBe(3);
+    expect([failed.status, failed.text]).toEqual([500, '{"error":"internal"}']);
+    expect(await audit()).toHaveLength(1);
+    expect(await name()).toBe(b.workspaceName);
+    // The workspace keeps the number the last competing change gave it.
+    expect(await deps.db.first("SELECT storage_allowance_bytes FROM workspace WHERE id = ?", [b.workspaceId])).toEqual({ storage_allowance_bytes: 993 });
   });
 
   it("lowering it below usage is accepted, answers over, and deletes nothing", SLOW, async () => {
