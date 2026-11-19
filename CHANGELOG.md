@@ -2,6 +2,31 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.12 (2026-11-19)
+
+- Sign-in pages on the app address: enter an email address, get a link, press one button to sign in. There is no password.
+- An account page shows who is signed in, how much storage the workspace uses, and every browser that is signed in, with a way to sign out of one or of all.
+- When a workspace is over its storage allowance, the account page says so and says what to do.
+- A site can show a contact for invites on the sign-in page with the optional `INVITE_CONTACT` (an email address or an https address).
+
+## 0.1.11 (2026-11-19)
+
+- An admin can list accounts with the storage each workspace uses, and set one workspace's storage allowance, through the API. An admin cannot open another workspace's tours or content.
+
+## 0.1.10 (2026-11-19)
+
+- Sign-in by link: a link works once and for 15 minutes, only its hash is stored, and asking for one answers the same whether or not the address has an account.
+- Sessions: a browser stays signed in for 30 days of use, in a cookie that scripts cannot read, and every change made from a browser is checked against cross-site requests.
+- Mail: the site can send sign-in links through a mail server over TLS (`MAIL_MODE=smtp` and the `SMTP_` settings). Mail is sent from a separate thread so it cannot slow other requests.
+- The first admin is made with one command on the server, which prints a sign-in link. Later recovery links are off unless the site sets `RECOVERY_LINKS=on`.
+- A script rehearses an update on a copy of a site's data and compares before and after.
+
+## 0.1.9 (2026-11-19)
+
+- Accounts: the database can hold users, workspace memberships, sign-in methods, sessions and an audit log. Existing tours, links and tokens are unchanged.
+- Limits on how often sign-in can be asked for, per address, per network and for the whole site.
+- A test suite holds every request to its own workspace: one workspace's token or session can never read or change another's.
+
 ## 0.1.8 (2026-11-19)
 
 - Storage allowance: a site can set how many bytes each workspace may use, with `STORAGE_ALLOWANCE_BYTES`. It is off unless the site sets it.
