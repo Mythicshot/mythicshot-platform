@@ -207,10 +207,18 @@ export type Install = {
    * never checked or shown here; the Worker itself reports a pair it cannot use.
    */
   hostVars?: Record<string, unknown>;
+  /**
+   * The other vars this command never sets (KEPT_VARS), when the install's file holds
+   * them: set by hand, kept exactly as found, never checked or shown here.
+   */
+  keptVars?: Record<string, unknown>;
 };
 
 /** The two address vars this command keeps but never sets. */
 const HOST_VARS = ["TOURS_HOST", "APP_HOST"] as const;
+
+/** Vars wrangler.jsonc does not carry, which an install may set by hand and `update` must not drop. */
+const KEPT_VARS = ["STORAGE_ALLOWANCE_BYTES"] as const;
 
 /** The comment line in wrangler.deploy.jsonc that records a confirmed address not attached yet. */
 const PENDING_LINE = /^\/\/ setup:cloudflare: address (\S+) confirmed, not attached yet; attached before: (\S+)$/m;
@@ -261,6 +269,9 @@ export function readInstall(root: string): Install | null {
   const hostVars: Record<string, unknown> = {};
   for (const key of HOST_VARS) if (c.vars && Object.hasOwn(c.vars, key)) hostVars[key] = c.vars[key];
   if (Object.values(hostVars).some((v) => v !== "")) install.hostVars = hostVars;
+  const keptVars: Record<string, unknown> = {};
+  for (const key of KEPT_VARS) if (c.vars && Object.hasOwn(c.vars, key)) keptVars[key] = c.vars[key];
+  if (Object.keys(keptVars).length > 0) install.keptVars = keptVars;
   const pending = readFileSync(path, "utf8").match(PENDING_LINE);
   if (pending) {
     const previous = pending[2] === "none" ? null : pending[2];
@@ -289,7 +300,8 @@ export function deployConfigText(root: string, install: Install & { databaseId: 
   else delete c.routes;
   // The two address vars stay empty, as in wrangler.jsonc, unless the install's own file
   // had them set by hand: then they are written back exactly as they were.
-  c.vars = { ...(c.vars ?? {}), PUBLIC_IMAGE_BASE: install.publicImageBase, ...(install.hostVars ?? {}) };
+  // A storage allowance set by hand in the install's file is written back as it was, too.
+  c.vars = { ...(c.vars ?? {}), PUBLIC_IMAGE_BASE: install.publicImageBase, ...(install.hostVars ?? {}), ...(install.keptVars ?? {}) };
   const pending =
     install.domain && install.pending
       ? `// setup:cloudflare: address ${install.domain} confirmed, not attached yet; attached before: ${install.pending.previous ?? "none"}\n`
@@ -297,7 +309,8 @@ export function deployConfigText(root: string, install: Install & { databaseId: 
   return (
     "// This install's Wrangler configuration, written by `npm run setup:cloudflare` from\n" +
     "// wrangler.jsonc. Ignored by Git; holds no secret. `update` rewrites it, keeping the\n" +
-    "// name, database id, address, PUBLIC_IMAGE_BASE, TOURS_HOST and APP_HOST.\n" +
+    "// name, database id, address, PUBLIC_IMAGE_BASE, TOURS_HOST, APP_HOST and\n" +
+    "// STORAGE_ALLOWANCE_BYTES.\n" +
     pending +
     JSON.stringify(c, null, 2) +
     "\n"
@@ -778,6 +791,7 @@ async function setup(io: Io, o: Options): Promise<void> {
     databaseId: databaseId ?? "00000000-0000-0000-0000-000000000000",
     publicImageBase: existing?.publicImageBase ?? "",
     ...(existing?.hostVars ? { hostVars: existing.hostVars } : {}),
+    ...(existing?.keptVars ? { keptVars: existing.keptVars } : {}),
     ...(domain !== null && (newDomain || pendingBefore) ? { pending: { previous: newDomain ? attachedBefore : pendingBefore!.previous } } : {}),
   };
   const configChanged = writeConfig(io, o, deployConfigText(io.root, install));

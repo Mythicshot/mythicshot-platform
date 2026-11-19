@@ -838,6 +838,29 @@ describe("the two address settings (TOURS_HOST and APP_HOST)", () => {
     expect(deployed(root).vars).toEqual(kept);
   });
 
+  it("update keeps a hand-set STORAGE_ALLOWANCE_BYTES, and so does running setup again", async () => {
+    const account = fakeAccount();
+    const first = harness(account);
+    expect(await first.run("--yes")).toBe(0);
+    const path = join(first.root, DEPLOY_CONFIG);
+    expect(readFileSync(path, "utf8")).not.toContain('"STORAGE_ALLOWANCE_BYTES":');
+    // Written in by hand; a value this command never checks or prints.
+    for (const [written, value] of [['"1073741824"', "1073741824"], ['"made-up-number"', "made-up-number"], ["0", 0]] as [string, unknown][]) {
+      writeFileSync(path, readFileSync(path, "utf8").replace(/"APP_HOST": ""(,\s*"STORAGE_ALLOWANCE_BYTES": [^\n,}]+)?/, `"APP_HOST": "", "STORAGE_ALLOWANCE_BYTES": ${written}`));
+      const kept = { ...VARS, STORAGE_ALLOWANCE_BYTES: value };
+      expect(deployed(first.root).vars).toEqual(kept);
+      for (const argv of [["update", "--yes"], ["--yes"], ["status"], ["update", "--yes"]]) {
+        const h = harness(account, { root: first.root });
+        expect(await h.run(...argv), argv.join(" ")).toBe(0);
+        expect(deployed(first.root).vars, argv.join(" ")).toEqual(kept);
+        expect((text(h.out) + text(h.err)).toLowerCase(), argv.join(" ")).not.toContain("made-up");
+      }
+      expect(readInstall(first.root)).toEqual({ name: "demo-platform", domain: null, databaseId: DB_ID, publicImageBase: "", keptVars: { STORAGE_ALLOWANCE_BYTES: value } });
+    }
+    // The file's own first lines say it is kept.
+    expect(readFileSync(path, "utf8").split("\n").slice(0, 4).join("\n")).toContain("STORAGE_ALLOWANCE_BYTES");
+  });
+
   it("update keeps both empty when they were empty", async () => {
     const account = fakeAccount();
     const first = harness(account);
