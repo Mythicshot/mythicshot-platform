@@ -8,27 +8,48 @@ import { migrate } from "../src/node/migrate.ts";
 import type { Config, Deps } from "../src/ports.ts";
 import { newId } from "../src/auth.ts";
 import { createWorkspace, workspaceStatements } from "../src/workspaces.ts";
+import { background as trackBackground, checkAtEndOfTest } from "./background.ts";
 import { counted } from "./counting.ts";
+import { FakeMailer } from "./fake-mail.ts";
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url));
 
+/**
+ * `mail: false` gives deps with mail off exactly as a live site has it: no `deps.mail` at
+ * all, so `mailOf` gives the mailer that is off. By default the deps carry the fake mailer.
+ */
+export type MakeOptions = { mail?: boolean };
+
 /** A fresh database file and two empty folders in a new temporary directory. */
-export async function makeDeps(config?: Partial<Config>) {
+export async function makeDeps(config?: Partial<Config>, opts: MakeOptions = {}) {
   const root = await mkdtemp(join(tmpdir(), "demo-platform-test-"));
   const db = new NodeDb(join(root, "db.sqlite"));
   await migrate(db, MIGRATIONS_DIR);
   const drafts = new NodeFileStore(join(root, "drafts"));
   const pub = new NodeFileStore(join(root, "public"));
   const c = counted(db, drafts, pub);
+  const mail = new FakeMailer();
+  const background = trackBackground();
   const deps: Deps = {
     db: c.db,
     drafts: c.drafts,
     pub: c.pub,
     config: { publicImageBase: "", setupCode: null, ...config },
     now: () => Date.now(),
+    ...(opts.mail === false ? {} : { mail }),
+    defer: background.defer,
   };
+  // The test that made these deps fails if it ends with deferred work still running.
+  checkAtEndOfTest(background);
   return {
     deps,
+    /**
+     * The mailer of these deps: it keeps every mail it is handed and contacts nothing. Not
+     * counted in `calls`. With `mail: false` the deps carry no mailer and this one stays empty.
+     */
+    mail,
+    /** Resolves when all work deferred so far has ended. A failure of that work is the fixed line, as on a real target. */
+    settle: () => background.settle(),
     draftKeys: () => drafts.keys(),
     publicKeys: () => pub.keys(),
     calls: c.calls,

@@ -861,6 +861,35 @@ describe("the two address settings (TOURS_HOST and APP_HOST)", () => {
     expect(readFileSync(path, "utf8").split("\n").slice(0, 4).join("\n")).toContain("STORAGE_ALLOWANCE_BYTES");
   });
 
+  it("update keeps a hand-set SITE_HOST, alone and beside a storage allowance", async () => {
+    const account = fakeAccount();
+    const first = harness(account);
+    expect(await first.run("--yes")).toBe(0);
+    const path = join(first.root, DEPLOY_CONFIG);
+    // wrangler.jsonc does not carry the var, so a new install's file has none.
+    expect(readFileSync(path, "utf8")).not.toContain('"SITE_HOST":');
+    // Written in by hand; a value this command never checks or prints.
+    const hand: [string, Record<string, unknown>][] = [
+      ['"SITE_HOST": "tours.example.com"', { SITE_HOST: "tours.example.com" }],
+      ['"SITE_HOST": "https://made-up.example.com/"', { SITE_HOST: "https://made-up.example.com/" }],
+      ['"STORAGE_ALLOWANCE_BYTES": "1073741824", "SITE_HOST": "tours.example.com"', { STORAGE_ALLOWANCE_BYTES: "1073741824", SITE_HOST: "tours.example.com" }],
+    ];
+    for (const [written, values] of hand) {
+      writeFileSync(path, readFileSync(path, "utf8").replace(/"APP_HOST": ""(,\s*"(?:SITE_HOST|STORAGE_ALLOWANCE_BYTES)": [^\n,}]+)*/, `"APP_HOST": "", ${written}`));
+      const kept = { ...VARS, ...values };
+      expect(deployed(first.root).vars, written).toEqual(kept);
+      for (const argv of [["update", "--yes"], ["--yes"], ["status"], ["update", "--yes"]]) {
+        const h = harness(account, { root: first.root });
+        expect(await h.run(...argv), argv.join(" ")).toBe(0);
+        expect(deployed(first.root).vars, argv.join(" ")).toEqual(kept);
+        expect((text(h.out) + text(h.err)).toLowerCase(), argv.join(" ")).not.toContain("made-up");
+      }
+      expect(readInstall(first.root)?.keptVars, written).toEqual(values);
+    }
+    // The file's own first lines say it is kept.
+    expect(readFileSync(path, "utf8").split("\n").slice(0, 4).join("\n")).toContain("SITE_HOST");
+  });
+
   it("update keeps both empty when they were empty", async () => {
     const account = fakeAccount();
     const first = harness(account);

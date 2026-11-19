@@ -3,18 +3,17 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp } from "../app.ts";
 import { withBudget } from "../budget.ts";
-import type { Deps } from "../ports.ts";
-import { configFromEnv, guardTarget } from "./config.ts";
+import { setClientAddress } from "../client.ts";
+import { DEFER_FAILED, deferTracker, type Deps } from "../ports.ts";
+import { clientAddressReader, configFromEnv, guardTarget, mailFromEnv, type Incoming } from "./config.ts";
 import { APP_UID, prepareDataDir } from "./datadir.ts";
 import { NodeDb } from "./db.ts";
 import { NodeFileStore } from "./files.ts";
 import { migrate } from "./migrate.ts";
+import { stopSequence } from "./stop.ts";
 
 // src/node/entry.ts and dist/node/entry.js both sit two folders below the repo root.
 const MIGRATIONS_DIR = fileURLToPath(new URL("../../migrations/", import.meta.url));
-
-/** How long open requests may run after SIGTERM before their connections are cut. */
-const STOP_GRACE_MS = 5000;
 
 /**
  * A client must send all request headers within 15 s and the whole request, body
@@ -36,6 +35,17 @@ async function main(): Promise<void> {
   // Read before anything is created or opened: a pair of addresses that cannot be used
   // stops the start here, with its one line and nothing else.
   const config = configFromEnv(process.env);
+  // Mail and the client address never stop the start. A mail block that cannot be used
+  // leaves mail off, and a header name that cannot be used leaves every address unknown;
+  // each says so in one fixed line that holds no value. The mail server is not contacted
+  // here: the first connection is made by the first mail.
+  const mail = mailFromEnv(process.env, config);
+  if (mail.problem !== null) console.error(mail.problem);
+  const client = clientAddressReader(process.env.CLIENT_ADDRESS_HEADER);
+  if (client.problem !== null) console.error(client.problem);
+  // Work that goes on after an answer (a mail being sent) is tracked here, so a stop can
+  // wait for it. A failure is one fixed line; the error itself is never written.
+  const background = deferTracker(() => console.error(DEFER_FAILED));
 
   const root = prepareDataDir(dataDir);
   const dbPath = join(root, "db.sqlite");
@@ -54,6 +64,9 @@ async function main(): Promise<void> {
     pub: new NodeFileStore(join(root, "public")),
     config,
     now: () => Date.now(),
+    // No mailer at all while mail is off, so the deps are then the ones of a site without mail.
+    ...(mail.mode === "smtp" ? { mail: mail.mailer } : {}),
+    defer: background.defer,
   };
 
   // Each request gets its own metered ports, as on Cloudflare, so one that goes over the
@@ -62,31 +75,41 @@ async function main(): Promise<void> {
   // With two addresses the host is read from the Host header only. A request line that
   // carries a full address instead of a path would name its own host, so the guard answers
   // it as a host this install does not serve. With one address nothing is checked, as before.
-  const fetchOne = guardTarget(config.hosts, serveOne);
+  const guarded = guardTarget(config.hosts, serveOne);
+  // The client address is noted before the app sees the request: the socket's, or the last
+  // value of the header CLIENT_ADDRESS_HEADER names. The app itself reads no header for it.
+  const fetchOne = (req: Request, env: { incoming: Incoming & { url?: string } }) => {
+    setClientAddress(req, client.read(env.incoming));
+    return guarded(req, env);
+  };
   const server = serve({ fetch: fetchOne, port, serverOptions: { headersTimeout: HEADERS_TIMEOUT_MS, requestTimeout: REQUEST_TIMEOUT_MS } }, (info) => {
     console.log(`listening on port ${info.port}`);
   });
 
   // `docker stop` sends SIGTERM, and Node running as PID 1 has no default handler for
-  // it. Stop taking requests, let open ones finish, then close the database so SQLite
-  // checkpoints its WAL into db.sqlite and the file is whole on the volume. If requests
-  // are still open after the grace period they are cut, before Docker's own 10 s kill.
-  let stopping = false;
-  const stop = (signal: string) => {
-    if (stopping) return;
-    stopping = true;
-    console.log(`${signal} received, stopping`);
-    const finish = () => {
-      db.close();
-      console.log("stopped");
-      process.exit(0);
-    };
-    server.close(finish);
-    if ("closeIdleConnections" in server) server.closeIdleConnections();
-    setTimeout(() => {
-      if ("closeAllConnections" in server) server.closeAllConnections();
-    }, STOP_GRACE_MS).unref();
-  };
+  // it. Stop taking requests, let open ones finish, wait for work deferred by a request
+  // (a mail on its way), then close the database so SQLite checkpoints its WAL into
+  // db.sqlite and the file is whole on the volume. The whole stop has one deadline,
+  // counted from the signal and well before the 10 s kill: requests still open after
+  // STOP_CUT_REQUESTS_MS are cut, and at STOP_DEADLINE_MS the database is closed whatever
+  // is still going on. The sequence and its test are in ./stop.ts.
+  const stop = stopSequence({
+    server: {
+      close: (done) => server.close(done),
+      closeIdleConnections: () => {
+        if ("closeIdleConnections" in server) server.closeIdleConnections();
+      },
+      closeAllConnections: () => {
+        if ("closeAllConnections" in server) server.closeAllConnections();
+      },
+    },
+    settle: () => background.settle(),
+    closeDb: () => db.close(),
+    setTimeout: (run, ms) => setTimeout(run, ms),
+    log: (line) => console.log(line),
+    error: (line) => console.error(line),
+    exit: (code) => process.exit(code),
+  });
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
 }

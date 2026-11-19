@@ -395,7 +395,18 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     // as well, since waiting does not make room. When the cap is reached it is the cap's.
     // When neither is so, room appeared between the statement and the look (an upload was
     // finished or aborted at that moment): the statement is tried once more, and its own
-    // refusal is read again. The cap's answer is never given unless the cap is reached.
+    // refusal is read again. The storage answer is only ever given when the upload does not
+    // fit at the moment of the look. The cap's answer is given when the cap is reached, and
+    // in one more case: the second statement was refused too and the second look found
+    // room again, so uploads of this workspace are being opened and closed around this
+    // request. No answer says that exactly; the cap's 429 with its `retry-after` is what
+    // such a create was answered before the allowance existed, and "send it again in a
+    // minute" is the right thing to do. It is an answer, never an error.
+    const capReached = (): Response => {
+      const res = apiError(429, "too_many_uploads", `this workspace already has ${cap} open uploads; finish or cancel one first`);
+      res.headers.set("retry-after", String(CAP_RETRY_AFTER_S));
+      return res;
+    };
     let made = await attempt();
     for (let tries = 1; !made; tries++) {
       const state = await deps.db.first<{ open: number; held: number }>(
@@ -405,13 +416,9 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       const needed = Math.max(0, wanted - (state?.held ?? 0));
       const usage = await usageOf(deps, auth.workspaceId);
       if (needed > 0 && usage.allowance !== null && usage.used + needed > usage.allowance) return storageFull(usage, needed);
-      if ((state?.open ?? 0) >= cap) {
-        const res = apiError(429, "too_many_uploads", `this workspace already has ${cap} open uploads; finish or cancel one first`);
-        res.headers.set("retry-after", String(CAP_RETRY_AFTER_S));
-        return res;
-      }
-      // Refused twice with room both times it was looked for: no answer here would be true.
-      if (tries >= 2) throw new Error("upload create refused twice with room for it");
+      if ((state?.open ?? 0) >= cap) return capReached();
+      // Refused twice with room both times it was looked for: the client is told to come back.
+      if (tries >= 2) return capReached();
       made = await attempt();
     }
     if (replaces === null) return json(201, { upload_id: id, steps: parsed.manifest.steps.length });
