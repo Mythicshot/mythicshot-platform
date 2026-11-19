@@ -646,6 +646,15 @@ describe("the shared cPanel hosting guide", () => {
     expect(guide).toMatch(/^\*\*After the update that brings accounts,\*\*[^\n]*\[step 15\]\(#15-make-yourself-the-admin\)\.$/m);
     expect(part).toMatch(/^> \[!WARNING\]\n> The link signs in whoever opens it first/m);
     expect(part).toMatch(/^> \[!WARNING\]\n> Never open the database with the hosting's `sqlite3` tool/m);
+    // The sign-in page is not in this version: the guide says so, and does not claim a sign-in works yet.
+    expect(part).toContain(
+      "\nThe page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, run the command again with the email alone for a new link.\n",
+    );
+    expect(part).not.toMatch(/ends with the link and no other line|in one step/);
+    expect(part).toContain("The admin was made, but no link was made. Run the command again with --email alone for a link.");
+    // Which account becomes the admin, and which settings the command sees.
+    expect(part).toMatch(/the oldest of them/);
+    expect(part).toMatch(/^The command reads the settings the settings file holds from that file only[^\n]*are not seen by it\.$/m);
     // The script's usage line is the planned one.
     expect(cpanelSh).toContain("  admin       Run the site's admin command, for example: admin first-admin --email you@example.com --username yourname");
   });
@@ -656,6 +665,11 @@ describe("the shared cPanel hosting guide", () => {
     expect(code).toContain("docker compose exec app node dist/node/admin.js first-admin --email you@example.com --username yourname");
     expect(code).toContain("docker compose exec app node dist/node/admin.js signin-link --email you@example.com");
     expect(runbook).toMatch(/> \[!WARNING\]\n> Never open the database with the server's `sqlite3` tool/);
+    expect(runbook).toMatch(/> \[!WARNING\]\n> The link signs in whoever opens it first/);
+    expect(runbook).toContain(
+      "\nThe page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, run `signin-link --email …` again for a new link.\n",
+    );
+    expect(runbook).toContain("The admin was made, but no link was made. Run the command again with --email alone for a link.");
   });
 
   it("the second address is set up in the order that keeps the platform reachable, and attaching it stays marked Unconfirmed", () => {
