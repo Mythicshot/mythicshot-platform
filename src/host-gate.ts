@@ -64,6 +64,14 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /api/v1/admin/accounts": "app",
   "PATCH /api/v1/admin/workspaces/:id": "app",
 
+  // The sign-in pages and their two files. They lead to the session, whose cookie belongs
+  // to the app address alone, so none of them answers on the tours address.
+  "GET /signin": "app",
+  "GET /signin/link": "app",
+  "GET /account": "app",
+  "GET /signin/signin.css": "app",
+  "GET /signin/signin.js": "app",
+
   // Tour pages, their pictures and the player's files.
   "GET /p/:name": "tours-redirect",
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": "tours",

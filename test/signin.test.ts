@@ -965,7 +965,8 @@ describe("where the sign-in routes answer", () => {
     const routes = createApp(deps).routes.map((r) => `${r.method} ${r.path}`);
     expect(list.map((r) => r.key)).toEqual(KEYS);
     for (const key of KEYS) expect(routes).toContain(key);
-    expect(routes.filter((key) => /\/(signin|signout|sessions?)\b/.test(key)).sort()).toEqual([...KEYS].sort());
+    // API routes only: the sign-in pages (GET /signin, /signin/link and their files, src/pages.ts) are not routes of this file.
+    expect(routes.filter((key) => /^[A-Z]+ \/api\/v1\/(signin|signout|sessions?)\b/.test(key)).sort()).toEqual([...KEYS].sort());
 
     const stored = await everythingStored(deps);
     const before = calls();

@@ -5,6 +5,7 @@ import { hostGate } from "./host-gate.ts";
 import { requestHost, roleOf } from "./hosts.ts";
 import type { Deps } from "./ports.ts";
 import { pageRoutes } from "./page.ts";
+import { pageRoutesForAccounts } from "./pages.ts";
 import { publishRoutes } from "./publish.ts";
 import { setupRoutes } from "./setup.ts";
 import { signinRoutes } from "./signin.ts";
@@ -34,6 +35,7 @@ export function createApp(deps: Deps): Hono {
   usageRoutes(app, deps);
   signinRoutes(app, deps);
   adminRoutes(app, deps);
+  pageRoutesForAccounts(app, deps);
   publishRoutes(app, deps);
   pageRoutes(app, deps);
 

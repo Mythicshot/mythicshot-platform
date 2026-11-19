@@ -138,8 +138,10 @@ function openPage(html: string, url: string, respond: Responder): Tab {
     },
     shows: () => visibleText(doc),
     async settle() {
+      // Lets every answer that can arrive arrive, and the script react to it; an answer
+      // the test holds back (later()) is not waited for.
       for (let i = 0; i < 20; i++) {
-        await Promise.all(pending);
+        await Promise.race([Promise.all(pending), new Promise((r) => setTimeout(r, 1))]);
         await new Promise((r) => setImmediate(r));
       }
     },
@@ -406,9 +408,9 @@ function usageAnswer(used: number, allowance: number | null, tours: number, over
   return { status: 200, json: { used_bytes: used, allowance_bytes: allowance, over, tours, counted: { pictures: used, logos: 0, uploads_in_progress: 0 } } };
 }
 const ROWS: SessionRow[] = [
-  { id: ME, label: "Firefox · Linux", created_at: day(2026, 11, 2), last_used_at: NOW, expires_at: NOW + 1, current: true },
-  { id: OTHER, label: "Chrome · Windows", created_at: day(2026, 1, 5), last_used_at: day(2026, 11, 18), expires_at: NOW + 1, current: false },
-  { id: THIRD, label: "Safari · iOS", created_at: day(2025, 2, 1), last_used_at: day(2025, 3, 3), expires_at: NOW + 1, current: false },
+  { id: ME, label: "Firefox on Linux", created_at: day(2026, 11, 2), last_used_at: NOW, expires_at: NOW + 1, current: true },
+  { id: OTHER, label: "Chrome on Windows", created_at: day(2026, 1, 5), last_used_at: day(2026, 11, 18), expires_at: NOW + 1, current: false },
+  { id: THIRD, label: "Safari on iOS", created_at: day(2025, 2, 1), last_used_at: day(2025, 3, 3), expires_at: NOW + 1, current: false },
 ];
 const sessionsAnswer = (rows: SessionRow[] = ROWS): Answer => ({ status: 200, json: { sessions: rows } });
 
@@ -441,10 +443,10 @@ describe("the account page", () => {
       "1.20 GB of 5.00 GB used · 12 tours",
       "Tours and their pictures count. Deleting a tour frees its space within a few minutes.",
       "Where you are signed in",
-      "This browser | Firefox · Linux | since 2 Nov",
-      "Chrome · Windows | last used 18 Nov",
+      "This browser | Firefox on Linux | since 2 Nov",
+      "Chrome on Windows | last used 18 Nov",
       "Sign out",
-      "Safari · iOS | last used 3 Mar 2025",
+      "Safari on iOS | last used 3 Mar 2025",
       "Sign out",
       "Sign out",
       "Sign out everywhere",
@@ -672,7 +674,7 @@ describe("the pages against the real app", () => {
     const stored = await deps.db.all<{ id: string; created_at: number; last_used_at: number }>("SELECT id, created_at, last_used_at FROM session WHERE user_id = ? AND revoked_at IS NULL", [owner.userId]);
     const mine = stored.find((r) => r.id !== elsewhere!.sessionId)!;
     const theirs = stored.find((r) => r.id === elsewhere!.sessionId)!;
-    expect(lines.filter((l) => l.includes(" | "))).toEqual([`This browser | Firefox · Linux | since ${shown(mine.created_at)}`, `Chrome · Windows | last used ${shown(theirs.last_used_at)}`]);
+    expect(lines.filter((l) => l.includes(" | "))).toEqual([`This browser | Firefox on Linux | since ${shown(mine.created_at)}`, `Chrome on Windows | last used ${shown(theirs.last_used_at)}`]);
 
     // Ending the other browser's session.
     page.$("sessions").all().filter((e) => e.tagName === "button")[0].click();

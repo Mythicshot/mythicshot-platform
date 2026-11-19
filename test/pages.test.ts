@@ -217,7 +217,7 @@ describe("the sign-in pages", () => {
     // The script's own words are exactly these, and it has no other sentence.
     expect(scriptText()).toEqual(SCRIPT_TEXT);
     const words = new Set(Object.values(SCRIPT_TEXT));
-    const sentences = scriptStrings().filter((t) => /[a-z]/i.test(t) && /\s/.test(t));
+    const sentences = scriptStrings().filter((t) => /[a-z]/i.test(t) && /\s/.test(t) && t !== "use strict");
     for (const t of sentences) expect(words.has(t), `a text outside TEXT: ${JSON.stringify(t)}`).toBe(true);
     // The script sets text only through textContent.
     for (const api of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "createContextualFragment", "DOMParser", "srcdoc"]) expect(SIGNIN_JS, api).not.toContain(api);
@@ -244,12 +244,14 @@ describe("the sign-in pages", () => {
     // Between the handler's start and the request there is no other function: the request is the press's own.
     expect(SIGNIN_JS.slice(press, sent)).not.toMatch(/\}\);\n/);
     // The code is taken only in the shape a link carries, and goes nowhere else.
-    expect(SIGNIN_JS).toContain("/^#c=(dpl_[0-9a-f]{40})$/.exec(fragment)");
+    expect(SIGNIN_JS).toContain("var match = /^#c=(dpl_[0-9a-f]{40})$/.exec(text);");
+    expect(SIGNIN_JS.match(/codeOf\(/g), "the shape is checked in one place, for the link page only").toHaveLength(2);
+    expect(SIGNIN_JS).toContain('if (page === "link") linkPage(codeOf(fragment));');
     for (const m of SIGNIN_JS.matchAll(/\bcode\b/g)) {
       const line = SIGNIN_JS.slice(SIGNIN_JS.lastIndexOf("\n", m.index) + 1, SIGNIN_JS.indexOf("\n", m.index)).trim();
       expect(
         [
-          'var code = match === null ? "" : match[1];',
+          "function linkPage(code) {",
           'if (code === "") {',
           'if (code === "") return;',
           'call("POST", "/api/v1/signin/complete", { code: code }).then(function (res) {',
@@ -272,7 +274,7 @@ describe("the sign-in pages", () => {
     expect(navigations.length).toBeGreaterThan(0);
     for (const target of navigations) expect(["\"/signin\"", "\"/account\""], target).toContain(target);
     // Every request goes to the API of this site, by a fixed path or a session's id.
-    const requests = [...SIGNIN_JS.matchAll(/\bcall\("([A-Z]+)", ([^,)]+)/g)].map((m) => `${m[1]} ${m[2]}`);
+    const requests = [...SIGNIN_JS.matchAll(/\bcall\("([A-Z]+)", ("[^"]*"(?: \+ encodeURIComponent\(id\))?)/g)].map((m) => `${m[1]} ${m[2]}`);
     expect(requests.sort()).toEqual(
       [
         'DELETE "/api/v1/sessions/" + encodeURIComponent(id)',
