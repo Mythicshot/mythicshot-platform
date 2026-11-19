@@ -454,6 +454,49 @@ describe("the setup-recovery SQL in the runbooks", () => {
     expect((await claim(deps)).status).toBe(201);
   });
 
+  it("reopens setup when the owner was made the admin and signed in, and removes that account's sessions and sign-in codes with it", async () => {
+    const { deps } = await makeDeps({ setupCode: CODE_OK });
+    expect((await claim(deps)).status).toBe(201);
+    const owner = (await deps.db.first<{ id: string; workspace_id: string }>("SELECT id, workspace_id FROM user"))!;
+    await deps.db.run("UPDATE user SET username = 'sam', is_admin = 1 WHERE id = ?", [owner.id]);
+    await deps.db.run("INSERT INTO session (id, user_id, hash, label, created_at, last_used_at, expires_at) VALUES ('ses_1', ?, ?, 'Firefox on Linux', 1, 1, 2)", [owner.id, "a".repeat(64)]);
+    await deps.db.run("INSERT INTO session (id, user_id, hash, label, created_at, last_used_at, expires_at, revoked_at) VALUES ('ses_2', ?, ?, 'Safari on iPhone', 1, 1, 2, 2)", [owner.id, "b".repeat(64)]);
+    await deps.db.run("INSERT INTO signin_code (id, user_id, hash, created_at, expires_at, used_at, session_id) VALUES ('sic_1', ?, ?, 1, 2, 1, ?)", [owner.id, "c".repeat(64), "ses_" + "1".repeat(24)]);
+    await deps.db.run("INSERT INTO signin_code (id, user_id, hash, created_at, expires_at) VALUES ('sic_2', ?, ?, 1, 2)", [owner.id, "d".repeat(64)]);
+    await deps.db.run("INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES ('aud_1', 1, 'first_admin', ?, ?, ?, NULL)", [owner.id, owner.workspace_id, owner.id]);
+    await run(deps);
+    for (const t of ["workspace", "user", "api_token", "setup", "membership", "signin_method", "session", "signin_code"]) expect(await count(deps, t), t).toBe(0);
+    // The record of what was done stays: it points at no row.
+    expect(await count(deps, "audit")).toBe(1);
+    expect((await createApp(deps).fetch(new Request(ORIGIN + "/setup"))).status).toBe(200);
+    expect((await claim(deps)).status).toBe(201);
+    // The new owner is an ordinary account again: the site has no admin until the command makes one.
+    expect(await deps.db.all("SELECT username, status, is_admin FROM user")).toEqual([{ username: null, status: "active", is_admin: 0 }]);
+    expect(await count(deps, "membership")).toBe(1);
+  });
+
+  it("keeps the account, its sessions and its sign-in codes once the token has been used", async () => {
+    const { deps } = await makeDeps({ setupCode: CODE_OK });
+    const res = await claim(deps);
+    const { token } = (await res.json()) as { token: string };
+    const owner = (await deps.db.first<{ id: string }>("SELECT id FROM user"))!;
+    await deps.db.run("INSERT INTO session (id, user_id, hash, label, created_at, last_used_at, expires_at) VALUES ('ses_1', ?, ?, 'Firefox on Linux', 1, 1, 2)", [owner.id, "a".repeat(64)]);
+    await deps.db.run("INSERT INTO signin_code (id, user_id, hash, created_at, expires_at) VALUES ('sic_1', ?, ?, 1, 2)", [owner.id, "c".repeat(64)]);
+    expect((await createApp(deps).fetch(new Request(ORIGIN + "/api/v1/me", { headers: { authorization: `Bearer ${token}` } }))).status).toBe(200);
+    await run(deps);
+    for (const t of ["workspace", "user", "api_token", "setup", "membership", "signin_method", "session", "signin_code"]) expect(await count(deps, t), t).toBe(1);
+  });
+
+  it("both runbooks say plainly what the recovery removes, and that an older runbook's SQL must not be used", () => {
+    for (const p of [DOCKER, CLOUDFLARE]) {
+      const start = docs[p].indexOf("token was lost before anyone saved it");
+      const end = docs[p].indexOf("```sql", start);
+      expect(start, p).toBeGreaterThan(0);
+      const text = docs[p].slice(start, end);
+      for (const s of ["the first admin's account", "sessions", "sign-in codes", "the only way back to the setup step", "DELETE FROM user", "older"]) expect(text, `${p}: ${s}`).toContain(s);
+    }
+  });
+
   it("changes nothing once the token has been used", async () => {
     const { deps } = await makeDeps({ setupCode: CODE_OK });
     const res = await claim(deps);
