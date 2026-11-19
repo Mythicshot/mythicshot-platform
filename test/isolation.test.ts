@@ -400,7 +400,7 @@ describe("one workspace against another", () => {
     for (const n of invented) expect(names).not.toContain(n);
     for (const side of [w.a, w.b]) {
       const s = await snapshotOf(w.deps, side, w.keys);
-      for (const table of ["workspace", "user", "membership", "signin_method", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "upload", "upload_step", "tour_deletion", "deleted_object"]) {
+      for (const table of ["workspace", "user", "membership", "signin_method", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object"]) {
         expect(s.rows[table].length, `${side.name} has no row in ${table}`).toBeGreaterThan(0);
       }
       // Every file a row names is there, but the one picture the publish in progress has not copied yet.
@@ -487,6 +487,7 @@ describe("one workspace against another", () => {
     const before = await snapshotOf(w.deps, w.a, w.keys);
     expect(before.rows.publish_job).toHaveLength(1);
     expect(before.rows.upload).toHaveLength(2);
+    expect(before.rows.replaced_object).toHaveLength(1);
     expect(before.rows.public_object.filter((o) => o.state === "retired" && o.delete_after <= w.deps.now()).length).toBeGreaterThan(0);
 
     for (const credential of CREDENTIALS) {
@@ -518,6 +519,7 @@ describe("one workspace against another", () => {
     expect(after.rows.publish_job).toEqual([]);
     expect(after.rows.upload.map((u) => u.id)).not.toContain(w.b.ids.upload);
     expect(after.rows.tour_deletion).toEqual([]);
+    expect(after.rows.replaced_object).toEqual([]);
     expect(after.rows.public_object).toEqual([]);
   });
 
@@ -657,14 +659,17 @@ describe("one workspace against another", () => {
           }
         }
       }
+    }
+    expect(w.writes()).toEqual([]);
+    expect(await dumpOf(w.deps, w.keys, { files: true, touched: [w.a.tokenId, w.b.tokenId] })).toEqual(start);
+    // The lists last: listing tours also clears the caller's own replaced pictures.
+    for (const origin of [TOURS, APP]) {
       for (const [key, list] of Object.entries(LISTS)) {
         const r = await send(w.deps, "GET", list.path, { token: w.b.token, origin });
         expect(r.status, `${key} on ${origin}`).toBe(200);
         for (const n of needles) expect(r.text.includes(n), `${key} on ${origin} told the second workspace ${n} of the first`).toBe(false);
       }
     }
-    expect(w.writes()).toEqual([]);
-    expect(await dumpOf(w.deps, w.keys, { files: true, touched: [w.a.tokenId, w.b.tokenId] })).toEqual(start);
   });
 });
 

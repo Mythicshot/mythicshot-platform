@@ -6,8 +6,9 @@
 // own token:
 // - a published tour with a logo, published twice, so it has a live snapshot, live public
 //   pictures and public pictures a re-publish retired that are still inside their grace;
-// - a draft-only tour whose chapter was replaced once (a committed replace) and has a
-//   second replace open that reuses one of its pictures by hash;
+// - a draft-only tour whose chapter was replaced once (a committed replace, whose clean-up
+//   was cut off, so the picture it took out still waits to be removed) and has a second
+//   replace open that reuses one of its pictures by hash;
 // - an open upload for a new tour: step 1 sent, step 2 and the logo not;
 // - a tour of 13 steps with a publish in progress (12 pictures copied, not live);
 // - a tour whose delete was cut off after its rows went and before its files did;
@@ -188,6 +189,17 @@ async function side(deps: Deps, name: string, base: number, fill: number): Promi
     revokedTokenId, workspaceId, `${name} revoked token`, await hashToken(revokedToken), deps.now(), deps.now(), deps.now(),
   ]);
   const publishOf = (tourId: string) => send(deps, "POST", `/api/v1/tours/${tourId}/publish`, { token });
+  // One request sent while the drafts store refuses every delete, so its clean-up is left undone.
+  const cutOff = async (run: (broken: Deps) => Promise<Call>): Promise<Call> => {
+    const broken: Deps = { ...deps, drafts: { ...deps.drafts, delete: () => Promise.reject(new Error("the store is down")) } };
+    const log = console.error;
+    console.error = () => {};
+    try {
+      return await run(broken);
+    } finally {
+      console.error = log;
+    }
+  };
 
   // The published tour, published twice: the second publish retires the first one's pictures.
   const published = await uploadTour(deps, token, manifestOf(s.published, `${name} published tour`, true), { kind: "new" }, fill);
@@ -201,7 +213,8 @@ async function side(deps: Deps, name: string, base: number, fill: number): Promi
   const first = must(await createReplace(deps, token, replaced, replaceTarget, await hashesOf(replaced, fill)), 201, "the replace");
   if (JSON.stringify(first.json.have) !== "[1]") throw new Error("the world could not be built: the replace did not reuse its first picture");
   must(await putStep(deps, token, first.json.upload_id, 2, stepImage(replaced.steps[1], fill)), 204, "the replace's second step");
-  must(await commit(deps, token, first.json.upload_id), 201, "the replace's commit");
+  must(await cutOff((broken) => commit(broken, token, first.json.upload_id)), 201, "the replace's commit");
+  await need(deps.db.first("SELECT 1 AS x FROM replaced_object WHERE tour_id = ?", [draft.tour_id]), "replaced picture waiting to be removed");
   const openReplace = manifestOf(s.openReplace, `${name} draft tour`);
   const second = must(await createReplace(deps, token, openReplace, replaceTarget, await hashesOf(openReplace, fill)), 201, "the open replace");
   if (JSON.stringify(second.json.have) !== "[1]") throw new Error("the world could not be built: the open replace did not reuse its first picture");
@@ -217,14 +230,7 @@ async function side(deps: Deps, name: string, base: number, fill: number): Promi
 
   // A delete cut off between its rows and its files: the store refuses the delete once.
   const gone = await uploadTour(deps, token, manifestOf(s.gone, `${name} tour being deleted`), { kind: "new" }, fill);
-  const broken: Deps = { ...deps, drafts: { ...deps.drafts, delete: () => Promise.reject(new Error("the store is down")) } };
-  const log = console.error;
-  console.error = () => {};
-  try {
-    must(await send(broken, "DELETE", `/api/v1/tours/${gone.tour_id}`, { token }), 500, "the delete that is cut off");
-  } finally {
-    console.error = log;
-  }
+  must(await cutOff((broken) => send(broken, "DELETE", `/api/v1/tours/${gone.tour_id}`, { token })), 500, "the delete that is cut off");
   await need(deps.db.first("SELECT 1 AS x FROM tour_deletion WHERE tour_id = ?", [gone.tour_id]), "deletion in progress");
 
   const tourIds = async (t: { tour_id: string; chapter_id: string }): Promise<TourIds & { sha256: string[] }> => {
