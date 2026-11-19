@@ -5,9 +5,9 @@ const SHAPE = { ok: false, problem: "shape" };
 const RESERVED_ANSWER = { ok: false, problem: "reserved" };
 const taken = (username: string) => ({ ok: true, username });
 
-/** The list as the plan wrote it, in the plan's order. `me` is in it and is two characters. */
+/** The names the plan lists, in the plan's order (`me` is in it and is two characters), then the ones added at review. */
 const PLAN_LIST =
-  "admin administrator root system support help security abuse postmaster hostmaster webmaster noreply no-reply mail email info contact hello api app www web tours tour img media static assets cdn docs blog status billing account accounts settings signin sign-in signout sign-out login logout signup sign-up register invite invites setup dashboard workspace workspaces team teams user users me you null undefined none anonymous everyone owner official staff mod moderator mythicshot mythic mythiclab mythic-lab demo test example".split(
+  "admin administrator root system support help security abuse postmaster hostmaster webmaster noreply no-reply mail email info contact hello api app www web tours tour img media static assets cdn docs blog status billing account accounts settings signin sign-in signout sign-out login logout signup sign-up register invite invites setup dashboard workspace workspaces team teams user users me you null undefined none anonymous everyone owner official staff mod moderator mythicshot mythic mythiclab mythic-lab demo test example deleted unknown guest nobody removed sysadmin superuser admins moderators mods helpdesk service bot notifications legal privacy terms dmca copyright trust safety sales press pricing feedback report cpanel webmail ftp autodiscover autoconfig smtp imap localhost dev staging beta healthz player auth oauth session sessions upload uploads embed share public home new search true false nan ember".split(
     " ",
   );
 
@@ -29,10 +29,11 @@ describe("usernames", () => {
       "a" + "-b".repeat(14) + "c", // 30 with a hyphen at every other place
       "a" + "9".repeat(29),
       // Close to a reserved name, but not one.
-      "admins",
       "admin1",
       "the-admin",
       "nulls",
+      "mythic-fan",
+      "ad-vance",
     ]) {
       expect(parseUsername(name), name).toEqual(taken(name));
     }
@@ -50,6 +51,14 @@ describe("usernames", () => {
     expect(parseUsername("  " + "A".repeat(30) + "  ")).toEqual(taken("a".repeat(30)));
     expect(parseUsername("   ab   ")).toEqual(SHAPE);
     expect(parseUsername(" ".repeat(40))).toEqual(SHAPE);
+    // Space, tab, CR and LF are the only outer characters dropped.
+    expect(parseUsername(" \t\r\n alex \n\r\t ")).toEqual(taken("alex"));
+    for (const outer of ["\u00a0", "\ufeff", "\u2028", "\u2029", "\u3000", "\u000b", "\u000c", "\u0085", "\u1680", "\u2003", "\u202f", "\u205f", "\u200b", "\u0000"]) {
+      expect(parseUsername(outer + "alex"), JSON.stringify(outer)).toEqual(SHAPE);
+      expect(parseUsername("alex" + outer), JSON.stringify(outer)).toEqual(SHAPE);
+      expect(parseUsername(" " + outer + "alex" + outer + " "), JSON.stringify(outer)).toEqual(SHAPE);
+      expect(parseUsername(outer + "admin"), JSON.stringify(outer)).toEqual(SHAPE);
+    }
     // Trimming does not uncover a hyphen rule.
     expect(parseUsername(" -alex ")).toEqual(SHAPE);
     expect(parseUsername(" alex- ")).toEqual(SHAPE);
@@ -82,28 +91,28 @@ describe("usernames", () => {
       "a".repeat(30) + "-",
       "a" + "-b".repeat(15),
       // Non-ASCII letters, including the ones that read as ASCII or lowercase into it.
-      "alexé", // é
-      "élex",
-      "аdmin", // Cyrillic а
-      "ɑdmin", // Latin alpha
-      "admın", // dotless i
-      "ADMİN", // capital dotted I: lowercases to i plus a combining dot
-      "Kelvin", // Kelvin sign: lowercases to k
-      "kelvinK",
-      "ａlex", // fullwidth a
-      "Ａlex", // fullwidth A
-      "aleχ", // Greek chi
-      "straße", // ß
-      "álex", // a plus a combining accent
-      "alex​", // zero-width space
-      "al‍ex", // zero-width joiner
-      "al­ex", // soft hyphen
-      "alex‮", // right-to-left override
-      "a‐b", // Unicode hyphen
-      "a–b", // en dash
-      "a−b", // minus sign
-      "al ex", // no-break space inside
-      "😀abc", // emoji
+      "alex\u00e9", // \u00e9
+      "\u00e9lex",
+      "\u0430dmin", // Cyrillic \u0430
+      "\u0251dmin", // Latin alpha
+      "adm\u0131n", // dotless i
+      "ADM\u0130N", // capital dotted I: lowercases to i plus a combining dot
+      "\u212aelvin", // Kelvin sign: lowercases to k
+      "kelvin\u212a",
+      "\uff41lex", // fullwidth a
+      "\uff21lex", // fullwidth A
+      "ale\u03c7", // Greek chi
+      "stra\u00dfe", // \u00df
+      "a\u0301lex", // a plus a combining accent
+      "alex\u200b", // zero-width space
+      "al\u200dex", // zero-width joiner
+      "al\u00adex", // soft hyphen
+      "alex\u202e", // right-to-left override
+      "a\u2010b", // Unicode hyphen
+      "a\u2013b", // en dash
+      "a\u2212b", // minus sign
+      "al\u00a0ex", // no-break space inside
+      "\ud83d\ude00abc", // emoji
       "abc\ud83d", // a lone surrogate
       "alex\u0000",
       "\u0000alex",
@@ -223,6 +232,10 @@ describe("usernames", () => {
     }
     // A generous bound: each case is one pass over the text, never a search that backs up.
     expect(Date.now() - started).toBeLessThan(5000);
+    // Outer characters that are not dropped, in bulk.
+    expect(parseUsername("\u00a0".repeat(1_000_000) + "alex")).toEqual(SHAPE);
+    expect(parseUsername("alex" + "\t\r\n ".repeat(500_000))).toEqual(taken("alex"));
+    expect(parseUsername("\n".repeat(2_000_000) + "a" + "\n".repeat(2_000_000) + "b" + "\n".repeat(2_000_000))).toEqual(SHAPE);
     // Outer spaces alone never make a name too long.
     expect(parseUsername(" ".repeat(100_000) + "Alex" + " ".repeat(100_000))).toEqual(taken("alex"));
   });
@@ -240,9 +253,92 @@ describe("usernames", () => {
       expect(parseUsername(name), name).toEqual(RESERVED_ANSWER);
     }
     // A reserved name is not reached through a look-alike or a hidden character: those are a shape problem.
-    for (const name of ["аdmin", "admın", "admin​", "ad­min", "admin.", "admin_", "ad-min-", "rооt"]) {
+    for (const name of ["\u0430dmin", "adm\u0131n", "admin\u200b", "ad\u00admin", "admin.", "admin_", "ad-min-", "r\u043e\u043et"]) {
       expect(parseUsername(name), JSON.stringify(name)).toEqual(SHAPE);
     }
+  });
+
+  it("a reserved name with hyphens added or taken out is refused", () => {
+    for (const name of [
+      "ad-min",
+      "a-d-m-i-n",
+      "Ad-Min",
+      " A-D-M-I-N ",
+      "mythic-shot",
+      "sup-port",
+      "no-rep-ly",
+      "nore-ply",
+      "sig-nin",
+      "s-ign-in",
+      "signi-n",
+      "mythi-clab",
+      "my-thic-lab",
+      "r-o-o-t",
+      "ro-ot",
+      "sys-admin",
+      "super-user",
+      "help-desk",
+      "web-mail",
+      "local-host",
+      "auto-discover",
+      "n-u-l-l",
+      "t-rue",
+      "a-p-i",
+      "w-w-w",
+      "mod-s",
+      "s-t-a-f-f",
+      "of-fi-ci-al",
+    ]) {
+      expect(parseUsername(name), name).toEqual(RESERVED_ANSWER);
+    }
+    // Every reserved name, with a hyphen put between each pair of its characters.
+    for (const reserved of RESERVED) {
+      const spelled = reserved.replaceAll("-", "").split("").join("-");
+      if (spelled.length <= USERNAME_MAX) expect(parseUsername(spelled), spelled).toEqual(RESERVED_ANSWER);
+      const squashed = reserved.replaceAll("-", "");
+      expect(parseUsername(squashed), squashed).toEqual(RESERVED_ANSWER);
+      const split = squashed.slice(0, -1) + "-" + squashed.slice(-1);
+      expect(parseUsername(split), split).toEqual(RESERVED_ANSWER);
+    }
+    // A hyphen in a wrong place is still a shape problem first.
+    for (const name of ["-admin", "admin-", "ad--min", "a-d-m-i-n-"]) expect(parseUsername(name), name).toEqual(SHAPE);
+    // Only the whole name counts: a reserved word inside a longer name is free.
+    for (const name of ["the-admin", "admin1", "admin-1", "root-beer", "supporter", "api-fan", "nullable", "test-pilot", "mod-ern", "raid-team"]) {
+      expect(parseUsername(name), name).toEqual(taken(name));
+    }
+  });
+
+  it("a name that holds the product name is refused, with or without hyphens", () => {
+    for (const name of [
+      "mythicshot",
+      "mythic-shot",
+      "mythicshot-support",
+      "official-mythicshot",
+      "mythic-shot-team",
+      "mythicshots",
+      "mythicshot1",
+      "xmythicshotx",
+      "the-mythicshot-fan",
+      "m-y-t-h-i-c-s-h-o-t",
+      "a-m-y-t-h-i-c-s-h-o-t-9",
+      "my-thic-shot-help",
+      "MythicShot-Support",
+      " MYTHIC-SHOT-TEAM ",
+      "not-mythicshot",
+      "a".repeat(20) + "mythicshot",
+      "mythicshot" + "a".repeat(20),
+    ]) {
+      expect(parseUsername(name), name).toEqual(RESERVED_ANSWER);
+    }
+    // Close, but not the name.
+    for (const name of ["mythic-fan", "mythics", "mythicshop", "mythic-shop", "shot-mythic", "mythicsho", "ythicshot"]) {
+      expect(parseUsername(name), name).toEqual(taken(name));
+    }
+    // A look-alike of it is a shape problem.
+    expect(parseUsername("mythicsh\u043et")).toEqual(SHAPE);
+    expect(parseUsername("mythic_shot")).toEqual(SHAPE);
+    expect(parseUsername("mythic.shot")).toEqual(SHAPE);
+    expect(parseUsername("mythic shot")).toEqual(SHAPE);
   });
 
   it("the reserved list is the approved one", () => {
