@@ -33,6 +33,8 @@ services:
       # Optional settings, each empty unless .env has a line for it; the app reads an
       # empty one as not set. The storage allowance of a workspace, in bytes.
       STORAGE_ALLOWANCE_BYTES: ${STORAGE_ALLOWANCE_BYTES:-}
+      # Who to ask for an invite, shown on the sign-in page: an email address or an https address.
+      INVITE_CONTACT: ${INVITE_CONTACT:-}
       # Mail: off unless MAIL_MODE is smtp; then the sender, the mail server, its port
       # (465 when empty) and the mailbox's sign-in. SMTP_PASSWORD is a secret, like
       # SETUP_CODE: it lives in .env only.

@@ -13,7 +13,18 @@ import { R2FileStore } from "./files.ts";
  * STORAGE_ALLOWANCE_BYTES, a var only an install that wants a limit adds to its own file,
  * or SITE_HOST, a var only a one-address install that wants sign-in links adds.
  */
-type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown };
+type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown };
+
+/**
+ * Who to ask for an invite, from the Worker's var INVITE_CONTACT, trimmed, or null when it
+ * is unset, empty or not text. It is passed on as written: the sign-in page checks it and
+ * leaves out a value it cannot use, so no value closes any path.
+ */
+export function inviteContactFromWorkerEnv(env: { INVITE_CONTACT?: unknown }): string | null {
+  if (typeof env.INVITE_CONTACT !== "string") return null;
+  const text = env.INVITE_CONTACT.trim();
+  return text === "" ? null : text;
+}
 
 /**
  * The host name sign-in links use on a one-address install, from the Worker's var
@@ -75,6 +86,7 @@ export function depsFromEnv(
   ctx?: { waitUntil(work: Promise<unknown>): void },
 ): Deps {
   const siteHost = siteHostFromWorkerEnv(env, hosts);
+  const inviteContact = inviteContactFromWorkerEnv(env);
   return {
     db: new D1Db(env.DB),
     drafts: new R2FileStore(env.DRAFTS),
@@ -90,6 +102,7 @@ export function depsFromEnv(
       hosts,
       ...(storageAllowanceBytes === null ? {} : { storageAllowanceBytes }),
       ...(siteHost === null ? {} : { siteHost }),
+      ...(inviteContact === null ? {} : { inviteContact }),
     },
     now: () => Date.now(),
     ...(ctx === undefined
