@@ -437,7 +437,7 @@ docker compose exec app node dist/node/admin.js signin-link --email you@example.
 
 Then remove the `RECOVERY_LINKS=on` line from `.env` with `nano .env` and run `docker compose up -d --force-recreate --wait app` again.
 
-The line must be in `.env` and the container recreated: the command reads the setting from the app's own process in the container, so passing it to `docker compose exec` with `-e` does not work.
+The line must be in `.env` and the container recreated: the command reads the setting from the app's own process in the container, so passing it to `docker compose exec` with `-e` does not work. Whoever can run Docker commands on the server controls the site anyway, so this setting is about not leaving a door open, not about stopping the server's owner.
 
 The recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the server: whoever can change `.env` or the data folder can change the site directly.
 
@@ -448,7 +448,7 @@ The command also has `mail-check`, which says whether mail is set up without sho
 
 ### If the setup did not finish
 
-The command says `This site's setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.` when the setup wizard wrote its setup record but stopped before it wrote the owner's account, so the site has nobody to make admin. While no tour or upload exists and the token was never used, the steps in [If the token was lost before anyone saved it](#if-the-token-was-lost-before-anyone-saved-it) clear that half-finished setup, and the wizard can run again. Otherwise restore a backup from before the setup, as in [step 9](#9-back-up-and-restore).
+The command says `This site's setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.` when the setup record names a workspace that has no account in it, for example after a manual change to the data or after an older version of the platform, so the site has nobody to make admin. Restoring a backup from before that change is the first choice, as in [step 9](#9-back-up-and-restore). While no tour or upload exists and the token was never used, the steps in [If the token was lost before anyone saved it](#if-the-token-was-lost-before-anyone-saved-it) clear that half-finished setup instead, and the wizard can run again.
 
 ## 9. Back up and restore
 

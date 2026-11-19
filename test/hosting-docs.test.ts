@@ -661,7 +661,7 @@ describe("the shared cPanel hosting guide", () => {
     // Which account becomes the admin, and which settings the command sees.
     expect(part).toMatch(/the oldest of them/);
     expect(part).toContain(
-      "\nThrough `./cpanel.sh admin` the command takes its settings from the settings file only: a setting exported in your SSH session, or entered in the environment screen of the hosting's **Setup Node.js App** page, is not seen by it. Run any other way on shared hosting, the recovery setting is always off.\n",
+      "\nThrough `./cpanel.sh admin` the command takes its settings from the settings file only: a setting exported in your SSH session, or entered in the environment screen of the hosting's **Setup Node.js App** page, is not seen by it. Run any other way on shared hosting, the recovery setting is off unless someone deliberately fakes the app's own process.\n",
     );
     expect(part).not.toMatch(/never taken from the shell at all/);
     expect(part).toContain(
@@ -672,6 +672,20 @@ describe("the shared cPanel hosting guide", () => {
     expect(part).toMatch(/^### If the setup did not finish$/m);
     expect(part).toContain("[If the setup did not finish](#if-the-setup-did-not-finish)");
     expect(part).toContain("restore it as in [step 11](#11-restore-from-a-backup)");
+    // The cause as it is, and the steps in the restore steps' order, with when it is safe.
+    const unfinished = part.slice(part.indexOf("### If the setup did not finish"));
+    expect(unfinished).toContain("the setup record names a workspace that has no account in it, for example after a manual change to the data or after an older version of the platform");
+    expect(unfinished).not.toMatch(/stopped before it wrote/);
+    expect(unfinished).toMatch(/Restoring a backup from before that change is the first choice/);
+    expect(unfinished).toMatch(/only if Mythicshot was never used to upload a tour to this site[^\n]*missing from the live site until the files are moved back/);
+    const steps = [...split(unfinished).prose.matchAll(/^(\d+)\. (.+)$/gm)].map((m) => m[2]);
+    expect(steps).toHaveLength(5);
+    expect(steps[0]).toMatch(/^Stop the app/);
+    expect(steps[1]).toMatch(/^Make a backup/);
+    expect(steps[2]).toMatch(/^Move `db\.sqlite`, `db\.sqlite-wal` and `db\.sqlite-shm`/);
+    expect(steps[3]).toMatch(/^Start the app/);
+    expect(steps[4]).toMatch(/^Open the setup wizard/);
+    expect(codeLines(unfinished)).toContain("cd ~/apps/tours && ./cpanel.sh backup");
     // The script's usage line is the planned one.
     expect(cpanelSh).toContain("  admin       Run the site's admin command, for example: admin first-admin --email you@example.com --username yourname");
   });
@@ -689,7 +703,11 @@ describe("the shared cPanel hosting guide", () => {
     expect(runbook).toContain("The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.");
     expect(runbook).toMatch(/`RECOVERY_LINKS=on`[^\n]*`\.env`[^\n]*remove the line again/);
     expect(runbook).toMatch(/by a link sent by mail[^\n]*needs no shell/);
-    expect(runbook).toContain("passing it to `docker compose exec` with `-e` does not work");
+    expect(runbook).toContain(
+      "passing it to `docker compose exec` with `-e` does not work. Whoever can run Docker commands on the server controls the site anyway, so this setting is about not leaving a door open, not about stopping the server's owner.",
+    );
+    expect(runbook).toContain("the setup record names a workspace that has no account in it, for example after a manual change to the data or after an older version of the platform");
+    expect(runbook).not.toMatch(/stopped before it wrote the owner's account/);
     expect(runbook).toContain(
       "\nThe recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the server: whoever can change `.env` or the data folder can change the site directly.\n",
     );

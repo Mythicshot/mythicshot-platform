@@ -524,7 +524,7 @@ The same command has three more uses: `./cpanel.sh admin mail-check` says whethe
 
 The command runs beside the running app, without a restart, and changes only the database: making the admin is one step that is written whole or not at all, and the link and its record in the audit follow it. It does not apply a database update itself: on a site that was not updated yet it says `The database is from an older version. Update the site first.` and changes nothing. If it says `This site's setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.`, see [If the setup did not finish](#if-the-setup-did-not-finish) below.
 
-Through `./cpanel.sh admin` the command takes its settings from the settings file only: a setting exported in your SSH session, or entered in the environment screen of the hosting's **Setup Node.js App** page, is not seen by it. Run any other way on shared hosting, the recovery setting is always off.
+Through `./cpanel.sh admin` the command takes its settings from the settings file only: a setting exported in your SSH session, or entered in the environment screen of the hosting's **Setup Node.js App** page, is not seen by it. Run any other way on shared hosting, the recovery setting is off unless someone deliberately fakes the app's own process.
 
 The recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the hosting account: whoever can change the settings file or the data folder can change the site directly.
 
@@ -533,7 +533,20 @@ The recovery setting keeps the command from being a standing way in to the site.
 
 ### If the setup did not finish
 
-The command says this when the setup wizard wrote its setup record but stopped before it wrote the owner's account, so the site has nobody to make admin. The way back is a backup from before the setup: restore it as in [step 11](#11-restore-from-a-backup). Without such a backup, and only while no tour has been uploaded, start the setup again on an empty database: move `db.sqlite`, and `db.sqlite-wal` and `db.sqlite-shm` when they are there, out of the data folder into a folder of their own, restart the app with `touch ~/apps/tours/tmp/restart.txt`, and open the setup wizard again with the setup code from the settings file, as in [step 7](#7-open-the-setup-wizard). Moving the files keeps them; nothing is deleted.
+The command says this when the setup record names a workspace that has no account in it, for example after a manual change to the data or after an older version of the platform, so the site has nobody to make admin. Restoring a backup from before that change is the first choice: restore it as in [step 11](#11-restore-from-a-backup).
+
+Without such a backup, the setup can be started again on an empty database. That is safe only if Mythicshot was never used to upload a tour to this site: the old files are kept, but any tours in them would be missing from the live site until the files are moved back. The steps follow the order of the restore steps:
+
+1. Stop the app: in cPanel, open **Setup Node.js App** and stop the app for `tours.example.com`.
+2. Make a backup, as in [step 10](#10-backups).
+
+```sh
+cd ~/apps/tours && ./cpanel.sh backup
+```
+
+3. Move `db.sqlite`, `db.sqlite-wal` and `db.sqlite-shm` (the last two only when they are there) out of the data folder into a folder of their own, such as `~/apps/tours-data.before-setup`. Nothing is deleted.
+4. Start the app again in **Setup Node.js App**. It makes a new, empty database.
+5. Open the setup wizard with the setup code from the settings file, as in [step 7](#7-open-the-setup-wizard), then make yourself the admin as above.
 
 ## What has been run where
 
