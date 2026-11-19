@@ -14,7 +14,7 @@ import { createApp } from "../src/app.ts";
 import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
 import { ACCOUNT_HTML, LINK_HTML, SIGNIN_HTML, SIGNIN_JS } from "../src/signin/page.ts";
-import { formatBytes } from "../src/usage.ts";
+import { NODE_SETTINGS, configFromEnv } from "../src/node/config.ts";
 import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
 
 const APP = "https://app.example.com";
@@ -459,7 +459,7 @@ describe("the account page", () => {
       "Signed in as alice",
       "alice@example.com",
       "Storage",
-      "1.20 GB of 5.00 GB used · 12 tours",
+      "1.2 GB of 5 GB used · 12 tours",
       "Tours and their pictures count. Deleting a tour frees its space within a few minutes.",
       "Where you are signed in",
       "This browser | Firefox on Linux | since 2 Nov",
@@ -505,13 +505,14 @@ describe("the account page", () => {
   it("the storage line and bar under, at and over the allowance and with no limit", async () => {
     const GB = 1024 ** 3;
     const cases: [Answer, string, string | null, boolean][] = [
-      [usageAnswer(0, 5 * GB, 0), "0 bytes of 5.00 GB used · 0 tours", "0%", false],
-      [usageAnswer(512 * 1024, 1 * GB, 1), "512 KB of 1.00 GB used · 1 tour", "0.05%", false],
-      [usageAnswer(5 * GB, 5 * GB, 2), "5.00 GB of 5.00 GB used · 2 tours", "100%", false],
-      [usageAnswer(6 * GB, 5 * GB, 3), "6.00 GB of 5.00 GB used · 3 tours", "100%", true],
+      [usageAnswer(0, 5 * GB, 0), "0 bytes of 5 GB used · 0 tours", "0%", false],
+      [usageAnswer(512 * 1024, 1 * GB, 1), "512 KB of 1 GB used · 1 tour", "0.05%", false],
+      [usageAnswer(5 * GB, 5 * GB, 2), "5 GB of 5 GB used · 2 tours", "100%", false],
+      [usageAnswer(6 * GB, 5 * GB, 3), "6 GB of 5 GB used · 3 tours", "100%", true],
       [usageAnswer(1, 0, 1), "1 byte of 0 bytes used · 1 tour", "100%", true],
-      [usageAnswer(1_288_490_189, null, 12), "1.20 GB used · 12 tours", null, false],
+      [usageAnswer(1_288_490_189, null, 12), "1.2 GB used · 12 tours", null, false],
     ];
+    const OVER = "You are over your storage allowance. New uploads are refused until you delete tours or get more room.";
     for (const [usage, line, width, over] of cases) {
       const tab = account({}, { usage });
       await tab.settle();
@@ -519,16 +520,50 @@ describe("the account page", () => {
       expect(tab.$("usage-bar").hidden, line).toBe(width === null);
       if (width !== null) expect(tab.$("usage-fill").style.width, line).toBe(width);
       expect(tab.$("usage-bar").getAttribute("data-over"), line).toBe(over ? "true" : null);
+      // Over the allowance, the sentence shows under the bar and its line; otherwise it is not there.
+      expect(tab.$("usage-over").hidden, line).toBe(!over);
+      expect(tab.shows().includes(OVER), line).toBe(over);
+      if (over) expect(tab.shows().slice(4, 6), line).toEqual([line, OVER]);
     }
   });
 
-  it("sizes read exactly as the server's own rule writes them", async () => {
-    const sizes = [0, 1, 2, 1023, 1024, 1025, 10_239, 10_240, 102_399, 102_400, 1_048_063, 1_048_064, 1_048_576, 14_889_779, 1_073_217_536, 1_073_741_824, 1_095_216_660, 5 * 1024 ** 3, 1024 ** 4, 9_007_199_254_740_991];
-    for (const n of sizes) {
+  it("sizes read in the owner's style: 1024 to a unit, at most one decimal, no trailing .0", async () => {
+    const table: [number, string][] = [
+      [0, "0 bytes"],
+      [1, "1 byte"],
+      [2, "2 bytes"],
+      [1023, "1023 bytes"],
+      [1024, "1 KB"],
+      [1075, "1 KB"],
+      [1126, "1.1 KB"],
+      [1536, "1.5 KB"],
+      [10_240, "10 KB"],
+      [102_400, "100 KB"],
+      [524_288, "512 KB"],
+      [525_000, "512.7 KB"],
+      [1_048_524, "1023.9 KB"],
+      [1_048_525, "1 MB"],
+      [1_048_576, "1 MB"],
+      [14_889_779, "14.2 MB"],
+      [1_073_741_823, "1 GB"],
+      [1_288_490_189, "1.2 GB"],
+      [5 * 1024 ** 3, "5 GB"],
+      [1024 ** 4, "1024 GB"],
+      [9_007_199_254_740_991, "8388608 GB"],
+    ];
+    for (const [n, size] of table) {
       const tab = account({}, { usage: usageAnswer(n, null, 1) });
       await tab.settle();
-      expect(tab.$("usage-text").textContent, String(n)).toBe(`${formatBytes(n)} used · 1 tour`);
+      expect(tab.$("usage-text").textContent, String(n)).toBe(`${size} used · 1 tour`);
     }
+  });
+
+  it("INVITE_CONTACT is read from the Node settings as text, and a value it cannot use never stops the start", () => {
+    expect(configFromEnv({ INVITE_CONTACT: " hello@example.com " }).inviteContact).toBe("hello@example.com");
+    expect(configFromEnv({ INVITE_CONTACT: "https://example.com/invite" }).inviteContact).toBe("https://example.com/invite");
+    expect(() => configFromEnv({ INVITE_CONTACT: "javascript:alert(1)" })).not.toThrow();
+    for (const v of [undefined, "", "   "]) expect("inviteContact" in configFromEnv({ INVITE_CONTACT: v }), String(v)).toBe(false);
+    expect(NODE_SETTINGS).toContain("INVITE_CONTACT");
   });
 
   it("ending another session sends the anti-forgery header and removes its row", async () => {
@@ -689,7 +724,7 @@ describe("the pages against the real app", () => {
     const page = me.open(ACCOUNT_HTML, `${APP}/account`);
     await page.settle();
     const lines = page.shows();
-    expect(lines.slice(0, 5)).toEqual(["Mythicshot", "Signed in as owner", owner.email, "Storage", "0 bytes of 977 KB used · 0 tours"]);
+    expect(lines.slice(0, 5)).toEqual(["Mythicshot", "Signed in as owner", owner.email, "Storage", "0 bytes of 976.6 KB used · 0 tours"]);
     const stored = await deps.db.all<{ id: string; created_at: number; last_used_at: number }>("SELECT id, created_at, last_used_at FROM session WHERE user_id = ? AND revoked_at IS NULL", [owner.userId]);
     const mine = stored.find((r) => r.id !== elsewhere!.sessionId)!;
     const theirs = stored.find((r) => r.id === elsewhere!.sessionId)!;

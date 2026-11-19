@@ -10,7 +10,8 @@ import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { ACCOUNT_PAGE_HEADERS } from "../src/pages.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
-import { ACCOUNT_HTML, LINK_HTML, SIGNIN_CSS, SIGNIN_HTML, SIGNIN_JS } from "../src/signin/page.ts";
+import { inviteContactFrom } from "../src/signin/invite.ts";
+import { ACCOUNT_HTML, LINK_HTML, SIGNIN_CSS, SIGNIN_HTML, SIGNIN_JS, signinHtml } from "../src/signin/page.ts";
 import { send, type Call } from "./bundle.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
@@ -95,6 +96,7 @@ const WORDING: Record<string, string[]> = {
     NOSCRIPT,
     "Signed in",
     "Storage",
+    "You are over your storage allowance. New uploads are refused until you delete tours or get more room.",
     "Tours and their pictures count. Deleting a tour frees its space within a few minutes.",
     "Where you are signed in",
     "Sign out",
@@ -384,5 +386,110 @@ describe("the sign-in pages", () => {
     expect(SIGNIN_CSS).toMatch(/\.message \{[^}]*min-height:/);
     expect(SIGNIN_CSS).toContain("@media (max-width: 480px)");
     expect(SIGNIN_CSS).toMatch(/overflow-wrap: anywhere/);
+  });
+});
+
+// ---- The owner's wording decisions ----
+
+const INVITE = "Mythicshot is invite-only for now.";
+
+/** The invite line of a sign-in page: its text nodes and its one link, if any. */
+function inviteLine(html: string): { text: string; links: { href: string | null; rel: string | null; text: string }[] } {
+  const doc = new FakeDocument(html);
+  const line = doc.body.all().find((e) => e.tagName === "p" && e.textContent.startsWith(INVITE))!;
+  expect(line, "the invite line").toBeDefined();
+  return {
+    text: line.textContent.replace(/\s+/g, " ").trim(),
+    links: line.all().filter((e) => e.tagName === "a").map((a) => ({ href: a.getAttribute("href"), rel: a.getAttribute("rel"), text: a.textContent })),
+  };
+}
+
+describe("the owner's wording decisions", () => {
+  it("INVITE_CONTACT: an https address is a link, an email address is shown after the sentence, anything else is no link", () => {
+    expect(inviteContactFrom("https://example.com/invite")).toEqual({ kind: "url", href: "https://example.com/invite" });
+    expect(inviteContactFrom("  Hello@Example.com ")).toEqual({ kind: "email", address: "hello@example.com" });
+    const invalid = [
+      undefined, null, 42, "", "   ", "http://example.com/invite", "javascript:alert(1)", "mailto:hello@example.com", "ftp://example.com",
+      "https://", "https://user:secret@example.com/", "https://example.com/a b", "not an address", "hello@", "@example.com", "hello@example",
+      "hello%40x@example.com", "a?b@example.com", "hello@example.com?bcc=x@example.com", "hello@example.com\nx", "https://example.com/\u0000",
+      "<script>alert(1)</script>", "x".repeat(3000),
+    ];
+    for (const raw of invalid) expect(inviteContactFrom(raw), JSON.stringify(raw)).toBeNull();
+
+    // Unset or invalid: the sentence alone, and the page exactly as built without the setting.
+    expect(signinHtml(null)).toBe(SIGNIN_HTML);
+    expect(inviteLine(SIGNIN_HTML)).toEqual({ text: INVITE, links: [] });
+
+    const url = inviteLine(signinHtml({ kind: "url", href: "https://example.com/invite" }));
+    expect(url).toEqual({ text: `${INVITE} Ask for an invite`, links: [{ href: "https://example.com/invite", rel: "noopener noreferrer", text: "Ask for an invite" }] });
+
+    const email = inviteLine(signinHtml({ kind: "email", address: "hello@example.com" }));
+    expect(email).toEqual({ text: `${INVITE} Ask for an invite: hello@example.com`, links: [{ href: "mailto:hello@example.com", rel: null, text: "hello@example.com" }] });
+
+    // Whatever an address holds is escaped: it never becomes markup or leaves its attribute.
+    const tricky = signinHtml({ kind: "url", href: `https://example.com/?a="><script>x</script>&b='c'` });
+    expect(tricky).not.toContain("<script>x");
+    expect(tricky).not.toContain(`"><`);
+    expect(inviteLine(tricky).links[0].href).toBe(`https://example.com/?a="><script>x</script>&b='c'`);
+    const parsed = inviteContactFrom(`https://example.com/?a="><script>x</script>`);
+    expect(parsed?.kind).toBe("url");
+    expect(signinHtml(parsed)).not.toContain("<script>");
+  });
+
+  it("the setting is served: the sign-in page carries the invite line it gives, and an invalid one leaves the page as built", async () => {
+    const cases: [string | undefined, string][] = [
+      [undefined, INVITE],
+      ["https://example.com/invite", `${INVITE} Ask for an invite`],
+      ["hello@example.com", `${INVITE} Ask for an invite: hello@example.com`],
+      ["javascript:alert(1)", INVITE],
+      ["http://example.com/", INVITE],
+      ["not an address", INVITE],
+    ];
+    for (const [raw, line] of cases) {
+      const { deps } = await makeDeps({ hosts: HOSTS, ...(raw === undefined ? {} : { inviteContact: raw }) });
+      const r = await send(deps, "GET", "/signin", { origin: APP });
+      expect(r.status, String(raw)).toBe(200);
+      expect(r.calls, String(raw)).toBe(0);
+      expect(inviteLine(r.text).text, String(raw)).toBe(line);
+      expect(r.headers.get("content-security-policy"), String(raw)).toBe(POLICY);
+      if (line === INVITE) expect(r.text, String(raw)).toBe(SIGNIN_HTML);
+      // The other pages never change with it.
+      expect((await send(deps, "GET", "/account", { origin: APP })).text).toBe(ACCOUNT_HTML);
+    }
+  });
+
+  it("on Workers, the var INVITE_CONTACT reaches the config as text, and anything that is not text is left out", async () => {
+    const load = import.meta.glob("../src/cloudflare/entry.ts");
+    const entry = (await load["../src/cloudflare/entry.ts"]()) as { inviteContactFromWorkerEnv(env: { INVITE_CONTACT?: unknown }): string | null };
+    expect(entry.inviteContactFromWorkerEnv({ INVITE_CONTACT: " hello@example.com " })).toBe("hello@example.com");
+    expect(entry.inviteContactFromWorkerEnv({ INVITE_CONTACT: "javascript:alert(1)" })).toBe("javascript:alert(1)");
+    for (const v of [undefined, "", "  ", 42, { a: 1 }]) expect(entry.inviteContactFromWorkerEnv({ INVITE_CONTACT: v }), JSON.stringify(v)).toBeNull();
+  });
+
+  it("the over-allowance sentence, the messages and the busy labels are the approved text", () => {
+    const doc = new FakeDocument(ACCOUNT_HTML);
+    const over = doc.getElementById("usage-over")!;
+    expect(over.textContent).toBe("You are over your storage allowance. New uploads are refused until you delete tours or get more room.");
+    expect(over.hidden).toBe(true);
+    expect(over.className).toBe("over");
+    expect(SIGNIN_CSS).toMatch(/\.over \{[^}]*color: var\(--warn\)/);
+    const text = scriptText();
+    expect([text.badEmail, text.tooMany, text.failed, text.notEnded, text.sending, text.signingIn, text.signingOut]).toEqual([
+      "That does not look like an email address.",
+      "Too many requests. Wait a few minutes and try again.",
+      "Something went wrong. Try again in a moment.",
+      "That session could not be ended. Reload the page.",
+      "Sending…",
+      "Signing in…",
+      "Signing out…",
+    ]);
+    for (const page of [SIGNIN_HTML, LINK_HTML, ACCOUNT_HTML]) expect(page).toContain('<noscript><p class="message">This page needs JavaScript.</p></noscript>');
+  });
+
+  it("the README names INVITE_CONTACT in one line of its settings table", () => {
+    const readme = (import.meta.glob("../README.md", { query: "?raw", import: "default", eager: true }) as Record<string, string>)["../README.md"];
+    const rows = readme.split("\n").filter((l) => l.startsWith("| `INVITE_CONTACT` |"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatch(/https/);
   });
 });

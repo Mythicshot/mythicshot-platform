@@ -641,3 +641,8 @@ export const SIGNIN_JS = `(function () {
   fragment = "";
 })();
 `;
+
+/** Placeholder: written after its tests. */
+export function signinHtml(_contact: import("./invite.ts").InviteContact | null): string {
+  return SIGNIN_HTML;
+}
