@@ -724,7 +724,7 @@ describe("a caller that is nobody", () => {
   // condition with sessions (Task 9, src/auth.ts). Until then this test is expected to fail,
   // and vitest reports it as failing the build the moment it passes: then change `it.fails`
   // to `it`. Nothing can disable an account before that task either.
-  it.fails("a token of a disabled owner's workspace gets 401 everywhere", SLOW, async () => {
+  it("a token of a disabled owner's workspace gets 401 everywhere", SLOW, async () => {
     const w = await build();
     const { deps, a } = w;
     await deps.db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [a.userId]);

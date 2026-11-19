@@ -32,6 +32,8 @@ const NOW = 1_800_000_000_000;
 const APP = "https://app.example.com";
 const CODE = /^dpl_[0-9a-f]{40}$/;
 const SECRET = /^dps_[0-9a-f]{64}$/;
+/** What Firefox on Linux sends as its User-Agent. */
+const UA = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
 
 async function sha(text: string): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
@@ -58,7 +60,7 @@ async function site(opts: { admin?: boolean } = {}) {
 /** A new code for the account, redeemed at once. */
 async function signIn(deps: Deps, userId: string, replaces: string | null = null) {
   const code = await createSignInCode(deps, userId);
-  const made = await redeemSignInCode(deps, code, "Firefox on Linux", replaces);
+  const made = await redeemSignInCode(deps, code, UA, replaces);
   if (made === null) throw new Error("the sign-in was refused");
   return made;
 }
@@ -94,7 +96,7 @@ describe("sign-in codes", () => {
 
     // One read and one batch.
     const before = calls();
-    const made = await redeemSignInCode(deps, code, "Firefox on Linux", null);
+    const made = await redeemSignInCode(deps, code, UA, null);
     expect(calls() - before).toBe(2);
     expect(made).not.toBeNull();
     expect(Object.keys(made!).sort()).toEqual(["secret", "sessionId", "userId"]);
@@ -111,16 +113,16 @@ describe("sign-in codes", () => {
     ]);
 
     // The same code again, and again: nothing.
-    expect(await redeemSignInCode(deps, code, "Firefox on Linux", null)).toBeNull();
-    expect(await redeemSignInCode(deps, code, "Firefox on Linux", null)).toBeNull();
+    expect(await redeemSignInCode(deps, code, UA, null)).toBeNull();
+    expect(await redeemSignInCode(deps, code, UA, null)).toBeNull();
     expect(await count(deps, "session")).toBe(1);
     expect(await count(deps, "audit")).toBe(1);
 
     // A code nobody was given, and things that are not codes at all (no database call for those).
-    expect(await redeemSignInCode(deps, "dpl_" + "0".repeat(40), "Firefox on Linux", null)).toBeNull();
+    expect(await redeemSignInCode(deps, "dpl_" + "0".repeat(40), UA, null)).toBeNull();
     const idle = calls();
     for (const bad of ["", "dpl_", code.toUpperCase(), code + "0", code.slice(0, -1), " " + code, code + "\n", "dps_" + "0".repeat(64), "dp_" + "0".repeat(40)]) {
-      expect(await redeemSignInCode(deps, bad, "Firefox on Linux", null), JSON.stringify(bad.slice(0, 8))).toBeNull();
+      expect(await redeemSignInCode(deps, bad, UA, null), JSON.stringify(bad.slice(0, 8))).toBeNull();
     }
     expect(calls()).toBe(idle);
     expect(await count(deps, "session")).toBe(1);
@@ -132,9 +134,9 @@ describe("sign-in codes", () => {
     for (let round = 0; round < 6; round++) {
       const code = await createSignInCode(deps, a.userId);
       const presses = await Promise.all([
-        redeemSignInCode(deps, code, "Firefox on Linux", null),
-        redeemSignInCode(deps, code, "Chrome on Windows", null),
-        redeemSignInCode(deps, code, "Safari on macOS", null),
+        redeemSignInCode(deps, code, UA, null),
+        redeemSignInCode(deps, code, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36", null),
+        redeemSignInCode(deps, code, null, null),
       ]);
       const won = presses.filter((p) => p !== null);
       expect(won, `round ${round}`).toHaveLength(1);
@@ -146,8 +148,8 @@ describe("sign-in codes", () => {
     }
     // One after the other is the same.
     const code = await createSignInCode(deps, b.userId);
-    expect(await redeemSignInCode(deps, code, "Firefox on Linux", null)).not.toBeNull();
-    expect(await redeemSignInCode(deps, code, "Firefox on Linux", null)).toBeNull();
+    expect(await redeemSignInCode(deps, code, UA, null)).not.toBeNull();
+    expect(await redeemSignInCode(deps, code, UA, null)).toBeNull();
     expect(await count(deps, "session", "user_id = '" + b.userId + "'")).toBe(1);
   });
 
@@ -158,11 +160,11 @@ describe("sign-in codes", () => {
     const late = await createSignInCode(deps, a.userId);
     const tooLate = await createSignInCode(deps, a.userId);
     clock.now = NOW + SIGNIN_CODE_MS - 1;
-    expect(await redeemSignInCode(deps, late, "Firefox on Linux", null)).not.toBeNull();
+    expect(await redeemSignInCode(deps, late, UA, null)).not.toBeNull();
     clock.now = NOW + SIGNIN_CODE_MS;
-    expect(await redeemSignInCode(deps, tooLate, "Firefox on Linux", null)).toBeNull();
+    expect(await redeemSignInCode(deps, tooLate, UA, null)).toBeNull();
     clock.now = NOW + SIGNIN_CODE_MS * 4;
-    expect(await redeemSignInCode(deps, tooLate, "Firefox on Linux", null)).toBeNull();
+    expect(await redeemSignInCode(deps, tooLate, UA, null)).toBeNull();
     expect(await count(deps, "session")).toBe(1);
     expect(await count(deps, "audit")).toBe(1);
 
@@ -170,31 +172,31 @@ describe("sign-in codes", () => {
     // again does not bring the link back.
     const forDisabled = await createSignInCode(deps, b.userId);
     await deps.db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [b.userId]);
-    expect(await redeemSignInCode(deps, forDisabled, "Firefox on Linux", null)).toBeNull();
+    expect(await redeemSignInCode(deps, forDisabled, UA, null)).toBeNull();
     expect(await count(deps, "session", "user_id = '" + b.userId + "'")).toBe(0);
     await deps.db.run("UPDATE user SET status = 'active' WHERE id = ?", [b.userId]);
-    expect(await redeemSignInCode(deps, forDisabled, "Firefox on Linux", null)).toBeNull();
+    expect(await redeemSignInCode(deps, forDisabled, UA, null)).toBeNull();
     expect(await count(deps, "session", "user_id = '" + b.userId + "'")).toBe(0);
     expect(await count(deps, "audit")).toBe(1);
     // A new code for the enabled account works.
-    expect(await redeemSignInCode(deps, await createSignInCode(deps, b.userId), "Firefox on Linux", null)).not.toBeNull();
+    expect(await redeemSignInCode(deps, await createSignInCode(deps, b.userId), UA, null)).not.toBeNull();
   });
 
   it("a code is refused while the site has no admin, and for an account with no workspace", async () => {
     const { deps, a, b } = await site({ admin: false });
     const early = await createSignInCode(deps, a.userId);
-    expect(await redeemSignInCode(deps, early, "Firefox on Linux", null)).toBeNull();
+    expect(await redeemSignInCode(deps, early, UA, null)).toBeNull();
     expect(await count(deps, "session")).toBe(0);
     expect(await count(deps, "audit")).toBe(0);
     // Once somebody is the admin, sign-in is open: for a new code, not for the spent one.
     await deps.db.run("UPDATE user SET is_admin = 1 WHERE id = ?", [b.userId]);
-    expect(await redeemSignInCode(deps, early, "Firefox on Linux", null)).toBeNull();
-    expect(await redeemSignInCode(deps, await createSignInCode(deps, a.userId), "Firefox on Linux", null)).not.toBeNull();
+    expect(await redeemSignInCode(deps, early, UA, null)).toBeNull();
+    expect(await redeemSignInCode(deps, await createSignInCode(deps, a.userId), UA, null)).not.toBeNull();
 
     // An account row without a membership (one an older build wrote) cannot sign in.
     const orphan = await seedAccount(deps);
     await deps.db.run("DELETE FROM membership WHERE user_id = ?", [orphan.userId]);
-    expect(await redeemSignInCode(deps, await createSignInCode(deps, orphan.userId), "Firefox on Linux", null)).toBeNull();
+    expect(await redeemSignInCode(deps, await createSignInCode(deps, orphan.userId), UA, null)).toBeNull();
     expect(await count(deps, "session", "user_id = '" + orphan.userId + "'")).toBe(0);
   });
 
@@ -202,7 +204,7 @@ describe("sign-in codes", () => {
     const { deps, a } = await site();
     const code = await createSignInCode(deps, a.userId);
     const unused = await createSignInCode(deps, a.userId);
-    const made = (await redeemSignInCode(deps, code, "Firefox on Linux", null))!;
+    const made = (await redeemSignInCode(deps, code, UA, null))!;
     const second = await signIn(deps, a.userId, made.secret);
     await resolveSession(withCookie(cookieOf(second.secret)), deps);
     await revokeSession(deps, a.userId, second.sessionId);
@@ -239,7 +241,8 @@ describe("sessions", () => {
     for (const at of [NOW, NOW + 1, NOW + 600_000, NOW + SESSION_TOUCH_MS - 1]) {
       clock.now = at;
       const used = await use();
-      expect(used.who).toEqual({ sessionId: s.sessionId, userId: a.userId, workspaceId: a.workspaceId, admin: false, secret: s.secret });
+      expect(used.who).toStrictEqual({ sessionId: s.sessionId, userId: a.userId, workspaceId: a.workspaceId, admin: false, csrf: await csrfFor(s.secret) });
+      expect(JSON.stringify(used.who)).not.toContain(s.secret.slice(4));
       expect(used.calls).toBe(1);
     }
     expect(await row()).toEqual({ last_used_at: NOW, expires_at: NOW + SESSION_MS });
@@ -363,10 +366,10 @@ describe("sessions", () => {
     expect(await who(elsewhere.secret)).not.toBeNull();
 
     // A sign-in that is refused replaces nothing.
-    expect(await redeemSignInCode(deps, "dpl_" + "0".repeat(40), "Firefox on Linux", second.secret)).toBeNull();
+    expect(await redeemSignInCode(deps, "dpl_" + "0".repeat(40), UA, second.secret)).toBeNull();
     const spent = await createSignInCode(deps, a.userId);
-    await redeemSignInCode(deps, spent, "Firefox on Linux", null);
-    expect(await redeemSignInCode(deps, spent, "Firefox on Linux", second.secret)).toBeNull();
+    await redeemSignInCode(deps, spent, UA, null);
+    expect(await redeemSignInCode(deps, spent, UA, second.secret)).toBeNull();
     expect(await who(second.secret)).not.toBeNull();
 
     // Something that is no session secret, or a secret nobody has, is ignored.
@@ -412,28 +415,61 @@ describe("sessions", () => {
     const other = await signIn(deps, a.userId);
     const good = cookieOf(s.secret);
     const read = (cookie: string | null) => readSessionCookie(withCookie(cookie));
+    const shown = (cookie: string | null) => String(cookie).replaceAll(s.secret, "<secret>").replaceAll(other.secret, "<other>");
 
-    // Exactly one well-formed value, wherever it stands among other cookies.
-    for (const cookie of [good, `theme=dark; ${good}`, `${good}; theme=dark`, `a=1;${good};b=2`, `  ${good}  `, `a=1, ${good}`, `dp_session=x; ${good}`, `__Host-dp_sessionx=1; ${good}`]) {
-      expect(read(cookie), cookie.slice(0, 30)).toBe(s.secret);
-      expect(sessionCookiePresent(withCookie(cookie))).toBe(true);
+    // Exactly one well-formed value, wherever it stands among other cookies. Pairs are
+    // separated by ";" and only spaces and tabs around a pair are dropped.
+    for (const cookie of [good, `theme=dark; ${good}`, `${good}; theme=dark`, `a=1;${good};b=2`, `  ${good}  `, `a=1;\t${good}\t;b=2`, `dp_session=x; ${good}`, `__Host-dp_sessionx=1; ${good}`, `x=a,b; ${good}`]) {
+      expect(read(cookie), shown(cookie)).toBe(s.secret);
+      expect(sessionCookiePresent(withCookie(cookie)), shown(cookie)).toBe(true);
     }
     expect(await resolveSession(withCookie(`theme=dark; ${good}`), deps)).toMatchObject({ sessionId: s.sessionId });
 
-    // No cookie of that name.
-    for (const cookie of [null, "", "theme=dark", "dp_session=" + s.secret, "__host-dp_session=" + s.secret, "x__Host-dp_session=" + s.secret, "__Host-dp_session", "theme=__Host-dp_session"]) {
-      expect(read(cookie), String(cookie).slice(0, 30)).toBeNull();
-      expect(sessionCookiePresent(withCookie(cookie)), String(cookie).slice(0, 30)).toBe(false);
+    // No cookie of that name. A comma is part of another cookie's value, so a cookie that
+    // another host set as `x=a,__Host-dp_session=...` is that host's cookie `x` and nothing
+    // else; and a name with any other character before or after it is another name.
+    const idle = calls();
+    const absent = [
+      null,
+      "",
+      "theme=dark",
+      "dp_session=" + s.secret,
+      "__host-dp_session=" + s.secret,
+      "__HOST-DP_SESSION=" + s.secret,
+      "x__Host-dp_session=" + s.secret,
+      "__Host-dp_session",
+      "theme=__Host-dp_session",
+      `x=a,${good}`,
+      `x=a, ${good}`,
+      `x=a,${good}; theme=dark`,
+      `theme=dark; x=a,${good}`,
+      `x=a,${good},y=b`,
+      `x="a;b",${good}`.replace(";", ","),
+      ` ${good}`,
+      `a=1; ${good}`,
+      `\u000b${good}`,
+      `a=1; \u000b${good}`,
+      `\u000c${good}`,
+      `a=1;\u000c${good}`,
+      `${SESSION_COOKIE} =${s.secret}`,
+      `%5F%5FHost-dp_session=${s.secret}`,
+      `__Host%2Ddp_session=${s.secret}`,
+    ];
+    for (const cookie of absent) {
+      expect(read(cookie), shown(cookie)).toBeNull();
+      expect(sessionCookiePresent(withCookie(cookie)), shown(cookie)).toBe(false);
+      expect(await resolveSession(withCookie(cookie), deps), shown(cookie)).toBeNull();
     }
 
     // Two of them, in any form, and every malformed one: present, and no session.
-    const idle = calls();
     const none = [
       `${good}; ${good}`,
       `${good}; ${cookieOf(other.secret)}`,
       `${cookieOf(other.secret)}; a=1; ${good}`,
       `${good}; ${SESSION_COOKIE}=`,
       `${good}, ${cookieOf(other.secret)}`,
+      `${good},x=a`,
+      `${good}, x=a`,
       `${SESSION_COOKIE}=`,
       `${SESSION_COOKIE}=x`,
       `${SESSION_COOKIE}="${s.secret}"`,
@@ -444,13 +480,15 @@ describe("sessions", () => {
       `${SESSION_COOKIE}=dpl_${s.secret.slice(4)}`,
       `${SESSION_COOKIE}=${s.secret} x`,
       `${SESSION_COOKIE}=${s.secret}=`,
+      `${SESSION_COOKIE}=${s.secret.replace("_", "%5F")}`,
+      `${SESSION_COOKIE}= ${s.secret}`,
+      `${SESSION_COOKIE}=${s.secret}\u000b`,
       `${SESSION_COOKIE} =${s.secret}; ${SESSION_COOKIE}=${s.secret}`,
     ];
     for (const cookie of none) {
-      const label = cookie.replaceAll(s.secret, "<secret>").replaceAll(other.secret, "<other>");
-      expect(read(cookie), label).toBeNull();
-      expect(sessionCookiePresent(withCookie(cookie)), label).toBe(true);
-      expect(await resolveSession(withCookie(cookie), deps), label).toBeNull();
+      expect(read(cookie), shown(cookie)).toBeNull();
+      expect(sessionCookiePresent(withCookie(cookie)), shown(cookie)).toBe(true);
+      expect(await resolveSession(withCookie(cookie), deps), shown(cookie)).toBeNull();
     }
     expect(calls()).toBe(idle);
   });
@@ -475,10 +513,27 @@ describe("sessions", () => {
     const url = APP + "/api/v1/signout";
     expect(change(url, { origin: APP })).toBe(true);
     expect(change(url, { origin: APP, "sec-fetch-site": "same-origin" })).toBe(true);
-    // A proxy may end TLS: the host is what counts, with its port.
+    // A proxy may end TLS, so the request's own scheme is not compared: the host is, with its port.
     expect(change("http://app.example.com/api/v1/signout", { origin: APP })).toBe(true);
-    expect(change("http://localhost:8787/api/v1/signout", { origin: "http://localhost:8787" })).toBe(true);
     expect(change("https://APP.example.com/api/v1/signout", { origin: "https://app.EXAMPLE.com" })).toBe(true);
+    expect(change("https://app.example.com:8443/api/v1/signout", { origin: "https://app.example.com:8443" })).toBe(true);
+
+    // The page itself must have been loaded over https: a page of this host loaded without
+    // it can be anybody's, whatever the browser says about the site.
+    for (const target of [url, "http://app.example.com/api/v1/signout"]) {
+      expect(change(target, { origin: "http://app.example.com" }), target).toBe(false);
+      expect(change(target, { origin: "http://app.example.com", "sec-fetch-site": "same-origin" }), target).toBe(false);
+    }
+    expect(change("https://app.example.com:8080/x", { origin: "http://app.example.com:8080" })).toBe(false);
+    expect(change("http://192.168.1.10:8787/x", { origin: "http://192.168.1.10:8787" })).toBe(false);
+    expect(change("http://localhost.example.com/x", { origin: "http://localhost.example.com" })).toBe(false);
+    expect(change("http://notlocalhost/x", { origin: "http://notlocalhost" })).toBe(false);
+    // Except on a development host, which has no https.
+    for (const local of ["http://localhost:8787", "http://localhost", "http://app.localhost:8787", "http://127.0.0.1:8787"]) {
+      expect(change(local + "/api/v1/signout", { origin: local }), local).toBe(true);
+      expect(change(local + "/api/v1/signout", { origin: local, "sec-fetch-site": "same-origin" }), local).toBe(true);
+      expect(change(local + "/api/v1/signout", { origin: local, "sec-fetch-site": "same-site" }), local).toBe(false);
+    }
 
     for (const site of ["same-site", "cross-site", "none", "", "SAME-ORIGIN ", "same-origin, same-origin"]) {
       expect(change(url, { origin: APP, "sec-fetch-site": site }), site).toBe(false);
@@ -537,12 +592,63 @@ describe("sessions", () => {
     }
   });
 
-  it("a label that is not one of the fixed ones is not stored", async () => {
+  it("only the fixed words of a label are ever stored, whatever the browser sent", async () => {
     const { deps, a } = await site();
-    for (const label of ["x".repeat(41), "<script>", "owner@example.com", "", "Fire\nfox"]) {
-      const made = await redeemSignInCode(deps, await createSignInCode(deps, a.userId), label, null);
-      expect(await deps.db.first("SELECT label FROM session WHERE id = ?", [made!.sessionId])).toEqual({ label: "Unknown browser" });
+    const agents: [string | null, string][] = [
+      [UA, "Firefox on Linux"],
+      [null, "Unknown browser"],
+      ["", "Unknown browser"],
+      // A ready-made label is not a User-Agent: nothing is taken over as it stands.
+      ["Firefox on Linux", "Unknown browser"],
+      ["Totally Legit Admin Console", "Unknown browser"],
+      ["<script>alert(1)</script>", "Unknown browser"],
+      ["owner@example.com", "Unknown browser"],
+      ["x".repeat(5000), "Unknown browser"],
+      ["Firefox/1.0 <script>alert(1)</script> owner@example.com 203.0.113.9 dps_" + "0".repeat(64), "Firefox"],
+      ["Chrome/1 (Windows) \u0000\r\nSet-Cookie: a=b; " + "é".repeat(300), "Chrome on Windows"],
+    ];
+    for (const [agent, label] of agents) {
+      const made = await redeemSignInCode(deps, await createSignInCode(deps, a.userId), agent, null);
+      expect(await deps.db.first("SELECT label FROM session WHERE id = ?", [made!.sessionId]), String(agent).slice(0, 30)).toEqual({ label });
     }
+    // Something that is not text at all, from a caller that does not check its types.
+    const made = await redeemSignInCode(deps, await createSignInCode(deps, a.userId), { toString: () => "Firefox/1" } as unknown as string, null);
+    expect(await deps.db.first("SELECT label FROM session WHERE id = ?", [made!.sessionId])).toEqual({ label: "Unknown browser" });
+    for (const row of await deps.db.all<{ label: string }>("SELECT label FROM session")) {
+      expect(row.label).toMatch(/^(?:Unknown browser|(?:Chrome|Firefox|Safari|Edge|Opera)(?: on (?:Windows|macOS|Linux|Android|iOS|ChromeOS))?)$/);
+    }
+  });
+
+  it("of two revokes of one session at once, one ended it and one audit row says so", async () => {
+    const { deps, a } = await site();
+    for (let round = 0; round < 5; round++) {
+      const s = await signIn(deps, a.userId);
+      const done = await Promise.all([revokeSession(deps, a.userId, s.sessionId), revokeSession(deps, a.userId, s.sessionId, "signout"), revokeSession(deps, a.userId, s.sessionId)]);
+      expect(done.filter((d) => d), `round ${round}`).toHaveLength(1);
+      expect(await deps.db.first("SELECT count(*) AS n FROM audit WHERE subject = ? AND event <> 'signin'", [s.sessionId])).toEqual({ n: 1 });
+      const row = await deps.db.first<{ revoked_at: number | null; label: string }>("SELECT revoked_at, label FROM session WHERE id = ?", [s.sessionId]);
+      expect(row).toEqual({ revoked_at: NOW, label: "Firefox on Linux" });
+    }
+  });
+
+  it("a session revoked between the read and the hourly write is not written", async () => {
+    const { deps, clock, a } = await site();
+    const s = await signIn(deps, a.userId);
+    clock.now = NOW + SESSION_TOUCH_MS;
+    // The session is revoked by another request just after this one read it.
+    const db = deps.db;
+    deps.db = {
+      ...db,
+      all: async (sql, params) => {
+        const rows = await db.all(sql, params);
+        await db.run("UPDATE session SET revoked_at = ? WHERE id = ?", [NOW + 5, s.sessionId]);
+        return rows as never;
+      },
+    };
+    expect(await resolveSession(withCookie(cookieOf(s.secret)), deps)).not.toBeNull();
+    deps.db = db;
+    expect(await deps.db.first("SELECT last_used_at, expires_at, revoked_at FROM session WHERE id = ?", [s.sessionId])).toEqual({ last_used_at: NOW, expires_at: NOW + SESSION_MS, revoked_at: NOW + 5 });
+    expect(await resolveSession(withCookie(cookieOf(s.secret)), deps)).toBeNull();
   });
 
   it("sweeping removes only expired and long-revoked rows, a page at a time", async () => {
@@ -567,6 +673,8 @@ describe("sessions", () => {
     const KEPT_REVOKED = rowId("ses", "b", 2);
     const ALMOST = rowId("ses", "b", 3);
     const RECENT_CODE = rowId("sic", "d", 1);
+    // The codes this test seeds as long past: nothing else was made before now.
+    const OLD_CODES = `created_at < ${NOW} AND id <> '${RECENT_CODE}'`;
     const expired = SWEEP_PAGE + 50;
     const rows = [];
     for (let i = 0; i < expired; i++) rows.push(session(rowId("ses", "e", i), hash("a", i), i % 2 === 0 ? NOW : NOW - 1 - i, null));
@@ -588,13 +696,13 @@ describe("sessions", () => {
     expect(await sweepSessions(deps)).toBeUndefined();
     expect(calls() - before).toBe(1);
     expect(await count(deps, "session")).toBe(total - SWEEP_PAGE);
-    expect(await count(deps, "signin_code", "id GLOB 'sic_c*'")).toBe(5);
+    expect(await count(deps, "signin_code", OLD_CODES)).toBe(5);
 
     before = calls();
     await sweepSessions(deps);
     expect(calls() - before).toBe(1);
     expect((await deps.db.all<{ id: string }>("SELECT id FROM session ORDER BY id")).map((r) => r.id)).toEqual(keptSessions);
-    expect(await count(deps, "signin_code", "id GLOB 'sic_c*'")).toBe(0);
+    expect(await count(deps, "signin_code", OLD_CODES)).toBe(0);
 
     // Nothing left to remove: a third sweep changes nothing.
     await sweepSessions(deps);
@@ -604,7 +712,7 @@ describe("sessions", () => {
     // The live sessions still resolve, and the fresh code still works.
     expect(await resolveSession(withCookie(cookieOf(live.secret)), deps)).toMatchObject({ sessionId: live.sessionId });
     expect(await resolveSession(withCookie(cookieOf(theirs.secret)), deps)).toMatchObject({ workspaceId: b.workspaceId });
-    expect(await redeemSignInCode(deps, freshCode, "Firefox on Linux", null)).not.toBeNull();
+    expect(await redeemSignInCode(deps, freshCode, UA, null)).not.toBeNull();
     // No audit row is ever swept.
     clock.now = NOW + SESSION_MS * 3;
     await sweepSessions(deps);

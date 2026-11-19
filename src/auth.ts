@@ -92,23 +92,27 @@ function notFound(): Response {
  * the only way a route learns its caller.
  *
  * In this order:
- * 1. An Authorization header together with a session cookie (any cookie of that name,
+ * 1. With `only: "token"` no cookie is looked at: the Authorization header is judged
+ *    alone, exactly as in the version before sessions, and without one the answer is the
+ *    401. The setup wizard's own page asks this way, and a cookie left in the browser
+ *    must not break it.
+ * 2. An Authorization header together with a session cookie (any cookie of that name,
  *    well-formed or not) is 400 `mixed_credentials`. Nothing is looked up.
- * 2. With an Authorization header: `Bearer <token>` resolves to the token's workspace
+ * 3. With an Authorization header: `Bearer <token>` resolves to the token's workspace
  *    and, unless `touch` is false, records when the token was last used. A token is
  *    refused when it is malformed, unknown or revoked, and when an account of its
- *    workspace is disabled.
- * 3. With a session cookie: in two-address mode it counts only on the app address. For
+ *    workspace is disabled. `only: "session"` refuses every token, with no lookup.
+ * 4. With a session cookie: in two-address mode it counts only on the app address. For
  *    any method but GET and HEAD the request must come from a page of this host
  *    (`sameOriginChange`, else 403 `bad_origin`) and carry the session's anti-forgery
  *    value in X-Csrf-Token (else 403 `bad_csrf`); both are decided from the request
  *    alone, before the database is asked. Then the session must be live, of an active
  *    account, and that account a member of a workspace: that one workspace is the answer.
- * 4. Anything else, and every refusal not named above, is the one 401.
+ * 5. Anything else, and every refusal not named above, is the one 401.
  *
- * `only: "token"` refuses a session and `only: "session"` a token, with the 401 and no
- * lookup. `admin: true` takes only the session of a site admin and answers everyone else
- * (no credential, a token, a member) 404 `not_found`; the 400 and the two 403s stay.
+ * `admin: true` takes only the session of a site admin, and every refusal there, the 400
+ * and the two 403s too, is the one 404 `not_found` a member gets: an admin route says
+ * nothing about itself to anyone else.
  *
  * No token, cookie, code or digest is ever logged or put in an answer: only digests
  * reach the database.
@@ -118,20 +122,30 @@ export async function requireAuth(
   deps: Deps,
   opts: { touch?: boolean; only?: "token" | "session"; admin?: boolean } = {},
 ): Promise<Auth | Response> {
-  const refused = opts.admin === true ? notFound : unauthorized;
+  if (opts.admin === true) {
+    const who = await callerOf(req, deps, { touch: opts.touch, only: "session" });
+    return who instanceof Response || who.session?.admin !== true ? notFound() : who;
+  }
+  return callerOf(req, deps, opts);
+}
+
+/** `requireAuth` without the admin rule: the caller, or the refusal a route that is no admin route answers. */
+async function callerOf(req: Request, deps: Deps, opts: { touch?: boolean; only?: "token" | "session" }): Promise<Auth | Response> {
   const header = req.headers.get("authorization");
+  // Before any cookie is read: a token-only route has no session to mix a token with.
+  if (opts.only === "token") return tokenAuth(header ?? "", deps, opts.touch !== false);
   const cookie = sessionCookiePresent(req);
   if (header !== null && cookie) return mixedCredentials();
-  if (cookie) return opts.only === "token" ? refused() : sessionAuth(req, deps, opts.admin === true, refused);
-  if (opts.only === "session" || opts.admin === true) return refused();
+  if (cookie) return sessionAuth(req, deps);
+  if (opts.only === "session") return unauthorized();
   return tokenAuth(header ?? "", deps, opts.touch !== false);
 }
 
 /** The session path of `requireAuth`: the request has a session cookie and no Authorization header. */
-async function sessionAuth(req: Request, deps: Deps, adminOnly: boolean, refused: () => Response): Promise<Auth | Response> {
-  if (!sessionHost(req, deps)) return refused();
+async function sessionAuth(req: Request, deps: Deps): Promise<Auth | Response> {
+  if (!sessionHost(req, deps)) return unauthorized();
   const secret = readSessionCookie(req);
-  if (secret === null) return refused();
+  if (secret === null) return unauthorized();
   const method = req.method.toUpperCase();
   if (method !== "GET" && method !== "HEAD") {
     if (!sameOriginChange(req)) return json(403, { error: "bad_origin", detail: "this request must come from the site's own pages" });
@@ -142,8 +156,7 @@ async function sessionAuth(req: Request, deps: Deps, adminOnly: boolean, refused
     }
   }
   const session = await resolveSession(req, deps);
-  if (session === null) return refused();
-  if (adminOnly && !session.admin) return refused();
+  if (session === null) return unauthorized();
   return { workspaceId: session.workspaceId, tokenId: "", session: { id: session.sessionId, userId: session.userId, admin: session.admin } };
 }
 
@@ -159,10 +172,20 @@ const TOKEN_LOOKUP =
   " AND NOT EXISTS (SELECT 1 FROM user u WHERE u.status = 'disabled'" +
   " AND (u.workspace_id = api_token.workspace_id OR u.id IN (SELECT m.user_id FROM membership m WHERE m.workspace_id = api_token.workspace_id)))";
 
-/** True when `err` is either adapter's report that the account column or the membership table does not exist yet. */
+/**
+ * True when `err` is the database's report that the status column or the membership
+ * table the lookup names does not exist. The exact texts, which the tests take from each
+ * target's own database:
+ * - Node (node:sqlite): `no such table: membership` and `no such column: u.status`,
+ *   the whole message;
+ * - Workers (D1): `D1_ERROR: no such table: membership: SQLITE_ERROR` and
+ *   `D1_ERROR: no such column: u.status at offset <n>: SQLITE_ERROR`.
+ * The name must end where the text does, at a colon or at ` at offset`, so no longer
+ * name matches, and no other failure (a lock, a missing api_token table) is this one.
+ */
 function isBeforeAccounts(err: unknown): boolean {
   for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
-    if (/no such column: u\.status|no such table: membership/.test(e.message)) return true;
+    if (/(?:^|: )no such (?:table: membership|column: u\.status)(?:$|:| at offset )/.test(e.message)) return true;
   }
   return false;
 }

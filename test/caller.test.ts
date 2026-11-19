@@ -12,6 +12,8 @@ import { send } from "./bundle.ts";
 const NOW = 1_800_000_000_000;
 const APP = "https://app.example.com";
 const TOURS = "https://tours.example.com";
+/** What Firefox on Linux sends as its User-Agent. */
+const UA = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
 const TWO: Partial<Config> = { hosts: { tours: "tours.example.com", app: "app.example.com" } };
 
 const UNAUTHORIZED = '{"error":"unauthorized"}';
@@ -36,7 +38,7 @@ async function site(config?: Partial<Config>) {
 }
 
 async function signIn(deps: Deps, userId: string) {
-  const made = await redeemSignInCode(deps, await createSignInCode(deps, userId), "Firefox on Linux", null);
+  const made = await redeemSignInCode(deps, await createSignInCode(deps, userId), UA, null);
   if (made === null) throw new Error("the sign-in was refused");
   return { ...made, cookie: `${SESSION_COOKIE}=${made.secret}`, csrf: await csrfFor(made.secret) };
 }
@@ -199,10 +201,13 @@ describe("the caller", () => {
     const before = calls();
     for (const authorization of authorizations) {
       for (const cookie of cookies) {
-        for (const opts of [undefined, { only: "token" as const }, { only: "session" as const }, { admin: true }, { touch: false }]) {
-          for (const p of [{ authorization, cookie }, { ...change(s), authorization, cookie }]) {
-            expect(await refusal(await requireAuth(request(p), deps, opts)), `${authorization.slice(0, 10)} | ${cookie.length} | ${JSON.stringify(opts)}`).toEqual(is400);
+        for (const p of [{ authorization, cookie }, { ...change(s), authorization, cookie }] as Presented[]) {
+          const label = `${authorization.slice(0, 10)} | ${cookie.length} | ${p.method ?? "GET"}`;
+          for (const opts of [undefined, { only: "session" as const }, { touch: false }]) {
+            expect(await refusal(await requireAuth(request(p), deps, opts)), `${label} | ${JSON.stringify(opts)}`).toEqual(is400);
           }
+          // An admin route answers what it answers everybody.
+          expect(await refusal(await requireAuth(request(p), deps, { admin: true })), label).toEqual(is404);
         }
       }
     }
@@ -210,6 +215,24 @@ describe("the caller", () => {
     expect(calls()).toBe(before);
     expect(await tokenRow(deps, a.workspaceId)).toMatchObject({ last_used_at: null });
     expect(await tokenRow(deps, b.workspaceId)).toMatchObject({ last_used_at: null });
+
+    // A token-only route never looks at a cookie: the token is judged alone, as in 0.1.8,
+    // whatever the cookie is worth and however the request was made.
+    for (const cookie of cookies) {
+      for (const p of [{ cookie }, { ...change(s), cookie }, { method: "POST", cookie, headers: { origin: "https://evil.example", "sec-fetch-site": "cross-site" } }] as Presented[]) {
+        expect(await requireAuth(request({ ...p, authorization: "Bearer " + a.token }), deps, { only: "token", touch: false }), String(cookie.length)).toStrictEqual({ workspaceId: a.workspaceId, tokenId: (await tokenRow(deps, a.workspaceId))!.id });
+        for (const authorization of ["Bearer dp_" + "0".repeat(40), "Bearer nope", "Basic abc", "x", ""]) {
+          expect(await refusal(await requireAuth(request({ ...p, authorization }), deps, { only: "token" })), authorization).toEqual(is401);
+        }
+        // And with no Authorization header the cookie is still nothing there.
+        expect(await refusal(await requireAuth(request(p), deps, { only: "token" }))).toEqual(is401);
+      }
+    }
+    expect(await tokenRow(deps, a.workspaceId)).toMatchObject({ last_used_at: null });
+    const wizard = await send(deps, "GET", "/api/v1/setup/connected", { origin: APP, token: a.token, headers: { cookie: s.cookie } });
+    expect([wizard.status, wizard.json]).toEqual([200, { connected: false }]);
+    const wizardStale = await send(deps, "GET", "/api/v1/setup/connected", { origin: APP, token: a.token, headers: { cookie: `${SESSION_COOKIE}=stale` } });
+    expect([wizardStale.status, wizardStale.json]).toEqual([200, { connected: false }]);
 
     // Through the app too, on a route that existed before.
     const both = await send(deps, "GET", "/api/v1/me", { origin: APP, token: a.token, headers: { cookie: s.cookie } });
@@ -373,8 +396,23 @@ describe("the caller", () => {
     // The admin, by session: and a change still needs the header.
     expect(await requireAuth(request({ cookie: boss.cookie }), deps, admins)).toStrictEqual({ workspaceId: admin.workspaceId, tokenId: "", session: { id: boss.sessionId, userId: admin.userId, admin: true } });
     expect(await requireAuth(request(change(boss, "PATCH")), deps, admins)).toMatchObject({ session: { admin: true } });
-    expect(await refusal(await requireAuth(request({ method: "PATCH", cookie: boss.cookie, headers: { origin: APP } }), deps, admins))).toEqual(is403csrf);
-    expect(await refusal(await requireAuth(request({ method: "PATCH", cookie: boss.cookie, headers: { origin: TOURS, "x-csrf-token": boss.csrf } }), deps, admins))).toEqual(is403origin);
+    // Every refusal there is the one not-found, for the admin and for a member alike: a
+    // missing or wrong anti-forgery value, another origin, a token beside the cookie.
+    const idle = calls();
+    for (const who of [boss, member]) {
+      const refusedChanges: Presented[] = [
+        { method: "PATCH", cookie: who.cookie, headers: { origin: APP } },
+        { method: "PATCH", cookie: who.cookie, headers: { origin: APP, "x-csrf-token": member.csrf === who.csrf ? boss.csrf : member.csrf } },
+        { method: "PATCH", cookie: who.cookie, headers: { origin: TOURS, "x-csrf-token": who.csrf } },
+        { method: "PATCH", cookie: who.cookie, headers: { "x-csrf-token": who.csrf } },
+        { method: "DELETE", cookie: who.cookie, headers: { origin: APP, "x-csrf-token": who.csrf, "sec-fetch-site": "cross-site" } },
+        { cookie: who.cookie, authorization: "Bearer " + admin.token },
+        { ...change(who, "PATCH"), authorization: "Bearer nope" },
+        { ...change(who, "PATCH"), cookie: who.cookie + "0" },
+      ];
+      for (const p of refusedChanges) expect(await refusal(await requireAuth(request(p), deps, admins)), JSON.stringify(p.headers ?? {}).slice(0, 50)).toEqual(is404);
+    }
+    expect(calls()).toBe(idle);
 
     // Taking the admin flag away is felt on the next request; so is disabling the admin.
     await deps.db.run("UPDATE user SET is_admin = 0 WHERE id = ?", [admin.userId]);
@@ -430,14 +468,98 @@ describe("the caller", () => {
     expect(await requireAuth(request({ authorization: "Bearer " + bare.token }), deps)).toMatchObject({ workspaceId: bare.workspaceId });
   });
 
+  it("a disabled account that is a member of the workspace stops its token, whatever its own row names", async () => {
+    const { deps, a, b } = await site();
+    const spare = await seedWorkspace(deps, "Spare");
+    // The account is tied to its workspace by its membership only: the older column on
+    // its own row names another workspace.
+    await deps.db.run("UPDATE user SET workspace_id = ? WHERE id = ?", [spare.workspaceId, a.userId]);
+    expect(await requireAuth(request({ authorization: "Bearer " + a.token }), deps)).toMatchObject({ workspaceId: a.workspaceId });
+    await deps.db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [a.userId]);
+    expect(await refusal(await requireAuth(request({ authorization: "Bearer " + a.token }), deps))).toEqual(is401);
+    // The workspace its row names is closed too, and nobody else's is.
+    expect(await refusal(await requireAuth(request({ authorization: "Bearer " + spare.token }), deps))).toEqual(is401);
+    expect(await requireAuth(request({ authorization: "Bearer " + b.token }), deps)).toMatchObject({ workspaceId: b.workspaceId });
+  });
+
+  it("on a database without the account tables a token resolves as it did, and no other failure does", async () => {
+    // The membership table is not there yet: the real refusal of each target's database.
+    {
+      const { deps, calls, a } = await site();
+      await deps.db.batch([{ sql: "DROP TABLE membership" }]);
+      const sql = recordSql(deps);
+      const before = calls();
+      expect(await requireAuth(request({ authorization: "Bearer " + a.token }), deps, { touch: false })).toMatchObject({ workspaceId: a.workspaceId });
+      expect(calls() - before).toBe(2);
+      expect(sql).toHaveLength(2);
+      expect(sql[1]).toBe("SELECT id, workspace_id, hash FROM api_token WHERE hash = ? AND revoked_at IS NULL");
+      expect(await refusal(await requireAuth(request({ authorization: "Bearer dp_" + "0".repeat(40) }), deps))).toEqual(is401);
+    }
+    // The status column is not there yet: again the database's own words.
+    {
+      const { deps, a } = await site();
+      await deps.db.batch([{ sql: "ALTER TABLE user DROP COLUMN status" }]);
+      const sql = recordSql(deps);
+      expect(await requireAuth(request({ authorization: "Bearer " + a.token }), deps, { touch: false })).toMatchObject({ workspaceId: a.workspaceId });
+      expect(sql).toHaveLength(2);
+    }
+    // Any other failure of the lookup is a failure: nothing is looked up a second time,
+    // and nobody is let in.
+    const { deps, a } = await site();
+    const db = deps.db;
+    const failures = [
+      "database is locked",
+      "D1_ERROR: database is locked: SQLITE_BUSY",
+      "no such table: api_token",
+      "no such table: user",
+      "no such table: membership_old",
+      "no such column: u.status_code",
+      "no such column: status",
+      "no such column: m.user_id",
+      "disk I/O error",
+      "",
+    ];
+    for (const message of failures) {
+      let lookups = 0;
+      deps.db = {
+        ...db,
+        first: async () => {
+          lookups++;
+          throw new Error(message);
+        },
+      };
+      await expect(requireAuth(request({ authorization: "Bearer " + a.token }), deps), message).rejects.toThrow();
+      expect(lookups, message).toBe(1);
+    }
+    // The two texts that do mean "not migrated yet", bare and as each target wraps them.
+    for (const message of ["no such table: membership", "D1_ERROR: no such table: membership: SQLITE_ERROR", "no such column: u.status", "D1_ERROR: no such column: u.status at offset 122: SQLITE_ERROR"]) {
+      const seen: string[] = [];
+      deps.db = {
+        ...db,
+        first: async (sql, params) => {
+          seen.push(sql);
+          if (seen.length === 1) throw new Error(message);
+          return db.first(sql, params) as never;
+        },
+      };
+      expect(await requireAuth(request({ authorization: "Bearer " + a.token }), deps, { touch: false }), message).toMatchObject({ workspaceId: a.workspaceId });
+      expect(seen, message).toHaveLength(2);
+      expect(seen[1]).toBe("SELECT id, workspace_id, hash FROM api_token WHERE hash = ? AND revoked_at IS NULL");
+    }
+    // The same text wrapped as the cause of another error.
+    deps.db = { ...db, first: async () => Promise.reject(new Error("query failed", { cause: new Error("database is locked") })) };
+    await expect(requireAuth(request({ authorization: "Bearer " + a.token }), deps)).rejects.toThrow();
+    deps.db = db;
+  });
+
   it("nothing of a cookie, a code or a header is ever logged", async () => {
     const { deps, a, b } = await site(TWO);
     const spies = (["log", "info", "warn", "error", "debug", "trace"] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
     const code = await createSignInCode(deps, a.userId);
-    const made = await redeemSignInCode(deps, code, "Firefox on Linux", null);
+    const made = await redeemSignInCode(deps, code, UA, null);
     const s = { ...made!, cookie: `${SESSION_COOKIE}=${made!.secret}`, csrf: await csrfFor(made!.secret) };
     const other = await signIn(deps, b.userId);
-    await redeemSignInCode(deps, code, "Firefox on Linux", s.secret);
+    await redeemSignInCode(deps, code, UA, s.secret);
 
     const answers: string[] = [];
     const presented: [Presented, Parameters<typeof requireAuth>[2]?][] = [

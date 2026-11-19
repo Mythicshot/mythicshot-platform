@@ -43,9 +43,6 @@ const COOKIE_MAX_AGE_S = 34_560_000;
 const SECRET_PATTERN = /^dps_[0-9a-f]{64}$/;
 const CODE_PATTERN = /^dpl_[0-9a-f]{40}$/;
 const SESSION_ID_PATTERN = /^ses_[0-9a-f]{24}$/;
-/** A label as `sessionLabel` writes one: a few plain words. */
-const LABEL_PATTERN = /^[A-Za-z]+(?: [A-Za-z]+)*$/;
-const LABEL_MAX_CHARS = 40;
 const UNKNOWN_LABEL = "Unknown browser";
 /** How much of a User-Agent header is looked at. */
 const AGENT_CHARS_READ = 1024;
@@ -64,17 +61,34 @@ async function sha256Hex(text: string): Promise<string> {
   return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))));
 }
 
-/** The values of every cookie named SESSION_COOKIE in the request, as sent. */
+/** A space or a tab: all that is dropped around a cookie pair, its name and its value. */
+function stripBlanks(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && (text.charCodeAt(start) === 32 || text.charCodeAt(start) === 9)) start++;
+  while (end > start && (text.charCodeAt(end - 1) === 32 || text.charCodeAt(end - 1) === 9)) end--;
+  return text.slice(start, end);
+}
+
+/**
+ * The values of every cookie named SESSION_COOKIE in the request, as sent.
+ *
+ * Read the way a browser writes the header: pairs separated by ";" and nothing else. A
+ * comma is part of a value, so a cookie some other host set for the whole site as
+ * `x=a,__Host-dp_session=...` stays that host's cookie `x` and is never ours; browsers
+ * refuse to let another host set a cookie whose name starts with `__Host-`, and reading
+ * the header any more loosely than they write it would give that protection away. Only
+ * spaces and tabs around a pair are dropped (not every character `String.trim` takes),
+ * and the name must be SESSION_COOKIE exactly, in its own case, with nothing decoded.
+ */
 function sessionCookieValues(req: Request): string[] {
   const header = req.headers.get("cookie");
   if (header === null) return [];
   const values: string[] = [];
-  // Cookies are separated by ";". Several Cookie header lines reach us joined by ",",
-  // so that separates too: a session secret holds neither character.
-  for (const part of header.split(/[;,]/)) {
+  for (const part of header.split(";")) {
     const eq = part.indexOf("=");
     if (eq < 0) continue;
-    if (part.slice(0, eq).trim() === SESSION_COOKIE) values.push(part.slice(eq + 1).trim());
+    if (stripBlanks(part.slice(0, eq)) === SESSION_COOKIE) values.push(stripBlanks(part.slice(eq + 1)));
   }
   return values;
 }
@@ -137,12 +151,20 @@ export function csrfFor(secret: string): Promise<string> {
   return sha256Hex("csrf\n" + secret);
 }
 
+/** True for the development hosts that have no https: `localhost`, `*.localhost` and `127.0.0.1`, the rule `originOf` in src/hosts.ts has. */
+function isLocalName(name: string): boolean {
+  return name === "localhost" || name.endsWith(".localhost") || name === "127.0.0.1";
+}
+
 /**
  * True when a changing request came from a page of the host it was sent to: it has an
- * Origin header whose host (name and port) equals the request's own host, and
+ * Origin header whose host (name and port) equals the request's own host, whose scheme
+ * is `https:` (or `http:` on `localhost`, `*.localhost` and `127.0.0.1` only), and
  * Sec-Fetch-Site, when the browser sent it, is exactly `same-origin`. The tours address
- * is another host, so a page there fails this although the two share a site. The scheme
- * is not compared, since a proxy may end TLS. No Referer and no forwarded header is read.
+ * is another host, so a page there fails this although the two share a site; and a page
+ * of this host that was loaded without https fails it, since anyone on the network can
+ * have written that page. The request's own scheme is not compared, since a proxy may
+ * end TLS. No Referer and no forwarded header is read.
  */
 export function sameOriginChange(req: Request): boolean {
   const site = req.headers.get("sec-fetch-site");
@@ -151,7 +173,7 @@ export function sameOriginChange(req: Request): boolean {
   if (origin === null || origin === "null") return false;
   try {
     const from = new URL(origin);
-    if (from.protocol !== "https:" && from.protocol !== "http:") return false;
+    if (from.protocol !== "https:" && !(from.protocol === "http:" && isLocalName(from.hostname))) return false;
     // An Origin is a scheme, a host and a port: anything more is not one.
     if (from.origin !== origin.toLowerCase() || from.username !== "" || from.password !== "") return false;
     return from.host === new URL(req.url).host;
@@ -216,10 +238,11 @@ export async function createSignInCode(deps: Deps, userId: string): Promise<stri
  * Turns a sign-in code into a session, once. Returns the new session's secret (for the
  * cookie), its id and the account's id, or null when the code is malformed, unknown,
  * already used or expired, when the account is disabled or a member of no workspace, and
- * while the site has no admin. `label` is the browser's name from `sessionLabel`;
- * anything else is stored as "Unknown browser". `replaces` is the value of the session
- * cookie the browser already had, or null: that session ends when, and only when, the
- * new one is made.
+ * while the site has no admin. `userAgent` is the request's User-Agent header as it
+ * came, or null: the stored label is made from it here by `sessionLabel`, so only that
+ * function's fixed words can ever be stored, never a caller's text. `replaces` is the
+ * value of the session cookie the browser already had, or null: that session ends when,
+ * and only when, the new one is made.
  *
  * One read and one batch. The batch is what decides, and it is all-or-nothing on both
  * targets:
@@ -236,7 +259,7 @@ export async function createSignInCode(deps: Deps, userId: string): Promise<stri
 export async function redeemSignInCode(
   deps: Deps,
   code: string,
-  label: string,
+  userAgent: string | null,
   replaces: string | null,
 ): Promise<{ secret: string; sessionId: string; userId: string } | null> {
   if (typeof code !== "string" || !CODE_PATTERN.test(code)) return null;
@@ -256,7 +279,7 @@ export async function redeemSignInCode(
 
   const sessionId = newId("ses");
   const secret = "dps_" + randomHex(32);
-  const stored = typeof label === "string" && label.length <= LABEL_MAX_CHARS && LABEL_PATTERN.test(label) ? label : UNKNOWN_LABEL;
+  const label = sessionLabel(userAgent);
   const stmts: Stmt[] = [
     {
       sql: "UPDATE signin_code SET used_at = ?, session_id = ? WHERE hash = ? AND used_at IS NULL AND expires_at > ?",
@@ -273,13 +296,15 @@ export async function redeemSignInCode(
                         AND u.status = 'active'
                         AND EXISTS (SELECT 1 FROM user WHERE is_admin = 1)),
                     ?, ?, ?, ?, ?)`,
-      params: [sessionId, codeHash, sessionId, found.user_id, found.workspace_id, await sha256Hex(secret), stored, now, now, now + SESSION_MS],
+      params: [sessionId, codeHash, sessionId, found.user_id, found.workspace_id, await sha256Hex(secret), label, now, now, now + SESSION_MS],
     },
   ];
   if (typeof replaces === "string" && SECRET_PATTERN.test(replaces)) {
     stmts.push({
-      sql: "UPDATE session SET revoked_at = ? WHERE hash = ? AND revoked_at IS NULL AND id <> ?",
-      params: [now, await sha256Hex(replaces), sessionId],
+      // The new session cannot be the one named here: its secret was made a moment ago
+      // and its digest is unique in the table.
+      sql: "UPDATE session SET revoked_at = ? WHERE hash = ? AND revoked_at IS NULL",
+      params: [now, await sha256Hex(replaces)],
     });
   }
   stmts.push(auditStatement(deps, { event: "signin", userId: found.user_id, workspaceId: found.workspace_id, subject: sessionId }));
@@ -302,11 +327,15 @@ export async function redeemSignInCode(
  *
  * This says who holds the cookie and nothing more: it does not check that a changing
  * request came from the site's own page. `requireAuth` does, and is what a route calls.
+ *
+ * The secret itself is not handed back: nothing needs it once the session is found.
+ * `csrf` is the session's anti-forgery value (`csrfFor` of the secret), which the session
+ * answer gives the site's own page; it does not reveal the secret.
  */
 export async function resolveSession(
   req: Request,
   deps: Deps,
-): Promise<{ sessionId: string; userId: string; workspaceId: string; admin: boolean; secret: string } | null> {
+): Promise<{ sessionId: string; userId: string; workspaceId: string; admin: boolean; csrf: string } | null> {
   if (!sessionHost(req, deps)) return null;
   const secret = readSessionCookie(req);
   if (secret === null) return null;
@@ -333,15 +362,21 @@ export async function resolveSession(
       now - SESSION_TOUCH_MS,
     ]);
   }
-  return { sessionId: row.id, userId: row.user_id, workspaceId: row.workspace_id, admin: row.is_admin === 1, secret };
+  return { sessionId: row.id, userId: row.user_id, workspaceId: row.workspace_id, admin: row.is_admin === 1, csrf: await csrfFor(secret) };
 }
 
 /**
- * Ends one session of the account. True when it was that account's and not yet revoked;
- * false, with nothing written, for another account's session id, an unknown one and one
- * already revoked. `event` is what the audit record calls it: "signout" for the caller's
- * own session, "session_revoked" for another of its sessions. One read and one batch
- * that holds the change and its audit row.
+ * Ends one session of the account. True for the one call that ended it; false, with
+ * nothing written, for another account's session id, an unknown one and one already
+ * revoked, also when another call revoked it a moment before this one. `event` is what
+ * the audit record calls it: "signout" for the caller's own session, "session_revoked"
+ * for another of its sessions.
+ *
+ * One read and one batch that holds the change and its audit row. The batch decides: its
+ * update writes NULL into the NOT NULL label of a session that is already revoked, which
+ * fails and undoes the whole batch, so of two calls at once only the first writes the
+ * time and the audit row. (A batch reports no row count, and the audit row must be
+ * written with the change or not at all, so the count cannot be what decides.)
  */
 export async function revokeSession(deps: Deps, userId: string, sessionId: string, event: "signout" | "session_revoked" = "session_revoked"): Promise<boolean> {
   if (typeof sessionId !== "string" || !SESSION_ID_PATTERN.test(sessionId)) return false;
@@ -350,10 +385,18 @@ export async function revokeSession(deps: Deps, userId: string, sessionId: strin
     [sessionId, userId],
   );
   if (found === null) return false;
-  await deps.db.batch([
-    { sql: "UPDATE session SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL", params: [deps.now(), sessionId, userId] },
-    auditStatement(deps, { event, userId, workspaceId: found.workspace_id, subject: sessionId }),
-  ]);
+  try {
+    await deps.db.batch([
+      {
+        sql: "UPDATE session SET label = CASE WHEN revoked_at IS NULL THEN label ELSE NULL END, revoked_at = coalesce(revoked_at, ?) WHERE id = ? AND user_id = ?",
+        params: [deps.now(), sessionId, userId],
+      },
+      auditStatement(deps, { event, userId, workspaceId: found.workspace_id, subject: sessionId }),
+    ]);
+  } catch (err) {
+    if (!isNotNullViolation(err)) throw err;
+    return false;
+  }
   return true;
 }
 
