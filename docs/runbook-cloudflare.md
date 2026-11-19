@@ -391,6 +391,10 @@ If the wizard saved the workspace but the token never reached you (the page was 
 
 ```sql
 DELETE FROM api_token WHERE (SELECT count(*) FROM workspace) = 1 AND NOT EXISTS (SELECT 1 FROM tour) AND NOT EXISTS (SELECT 1 FROM upload) AND NOT EXISTS (SELECT 1 FROM api_token WHERE last_used_at IS NOT NULL);
+DELETE FROM signin_code WHERE (SELECT count(*) FROM workspace) = 1 AND NOT EXISTS (SELECT 1 FROM tour) AND NOT EXISTS (SELECT 1 FROM upload) AND NOT EXISTS (SELECT 1 FROM api_token);
+DELETE FROM session WHERE (SELECT count(*) FROM workspace) = 1 AND NOT EXISTS (SELECT 1 FROM tour) AND NOT EXISTS (SELECT 1 FROM upload) AND NOT EXISTS (SELECT 1 FROM api_token);
+DELETE FROM signin_method WHERE (SELECT count(*) FROM workspace) = 1 AND NOT EXISTS (SELECT 1 FROM tour) AND NOT EXISTS (SELECT 1 FROM upload) AND NOT EXISTS (SELECT 1 FROM api_token);
+DELETE FROM membership WHERE (SELECT count(*) FROM workspace) = 1 AND NOT EXISTS (SELECT 1 FROM tour) AND NOT EXISTS (SELECT 1 FROM upload) AND NOT EXISTS (SELECT 1 FROM api_token);
 DELETE FROM user WHERE (SELECT count(*) FROM workspace) = 1 AND NOT EXISTS (SELECT 1 FROM tour) AND NOT EXISTS (SELECT 1 FROM upload) AND NOT EXISTS (SELECT 1 FROM api_token);
 DELETE FROM setup WHERE (SELECT count(*) FROM workspace) = 1 AND NOT EXISTS (SELECT 1 FROM tour) AND NOT EXISTS (SELECT 1 FROM upload) AND NOT EXISTS (SELECT 1 FROM api_token);
 DELETE FROM workspace WHERE (SELECT count(*) FROM workspace) = 1 AND NOT EXISTS (SELECT 1 FROM tour) AND NOT EXISTS (SELECT 1 FROM upload) AND NOT EXISTS (SELECT 1 FROM api_token);
