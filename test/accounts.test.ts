@@ -2,7 +2,7 @@
 // the audit record. Runs on both targets.
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
-import { accountByEmail, hasAdmin, parseEmail, workspaceOf } from "../src/accounts.ts";
+import { accountByEmail, hasAdmin, healMemberships, parseEmail, workspaceOf } from "../src/accounts.ts";
 import { AUDIT_EVENTS, auditStatement } from "../src/audit.ts";
 import { hashToken, requireAuth } from "../src/auth.ts";
 import type { Deps } from "../src/ports.ts";
@@ -80,6 +80,67 @@ describe("accounts", () => {
     expect(await workspaceOf(deps, b.userId)).toBe(b.workspaceId);
   });
 
+  it("an account written without a membership or a sign-in method is given both by the repair, once", async () => {
+    const { deps } = await makeDeps();
+    const a = await seedAccount(deps, { username: "sam" });
+    const b = await seedWorkspace(deps, "B");
+    // Nothing is missing: the repair changes nothing.
+    const before = await deps.db.all("SELECT * FROM membership ORDER BY user_id");
+    const methodsBefore = await deps.db.all("SELECT * FROM signin_method ORDER BY user_id");
+    const stmts = healMemberships(deps);
+    expect(stmts.length).toBeGreaterThan(0);
+    await deps.db.batch(stmts);
+    expect(await deps.db.all("SELECT * FROM membership ORDER BY user_id")).toEqual(before);
+    expect(await deps.db.all("SELECT * FROM signin_method ORDER BY user_id")).toEqual(methodsBefore);
+
+    // An older build ran on this database for a while: its three statements make a
+    // workspace, an owner and a token, and nothing else. A second owner lost only its
+    // membership, a third only its sign-in method.
+    const old = async (n: string, at: number) => {
+      await deps.db.batch([
+        { sql: "INSERT INTO workspace (id, name, created_at) VALUES (?, 'Old', ?)", params: [`ws_${n.repeat(24)}`, at] },
+        { sql: "INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, ?, ?)", params: [`usr_${n.repeat(24)}`, `ws_${n.repeat(24)}`, `old-${n}@example.com`, at] },
+        { sql: "INSERT INTO api_token (id, workspace_id, name, hash, created_at) VALUES (?, ?, 'First token', ?, ?)", params: [`tok_${n.repeat(24)}`, `ws_${n.repeat(24)}`, n.repeat(64), at] },
+      ]);
+    };
+    const OLD = ["c", "d", "e"].map((n) => `'usr_${n.repeat(24)}'`).join(", ");
+    await old("c", 111);
+    await old("d", 222);
+    await old("e", 333);
+    await deps.db.run("INSERT INTO signin_method (user_id, kind, created_at) VALUES (?, 'email_link', 222)", ["usr_" + "d".repeat(24)]);
+    await deps.db.run("INSERT INTO membership (workspace_id, user_id, role, created_at) VALUES (?, ?, 'owner', 333)", ["ws_" + "e".repeat(24), "usr_" + "e".repeat(24)]);
+    expect(await workspaceOf(deps, "usr_" + "c".repeat(24))).toBeNull();
+    expect(await workspaceOf(deps, "usr_" + "d".repeat(24))).toBeNull();
+
+    // The statements were made before the rows were missing, and still find them: they hold no list of accounts.
+    await deps.db.batch(stmts);
+    for (const n of ["c", "d", "e"]) expect(await workspaceOf(deps, `usr_${n.repeat(24)}`), n).toBe(`ws_${n.repeat(24)}`);
+    // Each new row is dated as its account is, like the rows the migration wrote: no clock is read.
+    expect(await deps.db.all(`SELECT workspace_id, user_id, role, created_at FROM membership WHERE user_id IN (${OLD}) ORDER BY user_id`)).toEqual([
+      { workspace_id: "ws_" + "c".repeat(24), user_id: "usr_" + "c".repeat(24), role: "owner", created_at: 111 },
+      { workspace_id: "ws_" + "d".repeat(24), user_id: "usr_" + "d".repeat(24), role: "owner", created_at: 222 },
+      { workspace_id: "ws_" + "e".repeat(24), user_id: "usr_" + "e".repeat(24), role: "owner", created_at: 333 },
+    ]);
+    expect(await deps.db.all(`SELECT user_id, kind, created_at FROM signin_method WHERE user_id IN (${OLD}) ORDER BY user_id`)).toEqual([
+      { user_id: "usr_" + "c".repeat(24), kind: "email_link", created_at: 111 },
+      { user_id: "usr_" + "d".repeat(24), kind: "email_link", created_at: 222 },
+      { user_id: "usr_" + "e".repeat(24), kind: "email_link", created_at: 333 },
+    ]);
+    // Every account now has exactly one of each, and the rows that were there are as they were.
+    expect(await deps.db.all("SELECT u.id FROM user u WHERE (SELECT count(*) FROM membership m WHERE m.user_id = u.id AND m.workspace_id = u.workspace_id) <> 1 OR (SELECT count(*) FROM signin_method s WHERE s.user_id = u.id) <> 1")).toEqual([]);
+    expect(await deps.db.all(`SELECT * FROM membership WHERE user_id NOT IN (${OLD}) ORDER BY user_id`)).toEqual(before);
+    expect(await workspaceOf(deps, a.userId)).toBe(a.workspaceId);
+    expect(await deps.db.first("SELECT username, is_admin FROM user WHERE id = ?", [a.userId])).toEqual({ username: "sam", is_admin: 0 });
+    expect(await hasAdmin(deps)).toBe(false);
+
+    // Again, and twice in one batch: nothing more is written and nothing fails.
+    const settled = [await deps.db.all("SELECT * FROM membership ORDER BY user_id"), await deps.db.all("SELECT * FROM signin_method ORDER BY user_id")];
+    await deps.db.batch([...healMemberships(deps), ...healMemberships(deps)]);
+    expect([await deps.db.all("SELECT * FROM membership ORDER BY user_id"), await deps.db.all("SELECT * FROM signin_method ORDER BY user_id")]).toEqual(settled);
+    // The older build's token was never in question.
+    expect(await deps.db.first("SELECT count(*) AS n FROM api_token WHERE workspace_id = ?", [b.workspaceId])).toEqual({ n: 1 });
+  });
+
   it("seedAccount makes an account with its workspace, a token that authenticates, and the username and admin flag asked for", async () => {
     const { deps } = await makeDeps();
     const plain = await seedAccount(deps);
@@ -148,11 +209,11 @@ describe("accounts", () => {
   it("an address with a line break, a space, two @ or a bad domain is not an email", () => {
     const bad: unknown[] = [
       // Line breaks anywhere, also at the ends: nothing with one is ever stored or mailed.
-      "sam@example.com\n", "\nsam@example.com", "sam@example.com\r\n", "sam\n@example.com", "sam@exam\rple.com", "sam@example.com\r\nBcc: x@example.org", "sam@example.com ", "sam@example.com\u0085", "sam\u000b@example.com", "sam@example.com\u0000",
+      "sam@example.com\n", "\nsam@example.com", "sam@example.com\r\n", "sam\n@example.com", "sam@exam\rple.com", "sam@example.com\r\nBcc: x@example.org", "sam@example.com\u2028", "sam@example.com\u0085", "sam\u000b@example.com", "sam@example.com\u0000",
       // Spaces inside, and white space that is not a plain space or tab at the ends.
-      "sam smith@example.com", "sam@ example.com", "sam @example.com", "sam@example .com", " sam@example.com", "sam@example.com　",
+      "sam smith@example.com", "sam@ example.com", "sam @example.com", "sam@example .com", "\u00a0sam@example.com", "sam@example.com\u3000",
       // Hidden and non-ASCII characters.
-      "sam​@example.com", "sam@example.com‎", "﻿sam@example.com", "sám@example.com", "sam@exámple.com", "sam@еxample.com", "Kim@example.com",
+      "sam\u200b@example.com", "sam@example.com\u200e", "\ufeffsam@example.com", "s\u00e1m@example.com", "sam@ex\u00e1mple.com", "sam@\u0435xample.com", "\u212aim@example.com",
       // Not exactly one @.
       "sam@@example.com", "sam@x@example.com", "@example.com", "sam@", "sam", "@", "",
       // The local part.
@@ -176,15 +237,28 @@ describe("accounts", () => {
     const first = auditStatement(deps, { event: "allowance_set", userId: a.userId, workspaceId: a.workspaceId, subject: a.workspaceId, detail: { old: 1_073_741_824, new: 0 } });
     // A statement for the caller's batch: nothing is written by making it.
     expect(await count(deps, "audit")).toBe(0);
-    await deps.db.batch([first, auditStatement(deps, { event: "signin", userId: a.userId, workspaceId: a.workspaceId, subject: "ses_" + "1".repeat(24) }), auditStatement(deps, { event: "signout_everywhere" })]);
+    await deps.db.batch([
+      first,
+      auditStatement(deps, { event: "signin", userId: a.userId, workspaceId: a.workspaceId, subject: "ses_" + "1".repeat(24) }),
+      auditStatement(deps, { event: "signout_everywhere" }),
+      // An allowance of null is the site's default, and both numbers are recorded as they were.
+      auditStatement(deps, { event: "allowance_set", userId: a.userId, workspaceId: a.workspaceId, subject: a.workspaceId, detail: { old: null, new: 5_000_000 } }),
+      auditStatement(deps, { event: "allowance_set", userId: a.userId, workspaceId: a.workspaceId, subject: a.workspaceId, detail: { old: 5_000_000, new: null, unit: "bytes" } }),
+      auditStatement(deps, { event: "signout", userId: null, workspaceId: null, subject: null, detail: null }),
+      auditStatement(deps, { event: "signout", detail: {} }),
+    ]);
     const rows = await deps.db.all<{ id: string; at: number; event: string; user_id: string | null; workspace_id: string | null; subject: string | null; detail: string | null }>("SELECT * FROM audit ORDER BY rowid");
     expect(rows.map(({ id: _id, ...rest }) => rest)).toEqual([
       { at: NOW, event: "allowance_set", user_id: a.userId, workspace_id: a.workspaceId, subject: a.workspaceId, detail: '{"old":1073741824,"new":0}' },
       { at: NOW, event: "signin", user_id: a.userId, workspace_id: a.workspaceId, subject: "ses_" + "1".repeat(24), detail: null },
       { at: NOW, event: "signout_everywhere", user_id: null, workspace_id: null, subject: null, detail: null },
+      { at: NOW, event: "allowance_set", user_id: a.userId, workspace_id: a.workspaceId, subject: a.workspaceId, detail: '{"old":null,"new":5000000}' },
+      { at: NOW, event: "allowance_set", user_id: a.userId, workspace_id: a.workspaceId, subject: a.workspaceId, detail: '{"old":5000000,"new":null,"unit":"bytes"}' },
+      { at: NOW, event: "signout", user_id: null, workspace_id: null, subject: null, detail: null },
+      { at: NOW, event: "signout", user_id: null, workspace_id: null, subject: null, detail: "{}" },
     ]);
     for (const r of rows) expect(r.id).toMatch(/^aud_[0-9a-f]{24}$/);
-    expect(new Set(rows.map((r) => r.id)).size).toBe(3);
+    expect(new Set(rows.map((r) => r.id)).size).toBe(7);
     // An event that is not one of the list is refused, whatever the type checker was told.
     expect(() => auditStatement(deps, { event: "signin; DROP TABLE audit" as never })).toThrow("audit: unknown event");
     expect(() => auditStatement(deps, { event: "toString" as never })).toThrow("audit: unknown event");
@@ -225,10 +299,34 @@ describe("accounts", () => {
     }
     expect(message).toContain("audit: a value that must not be recorded");
     expect(message).not.toContain(token.slice(3));
-    // A detail that is not a flat record of numbers and strings is refused too.
-    for (const d of [{ a: { b: 1 } }, { a: null }, { a: [1] }, { a: true }, [1], "text"]) {
+    // A detail that is not a flat record of whole numbers, nulls and short lowercase words is refused too.
+    const proto = JSON.parse('{"__proto__": 1}');
+    const many = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`k${i}`, i]));
+    class Detail {
+      old = 1;
+    }
+    for (const d of [
+      { a: { b: 1 } }, { a: [1] }, { a: true }, { a: undefined }, [1], "text", new Detail(), new Map([["a", 1]]),
+      // A word: a lowercase letter, then at most 39 lowercase letters, digits and underscores.
+      { a: "" }, { a: "Bytes" }, { a: "two words" }, { a: "a.b" }, { a: "a-b" }, { a: "9lives" }, { a: "_x" }, { a: "x".repeat(41) }, { a: "caf\u00e9" },
+      // A word that is most of a secret is still one.
+      { a: "dp_" + "ab".repeat(10) }, { a: "dpl_" + "0".repeat(12) }, { a: "x" + "ab".repeat(16) },
+      // Keys follow the same rule, and a key that names a part of every object is refused, not dropped.
+      { "": 1 }, { Old: 1 }, { "a b": 1 }, { ["x".repeat(41)]: 1 }, proto, { constructor: 1 }, { prototype: 1 }, { ["__proto__"]: 1 }, many,
+    ]) {
       expect(() => auditStatement(deps, { event: "signin", detail: d as never }), JSON.stringify(d)).toThrow("audit: a value that must not be recorded");
     }
+    expect(Object.keys(proto)).toEqual(["__proto__"]);
+
+    // An account, a workspace and a subject are named by id and by nothing else: a prefix of
+    // two to four lowercase letters, an underscore and 24 lowercase hex characters.
+    const HEX = "0123456789abcdef01234567";
+    for (const id of ["", "usr_1", "ses_1", "usr_" + HEX.slice(1), "usr_" + HEX + "0", "USR_" + HEX, "usr_" + HEX.toUpperCase(), "u_" + HEX, "users_" + HEX, "usr-" + HEX, HEX, " usr_" + HEX, "usr_" + HEX + "\n", "owner", "alex"]) {
+      for (const field of ["userId", "workspaceId", "subject"]) {
+        expect(() => auditStatement(deps, { event: "signin", [field]: id }), `${field} ${JSON.stringify(id)}`).toThrow("audit: a value that must not be recorded");
+      }
+    }
+    for (const id of ["usr_" + HEX, "ws_" + HEX, "tour_" + HEX, "ses_" + HEX, "aud_" + HEX]) auditStatement(deps, { event: "signin", userId: id, workspaceId: id, subject: id });
 
     // What is recorded: ids and plain numbers, and none of the secrets anywhere in the account tables.
     await deps.db.batch([

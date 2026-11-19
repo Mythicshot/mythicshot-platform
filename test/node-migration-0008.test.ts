@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { accountByEmail, hasAdmin, workspaceOf } from "../src/accounts.ts";
+import { accountByEmail, hasAdmin, healMemberships, workspaceOf } from "../src/accounts.ts";
 import { hashToken, requireAuth } from "../src/auth.ts";
 import { NodeDb } from "../src/node/db.ts";
 import { NodeFileStore } from "../src/node/files.ts";
@@ -136,11 +136,16 @@ function asKnownBefore(before: Record<string, Record<string, unknown>[]>, after:
   return out;
 }
 
-const KEPT_HEADERS = ["content-type", "content-length", "cache-control", "etag", "x-content-type-options", "content-security-policy", "location"];
+/** Headers that differ from one moment to the next whatever the server does. Every other header is compared. */
+const IGNORED_HEADERS = ["date"];
 
-/** What a client can tell of an answer: status, the headers that carry meaning, and every byte. */
-function seen(c: Call): { status: number; headers: Record<string, string | null>; body: string } {
-  return { status: c.status, headers: Object.fromEntries(KEPT_HEADERS.map((h) => [h, c.headers.get(h)])), body: Buffer.from(c.bytes).toString("base64") };
+/** What a client can tell of an answer: status, every header but the ignored ones, and every byte. */
+function seen(c: Call): { status: number; headers: Record<string, string>; body: string } {
+  const headers: Record<string, string> = {};
+  c.headers.forEach((value, name) => {
+    if (!IGNORED_HEADERS.includes(name.toLowerCase())) headers[name.toLowerCase()] = value;
+  });
+  return { status: c.status, headers, body: Buffer.from(c.bytes).toString("base64") };
 }
 
 /** The requests that show a site to its owner and to a visitor, each with its answer. */
@@ -170,6 +175,8 @@ describe("migration 0008 on an existing install", () => {
         const before = await everything(s.db);
         expect(before.user).toHaveLength(2);
         expect(before.step).toHaveLength(7);
+        // The site was sound before, so a broken reference afterwards would be the migration's.
+        expect(await s.db.all("PRAGMA foreign_key_check"), `from ${level}`).toEqual([]);
 
         expect(await migrate(s.db, s.dir(8)), `from ${level}`).toEqual(s.files.slice(level, 8));
         const after = await everything(s.db);
@@ -283,6 +290,7 @@ describe("migration 0008 on an existing install", () => {
       expect(before[`token 0 GET ${paths.withToken[2]}`].status).toBe(404);
       expect(before[`token 1 GET ${paths.withToken[2]}`].status).toBe(200);
       const rowsBefore = await everything(db);
+      expect(await db.all("PRAGMA foreign_key_check")).toEqual([]);
       const draftKeys = await (deps.drafts as NodeFileStore).keys();
       const publicKeys = await (deps.pub as NodeFileStore).keys();
 
@@ -291,6 +299,8 @@ describe("migration 0008 on an existing install", () => {
       expect(withoutNew(await everything(db))).toEqual(rowsBefore);
       expect(await (deps.drafts as NodeFileStore).keys()).toEqual(draftKeys);
       expect(await (deps.pub as NodeFileStore).keys()).toEqual(publicKeys);
+      expect(await db.all("PRAGMA foreign_key_check")).toEqual([]);
+      expect(await db.first("PRAGMA integrity_check")).toEqual({ integrity_check: "ok" });
       expect(await answers(deps, [TOKEN_A, TOKEN_B], paths)).toEqual(before);
 
       // The open upload still takes its last step and commits, and the new tour is listed.
@@ -407,6 +417,51 @@ describe("migration 0008 on an existing install", () => {
       // A row an older build deletes by naming it is not held by anything new: an upload and its steps.
       await db.run("DELETE FROM upload WHERE id = 'up_later'");
       expect(await db.all("PRAGMA foreign_key_check")).toEqual([]);
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it("an account an older build wrote after the migration is repaired once the newer build is back", async () => {
+    const s = await siteAt(7);
+    try {
+      const { db, deps } = s;
+      await writeOldSite(s);
+      expect(await migrate(db, s.dir(8))).toEqual([NAME]);
+      // The way back was taken: 0.1.8 runs on the migrated database, which has 0008 on
+      // record, and a workspace is made by its three statements.
+      const token = "dp_" + "c3".repeat(20);
+      await oldOwner(db, "c", "Later", "later@example.com", token);
+      const USR_C = "usr_" + "c".repeat(24);
+      const WS_C = "ws_" + "c".repeat(24);
+      expect(await workspaceOf(deps, USR_C)).toBeNull();
+      // Forward again: the migration is on record and does not run a second time, so it cannot fill the gap.
+      expect(await migrate(db, s.dir(8))).toEqual([]);
+      expect(await workspaceOf(deps, USR_C)).toBeNull();
+      const before = await everything(db);
+
+      await db.batch(healMemberships(deps));
+      expect(await workspaceOf(deps, USR_C)).toBe(WS_C);
+      expect(await db.all("SELECT * FROM membership ORDER BY user_id")).toEqual([
+        { workspace_id: WS_A, user_id: USR_A, role: "owner", created_at: NOW - 50_000 },
+        { workspace_id: WS_B, user_id: USR_B, role: "owner", created_at: NOW - 50_000 },
+        { workspace_id: WS_C, user_id: USR_C, role: "owner", created_at: NOW - 50_000 },
+      ]);
+      expect(await db.all("SELECT user_id, kind FROM signin_method ORDER BY user_id")).toEqual([
+        { user_id: USR_A, kind: "email_link" },
+        { user_id: USR_B, kind: "email_link" },
+        { user_id: USR_C, kind: "email_link" },
+      ]);
+      // Nothing else changed, nobody became an admin, and the repair is safe to run at every start.
+      const after = await everything(db);
+      expect({ ...after, membership: [], signin_method: [] }).toEqual({ ...before, membership: [], signin_method: [] });
+      expect(await hasAdmin(deps)).toBe(false);
+      await db.batch(healMemberships(deps));
+      expect(await everything(db)).toEqual(after);
+      expect(await db.all("PRAGMA foreign_key_check")).toEqual([]);
+      for (const [t, ws] of [[TOKEN_A, WS_A], [token, WS_C]]) {
+        expect(await requireAuth(new Request("https://tours.example.com/api/v1/me", { headers: { authorization: "Bearer " + t } }), deps)).toMatchObject({ workspaceId: ws });
+      }
     } finally {
       s.db.close();
     }
