@@ -27,7 +27,7 @@ const MAIL = signInMail("ada@example.com", LINK, "Mythicshot");
 const b64 = (text: string) => Buffer.from(text, "utf8").toString("base64");
 const PLAIN_TOKEN = b64(`\0${USER}\0${PASSWORD}`);
 /** Every form a secret could take in a text. */
-const SECRETS = [PASSWORD, b64(PASSWORD), PLAIN_TOKEN, CODE, LINK];
+const SECRETS = [PASSWORD, b64(PASSWORD), PLAIN_TOKEN, CODE, LINK, MAIL.to, USER, b64(USER)];
 
 /** "sent", or the failure itself. */
 const outcome = (work: Promise<void>): Promise<unknown> =>
@@ -336,6 +336,52 @@ describe("smtp client, scripted connection", () => {
     expect(reasonOf(await outcome(smtpMailer(null as unknown as SmtpSettings, absent.connect).send(MAIL)))).toBe("refused");
     expect(reasonOf(await outcome(smtpMailer(SETTINGS, absent.connect).send(null as unknown as typeof MAIL)))).toBe("refused");
     expect(absent.opened()).toBe(0);
+    // A text or subject beyond the size a mail of this site can have is refused the same way.
+    for (const mail of [
+      { ...MAIL, text: "x".repeat(100_001) },
+      { ...MAIL, text: "é".repeat(50_001) },
+      { ...MAIL, subject: "x".repeat(256) },
+      { ...MAIL, text: 5 as unknown as string },
+      { ...MAIL, subject: undefined as unknown as string },
+    ]) {
+      const big = memory();
+      const failure = await outcome(smtpMailer(SETTINGS, big.connect).send(mail));
+      expect(reasonOf(failure)).toBe("refused");
+      expect((failure as SmtpError).bodyWritten).toBe(false);
+      expect(big.opened()).toBe(0);
+      expect(() => buildMessage(mail, SETTINGS.from, 0, "abc")).toThrow(SmtpError);
+    }
+    // The largest text still goes.
+    const largest = memory();
+    await smtpMailer(SETTINGS, largest.connect).send({ ...MAIL, text: "x".repeat(99_999) + "\n" });
+    expect(largest.session.bodies).toHaveLength(1);
+    // Whatever is handed in, a failure is this client's own error and nothing else.
+    const hostile = {
+      get to(): string {
+        throw new Error(`boom ${PASSWORD}`);
+      },
+      subject: "s",
+      text: "t",
+    };
+    for (const [settings, mail] of [
+      [SETTINGS, hostile],
+      [{ ...SETTINGS, port: "465" as unknown as number }, MAIL],
+      [{ ...SETTINGS, from: 7 as unknown as string }, MAIL],
+      [SETTINGS, "mail" as unknown as typeof MAIL],
+      [undefined as unknown as SmtpSettings, MAIL],
+    ] as Array<[SmtpSettings, typeof MAIL]>) {
+      const unused = memory();
+      let thrown: unknown = null;
+      let failure: unknown = null;
+      try {
+        failure = await outcome(smtpMailer(settings, unused.connect).send(mail));
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeNull();
+      expect(["refused", "connect"]).toContain(reasonOf(failure, ["boom"]));
+      expect(unused.opened()).toBe(0);
+    }
     // The message builder refuses the same on its own.
     for (const to of badAddresses) expect(() => buildMessage({ ...MAIL, to }, SETTINGS.from, 0, "abc")).toThrow(SmtpError);
     for (const subject of badSubjects) expect(() => buildMessage({ ...MAIL, subject }, SETTINGS.from, 0, "abc")).toThrow(SmtpError);
@@ -382,10 +428,30 @@ describe("smtp client, scripted connection", () => {
       expect(reasonOf(await outcome(smtpMailer(SETTINGS, odd.connect).send(MAIL)))).toBe("refused");
       expect(odd.session.raw).toBe("");
     }
-    // Two replies to one command: the second is not taken for the answer to the next.
+    // A reply whose code changes from one line to the next is not a reply, at any step.
+    const shifting = memory({ ehlo: "250-a\r\n220 b" });
+    expect(reasonOf(await outcome(smtpMailer(SETTINGS, shifting.connect).send(MAIL)))).toBe("refused");
+    expect(shifting.session.commands).toEqual(["EHLO app.example.com"]);
+    // Two replies that arrive together to one command: the second is not taken for the
+    // answer to the next command, which is never written.
     const eager = memory({ ehlo: "250-mail.test\r\n250 AUTH PLAIN\r\n235 2.7.0 accepted" });
     expect(reasonOf(await outcome(smtpMailer(SETTINGS, eager.connect).send(MAIL)))).toBe("refused");
     expect(eager.session.raw).not.toContain(PLAIN_TOKEN);
+    // "Go ahead" and "taken" arriving together, before the message was written: refused,
+    // and the message never leaves.
+    const hasty = memory({ data: "354 go ahead\r\n250 2.0.0 queued" });
+    const hastyFailure = await outcome(smtpMailer(SETTINGS, hasty.connect).send(MAIL));
+    expect(reasonOf(hastyFailure)).toBe("refused");
+    expect((hastyFailure as SmtpError).bodyWritten).toBe(false);
+    expect(hasty.session.commands.at(-1)).toBe("DATA");
+    expect(hasty.session.raw).not.toContain("Subject:");
+    expect(hasty.session.raw).not.toContain(CODE);
+    // "Taken" said twice to the final dot: the mail is sent, once.
+    const twice = memory({ body: "250 2.0.0 queued\r\n250 2.0.0 queued" });
+    expect(await outcome(smtpMailer(SETTINGS, twice.connect).send(MAIL))).toBe("sent");
+    expect(twice.opened()).toBe(1);
+    expect(twice.session.bodies).toHaveLength(1);
+    expect(twice.session.commands.filter((c) => c === "DATA")).toHaveLength(1);
   });
 
   it("a refused recipient, a refused sign-in and a silent server each end as their own fixed reason", async () => {
@@ -413,6 +479,42 @@ describe("smtp client, scripted connection", () => {
     expect((await run({ body: "552 5.3.4 too big" }, ["too big"])).reason).toBe("refused");
     expect((await run({ hangUpAt: "mail" })).reason).toBe("refused");
     expect((await run({ hangUpAt: "greeting" })).reason).toBe("refused");
+    // Only 250 to the final dot means the mail was taken.
+    for (const body of ["251 2.1.5 will forward", "354 go on", "220 ready", "200 ok", "252 cannot verify", "235 2.7.0 accepted"]) {
+      const odd = await run({ body });
+      expect(odd.reason).toBe("refused");
+      expect(odd.session.commands).not.toContain("QUIT");
+    }
+
+    // Whether the mail may have been taken: only once the message itself was written.
+    const flagOf = async (script: Script) => {
+      const { session, connect } = memory(script);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const waiting = outcome(smtpMailer(SETTINGS, connect).send(MAIL));
+      await vi.advanceTimersByTimeAsync(SMTP_LIMITS.totalMs);
+      vi.useRealTimers();
+      const failure = (await waiting) as SmtpError;
+      expect(failure).toBeInstanceOf(SmtpError);
+      expect(typeof failure.bodyWritten).toBe("boolean");
+      return { reason: failure.reason, bodyWritten: failure.bodyWritten, bodies: session.bodies.length };
+    };
+    // The server hangs up, or says nothing, or says no, after the whole message arrived.
+    expect(await flagOf({ hangUpAt: "body" })).toEqual({ reason: "refused", bodyWritten: true, bodies: 1 });
+    expect(await flagOf({ body: null })).toEqual({ reason: "timeout", bodyWritten: true, bodies: 1 });
+    expect(await flagOf({ body: "554 5.6.0 no" })).toEqual({ reason: "refused", bodyWritten: true, bodies: 1 });
+    // Before that, the mail was certainly not sent.
+    expect(await flagOf({ hangUpAt: "data" })).toEqual({ reason: "refused", bodyWritten: false, bodies: 0 });
+    expect(await flagOf({ data: null })).toEqual({ reason: "timeout", bodyWritten: false, bodies: 0 });
+    expect(await flagOf({ rcpt: "550 no" })).toEqual({ reason: "refused", bodyWritten: false, bodies: 0 });
+    expect(await flagOf({ auth: "535 no" })).toEqual({ reason: "auth", bodyWritten: false, bodies: 0 });
+    expect(await flagOf({ greeting: null })).toEqual({ reason: "timeout", bodyWritten: false, bodies: 0 });
+    expect(new SmtpError("connect").bodyWritten).toBe(false);
+    expect(new SmtpError("tls").bodyWritten).toBe(false);
+    expect(new SmtpError("refused", true).bodyWritten).toBe(true);
+    // The three reasons that come before any message can never claim it was written.
+    for (const reason of ["connect", "tls", "auth"] as const) expect(new SmtpError(reason, true).bodyWritten).toBe(false);
+    // The waits cannot be changed by other code.
+    expect(Object.isFrozen(SMTP_LIMITS)).toBe(true);
 
     // Silence at each step is a timeout, and the mail is never written twice.
     for (const step of ["greeting", "ehlo", "auth", "mail", "rcpt", "data", "body"] as Step[]) {
@@ -739,23 +841,35 @@ describe("smtp client, fake server on 127.0.0.1", () => {
   const stranger = testCertificate({ dns: ["mail.test"], ip: ["127.0.0.1"] });
   // Trusted, but made out to another name and to no address.
   const misnamed = testCertificate({ dns: ["other.test"], ip: [] });
-  let defaults: string[] = [];
+  let defaults: string[] | null = null;
   const local = (port: number): SmtpSettings => ({ ...SETTINGS, host: "127.0.0.1", port });
 
+  // The package allows any Node from 24.0, and tls.setDefaultCACertificates came with
+  // 24.5. Without it this file cannot make its certificate trusted for the client's own
+  // connection, so the tests that need a trusted certificate are skipped, with a line
+  // that says so. The tests that need none still run.
+  const canTrust = typeof tls.setDefaultCACertificates === "function" && typeof tls.getCACertificates === "function";
+  const trustedIt = canTrust ? it : it.skip;
+  if (!canTrust) {
+    console.warn(`node-smtp: this Node (${process.version}) has no tls.setDefaultCACertificates; the tests that need a trusted test certificate are skipped.`);
+  }
+
   beforeAll(() => {
-    expect(new X509Certificate(trusted.cert).subjectAltName).toContain("IP Address:127.0.0.1");
+    if (!canTrust) return;
+    // Read first, before anything that can throw, so afterAll always has them to put back.
     defaults = tls.getCACertificates("default");
     tls.setDefaultCACertificates([...defaults, trusted.cert, misnamed.cert]);
+    expect(new X509Certificate(trusted.cert).subjectAltName).toContain("IP Address:127.0.0.1");
   });
   afterAll(() => {
-    tls.setDefaultCACertificates(defaults);
+    if (canTrust && defaults !== null) tls.setDefaultCACertificates(defaults);
   });
   afterEach(async () => {
     vi.useRealTimers();
     await Promise.all(running.splice(0).map((stop) => stop()));
   });
 
-  it("a mail goes over TLS to the fake server, once, and the connection is closed", async () => {
+  trustedIt("a mail goes over TLS to the fake server, once, and the connection is closed", async () => {
     const server = await fakeServer(trusted);
     await smtpMailer(local(server.port)).send(MAIL);
     expect(server.sessions).toHaveLength(1);
@@ -779,7 +893,7 @@ describe("smtp client, fake server on 127.0.0.1", () => {
     await until(() => server.closed() === 4);
   });
 
-  it("the server's name is sent and the certificate must be made out to it", async () => {
+  trustedIt("the server's name is sent and the certificate must be made out to it", async () => {
     const server = await fakeServer(trusted);
     // The settings name mail.test; only the address dialled is swapped for 127.0.0.1,
     // so no name is looked up. Everything else is the client's own TLS options.
@@ -804,7 +918,7 @@ describe("smtp client, fake server on 127.0.0.1", () => {
     expect(server.sessions.filter((s) => s.raw !== "")).toHaveLength(1);
   });
 
-  it("a certificate that is not trusted, or made out to another name, ends as tls and nothing is said", async () => {
+  trustedIt("a certificate that is not trusted, or made out to another name, ends as tls and nothing is said", async () => {
     const unknown = await fakeServer(stranger);
     expect(reasonOf(await outcome(smtpMailer(local(unknown.port)).send(MAIL)))).toBe("tls");
     const other = await fakeServer(misnamed);
@@ -838,7 +952,7 @@ describe("smtp client, fake server on 127.0.0.1", () => {
     await until(() => [...sockets].every((socket) => socket.destroyed));
   });
 
-  it("a server that offers only an old TLS version is refused", async () => {
+  trustedIt("a server that offers only an old TLS version is refused", async () => {
     const old = { minVersion: "TLSv1.1", maxVersion: "TLSv1.1", ciphers: "DEFAULT@SECLEVEL=0" } as const;
     const server = await fakeServer(trusted, { greeting: null }, old);
     // The control: a client told to accept the old version does get through, so the
@@ -858,10 +972,23 @@ describe("smtp client, fake server on 127.0.0.1", () => {
   });
 
   it("nothing listening ends as connect", async () => {
+    // A port that is taken and has no listener: the local end of an open connection.
+    // While that connection stays open nobody else can be given the port, so this does
+    // not lean on a port that was just closed staying free.
     const sockets = new Set<net.Socket>();
-    const { port, stop } = await listening(net.createServer(), sockets);
-    await stop();
+    const holder = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.on("error", () => {});
+    });
+    const held = await listening(holder, sockets);
+    const client = net.connect({ host: "127.0.0.1", port: held.port });
+    client.on("error", () => {});
+    sockets.add(client);
+    await new Promise<void>((resolve) => client.once("connect", () => resolve()));
+    const port = client.localPort!;
+    expect(port).not.toBe(held.port);
     expect(reasonOf(await outcome(smtpMailer(local(port)).send(MAIL)))).toBe("connect");
+    expect(client.destroyed).toBe(false);
     // A port that cannot exist is the same reason, not a crash.
     expect(reasonOf(await outcome(smtpMailer(local(0)).send(MAIL)))).toBe("connect");
     expect(reasonOf(await outcome(smtpMailer(local(70_000)).send(MAIL)))).toBe("connect");
@@ -869,7 +996,7 @@ describe("smtp client, fake server on 127.0.0.1", () => {
     expect(reasonOf(await outcome(smtpMailer({ ...local(port), host: "mail.test\r\nx" }).send(MAIL)))).toBe("connect");
   });
 
-  it("a server that accepts and then never answers is given up on, and the socket is closed", async () => {
+  trustedIt("a server that accepts and then never answers is given up on, and the socket is closed", async () => {
     // It takes the connection and never starts TLS.
     const sockets = new Set<net.Socket>();
     const mute = net.createServer((socket) => {
@@ -906,7 +1033,7 @@ describe("smtp client, fake server on 127.0.0.1", () => {
     expect(quiet.sessions[0].raw).not.toContain(PLAIN_TOKEN);
   });
 
-  it("a mail the server did not confirm is not sent a second time", async () => {
+  trustedIt("a mail the server did not confirm is not sent a second time", async () => {
     // The server takes the whole message and never says so: the client reports a
     // timeout and leaves it there. One connection, one message, no second try.
     const server = await fakeServer(trusted, { body: null });

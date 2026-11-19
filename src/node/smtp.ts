@@ -7,8 +7,11 @@
 // - The password leaves only after the server offered a sign-in this client speaks.
 // - Every wait has an end: the connection, each reply, and the whole conversation.
 // - One send is one try. Nothing is retried here, so nothing can be sent twice by this
-//   file; a caller that retries a failure may, since a timeout after the message was
-//   written does not tell whether the server took it.
+//   file. A caller that retries may send twice: once the message itself was written,
+//   a failure (`refused` or `timeout`) does not tell whether the server took the mail.
+//   Only `connect`, `tls` and `auth` are certain non-sends, as is any failure whose
+//   `bodyWritten` is false.
+// - Every failure of a send is an SmtpError, whatever was handed in.
 // - A failure is one of five fixed reasons. The server's words, the password, the
 //   recipient and the mail's text never enter an error, and this file writes no log.
 import { randomBytes } from "node:crypto";
@@ -26,21 +29,36 @@ export type SmtpSettings = { host: string; port: number; user: string; password:
  * accept the mailbox's sign-in, or offers none this client speaks. `refused`: it, or
  * this client's own check, turned the mail down, or the conversation broke. `timeout`:
  * a wait ran out.
+ *
+ * What a reason says about the mail: `connect`, `tls` and `auth` always mean it was not
+ * sent. `refused` and `timeout` mean that only while SmtpError.bodyWritten is false;
+ * after the message was written (after DATA) neither tells whether the server took it.
  */
 export type SmtpReason = "connect" | "tls" | "auth" | "refused" | "timeout";
 
-/** The only error this file throws. Its text is `smtp: <reason>` and nothing else. */
+/**
+ * The only error this file throws. Its text is `smtp: <reason>` and nothing else.
+ * `bodyWritten` is true when the message itself had been written to the server before
+ * the failure: the mail may then have been taken, and sending it again may deliver it
+ * twice. False means the mail was certainly not sent. It is a yes or no and holds no text.
+ */
 export class SmtpError extends Error {
   readonly reason: SmtpReason;
-  constructor(reason: SmtpReason) {
+  readonly bodyWritten: boolean;
+  constructor(reason: SmtpReason, bodyWritten: boolean = false) {
     super(`smtp: ${reason}`);
     this.name = "SmtpError";
     this.reason = reason;
+    // The other three end the conversation before any message, whatever the caller says.
+    this.bodyWritten = bodyWritten === true && (reason === "refused" || reason === "timeout");
   }
 }
 
 /** The longest waits: for the connection with TLS up, for one reply, and for one whole send. */
-export const SMTP_LIMITS = { connectMs: 10_000, replyMs: 15_000, totalMs: 30_000 } as const;
+export const SMTP_LIMITS = Object.freeze({ connectMs: 10_000, replyMs: 15_000, totalMs: 30_000 } as const);
+
+/** The largest text one mail may carry, in UTF-8 bytes. A subject is at most 255 characters. */
+export const MAX_TEXT_BYTES = 100_000;
 
 /** The most one reply may hold before the conversation is ended. */
 const MAX_REPLY_BYTES = 65_536;
@@ -79,7 +97,9 @@ function checkEnvelope(mail: Mail, from: string): void {
   if (mail === null || typeof mail !== "object") throw new SmtpError("refused");
   if (!isAddress(mail.to) || !isAddress(from)) throw new SmtpError("refused");
   if (typeof mail.subject !== "string" || !SUBJECT.test(mail.subject)) throw new SmtpError("refused");
-  if (typeof mail.text !== "string") throw new SmtpError("refused");
+  if (typeof mail.text !== "string" || mail.text.length > MAX_TEXT_BYTES || Buffer.byteLength(mail.text, "utf8") > MAX_TEXT_BYTES) {
+    throw new SmtpError("refused");
+  }
 }
 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -251,16 +271,20 @@ class Wire {
   }
 
   /**
-   * Writes `text` and returns the reply to it. Refuses to write while a reply nobody
-   * asked for is waiting, so an extra reply is never taken for the answer to this one.
+   * Writes `text` and returns the reply to it. Refuses to write while something the
+   * server sent is still unread: an extra reply that arrived together with the last one
+   * (or before this call) ends the conversation instead of being taken for the answer
+   * to this command. It cannot catch an extra reply that arrives after `text` was
+   * written; that one is read as the answer. `written` is called just before the write.
    */
-  ask(text: string): Promise<Reply> {
+  ask(text: string, written?: () => void): Promise<Reply> {
     if (this.over || this.failure !== null) return Promise.reject(new SmtpError(this.failure ?? "refused"));
     if (this.buffer !== "") {
       this.fail("refused");
       return Promise.reject(new SmtpError("refused"));
     }
     try {
+      written?.();
       this.stream.write(text, "latin1");
     } catch {
       this.fail("refused");
@@ -363,8 +387,8 @@ async function expectCode(pending: Promise<Reply>, codes: number[], otherwise: S
   return reply;
 }
 
-/** The conversation, from the greeting to the server taking the message. */
-async function converse(wire: Wire, s: SmtpSettings, mail: Mail, message: string): Promise<void> {
+/** The conversation, from the greeting to the server taking the message. `bodyWritten` is called when the message leaves. */
+async function converse(wire: Wire, s: SmtpSettings, mail: Mail, message: string, bodyWritten: () => void): Promise<void> {
   await expectCode(wire.reply(), [220], "refused");
   const hello = await expectCode(wire.ask(`EHLO ${s.helo}\r\n`), [250], "refused");
   const ways = offered(hello.lines);
@@ -381,32 +405,37 @@ async function converse(wire: Wire, s: SmtpSettings, mail: Mail, message: string
   await expectCode(wire.ask(`MAIL FROM:<${s.from}>\r\n`), [250], "refused");
   await expectCode(wire.ask(`RCPT TO:<${mail.to}>\r\n`), [250, 251], "refused");
   await expectCode(wire.ask("DATA\r\n"), [354], "refused");
-  await expectCode(wire.ask(onTheWire(message)), [250], "refused");
+  // Only 250 means the server took the mail.
+  await expectCode(wire.ask(onTheWire(message), bodyWritten), [250], "refused");
 }
 
 async function deliver(s: SmtpSettings, connect: (s: SmtpSettings) => Promise<Duplex>, mail: Mail): Promise<void> {
-  // Everything is checked before a connection exists, so a refusal writes nothing.
-  if (s === null || typeof s !== "object") throw new SmtpError("refused");
-  checkEnvelope(mail, s.from);
-  if (typeof s.helo !== "string" || !HELO.test(s.helo)) throw new SmtpError("refused");
-  for (const secret of [s.user, s.password]) {
-    if (typeof secret !== "string" || secret === "" || secret.includes("\0")) throw new SmtpError("auth");
-  }
-  if (typeof s.host !== "string" || !HOST.test(s.host)) throw new SmtpError("connect");
-  if (!Number.isInteger(s.port) || s.port < 1 || s.port > 65535) throw new SmtpError("connect");
-  const message = buildMessage(mail, s.from, Date.now(), randomBytes(16).toString("hex"));
-
   let wire: Wire | null = null;
   let expired = false;
-  const total = setTimeout(() => {
-    expired = true;
-    wire?.fail("timeout");
-  }, SMTP_LIMITS.totalMs);
+  let bodyWritten = false;
+  let total: ReturnType<typeof setTimeout> | null = null;
   try {
+    // Everything is checked before a connection exists, so a refusal writes nothing.
+    if (s === null || typeof s !== "object") throw new SmtpError("refused");
+    checkEnvelope(mail, s.from);
+    if (typeof s.helo !== "string" || !HELO.test(s.helo)) throw new SmtpError("refused");
+    for (const secret of [s.user, s.password]) {
+      if (typeof secret !== "string" || secret === "" || secret.includes("\0")) throw new SmtpError("auth");
+    }
+    if (typeof s.host !== "string" || !HOST.test(s.host)) throw new SmtpError("connect");
+    if (!Number.isInteger(s.port) || s.port < 1 || s.port > 65535) throw new SmtpError("connect");
+    const message = buildMessage(mail, s.from, Date.now(), randomBytes(16).toString("hex"));
+
+    total = setTimeout(() => {
+      expired = true;
+      wire?.fail("timeout");
+    }, SMTP_LIMITS.totalMs);
     const stream = await openWithin(connect, s);
     wire = new Wire(stream);
     if (expired) throw new SmtpError("timeout");
-    await converse(wire, s, mail, message);
+    await converse(wire, s, mail, message, () => {
+      bodyWritten = true;
+    });
     // The server has taken the mail. Whatever happens to the goodbye, it is sent, and
     // saying otherwise could make a caller send it again. The goodbye still falls
     // under the same waits.
@@ -416,10 +445,10 @@ async function deliver(s: SmtpSettings, connect: (s: SmtpSettings) => Promise<Du
       // Nothing to do: the mail is with the server.
     }
   } catch (error) {
-    // Only this file's own fixed reasons leave it.
-    throw new SmtpError(error instanceof SmtpError ? error.reason : "refused");
+    // Only this file's own fixed reasons leave it, with whether the message had left.
+    throw new SmtpError(error instanceof SmtpError ? error.reason : "refused", bodyWritten);
   } finally {
-    clearTimeout(total);
+    if (total !== null) clearTimeout(total);
     wire?.close();
   }
 }
@@ -428,7 +457,12 @@ async function deliver(s: SmtpSettings, connect: (s: SmtpSettings) => Promise<Du
  * A mailer that hands each mail to the mail server in `s`, one connection per mail.
  * `connect` replaces the way the connection is made (tests hand in one that lives in
  * memory); without it the connection is TLS as tlsOptions describes. A send rejects
- * with an SmtpError and nothing else.
+ * with an SmtpError and nothing else, whatever was handed in.
+ *
+ * A send that resolves was taken by the server. One that rejects with `connect`, `tls`
+ * or `auth`, or with `bodyWritten` false, was not sent. One that rejects with `refused`
+ * or `timeout` and `bodyWritten` true may have been taken all the same: the server had
+ * the whole message and did not confirm it. Sending that mail again can deliver it twice.
  */
 export function smtpMailer(s: SmtpSettings, connect: (s: SmtpSettings) => Promise<Duplex> = openTls): Mailer {
   return {

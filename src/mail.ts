@@ -67,23 +67,37 @@ export type LinkConfig = Config & { siteHost?: string | null };
 /**
  * The origin every sign-in link starts with, or null when the site has no configured
  * address. It comes from configuration only, never from a request: the app address in
- * two-address mode, else SITE_HOST. With null, no mail may be sent.
+ * two-address mode, else SITE_HOST. Either goes through normaliseHost, so the origin is
+ * always one signInLink takes; an app address that is not a plain host name gives null
+ * rather than falling back. With null, no mail may be sent.
  */
 export function linkOrigin(config: LinkConfig): string | null {
   const app = config.hosts?.app;
-  if (typeof app === "string" && app !== "") return originOf(app);
-  const site = typeof config.siteHost === "string" ? normaliseHost(config.siteHost) : null;
-  return site === null ? null : originOf(site);
+  const raw = typeof app === "string" && app !== "" ? app : config.siteHost;
+  const host = typeof raw === "string" ? normaliseHost(raw) : null;
+  return host === null ? null : originOf(host);
 }
 
 const CODE_CHARS = /^[A-Za-z0-9_-]{1,200}$/;
 
+/** True for exactly what originOf gives for a normalised host: a scheme and a host, nothing after. */
+function isOrigin(origin: unknown): origin is string {
+  if (typeof origin !== "string") return false;
+  const match = /^https?:\/\/([^/?#\s]+)$/.exec(origin);
+  if (match === null) return false;
+  const host = normaliseHost(match[1]);
+  return host !== null && originOf(host) === origin;
+}
+
 /**
  * The link for one sign-in code. The code sits after the `#`, which a browser sends to
- * no server, so it reaches no log and no referrer. Throws Error("bad code"), without
- * the code, for anything that could change the link's shape.
+ * no server, so it reaches no log and no referrer. The origin must be what linkOrigin
+ * gives: `https://` and a host, or `http://` for localhost, a `.localhost` name and
+ * 127.0.0.1, with no path, query or fragment. Throws Error("bad origin") or
+ * Error("bad code"), neither with the value, for anything else.
  */
 export function signInLink(origin: string, code: string): string {
+  if (!isOrigin(origin)) throw new Error("bad origin");
   if (typeof code !== "string" || !CODE_CHARS.test(code)) throw new Error("bad code");
   return `${origin}/signin/link#c=${code}`;
 }

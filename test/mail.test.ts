@@ -60,6 +60,39 @@ describe("mail", () => {
       }
       expect(message).toBe("bad code");
     }
+    // The origin is https and a host, or http for a local name, and nothing more.
+    expect(signInLink("https://tours.example.org:8443", CODE)).toBe(`https://tours.example.org:8443/signin/link#c=${CODE}`);
+    expect(signInLink("http://localhost:8787", CODE)).toBe(`http://localhost:8787/signin/link#c=${CODE}`);
+    expect(signInLink("http://app.localhost", CODE)).toBe(`http://app.localhost/signin/link#c=${CODE}`);
+    expect(signInLink("http://127.0.0.1:3000", CODE)).toBe(`http://127.0.0.1:3000/signin/link#c=${CODE}`);
+    const badOrigins = [
+      "",
+      "app.example.com",
+      "http://app.example.com",
+      "https://localhost",
+      "https://app.example.com/",
+      "https://app.example.com/x",
+      "https://app.example.com?x=1",
+      "https://app.example.com#x",
+      "https://user@app.example.com",
+      "https://app.example.com\r\nx",
+      "https://APP.example.com",
+      "https://app.example.com:443",
+      "ftp://app.example.com",
+      "javascript:alert(1)",
+      "//app.example.com",
+      " https://app.example.com",
+    ];
+    for (const bad of badOrigins) {
+      let message = "";
+      try {
+        signInLink(bad, CODE);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toBe("bad origin");
+    }
+    expect(() => signInLink(null as unknown as string, CODE)).toThrow("bad origin");
   });
 
   it("the link's host comes from the app address, else from SITE_HOST, else there is none", () => {
@@ -71,6 +104,15 @@ describe("mail", () => {
     expect(linkOrigin({ ...base, hosts: null, siteHost: "tours.example.org" })).toBe("https://tours.example.org");
     expect(linkOrigin({ ...base, siteHost: "Tours.Example.org:8443" })).toBe("https://tours.example.org:8443");
     expect(linkOrigin({ ...base, siteHost: "localhost:8787" })).toBe("http://localhost:8787");
+    // The app address goes through the same host check as every configured host.
+    expect(linkOrigin({ ...base, hosts: { tours: "tours.example.com", app: "App.Example.com:443" } })).toBe("https://app.example.com");
+    for (const app of ["app.example.com/x", "https://app.example.com", "evil.example\r\nx", "user@app.example.com", "a b"]) {
+      expect(linkOrigin({ ...base, hosts: { tours: "tours.example.com", app }, siteHost: "other.example.com" })).toBeNull();
+    }
+    // Every origin it gives is one signInLink takes.
+    for (const siteHost of ["tours.example.org", "Tours.Example.org:8443", "localhost:8787", "127.0.0.1"]) {
+      expect(() => signInLink(linkOrigin({ ...base, siteHost })!, CODE)).not.toThrow();
+    }
     // Neither: no origin, so no mail can carry a link.
     expect(linkOrigin(base)).toBeNull();
     expect(linkOrigin({ ...base, hosts: null })).toBeNull();
