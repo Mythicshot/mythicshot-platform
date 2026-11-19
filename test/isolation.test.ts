@@ -5,7 +5,7 @@
 // an id that never existed (status, body and headers, byte for byte), when a row of any
 // table changed, or when anything was written to or deleted from either store.
 //
-// Every route of the app is in exactly one of five tables, keyed "<METHOD> <route path>"
+// Every route of the app is in exactly one of six tables, keyed "<METHOD> <route path>"
 // exactly as in `createApp(deps).routes`:
 // - CASES: routes with an id in the path. Each lists the requests in which one workspace
 //   names the other's ids, with the exact answer.
@@ -13,6 +13,10 @@
 // - LISTS: routes that answer a collection or a summary of the caller's own workspace.
 // - SELF: routes with no id that change only the caller's own session or account.
 // - OPEN: routes with no owner at all, each with its reason.
+// - ADMIN: routes that cross workspaces on purpose, for the site's admin alone, each with
+//   the list of fields it may answer. Only an admin's session reaches them; everyone else
+//   gets one 404. They answer counts and the allowance, never a tour, picture, token or
+//   session, which the suite checks by scanning each answer for every name of both sides.
 // A route in none of them, or in two, fails the first test below; so does a table key no
 // route has. The route list is the router's own, as in test/openapi.test.ts, so the
 // tables cannot drift from the app.
@@ -30,7 +34,8 @@
 //   token, and its session with the anti-forgery header and an Origin of the address the
 //   request goes to, as the site's own page sends them. A route that takes only a session
 //   marks its requests `only: "session"`; a token is then answered 401, never the data.
-// - Admin routes (Task 12): a fifth table, ADMIN, added to TABLES.
+// - An admin route: add it to ADMIN with its reason, a request the admin would be answered,
+//   and every field (as a key path, such as "accounts[].id") its answer may hold.
 import { describe, expect, it } from "vitest";
 import { makeDeps } from "#harness";
 import { createApp } from "../src/app.ts";
@@ -233,8 +238,31 @@ const SELF: Record<string, { path: string; ends: string }> = {
   "POST /api/v1/signout/everywhere": { path: "/api/v1/signout/everywhere", ends: "every session of the caller's own account" },
 };
 
+/** The fields of one account in the admin's list: who it is, its counts and its allowance. */
+const ACCOUNT_FIELDS = ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "counted.pictures", "counted.logos", "counted.uploads_in_progress"];
+
+/**
+ * Routes that cross workspaces on purpose, for the site's admin alone: why, a request the
+ * admin is answered (sent with the first side's session, the admin's), and every field the
+ * answer may hold, as key paths. An answer holds exactly these, and nothing of any
+ * workspace's content: an account's id, username and email and its workspace's id are the
+ * only names it may carry.
+ */
+const ADMIN: Record<string, { reason: string; request: (w: World) => Sample; fields: string[] }> = {
+  "GET /api/v1/admin/accounts": {
+    reason: "the admin's overview of how each account uses its storage: counts and the allowance, nothing of any tour",
+    request: () => ({ method: "GET", path: "/api/v1/admin/accounts" }),
+    fields: ["accounts", "next", ...ACCOUNT_FIELDS.map((f) => `accounts[].${f}`)],
+  },
+  "PATCH /api/v1/admin/workspaces/:id": {
+    reason: "the admin sets or clears one workspace's storage allowance, by the workspace's id; it answers the numbers only",
+    request: (w) => ({ method: "PATCH", path: `/api/v1/admin/workspaces/${w.b.workspaceId}`, json: { storage_allowance_bytes: 1_000_000 } }),
+    fields: ["workspace_id", "allowance_bytes", "storage_allowance_bytes", "used_bytes", "over"],
+  },
+};
+
 type Tables = Record<string, Record<string, unknown>>;
-const TABLES: Tables = { CASES, BODY_IDS, LISTS, OPEN, SELF };
+const TABLES: Tables = { CASES, BODY_IDS, LISTS, OPEN, SELF, ADMIN };
 
 // ---- The route list against the tables ----
 
@@ -248,9 +276,12 @@ const hasParameter = (key: string) => key.slice(key.indexOf(" ") + 1).includes("
 /** Where a route with no table belongs. */
 function whereToAdd(key: string): string {
   return hasParameter(key)
-    ? "add it to CASES in test/isolation.test.ts, with a request for every id it can be given (or to OPEN with its reason, if it has no owner)"
-    : "add it to LISTS in test/isolation.test.ts if it answers a collection or a summary, to SELF if it changes only the caller's own session or account, to BODY_IDS if its body carries an id, or to OPEN with its reason if it has no owner";
+    ? "add it to CASES in test/isolation.test.ts, with a request for every id it can be given (or to OPEN with its reason, if it has no owner, or to ADMIN with its fields, if it is an admin route)"
+    : "add it to LISTS in test/isolation.test.ts if it answers a collection or a summary, to SELF if it changes only the caller's own session or account, to BODY_IDS if its body carries an id, to ADMIN with its fields if it is an admin route, or to OPEN with its reason if it has no owner";
 }
+
+/** An admin route, by its path: every one is under /api/v1/admin/. */
+const isAdminKey = (key: string) => key.slice(key.indexOf(" ") + 1).startsWith("/api/v1/admin/");
 
 /** Everything wrong between a route list and the tables: one line per problem, none when each route is in exactly one table and no table has a key without a route. */
 function tableProblems(routes: string[], tables: Tables = TABLES): string[] {
@@ -266,11 +297,20 @@ function tableProblems(routes: string[], tables: Tables = TABLES): string[] {
   return problems;
 }
 
-/** Routes with an id in the path that are not in CASES or OPEN. */
+/**
+ * Routes with an id in the path that are not in CASES or OPEN (or, for an admin route, in
+ * ADMIN); admin routes anywhere but in ADMIN; and routes in ADMIN that are no admin route.
+ */
 function parameterProblems(routes: string[], tables: Tables = TABLES): string[] {
-  return routes
-    .filter((key) => hasParameter(key) && !Object.hasOwn(tables.CASES ?? {}, key) && !Object.hasOwn(tables.OPEN ?? {}, key))
+  const inTable = (name: string, key: string) => Object.hasOwn(tables[name] ?? {}, key);
+  const problems = routes
+    .filter((key) => hasParameter(key) && !inTable("CASES", key) && !inTable("OPEN", key) && !(isAdminKey(key) && inTable("ADMIN", key)))
     .map((key) => `${key} takes an id in its path: it belongs in CASES (or in OPEN with its reason), not in LISTS, SELF or BODY_IDS`);
+  for (const key of routes) {
+    if (isAdminKey(key) && !inTable("ADMIN", key)) problems.push(`${key} is an admin route: it belongs in ADMIN, with every field it may answer`);
+    if (!isAdminKey(key) && inTable("ADMIN", key)) problems.push(`${key} is in ADMIN but is no admin route: only routes under /api/v1/admin/ cross workspaces`);
+  }
+  return problems;
 }
 
 /** For each operation of the description, the names ending in `_id` anywhere in its request body. */
@@ -380,6 +420,12 @@ describe("the tables against the route table", () => {
     for (const [key, entry] of Object.entries(OPEN)) expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(LISTS)) expect(entry.holds.length, `${key} must say what it holds`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(SELF)) expect(entry.ends.length, `${key} must say what it ends`).toBeGreaterThan(10);
+    for (const [key, entry] of Object.entries(ADMIN)) {
+      expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
+      expect(entry.fields.length, `${key} must list the fields it may answer`).toBeGreaterThan(0);
+    }
+    // The admin routes are there, and are in ADMIN.
+    expect(routes().filter(isAdminKey).sort()).toEqual(Object.keys(ADMIN).sort());
   });
 
   it("every route whose path has a parameter is in CASES or OPEN", () => {
@@ -448,6 +494,25 @@ describe("the tables against the route table", () => {
     const twice: Tables = { ...TABLES, LISTS: { ...LISTS, "GET /healthz": {} } };
     expect(tableProblems(routes(), twice)).toEqual(["GET /healthz is in LISTS and OPEN: keep it in one"]);
     expect(tableProblems(routes().filter((k) => k !== "GET /api/v1/usage"))).toEqual(["GET /api/v1/usage is in LISTS but no route has it: remove it from LISTS"]);
+
+    // A new admin route with no entry fails, and so does one passed off as a list or put in CASES,
+    // and a route in ADMIN that is no admin route.
+    const withAdmin = createApp({ config: { publicImageBase: "", setupCode: null } } as Deps);
+    withAdmin.get("/api/v1/admin/tours", (c) => c.json({}));
+    withAdmin.delete("/api/v1/admin/workspaces/:id", (c) => c.json({}));
+    expect(tableProblems(routeKeysOf(withAdmin))).toEqual([
+      "GET /api/v1/admin/tours is in no table: add it to LISTS in test/isolation.test.ts if it answers a collection or a summary, to SELF if it changes only the caller's own session or account, to BODY_IDS if its body carries an id, to ADMIN with its fields if it is an admin route, or to OPEN with its reason if it has no owner",
+      "DELETE /api/v1/admin/workspaces/:id is in no table: add it to CASES in test/isolation.test.ts, with a request for every id it can be given (or to OPEN with its reason, if it has no owner, or to ADMIN with its fields, if it is an admin route)",
+    ]);
+    const misplaced: Tables = { ...TABLES, LISTS: { ...LISTS, "GET /api/v1/admin/tours": {} }, CASES: { ...CASES, "DELETE /api/v1/admin/workspaces/:id": () => [] } };
+    expect(tableProblems(routeKeysOf(withAdmin), misplaced)).toEqual([]);
+    expect(parameterProblems(routeKeysOf(withAdmin), misplaced)).toEqual([
+      "GET /api/v1/admin/tours is an admin route: it belongs in ADMIN, with every field it may answer",
+      "DELETE /api/v1/admin/workspaces/:id is an admin route: it belongs in ADMIN, with every field it may answer",
+    ]);
+    const notAdmin: Tables = { ...TABLES, LISTS: { ...LISTS }, ADMIN: { ...ADMIN, "GET /api/v1/usage": {} } };
+    delete (notAdmin.LISTS as Record<string, unknown>)["GET /api/v1/usage"];
+    expect(parameterProblems(routes(), notAdmin)).toEqual(["GET /api/v1/usage is in ADMIN but is no admin route: only routes under /api/v1/admin/ cross workspaces"]);
   });
 });
 
@@ -966,5 +1031,92 @@ describe("routes with no owner", () => {
     expect(await page(a.ids.published.slug)).toEqual(await page(never.draft.slug));
     expect(await picture(a.ids.published.publicName)).toEqual(await picture(never.published.publicName));
     expect(await picture(a.ids.published.retiredName)).toEqual(await picture(never.published.publicName));
+  });
+});
+
+describe("the admin routes", () => {
+  /** Every key path of a JSON value, such as "accounts[].counted.pictures". */
+  function keyPaths(v: unknown, at = ""): string[] {
+    if (Array.isArray(v)) return v.flatMap((x) => keyPaths(x, `${at}[]`));
+    if (v === null || typeof v !== "object") return [];
+    return Object.entries(v).flatMap(([k, x]) => {
+      const path = at === "" ? k : `${at}.${k}`;
+      return [path, ...keyPaths(x, path)];
+    });
+  }
+
+  /** Everything of a side an admin answer must not hold: every name of its rows and secrets but its account's id and email and its workspace's id. */
+  async function forbiddenOf(w: World, side: Side): Promise<string[]> {
+    const all = needlesOf(await snapshotOf(w.deps, side, w.keys), [side.token, side.revokedToken, side.workspaceName, side.session.secret, side.session.csrf, ...namesIn(side.ids)]);
+    return all.filter((n) => ![side.userId, side.workspaceId, side.email].includes(n));
+  }
+
+  it("every admin route is in the ADMIN table and answers no field outside its list", SLOW, async () => {
+    const w = await build();
+    const before = { a: await forbiddenOf(w, w.a), b: await forbiddenOf(w, w.b) };
+    // The names are there to be found.
+    for (const side of [w.a, w.b]) for (const n of [side.ids.published.tour, side.ids.published.slug, side.ids.published.publicName, side.ids.draft.step, side.token, side.session.id, side.workspaceName]) expect(before[side === w.a ? "a" : "b"]).toContain(n);
+    for (const [key, entry] of Object.entries(ADMIN)) {
+      w.tick();
+      const r = await fire(w.deps, entry.request(w), BY_SESSION.of(w.a));
+      expect(r.status, `${key}: ${r.text}`).toBe(200);
+      expect(r.headers.get("cache-control"), key).toBe("no-store");
+      // Exactly the listed fields: none more, none missing.
+      expect([...new Set(keyPaths(r.json))].sort(), key).toEqual([...entry.fields].sort());
+      // And no name of either workspace's content, by any of its names.
+      for (const n of [...before.a, ...before.b]) expect(r.text.includes(n), `${key} told the admin ${n}`).toBe(false);
+    }
+  });
+
+  it("no caller but an admin's session reaches an admin route, and a refused call changes nothing", SLOW, async () => {
+    const w = await build();
+    const { deps, a, b } = w;
+    const refused = { status: 404, headers: [["cache-control", "no-store"], ["content-type", "application/json"], ["x-content-type-options", "nosniff"]], body: '{"error":"not_found"}' };
+    const callers: [string, Credential][] = [
+      ["nobody", { token: null }],
+      ["the admin's own token", BY_TOKEN.of(a)],
+      ["a member's token", BY_TOKEN.of(b)],
+      ["a member's session", BY_SESSION.of(b)],
+      ["the admin's session with a token", { ...BY_SESSION.of(a), token: a.token }],
+    ];
+    const before = await dumpOf(deps, w.keys, { files: true, touched: [a.session.id, b.session.id] });
+    for (const [key, entry] of Object.entries(ADMIN)) {
+      for (const [who, credential] of callers) {
+        w.tick();
+        expect(seen(await fire(deps, entry.request(w), credential)), `${key} by ${who}`).toEqual(refused);
+      }
+    }
+    expect(w.writes()).toEqual([]);
+    expect(await dumpOf(deps, w.keys, { files: true, touched: [a.session.id, b.session.id] })).toEqual(before);
+  });
+
+  it("the admin's session is its own workspace's only, on every route that is no admin route", SLOW, async () => {
+    const w = await build();
+    const { deps, a, b } = w;
+    // The first side's account is the site's admin, and its session says so.
+    expect(await deps.db.first("SELECT is_admin FROM user WHERE id = ?", [a.userId])).toEqual({ is_admin: 1 });
+    expect((await fire(deps, { method: "GET", path: "/api/v1/session" }, BY_SESSION.of(a))).json.account.admin).toBe(true);
+    const look = () => dumpOf(deps, w.keys, { touched: [a.session.id, a.tokenId] });
+    const before = await look();
+    // Every case, with the admin's session, against the other workspace's ids and ids that never existed: the route's own not-found, byte for byte.
+    const real = everyCase(b.ids, a.ids);
+    const invented = everyCase(inventedIds(b.ids), a.ids);
+    for (let i = 0; i < real.length; i++) {
+      w.tick();
+      const what = label(real[i].key, real[i].req, "session", a);
+      const theirs = await fire(deps, real[i].req, BY_SESSION.of(a));
+      expectAnswer(theirs, real[i].req, what, "session");
+      expect(seen(theirs), what).toEqual(seen(await fire(deps, invented[i].req, BY_SESSION.of(a))));
+      expect(w.writes(), what).toEqual([]);
+      expect(await look(), what).toEqual(before);
+    }
+    // Every list and summary the admin's session gets holds nothing of the other workspace.
+    const needles = needlesOf(await snapshotOf(deps, b, w.keys), [b.token, b.workspaceName, b.email, b.session.secret, b.session.csrf]);
+    for (const [key, list] of Object.entries(LISTS)) {
+      if (list.only === "token") continue;
+      const r = await fire(deps, { method: "GET", path: list.path }, BY_SESSION.of(a));
+      expect(r.status, key).toBe(200);
+      for (const n of needles) expect(r.text.includes(n), `${key} told the admin ${n} of the other workspace`).toBe(false);
+    }
   });
 });
