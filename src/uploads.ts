@@ -29,14 +29,16 @@
 import type { Hono } from "hono";
 import { newId, newSlug, requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
+import { UPLOAD_MAX_AGE_MS } from "./limits.ts";
 import { LIMITS, parseManifest, type Manifest } from "./manifest.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 import { housekeeping } from "./publish.ts";
-import { chapterPictures, clearReplaced, findChapter, firstChapterSql, parseHashes, replaceAnswer, replaceStatements, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
+import { chapterPictures, clearReplaced, findChapter, firstChapterSql, parseHashes, replaceAnswer, replaceStatements, replacedBytes, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, type ImageType } from "./sniff.ts";
+import { ALLOWANCE_OF_SQL, USED_SQL, allowanceParams, reservedFor, storageFull, usageOf } from "./usage.ts";
 
-/** An upload older than this is swept by the workspace's next create. */
-export const UPLOAD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** An upload older than this is swept by the workspace's next create. It lives in src/limits.ts; the name stays here for the files that import it from this one. */
+export { UPLOAD_MAX_AGE_MS };
 /** At most this many stale uploads are swept per create, to bound the work of one request. */
 const SWEEP_LIMIT = 5;
 /** The create body without a hash list: the manifest's cap plus room for the envelope around it. */
@@ -194,12 +196,14 @@ function commitStatements(deps: Deps, auth: Auth, up: UploadRow, m: Manifest, to
   if (up.tour_id === null) {
     const logoType = m.cover?.logo ? extOf(m.cover.logo) : null;
     stmts.push({
-      sql: `INSERT INTO tour (id, workspace_id, title, slug, status, spotlight_dim, theme, zoom, cover, cta, end_card, autoplay, logo_key, logo_type, created_at, updated_at, draft_version)
-            VALUES (?, (SELECT workspace_id ${openUpload}), ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      // The logo's size comes over from the upload with its key: from here on the storage
+      // count holds what the logo weighs, in place of the room the upload reserved for it.
+      sql: `INSERT INTO tour (id, workspace_id, title, slug, status, spotlight_dim, theme, zoom, cover, cta, end_card, autoplay, logo_key, logo_type, logo_bytes, created_at, updated_at, draft_version)
+            VALUES (?, (SELECT workspace_id ${openUpload}), ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       params: [
         tourId, up.id, auth.workspaceId, m.title, slug, m.spotlight_dim,
         JSON.stringify(m.theme), JSON.stringify(m.zoom), json01(m.cover), json01(m.cta), json01(m.end), JSON.stringify(m.autoplay),
-        logoType === null ? null : up.logo_key, logoType, now, now,
+        logoType === null ? null : up.logo_key, logoType, logoType === null ? null : up.logo_bytes, now, now,
       ],
     });
     stmts.push({
@@ -311,15 +315,30 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       reused = reusedSteps(parsed.manifest, hashes, await chapterPictures(deps, auth, tourId, replaces.chapterId));
     }
 
-    // One statement, so creates at the same moment can never pass the cap together.
+    // One statement, so creates at the same moment can never pass the cap together, nor
+    // the storage allowance. It works out what the upload reserves (`r.reserved`): all of
+    // its declared bytes and the room for a logo it takes; for a replace, only what that
+    // comes to above what the chapter holds now (and the logo it replaces), never below 0.
+    // The row is written only when the open-upload cap allows it and the reservation is 0,
+    // or the workspace has no limit, or what it uses plus the reservation is within its
+    // allowance. Parameters, in the order they stand in the text: the row's seven values;
+    // what the upload needs; the replaced chapter's (none for another target); the
+    // workspace id of USED_SQL; ALLOWANCE_OF_SQL's three; the cap's three.
     const id = newId("up");
     const now = deps.now();
     const cap = deps.config.maxOpenUploads ?? DEFAULT_MAX_OPEN_UPLOADS;
+    // A new tour takes a logo, and so does a replace of a tour's first chapter.
+    const wanted = reservedFor(parsed.manifest, tourId === null || replaces?.first === true);
+    const current = replaces === null || tourId === null ? null : replacedBytes(auth.workspaceId, tourId, replaces.chapterId, replaces.first);
     const insert: Stmt = {
-      sql: `INSERT INTO upload (id, workspace_id, tour_id, manifest, created_at, replaces_chapter_id, base_revision) SELECT ?, ?, ?, ?, ?, ?, ?
-             WHERE (SELECT count(*) FROM upload WHERE workspace_id = ? AND closing_at IS NULL AND created_at >= ?) < ?`,
+      sql: `INSERT INTO upload (id, workspace_id, tour_id, manifest, created_at, replaces_chapter_id, base_revision, reserved_bytes)
+            SELECT ?, ?, ?, ?, ?, ?, ?, r.reserved
+              FROM (SELECT CAST(max(0, ? - ${current === null ? "0" : current.sql}) AS INTEGER) AS reserved, ${USED_SQL} AS used, ${ALLOWANCE_OF_SQL} AS allowance) r
+             WHERE (SELECT count(*) FROM upload WHERE workspace_id = ? AND closing_at IS NULL AND created_at >= ?) < ?
+               AND (r.reserved = 0 OR r.allowance IS NULL OR r.used + r.reserved <= r.allowance)`,
       params: [
         id, auth.workspaceId, tourId, JSON.stringify(parsed.manifest), now, replaces?.chapterId ?? null, replaces?.revision ?? null,
+        wanted, ...(current?.params ?? []), auth.workspaceId, ...allowanceParams(deps, auth.workspaceId),
         auth.workspaceId, now - UPLOAD_MAX_AGE_MS, cap,
       ],
     };
@@ -333,6 +352,17 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       made = (await deps.db.first("SELECT 1 AS x FROM upload WHERE id = ? AND workspace_id = ?", [id, auth.workspaceId])) !== null;
     }
     if (!made) {
+      // Which of the two it was is read afterwards, once: usage as it is now, and for a
+      // replace what the chapter holds now. When the upload does not fit the allowance the
+      // answer is the storage one, also when the cap is full as well, since waiting does
+      // not make room. Anything else is the cap's answer, as it always was.
+      let needed = wanted;
+      if (current !== null) {
+        const held = await deps.db.first<{ bytes: number }>(`SELECT ${current.sql} AS bytes`, current.params);
+        needed = Math.max(0, wanted - (held?.bytes ?? 0));
+      }
+      const usage = await usageOf(deps, auth.workspaceId);
+      if (needed > 0 && usage.allowance !== null && usage.used + needed > usage.allowance) return storageFull(usage, needed);
       const res = apiError(429, "too_many_uploads", `this workspace already has ${cap} open uploads; finish or cancel one first`);
       res.headers.set("retry-after", String(CAP_RETRY_AFTER_S));
       return res;

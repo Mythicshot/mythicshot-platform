@@ -145,7 +145,7 @@ A replace changes the draft only. The public page and its images stay exactly as
 | Request | Answer |
 |---|---|
 | `POST /api/v1/uploads` with `{"manifest":{…},"target":{"kind":"replace","tour_id":"tour_…","chapter_id":"ch_…"},"sha256":["<64 lowercase hex>",…]}` | `201 {"upload_id":"up_…","steps":14,"have":[1,4,5],"settings":false}`. `sha256` is optional: one SHA-256 per step of the manifest, in order, of the image the client would send. `have` lists the step numbers whose image the chapter already has, so the client does not send them; it is empty without `sha256`. `settings` is `true` when the chapter is the tour's first |
-| the same, refused | `404 not_found` with detail `no such tour` (unknown, another workspace's, or not an id) or `no such chapter` (not a chapter of that tour); `400 bad_request` for a `sha256` that is not exactly one 64-character lowercase hex text per step, or that comes with another target; `400 bad_manifest`, `413 too_large` and `429 too_many_uploads` as for any upload. A server older than 0.1.4 answers `400 bad_target` |
+| the same, refused | `404 not_found` with detail `no such tour` (unknown, another workspace's, or not an id) or `no such chapter` (not a chapter of that tour); `400 bad_request` for a `sha256` that is not exactly one 64-character lowercase hex text per step, or that comes with another target; `400 bad_manifest`, `413 too_large`, `413 storage_full` (see [Storage allowance](#storage-allowance)) and `429 too_many_uploads` as for any upload. A server older than 0.1.4 answers `400 bad_target` |
 | `PUT /api/v1/uploads/<id>/steps/<n>` with the image | `204`; `409 already_sent` for a step in `have`, or one sent before |
 | `PUT /api/v1/uploads/<id>/logo` with the logo | `204` when `settings` is `true` and the manifest names a logo; `404` when the manifest names no logo; `409 logo_not_used` when `settings` is `false` |
 | `POST /api/v1/uploads/<id>/commit` | `201 {"tour_id":"tour_…","chapter_id":"ch_…","steps":14,"publish":"ready"}`. The chapter keeps its id, title and position and now has exactly the manifest's steps |
@@ -165,6 +165,36 @@ The server finds the images a chapter already has by a SHA-256 it computed itsel
 When `settings` is `true`, the commit also replaces the tour's theme, zoom, spotlight dim, cover, button, end card, autoplay and logo with the manifest's; a manifest that names no logo removes the tour's. When it is `false`, the tour keeps all of these. A replace never changes the tour's title or its link.
 
 Every request is safe to send again. A repeated create only makes another upload, which is removed by an abort or, left alone, after 24 hours. A repeated commit answers `201` with the same ids and steps, and with `publish` as it stands at that moment; once a later replace of the same chapter has been committed, it answers `404`, because the chapter no longer holds that upload's steps. Images the replace took out of the chapter are deleted from the server right after the commit, or with a later request if a publish of the older draft is still copying them.
+
+## Storage allowance
+
+A workspace can have a storage allowance: a number of bytes it may use. There is none by default, so a site that sets nothing never refuses an upload for storage and behaves as before.
+
+The setting is `STORAGE_ALLOWANCE_BYTES` (see [Settings](#settings)): the allowance of every workspace, in bytes, digits only. A workspace can also carry a number of its own in the database, which then comes before the setting. On Cloudflare the setting is a var in the install's `wrangler.deploy.jsonc`, written as text, such as `"STORAGE_ALLOWANCE_BYTES": "1073741824"`; `npm run setup:cloudflare -- update` keeps it.
+
+| | What |
+|---|---|
+| Counted | The image of every step of every tour, published or not; each tour's logo; and the room every unfinished upload holds from the moment it is started (all its images as the manifest gives them, and 200,000 bytes for a logo until its real size is known) until it is finished, aborted or removed |
+| Not counted | The copies of images a published tour serves, so a fully published workspace can hold about twice its count on disk; images that wait to be removed after a delete or a replace; a logo stored by a server older than 0.1.8; the database itself |
+
+`GET /api/v1/usage`, with a token, answers the workspace's own numbers, on either address:
+
+```
+{"used_bytes":4700,"allowance_bytes":1073741824,"over":false,"tours":1,"counted":{"pictures":3000,"logos":1000,"uploads_in_progress":700}}
+```
+
+`allowance_bytes` is `null` when there is no limit. `over` is `true` when more is used than the allowance.
+
+An upload that would take the workspace over its allowance is refused when it is started, by `POST /api/v1/uploads`, before any image is sent. Nothing is stored and no upload exists afterwards. The answer is `413` with the numbers in bytes and one sentence a program can show as it is:
+
+```
+{"error":"storage_full","detail":"this tour needs 14.2 MB of room, but the workspace has 3.10 MB left of its 1.00 GB allowance. Nothing was uploaded. Delete tours you no longer need, or ask the site's admin for more room","used_bytes":1070491238,"allowance_bytes":1073741824,"needed_bytes":14889779}
+```
+
+A new tour or a new chapter needs room for all its images. Replacing a chapter needs room only for what the chapter grows by, so an update that does not grow it works in a full workspace. Deleting a tour makes room at once; waiting does not, except that an upload nobody finished gives its room back when it is removed after 24 hours.
+
+> [!warning] Lowering an allowance deletes nothing
+> A workspace that is over its allowance keeps every tour, link and image: listing, publishing, unpublishing, renaming, deleting and updates that do not grow it still work, and only new tours, new chapters and growing updates are refused until tours are deleted or the allowance is raised.
 
 ## One address or two
 
@@ -289,7 +319,7 @@ Nothing in the code is tied to a hostname, account or bucket name.
 | `PUBLIC_IMAGE_BASE` | both | Empty (the default on both targets): the app serves published images itself on `/p/<name>`. Optionally, on Cloudflare, the address of the public bucket's own custom domain, such as `https://images.example.com`. |
 | `TOURS_HOST` | both | Optional, and only together with `APP_HOST`: the host name of the tours address, such as `tours.example.com`, without `https://` and without a path. Both empty or unset (the default) is one address, and no host name is checked. See [One address or two](#one-address-or-two). |
 | `APP_HOST` | both | Optional, and only together with `TOURS_HOST`: the host name of the app address, such as `app.example.com`, in the same form. It must be a different name than the tours address. |
-| `STORAGE_ALLOWANCE_BYTES` | both | Optional: the storage allowance of a workspace in bytes, digits only, such as `1073741824` for 1 GB. Unset or empty (the default): no limit. Any other value stops the start on Node with one line, and on Cloudflare answers 500 `misconfigured` on every path until it is fixed. |
+| `STORAGE_ALLOWANCE_BYTES` | both | Optional: the storage allowance of a workspace in bytes, digits only, such as `1073741824` for 1 GB. Unset or empty (the default): no limit. See [Storage allowance](#storage-allowance). Any other value stops the start on Node with one line, and on Cloudflare answers 500 `misconfigured` on every path until it is fixed. |
 | `DATA_DIR` | Node | The folder holding `db.sqlite`, `drafts/` and `public/`. Required. In the container it is `/data`. |
 | `PORT` | Node | The port the app listens on. Default 3000. |
 | `DB`, `DRAFTS`, `PUB` | Cloudflare | The D1 binding and the two R2 bindings in `wrangler.jsonc`; an install's names and id are in its `wrangler.deploy.jsonc`, written by `npm run setup:cloudflare`. |

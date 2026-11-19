@@ -84,13 +84,13 @@ const json = (schema: Schema) => ({ "application/json": { schema } });
 const answer = (description: string, schema: Schema) => ({ description, content: json(schema) });
 const empty = (description: string) => ({ description });
 /** A refusal: `{"error","detail"}` with one of the given codes. */
-const refusal = (description: string, ...codes: string[]) =>
-  answer(description, {
-    type: "object",
-    required: ["error", "detail"],
-    properties: { error: { type: "string", enum: codes }, detail: { type: "string" } },
-    additionalProperties: false,
-  });
+const refusalSchema = (...codes: string[]): Schema => ({
+  type: "object",
+  required: ["error", "detail"],
+  properties: { error: { type: "string", enum: codes }, detail: { type: "string" } },
+  additionalProperties: false,
+});
+const refusal = (description: string, ...codes: string[]) => answer(description, refusalSchema(...codes));
 const object = (required: string[], properties: Record<string, Schema>, description?: string): Schema => ({
   type: "object",
   ...(description === undefined ? {} : { description }),
@@ -160,6 +160,7 @@ function introduction(): string {
     `- One publish request copies up to ${COPY_BATCH} images; one delete request removes up to ${DELETE_FILES_PER_CALL} files.`,
     `- ${DEFAULT_MAX_OPEN_UPLOADS} open uploads per workspace, unless the server's settings give another number.`,
     `- An upload that is not finished is removed after ${hours} hours.`,
+    "- A workspace may have a storage allowance, set by the server's settings or its admin. An upload that would take the workspace over it is refused when it is started, with 413 `storage_full` and the numbers, before anything is stored. Nothing is ever deleted because of an allowance.",
     `- A publish that makes no progress for ${minutes} minutes counts as abandoned.`,
     "",
     "Anything over a limit is refused, never cut short.",
@@ -235,6 +236,36 @@ function schemas(): Record<string, Schema> {
           "Only on a server with two addresses: both host names, without a scheme. Absent means: use the address you were given.",
         ),
       },
+    ),
+    Usage: object(
+      ["used_bytes", "allowance_bytes", "over", "tours", "counted"],
+      {
+        used_bytes: whole("What the workspace uses, in bytes: the three numbers of counted together."),
+        allowance_bytes: { type: ["integer", "null"], description: "The workspace's storage allowance in bytes: its own number, else the server's setting. null when there is no limit." },
+        over: { type: "boolean", description: "true when more is used than the allowance. Always false without a limit; exactly the allowance is not over it." },
+        tours: whole("How many tours the workspace has, drafts and published."),
+        counted: object(
+          ["pictures", "logos", "uploads_in_progress"],
+          {
+            pictures: whole("The images of every step of every tour, published or not."),
+            logos: whole("The tours' logos. A logo stored by a server before version 0.1.8 counts as 0."),
+            uploads_in_progress: whole("The room held by uploads that are not finished: what each one needed when it was started."),
+          },
+          "What used_bytes is made of, in bytes.",
+        ),
+      },
+      "What a workspace uses of its storage allowance.",
+    ),
+    StorageFull: object(
+      ["error", "detail", "used_bytes", "allowance_bytes", "needed_bytes"],
+      {
+        error: { type: "string", enum: ["storage_full"] },
+        detail: { type: "string", description: "The same in words, as one sentence under 200 characters that a program can show after its own words, such as \"Could not start the upload: \". The text may change; do not match on it." },
+        used_bytes: whole("What the workspace uses now, in bytes."),
+        allowance_bytes: whole("The workspace's storage allowance, in bytes."),
+        needed_bytes: whole("The room this upload needs, in bytes: all its images, and room for a logo it takes; for the replacement of a chapter, only what the chapter would grow by."),
+      },
+      "The upload would take the workspace over its storage allowance. Nothing was stored and no upload exists.",
     ),
     Health: object(
       ["ok"],
@@ -532,7 +563,7 @@ function paths(): OpenApiDoc["paths"] {
       post: {
         tags: ["Uploads"],
         summary: "Start an upload",
-        description: `Starts an upload from the tour's manifest (at most ${n(LIMITS.manifestBytes)} bytes) and says where it goes: a new tour, a new chapter of a tour, or the replacement of a chapter. Then send each step's image, the logo if one is due, and finish the upload; nothing changes in any tour until then. A replace changes the draft only: the public page stays as it was until the tour is published again. A workspace may have ${DEFAULT_MAX_OPEN_UPLOADS} open uploads at a time (the server's settings can give another number), and an upload that is not finished is removed after ${hours} hours. A repeated request only makes another upload.`,
+        description: `Starts an upload from the tour's manifest (at most ${n(LIMITS.manifestBytes)} bytes) and says where it goes: a new tour, a new chapter of a tour, or the replacement of a chapter. Then send each step's image, the logo if one is due, and finish the upload; nothing changes in any tour until then. A replace changes the draft only: the public page stays as it was until the tour is published again. A workspace may have ${DEFAULT_MAX_OPEN_UPLOADS} open uploads at a time (the server's settings can give another number), and an upload that is not finished is removed after ${hours} hours. A repeated request only makes another upload. On a workspace with a storage allowance, an upload that would take it over is refused here with 413 storage_full, before any image is sent: a new tour or a new chapter needs room for all its images (and ${n(LOGO_RULE.maxBytes)} bytes for a logo it takes), the replacement of a chapter only for what the chapter grows by, so one that does not grow it is never refused for storage.`,
         operationId: "createUpload",
         security: TOKEN,
         requestBody: { required: true, content: json(ref("UploadCreate")) },
@@ -546,7 +577,10 @@ function paths(): OpenApiDoc["paths"] {
           ),
           "401": UNAUTHORIZED,
           "404": refusal("The target's tour is not in this workspace (detail: no such tour), or the chapter is not a chapter of that tour (detail: no such chapter).", "not_found"),
-          "413": refusal("The request body is too long.", "too_large"),
+          "413": answer(
+            "too_large: the request body is too long. storage_full: the upload would take the workspace over its storage allowance; nothing was stored, and the answer carries the numbers in bytes. Deleting tours, or a larger allowance, makes room; waiting does not.",
+            { oneOf: [refusalSchema("too_large"), ref("StorageFull")] },
+          ),
           "429": {
             description: "The workspace already has its number of open uploads. Finish or cancel one first.",
             headers: { "retry-after": { description: "Seconds to wait before trying again.", schema: { type: "integer", minimum: 1 } } },
@@ -632,6 +666,16 @@ function paths(): OpenApiDoc["paths"] {
         operationId: "getMe",
         security: TOKEN,
         responses: { "200": answer("The workspace and the version.", ref("Me")), "401": UNAUTHORIZED, "404": refusal("The token's workspace no longer exists.", "not_found") },
+      },
+    },
+    "/api/v1/usage": {
+      get: {
+        tags: ["Workspace"],
+        summary: "The workspace's storage use",
+        description: `What the token's workspace uses of its storage allowance, in bytes. Counted: the image of every step of every tour, published or not; each tour's logo; and the room held by every upload that is not finished (its images as the manifest gives them, and ${n(LOGO_RULE.maxBytes)} bytes for a logo until its real size is known), until the upload is finished, cancelled or removed, which happens after ${hours} hours. Not counted: the copies of images a published tour serves, and files that wait to be removed after a delete or a replace. allowance_bytes is null when neither the server's settings nor the workspace has one: No limit. over is true when more is used than the allowance, which can happen when an allowance is lowered; the server never deletes or unpublishes anything because of it, and only starting an upload that needs room is refused.`,
+        operationId: "getUsage",
+        security: TOKEN,
+        responses: { "200": answer("The workspace's numbers.", ref("Usage")), "401": UNAUTHORIZED },
       },
     },
     "/healthz": {

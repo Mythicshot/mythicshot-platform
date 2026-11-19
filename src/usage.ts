@@ -4,18 +4,27 @@
 // - the bytes of every step of its tours (a draft picture a step uses, published or not);
 // - the recorded size of each tour's logo (null, counted as nothing, for a logo stored
 //   before the size was recorded);
-// - what each open upload reserved at create: one that is not closing and was created
-//   within UPLOAD_MAX_AGE_MS, the same uploads the open-upload cap counts.
+// - what each open upload reserved at create: every upload that is not closing, whatever
+//   its age. An upload can be committed until it is swept, so it holds its room until
+//   then; otherwise one that outlived the day could land on top of a newer one, past the
+//   allowance.
 // Not counted: published copies (no size is recorded for them), pictures a replace took
 // out and files of a deleted tour that still wait to be cleaned up, uploads that are
-// closing or older than that, and upload_step.bytes (the reservation already holds the
-// declared bytes). Two steps that reuse one stored picture count twice.
+// closing, and upload_step.bytes (the reservation already holds the declared bytes). Two
+// steps that reuse one stored picture count twice.
 //
-// Nothing here refuses or deletes anything: this file only says how much is used.
+// Nothing here deletes anything. The one refusal is made by the statement that creates an
+// upload (src/uploads.ts), built from USED_SQL and ALLOWANCE_OF_SQL; this file words its
+// answer (storageFull) and serves a workspace its own numbers (GET /api/v1/usage).
+//
+// This file imports no route module (src/uploads.ts imports it), so the settings, which
+// read allowanceFromSetting, and the routes can load in either order.
+import type { Hono } from "hono";
+import { requireAuth } from "./auth.ts";
+import { json } from "./http.ts";
 import type { Manifest } from "./manifest.ts";
-import type { Deps } from "./ports.ts";
+import type { Deps, Value } from "./ports.ts";
 import { LOGO_RULE } from "./sniff.ts";
-import { UPLOAD_MAX_AGE_MS } from "./uploads.ts";
 
 /** The line shown when STORAGE_ALLOWANCE_BYTES cannot be used. It never repeats the value. */
 const BAD_SETTING = "STORAGE_ALLOWANCE_BYTES is not a number of bytes. Write digits only, such as 1073741824, or leave it out for no limit.";
@@ -39,26 +48,41 @@ export function allowanceFromSetting(raw: string | undefined): { ok: true; bytes
 }
 
 // The three sums, each a scalar subquery over the row `p`, which holds the workspace id
-// as p.ws and the oldest created_at an open upload may have as p.floor. Both USED_SQL and
-// usageOf are built from these, so the number a create is held against is the number shown.
+// as p.ws. Both USED_SQL and usageOf are built from these, so the number a create is held
+// against is the number shown.
 const PICTURES = "(SELECT coalesce(sum(s.bytes), 0) FROM tour t JOIN step s ON s.tour_id = t.id WHERE t.workspace_id = p.ws)";
 const LOGOS = "(SELECT coalesce(sum(t.logo_bytes), 0) FROM tour t WHERE t.workspace_id = p.ws)";
-const UPLOADS = "(SELECT coalesce(sum(u.reserved_bytes), 0) FROM upload u WHERE u.workspace_id = p.ws AND u.closing_at IS NULL AND u.created_at >= p.floor)";
-const PARAMS = "(SELECT ? AS ws, ? AS floor) p";
+const UPLOADS = "(SELECT coalesce(sum(u.reserved_bytes), 0) FROM upload u WHERE u.workspace_id = p.ws AND u.closing_at IS NULL)";
+const PARAMS = "(SELECT ? AS ws) p";
 
 /**
  * The bytes a workspace uses, as a scalar subquery for use inside another statement. It
- * takes two parameters, in this order: the workspace id, and the 24-hour floor
- * (`deps.now() - UPLOAD_MAX_AGE_MS`). It is 0, never null, for a workspace with nothing.
+ * takes one parameter: the workspace id. It is 0, never null, for a workspace with nothing.
  */
 export const USED_SQL = `(SELECT ${PICTURES} + ${LOGOS} + ${UPLOADS} FROM ${PARAMS})`;
 
 /**
  * The allowance of the row of `workspace` in scope: its own number, else the one
  * parameter this takes, the site's default (`deps.config.storageAllowanceBytes ?? null`).
- * Null means no limit.
+ * Null means no limit. With no row in scope there is no value at all: use
+ * ALLOWANCE_OF_SQL to ask by id.
  */
 export const ALLOWANCE_SQL = "coalesce(workspace.storage_allowance_bytes, ?)";
+
+/**
+ * The allowance of a workspace by id, as a scalar expression for use inside another
+ * statement: the workspace's own number, else the site's default, and the site's default
+ * also when no workspace has that id, so a missing row never reads as "no limit" on a
+ * site that has one. Its three parameters are allowanceParams(), in that order: the
+ * default, the workspace id, the default again.
+ */
+export const ALLOWANCE_OF_SQL = `coalesce((SELECT ${ALLOWANCE_SQL} FROM workspace WHERE workspace.id = ?), ?)`;
+
+/** The parameters of ALLOWANCE_OF_SQL for this workspace, in order. */
+export function allowanceParams(deps: Deps, workspaceId: string): Value[] {
+  const site = deps.config.storageAllowanceBytes ?? null;
+  return [site, workspaceId, site];
+}
 
 /**
  * `used` is pictures + logos + uploads. `allowance` is null when there is no limit, and
@@ -69,17 +93,52 @@ export type Usage = { pictures: number; logos: number; uploads: number; used: nu
 
 /** The usage of one workspace and the allowance it is held against, in one database call. */
 export async function usageOf(deps: Deps, workspaceId: string): Promise<Usage> {
+  const site = deps.config.storageAllowanceBytes ?? null;
   const row = await deps.db.first<{ pictures: number; logos: number; uploads: number; tours: number; allowance: number | null }>(
     `SELECT ${PICTURES} AS pictures, ${LOGOS} AS logos, ${UPLOADS} AS uploads,
             (SELECT count(*) FROM tour t WHERE t.workspace_id = p.ws) AS tours,
-            (SELECT ${ALLOWANCE_SQL} FROM workspace WHERE workspace.id = p.ws) AS allowance
+            coalesce((SELECT ${ALLOWANCE_SQL} FROM workspace WHERE workspace.id = p.ws), ?) AS allowance
        FROM ${PARAMS}`,
-    // In the order the placeholders stand in the text: the default, then the row p.
-    [deps.config.storageAllowanceBytes ?? null, workspaceId, deps.now() - UPLOAD_MAX_AGE_MS],
+    // In the order the placeholders stand in the text: the site's default twice (for a
+    // workspace without a number of its own, and for an id no workspace has), then the row p.
+    [site, site, workspaceId],
   );
   const { pictures, logos, uploads, tours, allowance } = row!;
   const used = pictures + logos + uploads;
   return { pictures, logos, uploads, used, allowance, over: allowance !== null && used > allowance, tours };
+}
+
+/**
+ * The answer to a create that would take the workspace over its allowance: 413 with the
+ * code storage_full, the three numbers in bytes, and one sentence a client can show as it
+ * is. The sentence continues "Could not start the upload: " and is closed by the client,
+ * so it starts in lower case and ends without a full stop; with the longest sizes there
+ * are it stays under 200 characters. It says how much the upload needs (for a replace:
+ * how much the chapter grows), how much of the allowance is left, that nothing was
+ * uploaded, and what makes room. The site itself never deletes anything to make room.
+ */
+export function storageFull(u: Usage, needed: number): Response {
+  const allowance = u.allowance ?? 0;
+  const left = Math.max(0, allowance - u.used);
+  const detail = `this tour needs ${formatBytes(needed)} of room, but the workspace has ${formatBytes(left)} left of its ${formatBytes(allowance)} allowance. Nothing was uploaded. Delete tours you no longer need, or ask the site's admin for more room`;
+  return json(413, { error: "storage_full", detail, used_bytes: u.used, allowance_bytes: allowance, needed_bytes: needed });
+}
+
+/** GET /api/v1/usage: what the caller's own workspace uses, and its allowance. It only reads. */
+export function usageRoutes(app: Hono, deps: Deps): void {
+  app.get("/api/v1/usage", async (c) => {
+    const auth = await requireAuth(c.req.raw, deps);
+    if (auth instanceof Response) return auth;
+    // The workspace is the caller's own, from the credential: nothing in the request names one.
+    const u = await usageOf(deps, auth.workspaceId);
+    return json(200, {
+      used_bytes: u.used,
+      allowance_bytes: u.allowance,
+      over: u.over,
+      tours: u.tours,
+      counted: { pictures: u.pictures, logos: u.logos, uploads_in_progress: u.uploads },
+    });
+  });
 }
 
 /**

@@ -8,6 +8,7 @@ import { publishRoutes } from "./publish.ts";
 import { setupRoutes } from "./setup.ts";
 import { tourRoutes } from "./tours.ts";
 import { uploadRoutes } from "./uploads.ts";
+import { usageRoutes } from "./usage.ts";
 
 /** The route table and error handling. Routes reach data only through `deps`. */
 export function createApp(deps: Deps): Hono {
@@ -28,6 +29,7 @@ export function createApp(deps: Deps): Hono {
   docsRoutes(app, deps);
   uploadRoutes(app, deps);
   tourRoutes(app, deps);
+  usageRoutes(app, deps);
   publishRoutes(app, deps);
   pageRoutes(app, deps);
 

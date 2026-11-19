@@ -53,6 +53,7 @@ const ROWS: Record<string, Row> = {
   "POST /api/v1/uploads/:id/commit": api("POST", `/api/v1/uploads/${UPLOAD}/commit`),
   "DELETE /api/v1/uploads/:id": api("DELETE", `/api/v1/uploads/${UPLOAD}`),
   "GET /api/v1/me": api("GET", "/api/v1/me"),
+  "GET /api/v1/usage": api("GET", "/api/v1/usage"),
   "GET /api/v1/tours": api("GET", "/api/v1/tours"),
   "PATCH /api/v1/tours/:id": api("PATCH", `/api/v1/tours/${TOUR}`),
   "DELETE /api/v1/tours/:id": api("DELETE", `/api/v1/tours/${TOUR}`),
@@ -176,7 +177,7 @@ describe("the host-routing matrix", () => {
     for (const key of DOCS_FILE_KEYS) expect(HOST_RULES[key], key).toBe("app");
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
-    expect(API_KEYS.length).toBe(13);
+    expect(API_KEYS.length).toBe(14);
     expect(WIZARD_KEYS.length).toBe(5);
   });
 

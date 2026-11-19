@@ -52,7 +52,7 @@ async function openUpload(deps: Deps, ws: Ws, reserved: number, manifest: Json =
 
 /** The sum as the create statement will read it: the scalar subquery alone. */
 async function usedBySql(deps: Deps, workspaceId: string): Promise<number> {
-  return (await deps.db.first<{ used: number }>(`SELECT ${USED_SQL} AS used`, [workspaceId, deps.now() - DAY]))!.used;
+  return (await deps.db.first<{ used: number }>(`SELECT ${USED_SQL} AS used`, [workspaceId]))!.used;
 }
 
 async function publishAll(deps: Deps, token: string, tourId: string): Promise<Call> {
@@ -86,11 +86,9 @@ describe("usage of a workspace", () => {
     const pictures = sum(v3) + sum(chapter) + sum(other);
     expect(pictures).toBe(48213 + 51022 + 402117 + 700 + 6000);
 
-    // Steps alone: a tour's logo has no recorded size until a commit writes one.
-    expect(await usageOf(deps, a.workspaceId)).toEqual({ ...NOTHING, pictures, used: pictures, tours: 2 });
-
-    // The size of a logo, as a commit will carry it over from the upload.
-    await deps.db.run("UPDATE tour SET logo_bytes = ? WHERE id = ?", [1000, first.tour_id]);
+    // The steps, and the size of the first tour's logo, which its commit carried over from the upload.
+    expect(await usageOf(deps, a.workspaceId)).toEqual({ ...NOTHING, pictures, logos: 1000, used: pictures + 1000, tours: 2 });
+    expect(await deps.db.first("SELECT logo_bytes FROM tour WHERE id = ?", [first.tour_id])).toEqual({ logo_bytes: 1000 });
     // Two open uploads, each holding what its create reserved.
     await openUpload(deps, a, 5000);
     await openUpload(deps, a, 70_000);
@@ -101,7 +99,7 @@ describe("usage of a workspace", () => {
     expect(await usedBySql(deps, a.workspaceId)).toBe(used);
   });
 
-  it("a closing upload and one older than a day are not counted", async () => {
+  it("a closing upload is not counted, and an open one counts whatever its age", async () => {
     const { deps, a, advance } = await setup();
     const old = await openUpload(deps, a, 1000);
     const edge = await openUpload(deps, a, 20_000);
@@ -113,19 +111,31 @@ describe("usage of a workspace", () => {
     await deps.db.run("UPDATE upload SET closing_at = ? WHERE id = ?", [T0, closing]);
     expect((await usageOf(deps, a.workspaceId)).uploads).toBe(4_021_000);
 
-    // Exactly a day old still counts, as it still counts against the open-upload cap.
+    // An upload can be committed until it is swept, however old it is, so it holds its
+    // room until then: at the edge of the day, past it, and later still.
     await deps.db.run("UPDATE upload SET created_at = ? WHERE id = ?", [T0 - DAY, edge]);
     await deps.db.run("UPDATE upload SET created_at = ? WHERE id = ?", [T0 - DAY - 1, old]);
     const usage = await usageOf(deps, a.workspaceId);
-    expect(usage).toEqual({ ...NOTHING, uploads: 4_020_000, used: 4_020_000 });
-    expect(await usedBySql(deps, a.workspaceId)).toBe(4_020_000);
-
-    // A millisecond later the one at the edge is out too, with no request in between.
-    advance(1);
-    expect((await usageOf(deps, a.workspaceId)).uploads).toBe(4_000_000);
-    expect(await usedBySql(deps, a.workspaceId)).toBe(4_000_000);
+    expect(usage).toEqual({ ...NOTHING, uploads: 4_021_000, used: 4_021_000 });
+    expect(await usedBySql(deps, a.workspaceId)).toBe(4_021_000);
+    advance(30 * DAY);
+    expect((await usageOf(deps, a.workspaceId)).uploads).toBe(4_021_000);
+    expect(await usedBySql(deps, a.workspaceId)).toBe(4_021_000);
     // The rows are all still there: nothing was removed to make the number.
     expect(await count(deps, "upload")).toBe(4);
+  });
+
+  it("a workspace id with no row takes the site's allowance, never no limit", async () => {
+    const { deps, a } = await setup({ storageAllowanceBytes: 5000 });
+    const nobody = "ws_000000000000000000000000";
+    expect(await usageOf(deps, nobody)).toEqual({ ...NOTHING, allowance: 5000 });
+    // Also when another workspace has a number of its own.
+    await deps.db.run("UPDATE workspace SET storage_allowance_bytes = 9 WHERE id = ?", [a.workspaceId]);
+    expect((await usageOf(deps, nobody)).allowance).toBe(5000);
+    expect((await usageOf(deps, a.workspaceId)).allowance).toBe(9);
+    // Zero as the site's number is a limit for it too.
+    deps.config.storageAllowanceBytes = 0;
+    expect((await usageOf(deps, nobody)).allowance).toBe(0);
   });
 
   it("published copies, replaced pictures and a deleted tour's files are not counted", async () => {
