@@ -173,10 +173,12 @@ describe("the server command", () => {
 
   it("run as its own file, the gate is the environment of process 1, and anything unreadable is off", () => {
     const environ = (pairs: string[]) => Buffer.from(pairs.join("\0") + "\0");
-    const at = (file: Buffer | Error) => ({ pid: 4242, platform: "linux" as NodeJS.Platform, read: (path: string) => {
-      expect(path).toBe("/proc/1/environ");
-      if (file instanceof Error) throw file;
-      return file;
+    // Process 1 as the container starts it: the Dockerfile's CMD ["node", "dist/node/entry.js"].
+    const APP = environ(["node", "dist/node/entry.js"]);
+    const at = (file: Buffer | Error, cmdline: Buffer | Error = APP) => ({ pid: 4242, platform: "linux" as NodeJS.Platform, read: (path: string) => {
+      const got = path === "/proc/1/cmdline" ? cmdline : path === "/proc/1/environ" ? file : new Error(`read ${path}`);
+      if (got instanceof Error) throw got;
+      return got;
     } });
     expect(recoveryFromProcessOne(at(environ(["PATH=/usr/bin", "RECOVERY_LINKS=on", "DATA_DIR=/data"])))).toBe(true);
     expect(recoveryFromProcessOne(at(environ(["RECOVERY_LINKS= ON "])))).toBe(true);
@@ -191,6 +193,41 @@ describe("the server command", () => {
     };
     expect(recoveryFromProcessOne({ pid: 4242, platform: "win32", read: never })).toBe(false);
     expect(recoveryFromProcessOne({ pid: 1, platform: "linux", read: never })).toBe(false);
+  });
+
+  it("process 1 counts only when it is this application's own server", () => {
+    const nul = (parts: string[]) => Buffer.from(parts.join("\0") + "\0");
+    const ON_ENV = nul(["RECOVERY_LINKS=on"]);
+    const with1 = (cmdline: Buffer | Error) => ({
+      pid: 4242,
+      platform: "linux" as NodeJS.Platform,
+      read: (path: string) => {
+        const got = path === "/proc/1/cmdline" ? cmdline : path === "/proc/1/environ" ? ON_ENV : new Error(path);
+        if (got instanceof Error) throw got;
+        return got;
+      },
+    });
+    // The app, as the image starts it, by any spelling of node and of the script's path.
+    for (const parts of [["node", "dist/node/entry.js"], ["/usr/local/bin/node", "dist/node/entry.js"], ["node", "/app/dist/node/entry.js"], ["node", "--enable-source-maps", "dist/node/entry.js"], ["node", "./dist/node/entry.js"]]) {
+      expect(recoveryFromProcessOne(with1(nul(parts))), parts.join(" ")).toBe(true);
+    }
+    // A shell, an init, another script, another program, nothing: closed, whatever the environment says.
+    for (const parts of [
+      ["sh", "-c", "RECOVERY_LINKS=on node dist/node/entry.js"],
+      ["/bin/sh", "-c", "node dist/node/entry.js"],
+      ["/sbin/docker-init", "--", "node", "dist/node/entry.js"],
+      ["tini", "--", "node", "dist/node/entry.js"],
+      ["node", "dist/node/admin.js"],
+      ["node", "dist/node/entry.js.bak"],
+      ["node", "/tmp/fake-dist/node/entry.jsx"],
+      ["node"],
+      ["nodejs-fake", "dist/node/entry.js"],
+      ["bash"],
+      [],
+    ]) {
+      expect(recoveryFromProcessOne(with1(nul(parts))), parts.join(" ")).toBe(false);
+    }
+    expect(recoveryFromProcessOne(with1(Object.assign(new Error("EACCES"), { code: "EACCES" })))).toBe(false);
   });
 
   it("started as its own file with RECOVERY_LINKS=on in its environment, it still refuses", async () => {
