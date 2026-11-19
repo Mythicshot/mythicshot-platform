@@ -8,6 +8,8 @@
 #   options: --yes, --dry-run, and for update: --allow-downgrade
 #   a second address, for the app: --app-domain app.example.com with update or status
 #   (see "Two addresses" below)
+#   ./cpanel.sh admin [--app-root apps/tours] [--dry-run] <the admin command's arguments>
+#   (see "The admin command" below)
 #
 # Where things go, for the default --app-root apps/tours (always relative to $HOME):
 #   ~/apps/tours             the app: dist/, migrations/, package.json, package-lock.json,
@@ -87,6 +89,20 @@
 #   address that answers without its role is reported as failed, by name. After an
 #   update that is not the new version's fault, so no commands to go back are printed.
 #
+# The admin command. `admin` runs the site's own admin command (dist/node/admin.js:
+# first-admin, signin-link, mail-check, audit) in the installed app, beside the running
+# app:
+# - Options of this script (--app-root, --node, --dry-run) go before the command's first
+#   argument; from there on every argument is the command's and reaches it unchanged.
+# - It runs `node app.cjs admin <arguments>` in the app folder, inside the app's Node.js
+#   environment. The startup file reads the settings file exactly as it does for the app
+#   and hands every setting to the command. This script reads only the DATA_DIR line, to
+#   check that the data folder is there, and prints no value from the file.
+# - It echoes nothing itself: what the command prints, a sign-in link among it, goes to
+#   this terminal only and to no log or file. Its exit code is the command's.
+# - The command changes the database only (in one transaction, beside the running app),
+#   never a file of the app; it applies no migration. --dry-run prints what would be run.
+#
 # Every outside command (cloudlinux-selector, npm, node, sqlite3, curl, and touch for
 # the restart file) is found through PATH, so the tests put stand-ins in front.
 # CPANEL_HEALTH_TRIES and CPANEL_HEALTH_WAIT (seconds) change how long the health check
@@ -131,6 +147,8 @@ NODE_MAJOR=""
 ASSUME_YES=0
 DRY_RUN=0
 ALLOW_DOWNGRADE=0
+# admin: the arguments for the admin command, as they were given.
+ADMIN_ARGS=()
 
 SRC_DIR=""
 APP_DIR=""
@@ -177,6 +195,8 @@ Commands:
   backup      Copy the database, the drafts and public folders, the app files and the
               settings file to a new folder under ~/backups.
   status      Show the installed version, the folders, the last backup and the health.
+  admin       Run the site's admin command, for example: admin first-admin --email you@example.com --username yourname
+              This script's options go before the command's arguments.
 
 Options:
   --app-root <path>   The app folder, relative to your home folder (default apps/tours).
@@ -206,8 +226,10 @@ run() {
 # ---------------------------------------------------------------- arguments
 
 parse_args() {
-  local seen=0 a want=""
+  local seen=0 a want="" passing=0
   for a in "$@"; do
+    # After admin, from the command's first argument on, everything is the command's.
+    if [ "$passing" = 1 ]; then ADMIN_ARGS+=("$a"); continue; fi
     if [ -n "$want" ]; then
       case "$want" in
         --app-root) APP_ROOT="$a" ;;
@@ -218,8 +240,17 @@ parse_args() {
       want=""
       continue
     fi
+    if [ "$COMMAND" = admin ]; then
+      case "$a" in
+        --app-root | --node | --app-root=* | --node=* | --dry-run) ;;
+        *) passing=1; ADMIN_ARGS+=("$a"); continue ;;
+      esac
+    fi
     case "$a" in
       install | update | backup | status)
+        [ "$seen" = 0 ] || usage_error "give only one command"
+        COMMAND="$a"; seen=1 ;;
+      admin)
         [ "$seen" = 0 ] || usage_error "give only one command"
         COMMAND="$a"; seen=1 ;;
       --app-root | --domain | --app-domain | --node) want="$a" ;;
@@ -235,7 +266,11 @@ parse_args() {
     esac
   done
   [ -z "$want" ] || usage_error "$want needs a value"
-  [ -n "$COMMAND" ] || usage_error "give a command: install, update, backup or status"
+  [ -n "$COMMAND" ] || usage_error "give a command: install, update, backup, status or admin"
+  if [ "$COMMAND" = admin ]; then
+    [ "${#ADMIN_ARGS[@]}" -gt 0 ] || usage_error "admin needs the admin command's arguments, for example: admin first-admin --email you@example.com --username yourname"
+    [ "$DOMAIN_GIVEN" = 0 ] && [ "$APP_DOMAIN_GIVEN" = 0 ] || usage_error "--domain and --app-domain do not go with admin"
+  fi
   valid_app_root "$APP_ROOT" || usage_error "--app-root must be a folder path relative to your home folder, made of letters, digits, dots, hyphens and underscores, and the app folder must be outside the folders the web server serves (public_html, www, or a folder named after a domain): $APP_ROOT"
   [ -z "$DOMAIN" ] || valid_domain "$DOMAIN" || usage_error "--domain must be a host name in lowercase, such as tours.example.com, without https:// and without a path"
   if [ "$APP_DOMAIN_GIVEN" = 1 ]; then
@@ -692,6 +727,11 @@ copy_database() {
     # shellcheck disable=SC2016 # the program text is for Node, not for the shell
     NODE_ENV_UMASK=077 in_node_env node -e 'const { DatabaseSync } = require("node:sqlite"); const [from, to] = process.argv.slice(1); const db = new DatabaseSync(from, { timeout: 5000 }); try { db.prepare("VACUUM INTO ?").run(to); } finally { db.close(); } const copy = new DatabaseSync(to, { readOnly: true }); let rows; try { rows = copy.prepare("PRAGMA integrity_check").all(); } finally { copy.close(); } if (rows.length !== 1 || Object.values(rows[0])[0] !== "ok") { console.error("the copy did not pass the integrity check"); process.exit(1); }' "$from" "$to" || return 1
   elif command -v sqlite3 >/dev/null 2>&1; then
+    # The database has STRICT tables, which a tool older than 3.37 cannot read.
+    if ! sqlite3_reads_strict_tables; then
+      warn "the sqlite3 tool here is older than 3.37 and cannot read this database, so it is not used for the copy; the app's Node.js is needed for a backup"
+      return 1
+    fi
     info "the app's Node.js was not found at $ACTIVATE, so the copy is made with the sqlite3 tool"
     info "\$ sqlite3 $from \".backup '$to'\""
     sqlite3 "$from" ".backup '$to'" || return 1
@@ -705,6 +745,16 @@ copy_database() {
   # Whatever the tool reported, the copy must be there and be a database.
   [ -s "$to" ] || { warn "the database copy was not written"; return 1; }
   [ "$(head -c 15 "$to" | tr -d '\0')" = "SQLite format 3" ] || { warn "the database copy is not a SQLite file"; return 1; }
+}
+
+
+# True when the sqlite3 tool says it is version 3.37 or newer, the first that reads
+# STRICT tables. A tool that fails or answers anything else is not used.
+sqlite3_reads_strict_tables() {
+  local v
+  v="$(sqlite3 --version 2>/dev/null | head -n 1)" || return 1
+  [[ "$v" =~ ^([0-9]{1,4})\.([0-9]{1,4})(\.[0-9]+)*([[:space:]]|$) ]] || return 1
+  ((10#${BASH_REMATCH[1]} > 3 || (10#${BASH_REMATCH[1]} == 3 && 10#${BASH_REMATCH[2]} >= 37)))
 }
 
 remove_partial_backup() {
@@ -1179,6 +1229,32 @@ cmd_status() {
   report_health || true
 }
 
+# Runs the site's admin command in the installed app (see "The admin command" above).
+cmd_admin() {
+  installed || die "nothing is installed at $APP_DIR, so there is no site to run the admin command on"
+  read_state
+  set_node_paths
+  [ -f "$APP_DIR/dist/node/admin.js" ] || die "the version installed at $APP_DIR has no admin command yet; update it with a newer archive first. Nothing was changed"
+  # The data folder is checked here without naming it: no value of the settings file is printed.
+  read_data_dir || die "$DATA_PROBLEM, so the site's settings are not known; nothing was changed. The file must hold a line DATA_DIR=<the data folder's full path>"
+  [ -d "$DATA_DIR" ] || die "the data folder that DATA_DIR in $SETTINGS names does not exist; nothing was changed"
+  require_node_env
+  if [ "$DRY_RUN" = 1 ]; then
+    in_node_env node app.cjs admin "${ADMIN_ARGS[@]}"
+    say "Dry run: nothing was changed"
+    return 0
+  fi
+  printf '\n'
+  (
+    umask 077
+    set +eu
+    # shellcheck source=/dev/null
+    . "$ACTIVATE" >/dev/null || exit 1
+    cd "$APP_DIR" || exit 1
+    exec node app.cjs admin "${ADMIN_ARGS[@]}"
+  )
+}
+
 on_exit() { remove_partial_backup; }
 
 main() {
@@ -1192,6 +1268,7 @@ main() {
     update) cmd_update ;;
     backup) cmd_backup ;;
     status) cmd_status ;;
+    admin) cmd_admin ;;
   esac
 }
 

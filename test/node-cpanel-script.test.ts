@@ -34,6 +34,20 @@ const TWO_ADDRESS_TESTS = [
   "test_app_domain_never_shows_the_setup_code",
 ];
 
+/**
+ * The tests of `cpanel.sh admin` and of the old sqlite3 tool. They are run here too, all
+ * in one go, because they are few and quick: the containers cannot run the one with a
+ * real Node.js, and nothing about them needs Debian.
+ */
+const ADMIN_TESTS = [
+  "test_admin_runs_the_command_in_the_apps_node_with_the_data_folder",
+  "test_admin_passes_its_arguments_unchanged",
+  "test_admin_needs_an_install",
+  "test_admin_dry_run_runs_nothing",
+  "test_an_old_sqlite3_tool_is_not_used_for_the_copy",
+  "test_admin_with_real_node_hands_the_command_the_settings",
+];
+
 /** A Bash that runs POSIX scripts here, or the reason there is none. */
 function findBash(): { bash: string } | { reason: string } {
   const works = (bash: string) => spawnSync(bash, ["-c", "echo ok"], { encoding: "utf8", windowsHide: true }).stdout?.trim() === "ok";
@@ -81,6 +95,19 @@ describe("the cPanel script's backup with a real Node.js", () => {
     // Run, and passed: not skipped inside the Bash file for want of a Node.js.
     expect(output).toContain(`PASS  ${TEST}`);
     expect(output).toMatch(/^1 passed, 0 failed, 0 skipped$/m);
+    expect(r.status, output).toBe(0);
+  }, 300_000);
+
+  it("the Bash file has every test of the admin command", () => {
+    const harness = readFileSync(join(ROOT, HARNESS), "utf8");
+    for (const name of ADMIN_TESTS) expect(harness, name).toMatch(new RegExp(`^${name}\\(\\) \\{$`, "m"));
+  });
+
+  it.skipIf("reason" in found)(`runs the admin command through cpanel.sh: in the app's Node.js, with the settings the app gets, its arguments unchanged${"reason" in found ? ` (skipped: ${found.reason})` : ""}`, () => {
+    const r = spawnSync((found as { bash: string }).bash, [HARNESS, "--inside", ...ADMIN_TESTS], { cwd: ROOT, encoding: "utf8", timeout: 280_000, windowsHide: true });
+    const output = `${r.stdout}\n${r.stderr}`;
+    for (const name of ADMIN_TESTS) expect(output, name).toContain(`PASS  ${name}`);
+    expect(output).toMatch(new RegExp(`^${ADMIN_TESTS.length} passed, 0 failed, 0 skipped$`, "m"));
     expect(r.status, output).toBe(0);
   }, 300_000);
 });
