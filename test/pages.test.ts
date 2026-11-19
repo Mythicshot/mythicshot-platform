@@ -102,7 +102,8 @@ const WORDING: Record<string, string[]> = {
     "Tours are managed from Mythicshot for now. A dashboard is coming to this page.",
   ],
 };
-const TITLES: Record<string, string> = { "/signin": "Sign in", "/signin/link": "Finish signing in", "/account": "Signed in" };
+// The account page's title is the site's name alone until its script knows someone is signed in.
+const TITLES: Record<string, string> = { "/signin": "Sign in", "/signin/link": "Finish signing in", "/account": "Mythicshot" };
 
 /** Every text the script itself puts on a page, by its key in the script's TEXT. */
 const SCRIPT_TEXT: Record<string, string> = {
@@ -273,6 +274,12 @@ describe("the sign-in pages", () => {
     const navigations = [...SIGNIN_JS.matchAll(/location\.(replace|assign)\(([^)]*)\)/g)].map((m) => m[2]);
     expect(navigations.length).toBeGreaterThan(0);
     for (const target of navigations) expect(["\"/signin\"", "\"/account\""], target).toContain(target);
+    // The address is never assigned to, by any name: every use of location is one of these.
+    expect(SIGNIN_JS).not.toMatch(/\blocation\s*=(?!=)/);
+    expect(SIGNIN_JS).not.toMatch(/\b(?:window|document|self|top|parent|globalThis)\s*\.\s*location\b/);
+    expect(SIGNIN_JS).not.toMatch(/\blocation\s*\[/);
+    const uses = [...SIGNIN_JS.matchAll(/\blocation\b\s*(\.\s*[a-zA-Z]+)?/g)].map((m) => (m[1] ?? "").replace(/\s/g, ""));
+    expect(new Set(uses)).toEqual(new Set([".hash", ".pathname", ".search", ".replace", ".assign"]));
     // Every request goes to the API of this site, by a fixed path or a session's id.
     const requests = [...SIGNIN_JS.matchAll(/\bcall\("([A-Z]+)", ("[^"]*"(?: \+ encodeURIComponent\(id\))?)/g)].map((m) => `${m[1]} ${m[2]}`);
     expect(requests.sort()).toEqual(

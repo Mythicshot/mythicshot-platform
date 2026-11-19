@@ -188,6 +188,15 @@ export class FakeDocument {
   get head(): FakeElement {
     return this.root.all().find((e) => e.tagName === "head")!;
   }
+  /** The text of <title>, as a browser's document.title reads and writes it. */
+  get title(): string {
+    return this.root.all().find((e) => e.tagName === "title")?.textContent ?? "";
+  }
+  set title(v: string) {
+    this.log?.push("document");
+    const t = this.root.all().find((e) => e.tagName === "title");
+    if (t) t.textContent = String(v);
+  }
   getElementById(id: string): FakeElement | null {
     this.log?.push("document");
     return this.root.all().find((e) => e.id === id) ?? null;

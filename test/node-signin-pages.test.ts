@@ -234,6 +234,11 @@ describe("the sign-in page", () => {
     expect(tab.$("ask-button").textContent).toBe("Sending…");
     expect(tab.$("ask-button").disabled).toBe(true);
     expect(tab.$("ask-button").click()).toBeNull();
+    // Enter in the field submits the form without the button: the form's own guard holds that too.
+    tab.$("ask-form").dispatch("submit");
+    tab.$("ask-form").dispatch("submit");
+    await tab.settle();
+    expect(tab.fetched.filter((f) => f.method === "POST")).toHaveLength(1);
     server.answer({ status: 200, json: { ok: true } });
     await tab.settle();
     expect(tab.shows()).toEqual([
@@ -338,7 +343,17 @@ describe("the page a sign-in link opens", () => {
       expect(tab.shows()).toEqual(["Mythicshot", "This sign-in link no longer works", "A link works once and for 15 minutes. Ask for a new one and use the newest mail.", "Send me a new link"]);
       expect(tab.doc.activeElement?.id).toBe("h-dead");
       expect(tab.left()).toBeNull();
+      // The code is gone from the page's memory: the hidden button, pressed by any means, sends nothing.
+      expect(tab.$("finish-button").disabled).toBe(false);
+      tab.$("finish-button").dispatch("click");
+      await tab.settle();
+      expect(tab.fetched).toHaveLength(1);
     }
+    // The same when the page had no code to begin with.
+    const empty = openPage(LINK_HTML, `${APP}/signin/link#c=abc`, answers({}));
+    empty.$("finish-button").dispatch("click");
+    await empty.settle();
+    expect(empty.fetched).toEqual([]);
   });
 
   it("a page opened without a code, or with one that is not a code, shows the dead link at once and asks nothing", async () => {
@@ -429,12 +444,16 @@ describe("the account page", () => {
     expect(tab.left()).toBe("/signin");
     expect(tab.$("account").hidden).toBe(true);
     expect(tab.fetched.map((f) => f.path)).toEqual(["/api/v1/session"]);
+    // While it is sent away, the tab's title is the site's name alone.
+    expect(tab.doc.title).toBe("Mythicshot");
   });
 
   it("shows who is signed in, the storage and where, in the approved words", async () => {
     const tab = account();
     expect(tab.$("account").hidden).toBe(true);
+    expect(tab.doc.title).toBe("Mythicshot");
     await tab.settle();
+    expect(tab.doc.title).toBe("Signed in");
     expect(tab.shows()).toEqual([
       "Mythicshot",
       "Signed in as alice",

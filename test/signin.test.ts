@@ -967,6 +967,10 @@ describe("where the sign-in routes answer", () => {
     for (const key of KEYS) expect(routes).toContain(key);
     // API routes only: the sign-in pages (GET /signin, /signin/link and their files, src/pages.ts) are not routes of this file.
     expect(routes.filter((key) => /^[A-Z]+ \/api\/v1\/(signin|signout|sessions?)\b/.test(key)).sort()).toEqual([...KEYS].sort());
+    // The wider match by name alone finds exactly those and the four sign-in pages under /signin (GET /account has none of
+    // these names), so a new route under such a name, a page or not, fails here until it is placed.
+    const SIGNIN_PAGES = ["GET /signin", "GET /signin/link", "GET /signin/signin.css", "GET /signin/signin.js"];
+    expect(routes.filter((key) => /\/(signin|signout|sessions?)\b/.test(key)).sort()).toEqual([...KEYS, ...SIGNIN_PAGES].sort());
 
     const stored = await everythingStored(deps);
     const before = calls();

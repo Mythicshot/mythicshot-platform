@@ -95,7 +95,7 @@ export const ACCOUNT_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
-<title>Signed in</title>
+<title>Mythicshot</title>
 <link rel="stylesheet" href="/signin/signin.css">
 <script src="/signin/signin.js" defer></script>
 </head>
@@ -615,6 +615,8 @@ export const SIGNIN_JS = `(function () {
       }
       csrf = res.data.csrf;
       current = String(res.data.session.id);
+      // The title stays the site's name until someone is known to be signed in.
+      document.title = TEXT.signedIn;
       var who = res.data.account;
       say($("h-account"), typeof who.username === "string" && who.username !== "" ? TEXT.signedInAs + who.username : TEXT.signedIn);
       say($("account-email"), typeof who.email === "string" ? who.email : "");
