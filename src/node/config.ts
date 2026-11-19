@@ -5,6 +5,7 @@ import { misdirected } from "../host-gate.ts";
 import { resolveHosts, type Hosts } from "../hosts.ts";
 import type { Config } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
+import { allowanceFromSetting } from "../usage.ts";
 
 /**
  * The app's configuration from the environment: PUBLIC_IMAGE_BASE, SETUP_CODE and the two
@@ -12,14 +13,22 @@ import { setupCodeFromEnv } from "../setup.ts";
  * and the app serves one address as before. A pair that cannot be used (one without the
  * other, a value that is not a host name, the same name twice) throws an Error whose
  * message is the one fixed line to show; it names the settings and never repeats a value.
+ *
+ * STORAGE_ALLOWANCE_BYTES is the site's default storage allowance per workspace. Unset or
+ * empty, the config has no such key and nothing is limited, as before the setting
+ * existed. A value that is not digits only throws its own fixed line the same way: a
+ * mistyped limit stops the start rather than quietly lifting the limit.
  */
 export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   const hosts = resolveHosts({ tours: env.TOURS_HOST, app: env.APP_HOST });
   if (!hosts.ok) throw new Error(hosts.problem);
+  const allowance = allowanceFromSetting(env.STORAGE_ALLOWANCE_BYTES);
+  if (!allowance.ok) throw new Error(allowance.problem);
   return {
     publicImageBase: env.PUBLIC_IMAGE_BASE ?? "",
     setupCode: setupCodeFromEnv(env.SETUP_CODE),
     hosts: hosts.hosts,
+    ...(allowance.bytes === null ? {} : { storageAllowanceBytes: allowance.bytes }),
   };
 }
 

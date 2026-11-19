@@ -111,6 +111,12 @@ export type Config = {
   retiredGraceMs?: number;
   /** The tours and the app address in two-address mode. Absent or null: one address, no host check. */
   hosts?: Hosts | null;
+  /**
+   * The site's default storage allowance per workspace, in bytes, from the
+   * STORAGE_ALLOWANCE_BYTES setting; a workspace's own number comes before it. Absent or
+   * null: no limit. 0 is a limit.
+   */
+  storageAllowanceBytes?: number | null;
 };
 
 export type Deps = { db: Db; drafts: FileStore; pub: FileStore; config: Config; now: () => number };
