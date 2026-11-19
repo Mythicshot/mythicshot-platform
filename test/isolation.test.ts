@@ -40,6 +40,7 @@ import { openapi, type OpenApiDoc } from "../src/docs/openapi.ts";
 import type { Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
 import { LIMITS_SIGNIN } from "../src/rate.ts";
+import { PAD_BUCKET } from "../src/signin.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { ORIGIN, commit, logoPng, putStep, send, stepImage, type Call, type Json } from "./bundle.ts";
 import { OWNED, SHARED, createReplace, dumpOf, inventedIds, manifestOf, namesIn, needlesOf, snapshotOf, tablesOf, world, type Ids, type Side, type World } from "./isolation-world.ts";
@@ -900,8 +901,8 @@ describe("routes with no owner", () => {
     const w = await build({ setupCode: SETUP_CODE });
     const { deps, a, b } = w;
     // Asking for a sign-in link counts the request in the site's own sign-in counters,
-    // whoever asks; they belong to no workspace (SHARED), and only they are left out here.
-    const signInBuckets: string[] = Object.values(LIMITS_SIGNIN).map((limit) => limit.bucket);
+    // whoever asks; they (and the pad counter the sign-in job keeps) belong to no workspace (SHARED), and only they are left out here.
+    const signInBuckets: string[] = [...Object.values(LIMITS_SIGNIN).map((limit) => limit.bucket), PAD_BUCKET];
     const look = async (files: boolean) => {
       const d = await dumpOf(deps, w.keys, { files });
       d.rows.rate_counter = (d.rows.rate_counter ?? []).filter((row) => !signInBuckets.includes(row.bucket as string));

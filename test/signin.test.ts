@@ -9,7 +9,7 @@ import { setClientAddress } from "../src/client.ts";
 import type { Config, Db, Deps } from "../src/ports.ts";
 import { LIMITS_SIGNIN, SITE_KEY, SITE_QUIET_KEY, recipientKey } from "../src/rate.ts";
 import { SESSION_COOKIE, SIGNIN_CODE_MS, clearedCookie, createSignInCode, csrfFor, redeemSignInCode, sessionCookie } from "../src/sessions.ts";
-import { SIGNIN_LINES, signinRoutes } from "../src/signin.ts";
+import { PAD_BUCKET, PAD_KEY, SIGNIN_LINES, signinRoutes } from "../src/signin.ts";
 import { send, type Call, type SendOptions } from "./bundle.ts";
 
 const NOW = 1_800_000_000_000;
@@ -115,8 +115,14 @@ function recordKinds(deps: Deps, statements?: string[]): string[] {
 
 /** What every link request awaits before its answer: the two counts per recipient, the account read, the mail cap, the two sweeps. */
 const AWAITED = ["first", "first", "first", "first", "batch", "run"];
-/** What the job after the answer adds for an account that gets a link: its code, then the audit row. */
-const ACCOUNT_JOB = ["run", "batch"];
+/**
+ * What the job after the answer does, for every request: one write and then one batch.
+ * For an account that gets a link they write its code and the audit row; for any other
+ * request they add to the pad counter, so the job costs the same either way.
+ */
+const JOB = ["run", "batch"];
+/** The pad counter's total: two more for every request whose job makes no link. */
+const padCount = async (deps: Deps) => (await deps.db.first<{ n: number }>("SELECT coalesce(sum(count), 0) AS n FROM rate_counter WHERE bucket = ?", [PAD_BUCKET]))!.n;
 /** The mark `answered` puts among the recorded calls when the app has handed back its answer. */
 const ANSWER = "| answer";
 
@@ -171,8 +177,13 @@ describe("asking for a sign-in link", () => {
 
     const known = await ask(deps, a.email, { app });
     const knownCalls = split(kinds);
+    expect(await padCount(deps)).toBe(0);
+    kinds.length = 0;
     const stranger = await ask(deps, STRANGER, { app });
     const strangerCalls = split(kinds);
+    // Each of the stranger's two job calls changed a row: the pad counter moved by two.
+    expect(await padCount(deps)).toBe(2);
+    kinds.length = 0;
 
     expect(seen(known)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
     expect(seen(stranger)).toEqual(seen(known));
@@ -180,9 +191,9 @@ describe("asking for a sign-in link", () => {
     // Before the answer: the same database calls, of the same kinds, in the same order.
     expect(strangerCalls.before).toEqual(knownCalls.before);
     expect(knownCalls.before).toEqual(AWAITED);
-    // After it, only the account's job writes anything: its code and the audit row.
-    expect(knownCalls.after).toEqual(ACCOUNT_JOB);
-    expect(strangerCalls.after).toEqual([]);
+    // After it, the same kinds of calls in the same order: the account's code and audit row, the stranger's pad.
+    expect(knownCalls.after).toEqual(JOB);
+    expect(strangerCalls.after).toEqual(JOB);
     // And they really were two different requests: one mail, to the account.
     expect(mail.sent.map((m) => m.to)).toEqual([a.email]);
     expect(await countOf(deps, "signin_code")).toBe(1);
@@ -222,13 +233,38 @@ describe("asking for a sign-in link", () => {
     await ask(deps, STRANGER, { app });
     const stranger = split(statements);
 
-    // Before the answer: no write of a code, an audit row or a mail, and the very same statements for both.
-    expect(known.before.filter((x) => accountOnly.test(x))).toEqual([]);
+    // Before the answer: no write of a code, an audit row, the pad or a mail, and the very same statements for both.
+    expect(known.before.filter((x) => accountOnly.test(x) || x.includes(PAD_BUCKET))).toEqual([]);
     expect(known.before).toEqual(stranger.before);
-    // After it: the account's code, its audit row and one mail, in that order; nothing at all for the stranger.
+    // After it: the account's code, its audit row and one mail, in that order; the stranger's two pad writes, of the same kinds.
     expect(known.after.map((x) => x.split(" (")[0])).toEqual(["run INSERT INTO signin_code", "batch INSERT INTO audit", "mail"]);
-    expect(stranger.after).toEqual([]);
+    expect(stranger.after.map((x) => x.split(" (")[0])).toEqual(["run INSERT INTO rate_counter", "batch INSERT INTO rate_counter"]);
+    // Nothing but the mail hand-over tells the two jobs apart by kind.
+    expect(known.after.filter((x) => x !== "mail").map((x) => x.split(" ")[0])).toEqual(stranger.after.map((x) => x.split(" ")[0]));
     expect(mail.sent.map((m) => m.to)).toEqual([a.email]);
+  });
+
+  it("the pad keeps one row an hour, is swept like any counter, and no limit reads it", async () => {
+    const { deps, clock } = await site();
+    const hour = 3_600_000;
+    clock.now = NOW - (NOW % hour);
+    for (let i = 0; i < 5; i++) await ask(deps, `stranger-${i}@example.com`);
+    clock.now += hour;
+    await ask(deps, STRANGER);
+    const rows = await rowsOf<{ key: string; window_start: number; count: number }>(deps, "SELECT key, window_start, count FROM rate_counter WHERE bucket = ? ORDER BY window_start", [PAD_BUCKET]);
+    expect(rows).toEqual([
+      { key: PAD_KEY, window_start: NOW - (NOW % hour), count: 10 },
+      { key: PAD_KEY, window_start: NOW - (NOW % hour) + hour, count: 2 },
+    ]);
+    // The bucket and key fit the counter's columns, and the bucket is none of the limits'.
+    expect(new TextEncoder().encode(PAD_BUCKET).length).toBeLessThanOrEqual(40);
+    expect(new TextEncoder().encode(PAD_KEY).length).toBeLessThanOrEqual(100);
+    expect(Object.values(LIMITS_SIGNIN).map((limit) => limit.bucket)).not.toContain(PAD_BUCKET);
+    // A day and more later the counter sweep that rides on every request removes the old rows.
+    clock.now += 2 * 86_400_000;
+    await ask(deps, STRANGER);
+    const left = await rowsOf<{ window_start: number }>(deps, "SELECT window_start FROM rate_counter WHERE bucket = ?", [PAD_BUCKET]);
+    expect(left).toEqual([{ window_start: clock.now - (clock.now % hour) }]);
   });
 
   it("a code or audit row that cannot be written still answers as always, and sends nothing", async () => {
@@ -355,7 +391,7 @@ describe("asking for a sign-in link", () => {
     const kinds = recordKinds(reference.deps);
     const sent = seen(await ask(reference.deps, reference.a.email, { app: answered([kinds]) }));
     const sentCalls = split(kinds);
-    expect(sentCalls.after).toEqual(ACCOUNT_JOB);
+    expect(sentCalls.after).toEqual(JOB);
     expect(reference.mail.sent).toHaveLength(1);
 
     // Each site is made only when its turn comes: on Workers every site is the one test database, emptied anew.
@@ -387,8 +423,9 @@ describe("asking for a sign-in link", () => {
       // On a site with one address the request goes to whatever name it has.
       const r = await ask(s.deps, s.a.email, { app: answered([seenKinds]) });
       expect(seen(r), what).toEqual(sent);
-      // The same calls before the answer, and none after it.
-      expect(split(seenKinds), what).toEqual({ before: sentCalls.before, after: [] });
+      // The same calls before the answer, and the same kinds after it, each of which changed a row of the pad.
+      expect(split(seenKinds), what).toEqual(sentCalls);
+      expect(await padCount(s.deps), what).toBe(2);
       expect(s.mail.sent, what).toEqual([]);
       expect(await countOf(s.deps, "signin_code"), what).toBe(0);
       expect(await countOf(s.deps, "audit"), what).toBe(0);
@@ -411,8 +448,10 @@ describe("asking for a sign-in link", () => {
     expect(seen(await ask(deps, a.email))).toEqual(first);
     expect(seen(await ask(deps, a.email.toUpperCase()))).toEqual(first);
     expect(mail.sent).toHaveLength(3);
-    // The calls every request waits for, and nothing after: no code, no audit row.
-    expect(kinds).toEqual([...AWAITED, ...AWAITED]);
+    // The calls every request waits for, and the job's two, which add to the pad: no code, no audit row.
+    expect(kinds).toEqual([...AWAITED, ...JOB, ...AWAITED, ...JOB]);
+    expect(await padCount(deps)).toBe(4);
+    expect(await countOf(deps, "signin_code")).toBe(3);
     // Each one held back is one fixed line, which names no address.
     expect(errors.mock.calls).toEqual([[RECIPIENT_LINE], [RECIPIENT_LINE]]);
     // Another address is not held back by it, and a stranger asked four times is answered the same.
@@ -487,7 +526,7 @@ describe("asking for a sign-in link", () => {
     const kinds = recordKinds(deps);
     const over = await ask(deps, b.email);
     expect(seen(over)).toEqual(seen(hundredth));
-    expect(kinds).toEqual(AWAITED);
+    expect(kinds).toEqual([...AWAITED, ...JOB]);
     expect(mail.sent).toHaveLength(1);
     expect(errors.mock.calls).toEqual([[HOUR_LINE]]);
     // No code was made for a mail that was not sent, and nothing recorded.

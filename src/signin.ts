@@ -26,7 +26,7 @@ import { requireAuth } from "./auth.ts";
 import { clientAddressOf } from "./client.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
 import { NO_MAIL, linkOrigin, signInLink, signInMail } from "./mail.ts";
-import { deferOf, mailOf, type Deps } from "./ports.ts";
+import { deferOf, mailOf, type Deps, type Stmt } from "./ports.ts";
 import { LIMITS_SIGNIN, SITE_KEY, SITE_QUIET_KEY, hitLimit, networkKey, recipientKey, sweepCounters, type Limit } from "./rate.ts";
 import { clearedCookie, createSignInCode, csrfFor, readSessionCookie, redeemSignInCode, revokeAll, revokeSession, sameOriginChange, sessionCookie, sessionHost, sweepSessions } from "./sessions.ts";
 
@@ -52,6 +52,24 @@ export const SIGNIN_LINES = {
 /** The 401 of `requireAuth`, for a session that ended between being resolved and being read. */
 function unauthorized(): Response {
   return new Response('{"error":"unauthorized"}', { status: 401, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+}
+
+/**
+ * The counter the job of a link request adds to when it makes no link, so that it writes as
+ * much as a job that does: one row of `rate_counter` per hour. No limit reads it, and the
+ * counter sweep removes old rows as it removes every other counter's.
+ */
+export const PAD_BUCKET = "signin_pad";
+export const PAD_KEY = "pad";
+const PAD_WINDOW_MS = 3_600_000;
+
+/** The statement that adds one to this hour's pad counter: it always changes one row. */
+function padStatement(deps: Deps): Stmt {
+  const now = deps.now();
+  return {
+    sql: "INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, 1) ON CONFLICT (bucket, key, window_start) DO UPDATE SET count = count + 1",
+    params: [PAD_BUCKET, PAD_KEY, now - (now % PAD_WINDOW_MS)],
+  };
 }
 
 /** Resolves once the current task is over, so work started now runs only after the answer has been handed back. */
@@ -112,12 +130,29 @@ type LinkJob = { overRecipient: boolean; overHour: boolean; link: { userId: stri
  * for an account that gets a link its code, the audit row and one mail. A code or audit row
  * that cannot be written is one fixed line and no mail; a mail that fails is one fixed line.
  * Nothing is ever tried twice: a mail that failed after its text was sent may have arrived.
+ *
+ * Every job makes the same database work: one write and then one batch, each changing one
+ * row. Without a link they add twice to the pad counter. On a target whose database blocks
+ * (Node), a job that wrote for an account alone would delay the next request, whatever it
+ * is, and so tell who has an account.
  */
 async function linkJob(deps: Deps, job: LinkJob): Promise<void> {
   await afterTheAnswer();
   if (job.overRecipient) console.error(SIGNIN_LINES.recipient);
   if (job.overHour) console.error(SIGNIN_LINES.hour);
-  if (job.link === null) return;
+  if (job.link === null) {
+    try {
+      // Making a code waits once for its digest before the write; so does this, so both
+      // jobs write at the same moment after the answer.
+      await crypto.subtle.digest("SHA-256", crypto.getRandomValues(new Uint8Array(24)));
+      const pad = padStatement(deps);
+      await deps.db.run(pad.sql, pad.params);
+      await deps.db.batch([padStatement(deps)]);
+    } catch {
+      // A pad that could not be written changes nothing anyone asked for.
+    }
+    return;
+  }
   const { userId, workspaceId, to, origin } = job.link;
   let link: string;
   try {
