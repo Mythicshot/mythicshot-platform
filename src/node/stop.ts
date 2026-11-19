@@ -24,6 +24,12 @@ export type StopParts = {
   server: { close(done: () => void): unknown; closeIdleConnections?: () => void; closeAllConnections?: () => void };
   /** Resolves when all deferred work has ended (the tracker's `settle`). */
   settle: () => Promise<void>;
+  /**
+   * Ends the mailer's work (the mail worker): refuses what waits, ends what is on its way
+   * and stops the worker. Called exactly once, just before the database is closed, so a
+   * mail on its way has had all the time up to the deadline. Optional: no mail, nothing.
+   */
+  closeMail?: () => unknown;
   /** Closes the database. Called exactly once. */
   closeDb: () => void;
   setTimeout: (run: () => void, ms: number) => unknown;
@@ -38,7 +44,7 @@ export type StopParts = {
 /**
  * The handler for a stop signal. On the first signal it stops taking requests and lets
  * open ones finish; when the server has closed it waits for the deferred work; then it
- * closes the database and exits. Connections still open at STOP_CUT_REQUESTS_MS are cut.
+ * closes the mailer and the database and exits. Connections still open at STOP_CUT_REQUESTS_MS are cut.
  * At STOP_DEADLINE_MS, counted from the signal, the database is closed and the process
  * ends whatever is still open: a request that never ends, a server that never reports
  * closed, or deferred work that never settles. Further signals change nothing.
@@ -49,6 +55,15 @@ export function stopSequence(parts: StopParts): (signal: string) => void {
   const finish = () => {
     if (finished) return;
     finished = true;
+    if (parts.closeMail !== undefined) {
+      try {
+        // Not waited for: the database closes now, whatever the mailer does. A rejection is
+        // caught, so none is left unhandled; its text is never read.
+        void Promise.resolve(parts.closeMail()).catch(() => {});
+      } catch {
+        // A mailer that cannot be closed does not hold up the stop.
+      }
+    }
     try {
       parts.closeDb();
     } catch {
