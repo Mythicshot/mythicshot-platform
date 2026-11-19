@@ -13,6 +13,16 @@ import { allowanceFromSetting } from "../usage.ts";
 import { smtpMailer, type SmtpSettings } from "./smtp.ts";
 
 /**
+ * Every setting the Node target reads from the environment, here and in entry.ts. A test
+ * holds this list equal to what the two files read, so a new setting cannot be left out:
+ * the admin command's startup clears each of them before it reads the settings file.
+ */
+export const NODE_SETTINGS: readonly string[] = [
+  "APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE",
+  "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST",
+];
+
+/**
  * The app's configuration from the environment: PUBLIC_IMAGE_BASE, SETUP_CODE and the two
  * optional addresses, TOURS_HOST and APP_HOST. With neither address set, `hosts` is null
  * and the app serves one address as before. A pair that cannot be used (one without the

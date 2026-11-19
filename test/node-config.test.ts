@@ -560,6 +560,8 @@ describe("the settings reach the app on every install path", () => {
   it("the cPanel startup file passes every NAME=value line on, whatever the name", () => {
     const startup = read("../deploy/cpanel/app.cjs");
     expect(startup).toContain("const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);");
-    expect(startup).toContain("process.env[m[1]] = quoted ? quoted[1] : m[2];");
+    expect(startup).toContain("out.push([m[1], quoted ? quoted[1] : m[2]]);");
+    // The app gets every line the environment does not already set.
+    expect(startup).toContain("for (const [name, value] of settingsLines()) if (process.env[name] === undefined) process.env[name] = value;");
   });
 });

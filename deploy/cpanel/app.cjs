@@ -41,37 +41,50 @@ try {
   process.exit(1);
 }
 
-// `node app.cjs admin <arguments>` runs the site's admin command (dist/node/admin.js)
-// instead of the app, with these same settings: that is how `cpanel.sh admin` runs it.
-// The guard is the first argument: whatever loads this file to start the app (Passenger,
-// through a loader of its own) does not hand it `admin` first, and no line of the
-// settings file can choose the command. For the command the settings file wins over the
-// environment for every setting it holds, so a setting exported in the shell it is run
-// from cannot change what it does; for the app the environment wins, as before.
-const runAdmin = require.main === module && process.argv[2] === "admin";
-// RECOVERY_LINKS lets the command print a sign-in link for an account that exists. It is
-// taken from the settings file only, never from the shell, also when the file is silent.
-if (runAdmin) delete process.env.RECOVERY_LINKS;
-
-for (const raw of text.split(/\r?\n/)) {
-  const line = raw.trim();
-  if (line === "" || line.startsWith("#")) continue;
-  const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
-  if (!m || (!runAdmin && process.env[m[1]] !== undefined)) continue;
-  const quoted = /^"(.*)"$/.exec(m[2]) || /^'(.*)'$/.exec(m[2]);
-  process.env[m[1]] = quoted ? quoted[1] : m[2];
+/** The lines of the settings file as [NAME, value], with one pair of quotes dropped. */
+function settingsLines() {
+  const out = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
+    if (!m) continue;
+    const quoted = /^"(.*)"$/.exec(m[2]) || /^'(.*)'$/.exec(m[2]);
+    out.push([m[1], quoted ? quoted[1] : m[2]]);
+  }
+  return out;
 }
 
-// The arguments after `admin` reach the command unchanged.
-if (runAdmin) {
+// `node app.cjs admin <arguments>` runs the site's admin command (dist/node/admin.js)
+// instead of the app: that is how `cpanel.sh admin` runs it. The guard is the first
+// argument: whatever loads this file to start the app (Passenger, through a loader of its
+// own) does not hand it `admin` first, and no line of the settings file can choose the
+// command. For the command the settings file is the only source: every setting the app
+// reads, and the recovery setting, is first cleared from the environment (the list comes
+// from the command itself, ADMIN_SETTINGS), so a variable set in the shell it is run from
+// cannot point it at another database or another address. RECOVERY_LINKS is not put in
+// the environment at all: the command is handed it as an explicit yes or no. For the app
+// the environment wins, as before.
+if (require.main === module && process.argv[2] === "admin") {
   import("./dist/node/admin.js")
-    .then((admin) => admin.main(process.argv.slice(3)))
+    .then((admin) => {
+      if (!Array.isArray(admin.ADMIN_SETTINGS) || typeof admin.isRecoveryOn !== "function") throw new Error("not this command");
+      for (const name of admin.ADMIN_SETTINGS) delete process.env[name];
+      let recovery;
+      for (const [name, value] of settingsLines()) {
+        if (name === "RECOVERY_LINKS") recovery = value;
+        else process.env[name] = value;
+      }
+      // The arguments after `admin` reach the command unchanged.
+      return admin.main(process.argv.slice(3), { recoveryLinks: admin.isRecoveryOn(recovery) });
+    })
     .catch(() => {
       // A fixed sentence: nothing of the settings and nothing the error says.
       console.error("demo-platform: the admin command could not be run. Update the site with a current archive and try again.");
       process.exit(1);
     });
 } else {
+  for (const [name, value] of settingsLines()) if (process.env[name] === undefined) process.env[name] = value;
   import("./dist/node/entry.js").catch((err) => {
     console.error(err);
     process.exit(1);

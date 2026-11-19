@@ -3,13 +3,15 @@
 // is sent: where a mailer is needed the fake one is handed in, and every host is a
 // placeholder.
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { auditStatement } from "../src/audit.ts";
 import { requireAuth } from "../src/auth.ts";
-import { isMainModule, runAdmin, type AdminOptions } from "../src/node/admin.ts";
+import { ADMIN_SETTINGS, isMainModule, isRecoveryOn, mainDecision, recoveryFromProcessOne, runAdmin, type AdminOptions } from "../src/node/admin.ts";
+import { NODE_SETTINGS } from "../src/node/config.ts";
 import { NodeDb } from "../src/node/db.ts";
 import { migrate } from "../src/node/migrate.ts";
 import type { Deps } from "../src/ports.ts";
@@ -83,8 +85,18 @@ async function site(opts: { setUp?: boolean; accounts?: boolean; email?: string 
   }
 }
 
-/** Runs the command and returns what it said and its exit code. */
-async function run(env: NodeJS.ProcessEnv, argv: string[], opts?: AdminOptions): Promise<{ code: number; lines: string[] }> {
+/**
+ * Runs the command as app.cjs does and returns what it said and its exit code: `settings`
+ * stands for the settings file. Its RECOVERY_LINKS line becomes the explicit gate and is
+ * not handed over in the environment, as app.cjs does it.
+ */
+async function run(settings: NodeJS.ProcessEnv, argv: string[], opts?: AdminOptions): Promise<{ code: number; lines: string[] }> {
+  const { RECOVERY_LINKS: recovery, ...env } = settings;
+  return runRaw(env, argv, { recoveryLinks: isRecoveryOn(recovery), ...opts });
+}
+
+/** Runs the command with exactly this environment and these options, nothing translated. */
+async function runRaw(env: NodeJS.ProcessEnv, argv: string[], opts?: AdminOptions): Promise<{ code: number; lines: string[] }> {
   const lines: string[] = [];
   const code = await runAdmin(argv, env, (line) => lines.push(line), opts);
   return { code, lines };
@@ -136,6 +148,91 @@ describe("the server command", () => {
     expect(link.code).toBe(0);
     expect(link.lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(LINK), REMIND]);
     expect(link.lines[1]).not.toBe(made.lines[4]);
+  });
+
+  it("the gate is never read from the command's own environment: a direct run with RECOVERY_LINKS=on refuses and writes nothing", async () => {
+    const s = await site();
+    await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    const db = connect(s.dir);
+    const written = async () => [await db.all("SELECT * FROM signin_code ORDER BY id"), await db.all("SELECT * FROM audit ORDER BY id")];
+    const before = await written();
+    for (const argv of [["signin-link", "--email", "you@example.com"], ["--email", "you@example.com"]]) {
+      const r = await runRaw({ ...s.env, RECOVERY_LINKS: "on" }, argv);
+      expect(r.lines).toEqual([RECOVERY_OFF]);
+      expect(r.code).toBe(1);
+      // Only the explicit gate opens it, and then the reminder follows the link.
+      expect((await runRaw(s.env, argv, { recoveryLinks: true })).lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(LINK), REMIND]);
+    }
+    expect((await runRaw({ ...s.env, RECOVERY_LINKS: "on" }, ["signin-link", "--email", "you@example.com"], { recoveryLinks: false })).lines).toEqual([RECOVERY_OFF]);
+    expect((await written())[0]).toHaveLength((before[0] as unknown[]).length + 2);
+    // first-admin is the same whatever the gate says.
+    const fresh = await site();
+    const r = await runRaw({ ...fresh.env, RECOVERY_LINKS: "on" }, ["first-admin", "--email", "you@example.com", "--username", "alex"], { recoveryLinks: true });
+    expect(r.lines).toEqual([...CREATED("alex"), expect.stringMatching(LINK)]);
+  });
+
+  it("run as its own file, the gate is the environment of process 1, and anything unreadable is off", () => {
+    const environ = (pairs: string[]) => Buffer.from(pairs.join("\0") + "\0");
+    const at = (file: Buffer | Error) => ({ pid: 4242, platform: "linux" as NodeJS.Platform, read: (path: string) => {
+      expect(path).toBe("/proc/1/environ");
+      if (file instanceof Error) throw file;
+      return file;
+    } });
+    expect(recoveryFromProcessOne(at(environ(["PATH=/usr/bin", "RECOVERY_LINKS=on", "DATA_DIR=/data"])))).toBe(true);
+    expect(recoveryFromProcessOne(at(environ(["RECOVERY_LINKS= ON "])))).toBe(true);
+    for (const pairs of [["RECOVERY_LINKS=off"], ["RECOVERY_LINKS=1"], ["RECOVERY_LINKS="], ["NOT_RECOVERY_LINKS=on"], ["RECOVERY_LINKS_X=on"], []]) {
+      expect(recoveryFromProcessOne(at(environ(pairs))), pairs.join(",")).toBe(false);
+    }
+    expect(recoveryFromProcessOne(at(Object.assign(new Error("EACCES"), { code: "EACCES" })))).toBe(false);
+    expect(recoveryFromProcessOne(at(Object.assign(new Error("ENOENT"), { code: "ENOENT" })))).toBe(false);
+    // Not Linux, or the command is process 1 itself (its own environment): off without reading anything.
+    const never = (path: string): Buffer => {
+      throw new Error(`read ${path}`);
+    };
+    expect(recoveryFromProcessOne({ pid: 4242, platform: "win32", read: never })).toBe(false);
+    expect(recoveryFromProcessOne({ pid: 1, platform: "linux", read: never })).toBe(false);
+  });
+
+  it("started as its own file with RECOVERY_LINKS=on in its environment, it still refuses", async () => {
+    const s = await site();
+    await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    const db = connect(s.dir);
+    const codes = await db.all("SELECT id FROM signin_code");
+    const base: Record<string, string> = {};
+    for (const k of ["PATH", "Path", "SystemRoot", "TEMP", "TMP"]) if (process.env[k] !== undefined) base[k] = process.env[k] as string;
+    const file = fileURLToPath(new URL("../src/node/admin.ts", import.meta.url));
+    const r = spawnSync(process.execPath, [file, "--email", "you@example.com"], { env: { ...base, ...s.env, RECOVERY_LINKS: "on" }, encoding: "utf8", timeout: 60_000, windowsHide: true });
+    expect(r.stdout).toBe(RECOVERY_OFF + "\n");
+    expect(r.status).toBe(1);
+    expect(await db.all("SELECT id FROM signin_code")).toEqual(codes);
+  }, 60_000);
+
+  it("the settings app.cjs clears for the command are every one the Node target reads, and the gate", () => {
+    const names = new Set<string>();
+    for (const f of ["../src/node/config.ts", "../src/node/entry.ts"]) {
+      for (const m of readFileSync(fileURLToPath(new URL(f, import.meta.url)), "utf8").matchAll(/\benv\.([A-Z][A-Z0-9_]*)/g)) names.add(m[1]);
+    }
+    expect([...NODE_SETTINGS].sort()).toEqual([...names].sort());
+    expect([...ADMIN_SETTINGS].sort()).toEqual([...NODE_SETTINGS, "RECOVERY_LINKS"].sort());
+  });
+
+  it("started under the command's name but not recognised as itself, it prints the usage instead of doing nothing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dp-admin-decide-"));
+    made.push(dir);
+    mkdirSync(join(dir, "dist", "node"), { recursive: true });
+    mkdirSync(join(dir, "copy"));
+    const file = join(dir, "dist", "node", "admin.js");
+    writeFileSync(file, "");
+    writeFileSync(join(dir, "copy", "admin.js"), "");
+    const url = pathToFileURL(file).href;
+    expect(mainDecision(file, url)).toBe("run");
+    // Without its extension, as `node dist/node/admin` is typed.
+    expect(mainDecision(join(dir, "dist", "node", "admin"), url)).toBe("run");
+    // Another file of the same name (a copy or a hard link elsewhere): said, not silent.
+    expect(mainDecision(join(dir, "copy", "admin.js"), url)).toBe("usage");
+    expect(mainDecision(join(dir, "copy", "admin"), url)).toBe("usage");
+    // Loaded by something else: nothing.
+    for (const other of [undefined, join(dir, "app.cjs"), join(dir, "dist", "node", "entry.js")]) expect(mainDecision(other, url), String(other)).toBe("none");
   });
 
   it("only the command reads RECOVERY_LINKS: no other source file names it", () => {
@@ -373,7 +470,7 @@ describe("the server command", () => {
       { sql: "INSERT INTO setup (id, workspace_id, completed_at) VALUES (1, ?, 1)", params: [ws] },
     ]);
     const r = await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
-    expect(r.lines).toEqual(["This site's setup did not finish. Use the recovery steps in the guide, then run this again."]);
+    expect(r.lines).toEqual(['This site\'s setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.']);
     expect(r.code).toBe(1);
     expect(await db.all("SELECT * FROM audit")).toEqual([]);
 

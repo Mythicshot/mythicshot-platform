@@ -143,13 +143,20 @@ describe("the cPanel startup file", () => {
 });
 
 describe("the cPanel startup file run as the admin command", () => {
-  /** A stand-in dist/node/admin.js: its main prints the arguments it was given and the settings it sees, and sets the exit code. */
+  /**
+   * A stand-in dist/node/admin.js with the real one's exports: the settings to clear, the
+   * gate's rule, and a main that prints the arguments, the settings it sees and the gate
+   * it was handed, and sets the exit code.
+   */
   function withAdmin(l: { app: string }): void {
     writeFileSync(
       join(l.app, "dist", "node", "admin.js"),
       [
-        "export async function main(argv) {",
-        '  console.log("ADMIN " + JSON.stringify({ argv, DATA_DIR: process.env.DATA_DIR ?? null, APP_HOST: process.env.APP_HOST ?? null, SMTP_PASSWORD: process.env.SMTP_PASSWORD ?? null, RECOVERY_LINKS: process.env.RECOVERY_LINKS ?? null }));',
+        'export const ADMIN_SETTINGS = ["DATA_DIR", "APP_HOST", "TOURS_HOST", "SITE_HOST", "SMTP_PASSWORD", "RECOVERY_LINKS"];',
+        'export function isRecoveryOn(v) { return typeof v === "string" && v.trim().toLowerCase() === "on"; }',
+        "export async function main(argv, opts) {",
+        "  const pick = (k) => process.env[k] ?? null;",
+        '  console.log("ADMIN " + JSON.stringify({ argv, DATA_DIR: pick("DATA_DIR"), APP_HOST: pick("APP_HOST"), TOURS_HOST: pick("TOURS_HOST"), SITE_HOST: pick("SITE_HOST"), SMTP_PASSWORD: pick("SMTP_PASSWORD"), RECOVERY_LINKS: pick("RECOVERY_LINKS"), gate: opts?.recoveryLinks ?? null }));',
         '  process.exitCode = argv.includes("--fail") ? 1 : 0;',
         "}",
         "",
@@ -162,7 +169,7 @@ describe("the cPanel startup file run as the admin command", () => {
   };
   const lines = (text: string) => text.split("\n").filter((x) => x !== "");
 
-  it("`node app.cjs admin …` runs the admin command with the arguments unchanged and the app's own settings, and not the app", () => {
+  it("`node app.cjs admin …` runs the admin command with the arguments unchanged and the settings file as its only source", () => {
     const l = layout();
     withAdmin(l);
     writeFileSync(l.settings, [`DATA_DIR=/data/tours`, `SETUP_CODE=${SECRET}`, `APP_HOST="app.example.com"`, `SMTP_PASSWORD=pw with spaces=and+signs`, ""].join("\n"));
@@ -171,36 +178,30 @@ describe("the cPanel startup file run as the admin command", () => {
     expect(r.stderr).toBe("");
     expect(r.status).toBe(0);
     expect(r.started).toBeNull();
-    expect(admin(r)).toEqual({ argv: args.slice(1), DATA_DIR: "/data/tours", APP_HOST: "app.example.com", SMTP_PASSWORD: "pw with spaces=and+signs", RECOVERY_LINKS: null });
-    // Unlike the app, the command takes the file's value over one set in the shell it was started from: a setting
-    // exported in an SSH session must not change what it does. A setting the file does not hold still comes through.
-    expect(admin(start(l.app, { DATA_DIR: "/from/the/shell", APP_HOST: "other.example.com", SMTP_PASSWORD: "from-the-shell" }, ["admin", "audit"]))).toEqual({
-      argv: ["audit"],
-      DATA_DIR: "/data/tours",
-      APP_HOST: "app.example.com",
-      SMTP_PASSWORD: "pw with spaces=and+signs",
-      RECOVERY_LINKS: null,
-    });
-    writeFileSync(l.settings, `DATA_DIR=/data/tours
-`);
-    expect(admin(start(l.app, { APP_HOST: "from.example.com" }, ["admin", "audit"]))).toMatchObject({ DATA_DIR: "/data/tours", APP_HOST: "from.example.com" });
+    const all = { DATA_DIR: "/data/tours", APP_HOST: "app.example.com", TOURS_HOST: null, SITE_HOST: null, SMTP_PASSWORD: "pw with spaces=and+signs", RECOVERY_LINKS: null, gate: false };
+    expect(admin(r)).toEqual({ argv: args.slice(1), ...all });
+    // A setting set in the shell it is started from never reaches the command: the file holds it or nobody does.
+    const shell = { DATA_DIR: "/from/the/shell", APP_HOST: "other.example.com", TOURS_HOST: "tours.other.example.com", SITE_HOST: "site.other.example.com", SMTP_PASSWORD: "from-the-shell" };
+    expect(admin(start(l.app, shell, ["admin", "audit"]))).toEqual({ argv: ["audit"], ...all });
+    writeFileSync(l.settings, "SITE_HOST=tours.example.com\n");
+    expect(admin(start(l.app, shell, ["admin", "audit"]))).toEqual({ argv: ["audit"], ...all, DATA_DIR: null, APP_HOST: null, SMTP_PASSWORD: null, SITE_HOST: "tours.example.com" });
     // The app itself keeps its rule: what is set already wins.
     expect(start(l.app, { DATA_DIR: "/from/the/shell" }).started).toMatchObject({ DATA_DIR: "/from/the/shell" });
     // The command's exit code is the process's.
     expect(start(l.app, {}, ["admin", "--fail"]).status).toBe(1);
   });
 
-  it("RECOVERY_LINKS reaches the command only from the settings file, never from the shell it is run from", () => {
+  it("the recovery gate is the settings file's RECOVERY_LINKS, handed over explicitly and never as a variable", () => {
     const l = layout();
     withAdmin(l);
     writeFileSync(l.settings, "DATA_DIR=/data/tours\n");
-    // Exported in the SSH session, with the file silent about it: the command does not see it.
-    for (const value of ["on", "ON", " on "]) expect(admin(start(l.app, { RECOVERY_LINKS: value }, ["admin", "signin-link"])), value).toMatchObject({ RECOVERY_LINKS: null });
-    // In the file: the command sees the file's value, whatever the shell says.
-    writeFileSync(l.settings, "DATA_DIR=/data/tours\nRECOVERY_LINKS=on\n");
-    expect(admin(start(l.app, {}, ["admin", "signin-link"]))).toMatchObject({ RECOVERY_LINKS: "on" });
+    // Exported in the SSH session, with the file silent about it: closed, and not passed on.
+    for (const value of ["on", "ON", " on "]) expect(admin(start(l.app, { RECOVERY_LINKS: value }, ["admin", "signin-link"])), value).toMatchObject({ RECOVERY_LINKS: null, gate: false });
+    // In the file: open, by the command's own rule, and still not in the environment.
+    writeFileSync(l.settings, "DATA_DIR=/data/tours\nRECOVERY_LINKS= On \n");
+    expect(admin(start(l.app, {}, ["admin", "signin-link"]))).toMatchObject({ RECOVERY_LINKS: null, gate: true });
     writeFileSync(l.settings, "DATA_DIR=/data/tours\nRECOVERY_LINKS=off\n");
-    expect(admin(start(l.app, { RECOVERY_LINKS: "on" }, ["admin", "signin-link"]))).toMatchObject({ RECOVERY_LINKS: "off" });
+    expect(admin(start(l.app, { RECOVERY_LINKS: "on" }, ["admin", "signin-link"]))).toMatchObject({ RECOVERY_LINKS: null, gate: false });
   });
 
   it("without `admin` first, or with it only in the settings file, the app starts as always", () => {

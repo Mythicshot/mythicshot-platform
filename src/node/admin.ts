@@ -15,19 +15,64 @@
 // says to update first. Everything it says goes through `out`, one line at a time, to
 // the terminal: no line names a setting's value, a token, the setup code, a digest or a
 // cookie. The only secret it ever prints is a sign-in link, which is the point of it.
-import { existsSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+//
+// Printing a link for an account that exists is a recovery tool, behind a gate that is
+// never read from this process's environment: app.cjs hands over what the settings file
+// says (RECOVERY_LINKS), and run as its own file the gate is what the environment of
+// process 1 says, which in the container is the app started from the stack's .env.
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEmail } from "../accounts.ts";
 import { claimFirstAdmin, signInLinkFor, type ClaimProblem } from "../admin.ts";
 import type { Mailer } from "../mail.ts";
 import type { Deps, FileStore } from "../ports.ts";
 import { parseUsername } from "../usernames.ts";
-import { configFromEnv, mailFromEnv } from "./config.ts";
+import { configFromEnv, mailFromEnv, NODE_SETTINGS } from "./config.ts";
 import { NodeDb } from "./db.ts";
 import { SmtpError, smtpMailer, type SmtpSettings } from "./smtp.ts";
 
-export type AdminOptions = { makeMailer?: (settings: SmtpSettings) => Mailer };
+/**
+ * `makeMailer` replaces how the SMTP client is made (tests). `recoveryLinks` is the
+ * recovery gate: true lets the command print a link for an account that exists. Absent
+ * means closed.
+ */
+export type AdminOptions = { makeMailer?: (settings: SmtpSettings) => Mailer; recoveryLinks?: boolean };
+
+/** The name of the recovery setting. Only this file and the startup file use it. */
+const RECOVERY_SETTING = "RECOVERY_LINKS";
+
+/**
+ * Every setting the startup file clears from the environment before it reads the
+ * settings file for this command, so the file is the command's only source: each one the
+ * Node target reads, and the recovery setting.
+ */
+export const ADMIN_SETTINGS: readonly string[] = [...NODE_SETTINGS, RECOVERY_SETTING];
+
+/** The gate's rule for a written value: `on`, in any case, with spaces around it. Anything else, absent included, is closed. */
+export function isRecoveryOn(value: unknown): boolean {
+  return typeof value === "string" && value.trim().toLowerCase() === "on";
+}
+
+/**
+ * The gate when the command runs as its own file: what the environment of process 1 says
+ * of RECOVERY_LINKS. In a container process 1 is the app, started with the stack's .env,
+ * so the gate opens only with the line there and the container recreated; `exec -e`
+ * cannot open it. Closed when this is process 1 itself, on any system but Linux, and for
+ * any file that cannot be read (shared hosting does not let it be read).
+ */
+export function recoveryFromProcessOne(at: { pid: number; platform: NodeJS.Platform; read: (path: string) => Buffer } = { pid: process.pid, platform: process.platform, read: (p) => readFileSync(p) }): boolean {
+  if (at.pid === 1 || at.platform !== "linux") return false;
+  let text: string;
+  try {
+    text = at.read("/proc/1/environ").toString("utf8");
+  } catch {
+    return false;
+  }
+  const prefix = `${RECOVERY_SETTING}=`;
+  for (const pair of text.split("\0")) if (pair.startsWith(prefix)) return isRecoveryOn(pair.slice(prefix.length));
+  return false;
+}
 
 /** The migration that made the tables this command reads and writes. */
 const ACCOUNTS_MIGRATION = "0008_accounts.sql";
@@ -77,7 +122,7 @@ const SAID = {
   madeNoLink: "The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.",
   recoveryOff: "Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.",
   recoveryRemind: "Remove the line RECOVERY_LINKS=on from the settings file now.",
-  setupUnfinished: "This site's setup did not finish. Use the recovery steps in the guide, then run this again.",
+  setupUnfinished: 'This site\'s setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.',
   mailOff: "Mail is off.",
   mailOn: "Mail is set to SMTP: host, port, user, password and sender are set.",
   mailNoLinkHost: "Mail is off because no address for sign-in links is set. Set APP_HOST and TOURS_HOST, or SITE_HOST.",
@@ -179,16 +224,6 @@ function mailState(mail: { mode: "off" | "smtp"; problem: string | null; setting
   if (mail.mode === "smtp") return { line: SAID.mailOn, usable: true, code: 0 };
   if (mail.problem === null) return { line: SAID.mailOff, usable: false, code: 0 };
   return { line: mail.setting === null ? SAID.mailNoLinkHost : `Mail is off because ${mail.setting} is missing or not usable.`, usable: false, code: 1 };
-}
-
-/**
- * True when RECOVERY_LINKS is `on`, in any case, with spaces around it allowed; anything
- * else, unset included, is off. Only this command reads the setting: the app never does.
- * Through cpanel.sh it comes from the settings file only (app.cjs drops one set in the
- * shell), so an exported variable in an SSH session cannot switch it on.
- */
-function recoveryLinksOn(env: NodeJS.ProcessEnv): boolean {
-  return typeof env.RECOVERY_LINKS === "string" && env.RECOVERY_LINKS.trim().toLowerCase() === "on";
 }
 
 /** The lines that hand a person their link, or the path when the site has no configured address. */
@@ -309,7 +344,7 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
       case "signin-link": {
         // A link for an account that exists is a recovery tool, off unless the settings
         // file says so for this one run: nothing is made or recorded while it is off.
-        if (!recoveryLinksOn(env)) {
+        if (opts.recoveryLinks !== true) {
           out(SAID.recoveryOff);
           return 1;
         }
@@ -342,13 +377,23 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
   }
 }
 
-/** Runs the command as `node dist/node/admin.js …`: the environment's settings, the terminal's standard output. */
-export async function main(argv: string[]): Promise<void> {
+/**
+ * Runs the command with the environment's settings and the terminal's standard output.
+ * `opts.recoveryLinks` is the recovery gate, given by the caller: app.cjs hands over the
+ * settings file's value, and a run as its own file hands over recoveryFromProcessOne().
+ */
+export async function main(argv: string[], opts: { recoveryLinks?: boolean } = {}): Promise<void> {
   // As the app does: anything SQLite creates beside the database is for this account only.
   process.umask(0o077);
   process.exitCode = await runAdmin(argv, process.env, (line) => {
     process.stdout.write(line + "\n");
-  });
+  }, { recoveryLinks: opts.recoveryLinks === true });
+}
+
+/** The usage, to standard output, for a start under this command's name that is not recognised as this file. */
+function usageAndStop(): void {
+  for (const line of usage(usageName(process.env))) process.stdout.write(line + "\n");
+  process.exitCode = 2;
 }
 
 /**
@@ -359,13 +404,33 @@ export async function main(argv: string[]): Promise<void> {
  */
 export function isMainModule(argv1: string | undefined, moduleUrl: string): boolean {
   if (typeof argv1 !== "string" || argv1 === "") return false;
-  try {
-    const started = realpathSync.native(argv1);
-    const self = realpathSync.native(fileURLToPath(moduleUrl));
-    return process.platform === "win32" ? started.toLowerCase() === self.toLowerCase() : started === self;
-  } catch {
-    return false;
-  }
+  const same = (path: string): boolean => {
+    try {
+      const started = realpathSync.native(path);
+      const self = realpathSync.native(fileURLToPath(moduleUrl));
+      return process.platform === "win32" ? started.toLowerCase() === self.toLowerCase() : started === self;
+    } catch {
+      return false;
+    }
+  };
+  // `node dist/node/admin` names the file without its extension.
+  return same(argv1) || same(argv1 + ".js");
 }
 
-if (isMainModule(process.argv[1], import.meta.url)) void main(process.argv.slice(2));
+/**
+ * What to do when this module is loaded: `run` when Node was started with this file;
+ * `usage` when it was started with a file of this file's name that is not it (a copy, or
+ * a hard link elsewhere), so that it never ends silently with nothing done; `none` when
+ * something else loaded it (app.cjs, a test).
+ */
+export function mainDecision(argv1: string | undefined, moduleUrl: string): "run" | "usage" | "none" {
+  if (isMainModule(argv1, moduleUrl)) return "run";
+  if (typeof argv1 !== "string" || argv1 === "") return "none";
+  const self = basename(fileURLToPath(moduleUrl)).toLowerCase();
+  const started = basename(argv1).toLowerCase();
+  return started === self || started + ".js" === self ? "usage" : "none";
+}
+
+const decision = mainDecision(process.argv[1], import.meta.url);
+if (decision === "run") void main(process.argv.slice(2), { recoveryLinks: recoveryFromProcessOne() });
+else if (decision === "usage") usageAndStop();

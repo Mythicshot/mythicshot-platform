@@ -195,6 +195,32 @@ describe("the cPanel archive", () => {
       const again = spawnSync(process.execPath, ["dist/node/admin.js", "first-admin", "--email", "you@example.com", "--username", "alex"], { cwd: app, env: { ...base, DATA_DIR: data }, encoding: "utf8", timeout: 60_000, windowsHide: true });
       expect(again.stdout).toBe("This site already has an admin. Nothing was changed.\n");
       expect(again.status).toBe(1);
+
+      // The settings file is the command's only source: hosts exported in the shell do not move the link,
+      // and its recovery line opens the gate for this run.
+      const settings = join(home, "apps", "tours-config.env");
+      writeFileSync(settings, `DATA_DIR=${data}\nSITE_HOST=tours.example.com\nRECOVERY_LINKS=on\n`);
+      const shell = { ...base, APP_HOST: "app.other.example.com", TOURS_HOST: "tours.other.example.com", SITE_HOST: "site.other.example.com" };
+      const recovered = spawnSync(process.execPath, ["app.cjs", "admin", "--email", "you@example.com"], { cwd: app, env: shell, encoding: "utf8", timeout: 60_000, windowsHide: true });
+      expect(recovered.stderr).toBe("");
+      expect(recovered.stdout.split("\n")).toEqual([
+        "Open this link within 15 minutes to sign in:",
+        expect.stringMatching(/^https:\/\/tours\.example\.com\/signin\/link#c=dpl_[0-9a-f]{40}$/),
+        "Remove the line RECOVERY_LINKS=on from the settings file now.",
+        "",
+      ]);
+      // No DATA_DIR in the file: the shell's does not count.
+      writeFileSync(settings, "SITE_HOST=tours.example.com\n");
+      const noData = spawnSync(process.execPath, ["app.cjs", "admin", "audit"], { cwd: app, env: { ...shell, DATA_DIR: data }, encoding: "utf8", timeout: 60_000, windowsHide: true });
+      expect(noData.stdout).toBe("DATA_DIR is not set, so the site's data is not known. Nothing was changed.\n");
+      expect(noData.status).toBe(1);
+      // Run directly with the gate in its own environment, with or without the file's extension: refused.
+      const off = "Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.\n";
+      for (const script of ["dist/node/admin.js", "dist/node/admin"]) {
+        const direct = spawnSync(process.execPath, [script, "--email", "you@example.com"], { cwd: app, env: { ...base, DATA_DIR: data, SITE_HOST: "tours.example.com", RECOVERY_LINKS: "on" }, encoding: "utf8", timeout: 60_000, windowsHide: true });
+        expect(direct.stdout, script).toBe(off);
+        expect(direct.status, script).toBe(1);
+      }
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
