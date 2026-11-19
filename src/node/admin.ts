@@ -51,7 +51,7 @@ const usage = (name: string): string[] => [
   "  first-admin --email <address> --username <name>",
   "      Make the site's owner its admin, with this address and username, and print a sign-in link. Works once.",
   "  signin-link --email <address>",
-  "      Print a sign-in link for the account with this address. It works once and for 15 minutes.",
+  "      Recovery only, while the settings file holds RECOVERY_LINKS=on: print a sign-in link for the account with this address. It works once and for 15 minutes.",
   "  mail-check [--send-to <address>]",
   "      Say whether mail is set up, without showing any setting. With --send-to, send one test mail.",
   "  audit [--last <n>]",
@@ -74,7 +74,9 @@ const SAID = {
   noDatabase: "There is no database in the data folder yet. Start the site once, then run this again.",
   busy: "The database is busy. Try again in a moment.",
   failed: "The command stopped on an unexpected error.",
-  madeNoLink: "The admin was made, but no link was made. Run the command again with --email alone for a link.",
+  madeNoLink: "The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.",
+  recoveryOff: "Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.",
+  recoveryRemind: "Remove the line RECOVERY_LINKS=on from the settings file now.",
   setupUnfinished: "This site's setup did not finish. Use the recovery steps in the guide, then run this again.",
   mailOff: "Mail is off.",
   mailOn: "Mail is set to SMTP: host, port, user, password and sender are set.",
@@ -177,6 +179,16 @@ function mailState(mail: { mode: "off" | "smtp"; problem: string | null; setting
   if (mail.mode === "smtp") return { line: SAID.mailOn, usable: true, code: 0 };
   if (mail.problem === null) return { line: SAID.mailOff, usable: false, code: 0 };
   return { line: mail.setting === null ? SAID.mailNoLinkHost : `Mail is off because ${mail.setting} is missing or not usable.`, usable: false, code: 1 };
+}
+
+/**
+ * True when RECOVERY_LINKS is `on`, in any case, with spaces around it allowed; anything
+ * else, unset included, is off. Only this command reads the setting: the app never does.
+ * Through cpanel.sh it comes from the settings file only (app.cjs drops one set in the
+ * shell), so an exported variable in an SSH session cannot switch it on.
+ */
+function recoveryLinksOn(env: NodeJS.ProcessEnv): boolean {
+  return typeof env.RECOVERY_LINKS === "string" && env.RECOVERY_LINKS.trim().toLowerCase() === "on";
 }
 
 /** The lines that hand a person their link, or the path when the site has no configured address. */
@@ -295,12 +307,19 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
         return 0;
       }
       case "signin-link": {
+        // A link for an account that exists is a recovery tool, off unless the settings
+        // file says so for this one run: nothing is made or recorded while it is off.
+        if (!recoveryLinksOn(env)) {
+          out(SAID.recoveryOff);
+          return 1;
+        }
         const link = await signInLinkFor(deps, parsed.email);
         if (!link.ok) {
           out(SAID.noLink);
           return 1;
         }
         for (const line of linkLines(link)) out(line);
+        out(SAID.recoveryRemind);
         return 0;
       }
       default: {

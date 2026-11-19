@@ -648,10 +648,16 @@ describe("the shared cPanel hosting guide", () => {
     expect(part).toMatch(/^> \[!WARNING\]\n> Never open the database with the hosting's `sqlite3` tool/m);
     // The sign-in page is not in this version: the guide says so, and does not claim a sign-in works yet.
     expect(part).toContain(
-      "\nThe page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, run the command again with the email alone for a new link.\n",
+      "\nThe page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, get a new link with the recovery setting, as described below.\n",
     );
     expect(part).not.toMatch(/ends with the link and no other line|in one step/);
-    expect(part).toContain("The admin was made, but no link was made. Run the command again with --email alone for a link.");
+    expect(part).toContain("The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.");
+    // A link for an existing account is a recovery tool: on for one run, off again; signing in normally needs no shell.
+    expect(part).toMatch(/^\*\*A new sign-in link is a recovery tool\.\*\*[^\n]*`RECOVERY_LINKS=on`[^\n]*remove the line again[^\n]*$/m);
+    expect(lines).toContain("RECOVERY_LINKS=on");
+    expect(part).toContain("Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.");
+    expect(part).toContain("Remove the line RECOVERY_LINKS=on from the settings file now.");
+    expect(part).toMatch(/by a link sent by mail[^\n]*needs no shell/);
     // Which account becomes the admin, and which settings the command sees.
     expect(part).toMatch(/the oldest of them/);
     expect(part).toMatch(/^The command reads the settings the settings file holds from that file only[^\n]*are not seen by it\.$/m);
@@ -667,9 +673,11 @@ describe("the shared cPanel hosting guide", () => {
     expect(runbook).toMatch(/> \[!WARNING\]\n> Never open the database with the server's `sqlite3` tool/);
     expect(runbook).toMatch(/> \[!WARNING\]\n> The link signs in whoever opens it first/);
     expect(runbook).toContain(
-      "\nThe page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, run `signin-link --email …` again for a new link.\n",
+      "\nThe page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, get a new link with the recovery setting, as in step 3.\n",
     );
-    expect(runbook).toContain("The admin was made, but no link was made. Run the command again with --email alone for a link.");
+    expect(runbook).toContain("The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.");
+    expect(runbook).toMatch(/`RECOVERY_LINKS=on`[^\n]*`\.env`[^\n]*remove the line again/);
+    expect(runbook).toMatch(/by a link sent by mail[^\n]*needs no shell/);
   });
 
   it("the second address is set up in the order that keeps the platform reachable, and attaching it stays marked Unconfirmed", () => {

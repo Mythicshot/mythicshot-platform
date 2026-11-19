@@ -49,6 +49,9 @@ try {
 // environment for every setting it holds, so a setting exported in the shell it is run
 // from cannot change what it does; for the app the environment wins, as before.
 const runAdmin = require.main === module && process.argv[2] === "admin";
+// RECOVERY_LINKS lets the command print a sign-in link for an account that exists. It is
+// taken from the settings file only, never from the shell, also when the file is silent.
+if (runAdmin) delete process.env.RECOVERY_LINKS;
 
 for (const raw of text.split(/\r?\n/)) {
   const line = raw.trim();

@@ -541,6 +541,8 @@ describe("the settings reach the app on every install path", () => {
     for (const name of own) expect(app, name).toMatch(new RegExp(`^      ${name}: `, "m"));
     // Every other one is optional: passed on as written in .env, empty without a line there.
     for (const name of settingsRead().filter((n) => !own.includes(n))) expect(app, name).toContain(`      ${name}: \${${name}:-}\n`);
+    // The admin command, run in this container with `docker compose exec`, reads the container's environment: its recovery setting is passed on too.
+    expect(app).toContain("      RECOVERY_LINKS: ${RECOVERY_LINKS:-}\n");
     // The mailbox password goes to the app only, as the tunnel token goes to cloudflared only.
     expect(stack.match(/SMTP_PASSWORD/g)?.length).toBe(app.match(/SMTP_PASSWORD/g)?.length);
     // The copy inside install.sh is the same file (test/docs.test.ts holds them equal).

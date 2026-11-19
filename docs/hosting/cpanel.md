@@ -476,7 +476,7 @@ The subdomain `app.example.com` can stay or be removed in cPanel. With one addre
 
 The version with accounts prepares sign-in with a link sent instead of a password. A site that was updated keeps working exactly as before: its tours, their links and its tokens are not changed, and nobody can sign in until the site has an admin. The admin is made once, by a command run on the hosting. There is no web page for it, and the setup code plays no part in it.
 
-The page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, run the command again with the email alone for a new link.
+The page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, get a new link with the recovery setting, as described below.
 
 1. Update to a version with accounts, as in [step 9](#9-updates), and see that `./cpanel.sh status` shows the health as ok.
 2. Run the command from the installed copy of the script, with your own email address and the username you want. The account that set up the site becomes the admin, with that address in place of the one typed in the setup wizard. Should the site's workspace hold several accounts, the oldest of them is the one made admin.
@@ -500,19 +500,31 @@ https://app.example.com/signin/link#…
 > [!WARNING]
 > The link signs in whoever opens it first, like a password for 15 minutes: open it in your own browser and never paste it into a chat, a ticket or a file.
 
-**How to tell it worked:** the command prints the lines above, ending with the link. If it says `The admin was made, but no link was made. Run the command again with --email alone for a link.`, the admin exists and only the link is missing: do as it says. Run the first command again and it says `This site already has an admin. Nothing was changed.`: there is only ever one first admin, and the command changes nothing the second time. A username is 3 to 30 lowercase letters, digits and hyphens and starts with a letter; a reserved name such as `admin` is refused with its own sentence, and so is an address that is not one. Nothing is changed when it refuses.
+**How to tell it worked:** the command prints the lines above, ending with the link. If it says `The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.`, the admin exists and only the link is missing: get one as described below. Run the first command again and it says `This site already has an admin. Nothing was changed.`: there is only ever one first admin, and the command changes nothing the second time. A username is 3 to 30 lowercase letters, digits and hyphens and starts with a letter; a reserved name such as `admin` is refused with its own sentence, and so is an address that is not one. Nothing is changed when it refuses.
 
-**A new sign-in link, at any time,** for instance while mail is not set up: give the address alone. The command never sends mail for this; it prints the link here and nowhere else, and not into any log.
+Signing in normally is by a link sent by mail from the sign-in page, and needs no shell. The first admin's link above works once and for 15 minutes; making the admin is a one-time act, and the command is not a standing way in.
+
+**A new sign-in link is a recovery tool.** If the first link was not used, for example because the sign-in page arrives in a later version, or mail is not set up yet, turn the recovery setting on for one run: add the line `RECOVERY_LINKS=on` to the settings file, run the command with the address alone, then remove the line again. Without the line the command says `Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.` and makes nothing. With it, the command prints the link here and nowhere else, never mails it, records it in the audit, and ends with `Remove the line RECOVERY_LINKS=on from the settings file now.`
+
+```sh
+nano ~/apps/tours-config.env
+```
+
+```text
+RECOVERY_LINKS=on
+```
 
 ```sh
 cd ~/apps/tours && ./cpanel.sh admin --email you@example.com
 ```
 
+Then open the settings file again, remove the line and save. The app itself never reads this setting, so it needs no restart either way.
+
 The same command has three more uses: `./cpanel.sh admin mail-check` says whether mail is set up without showing any setting, `./cpanel.sh admin audit` shows the last sign-ins and admin changes, and `./cpanel.sh admin --help` lists them. Options of the script itself, such as `--app-root` or `--dry-run`, go before the command's own: `./cpanel.sh admin --dry-run first-admin --email you@example.com --username yourname` prints what it would run and runs nothing.
 
 The command runs beside the running app, without a restart, and changes only the database: making the admin is one step that is written whole or not at all, and the link and its record in the audit follow it. It does not apply a database update itself: on a site that was not updated yet it says `The database is from an older version. Update the site first.` and changes nothing. If it says `This site's setup did not finish. Use the recovery steps in the guide, then run this again.`, the setup wizard stopped before it wrote the owner's account.
 
-The command reads the settings the settings file holds from that file only, so a setting exported in your SSH session does not change what it does; settings entered in the environment screen of the hosting's **Setup Node.js App** page are not seen by it.
+The command reads the settings the settings file holds from that file only, so a setting exported in your SSH session does not change what it does; `RECOVERY_LINKS` is never taken from the shell at all; settings entered in the environment screen of the hosting's **Setup Node.js App** page are not seen by it.
 
 > [!WARNING]
 > Never open the database with the hosting's `sqlite3` tool: on many hosting accounts it is older than 3.37 and cannot read the platform's tables, so use only the script and the app, which use the app's own Node.js.

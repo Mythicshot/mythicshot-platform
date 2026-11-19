@@ -149,7 +149,7 @@ describe("the cPanel startup file run as the admin command", () => {
       join(l.app, "dist", "node", "admin.js"),
       [
         "export async function main(argv) {",
-        '  console.log("ADMIN " + JSON.stringify({ argv, DATA_DIR: process.env.DATA_DIR ?? null, APP_HOST: process.env.APP_HOST ?? null, SMTP_PASSWORD: process.env.SMTP_PASSWORD ?? null }));',
+        '  console.log("ADMIN " + JSON.stringify({ argv, DATA_DIR: process.env.DATA_DIR ?? null, APP_HOST: process.env.APP_HOST ?? null, SMTP_PASSWORD: process.env.SMTP_PASSWORD ?? null, RECOVERY_LINKS: process.env.RECOVERY_LINKS ?? null }));',
         '  process.exitCode = argv.includes("--fail") ? 1 : 0;',
         "}",
         "",
@@ -171,7 +171,7 @@ describe("the cPanel startup file run as the admin command", () => {
     expect(r.stderr).toBe("");
     expect(r.status).toBe(0);
     expect(r.started).toBeNull();
-    expect(admin(r)).toEqual({ argv: args.slice(1), DATA_DIR: "/data/tours", APP_HOST: "app.example.com", SMTP_PASSWORD: "pw with spaces=and+signs" });
+    expect(admin(r)).toEqual({ argv: args.slice(1), DATA_DIR: "/data/tours", APP_HOST: "app.example.com", SMTP_PASSWORD: "pw with spaces=and+signs", RECOVERY_LINKS: null });
     // Unlike the app, the command takes the file's value over one set in the shell it was started from: a setting
     // exported in an SSH session must not change what it does. A setting the file does not hold still comes through.
     expect(admin(start(l.app, { DATA_DIR: "/from/the/shell", APP_HOST: "other.example.com", SMTP_PASSWORD: "from-the-shell" }, ["admin", "audit"]))).toEqual({
@@ -179,6 +179,7 @@ describe("the cPanel startup file run as the admin command", () => {
       DATA_DIR: "/data/tours",
       APP_HOST: "app.example.com",
       SMTP_PASSWORD: "pw with spaces=and+signs",
+      RECOVERY_LINKS: null,
     });
     writeFileSync(l.settings, `DATA_DIR=/data/tours
 `);
@@ -187,6 +188,19 @@ describe("the cPanel startup file run as the admin command", () => {
     expect(start(l.app, { DATA_DIR: "/from/the/shell" }).started).toMatchObject({ DATA_DIR: "/from/the/shell" });
     // The command's exit code is the process's.
     expect(start(l.app, {}, ["admin", "--fail"]).status).toBe(1);
+  });
+
+  it("RECOVERY_LINKS reaches the command only from the settings file, never from the shell it is run from", () => {
+    const l = layout();
+    withAdmin(l);
+    writeFileSync(l.settings, "DATA_DIR=/data/tours\n");
+    // Exported in the SSH session, with the file silent about it: the command does not see it.
+    for (const value of ["on", "ON", " on "]) expect(admin(start(l.app, { RECOVERY_LINKS: value }, ["admin", "signin-link"])), value).toMatchObject({ RECOVERY_LINKS: null });
+    // In the file: the command sees the file's value, whatever the shell says.
+    writeFileSync(l.settings, "DATA_DIR=/data/tours\nRECOVERY_LINKS=on\n");
+    expect(admin(start(l.app, {}, ["admin", "signin-link"]))).toMatchObject({ RECOVERY_LINKS: "on" });
+    writeFileSync(l.settings, "DATA_DIR=/data/tours\nRECOVERY_LINKS=off\n");
+    expect(admin(start(l.app, { RECOVERY_LINKS: "on" }, ["admin", "signin-link"]))).toMatchObject({ RECOVERY_LINKS: "off" });
   });
 
   it("without `admin` first, or with it only in the settings file, the app starts as always", () => {

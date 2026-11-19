@@ -2,7 +2,7 @@
 // scratch folder, as `node dist/node/admin.js` runs it beside the app. Node only. No mail
 // is sent: where a mailer is needed the fake one is handed in, and every host is a
 // placeholder.
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -28,6 +28,10 @@ const CREATED = (name: string) => [`The admin account "${name}" was created.`, "
 const LINK = /^https:\/\/app\.example\.com\/signin\/link#c=dpl_[0-9a-f]{40}$/;
 const NO_LINK = "No link was made. Check the address, and that the site has an admin.";
 const HAS_ADMIN = "This site already has an admin. Nothing was changed.";
+/** The recovery setting, for the runs that print a link for an existing account. */
+const ON = { RECOVERY_LINKS: "on" };
+const REMIND = "Remove the line RECOVERY_LINKS=on from the settings file now.";
+const RECOVERY_OFF = "Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.";
 
 const made: string[] = [];
 const open: NodeDb[] = [];
@@ -128,10 +132,48 @@ describe("the server command", () => {
     expect(made.code).toBe(0);
     expect(made.lines.slice(0, 4)).toEqual(CREATED("alex"));
     expect(made.lines[4]).toMatch(LINK);
-    const link = await run(s.env, ["--email=you@example.com"]);
+    const link = await run({ ...s.env, ...ON }, ["--email=you@example.com"]);
     expect(link.code).toBe(0);
-    expect(link.lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(LINK)]);
+    expect(link.lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(LINK), REMIND]);
     expect(link.lines[1]).not.toBe(made.lines[4]);
+  });
+
+  it("only the command reads RECOVERY_LINKS: no other source file names it", () => {
+    const src = fileURLToPath(new URL("../src/", import.meta.url));
+    const readers = readdirSync(src, { recursive: true, encoding: "utf8" })
+      .filter((p) => p.endsWith(".ts"))
+      .filter((p) => readFileSync(join(src, p), "utf8").includes("RECOVERY_LINKS"))
+      .map((p) => p.replace(/\\/g, "/"));
+    expect(readers).toEqual(["node/admin.ts"]);
+  });
+
+  it("a link for an existing account is a recovery tool, off unless the settings say RECOVERY_LINKS=on", async () => {
+    const s = await site();
+    // The first admin's own link is part of the one act, whatever the setting says, and never reminds.
+    const first = await run({ ...s.env, RECOVERY_LINKS: "off" }, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    expect(first.code).toBe(0);
+    expect(first.lines).toEqual([...CREATED("alex"), expect.stringMatching(LINK)]);
+    const db = connect(s.dir);
+    const written = async () => [await db.all("SELECT * FROM signin_code ORDER BY id"), await db.all("SELECT * FROM audit ORDER BY id")];
+    const before = await written();
+    // Off: unset, and every value but `on`. Nothing is made and nothing is recorded, by either spelling.
+    for (const value of [undefined, "", "off", "1", "true", "yes", "enabled", "o n", "on1"]) {
+      for (const argv of [["signin-link", "--email", "you@example.com"], ["--email", "you@example.com"]]) {
+        const r = await run({ ...s.env, RECOVERY_LINKS: value }, argv);
+        expect(r.lines, `${value} ${argv[0]}`).toEqual([RECOVERY_OFF]);
+        expect(r.code).toBe(1);
+      }
+    }
+    expect(await written()).toEqual(before);
+    // On: `on` in any case, with spaces around it. Each link is recorded as before.
+    for (const value of ["on", "ON", " On ", "\ton"]) {
+      const r = await run({ ...s.env, RECOVERY_LINKS: value }, ["signin-link", "--email", "you@example.com"]);
+      expect(r.lines, JSON.stringify(value)).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(LINK), REMIND]);
+      expect(r.code).toBe(0);
+    }
+    expect(await db.all("SELECT event FROM audit WHERE event = 'signin_link_printed'")).toHaveLength(5);
+    // A stranger's refusal with the setting on still writes nothing and does not remind.
+    expect((await run({ ...s.env, ...ON }, ["signin-link", "--email", "stranger@example.com"])).lines).toEqual([NO_LINK]);
   });
 
   it("each refusal prints its sentence and exits 1", async () => {
@@ -222,16 +264,16 @@ describe("the server command", () => {
   it("signin-link prints a link that signs in once", async () => {
     const s = await site();
     await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
-    const r = await run(s.env, ["signin-link", "--email", " You@Example.com"]);
+    const r = await run({ ...s.env, ...ON }, ["signin-link", "--email", " You@Example.com"]);
     expect(r.code).toBe(0);
-    expect(r.lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(LINK)]);
+    expect(r.lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(LINK), REMIND]);
     const code = r.lines[1].split("#c=")[1];
     const db = connect(s.dir);
     const session = await redeemSignInCode(depsOn(db), code, "Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0", null);
     expect(session?.userId).toBe(s.userId);
     expect(await redeemSignInCode(depsOn(db), code, null, null)).toBeNull();
     // Each run makes a link of its own, and each is on record.
-    const again = await run(s.env, ["signin-link", "--email", "you@example.com"]);
+    const again = await run({ ...s.env, ...ON }, ["signin-link", "--email", "you@example.com"]);
     expect(again.lines[1]).not.toBe(r.lines[1]);
     expect(await db.all("SELECT event FROM audit WHERE event = 'signin_link_printed'")).toHaveLength(3);
     // Only digests are stored.
@@ -251,7 +293,7 @@ describe("the server command", () => {
 
     // No admin yet: nobody gets a link, the owner included.
     for (const email of ["you@example.com", "member@example.com", "stranger@example.com"]) {
-      const r = await run(s.env, ["signin-link", "--email", email]);
+      const r = await run({ ...s.env, ...ON }, ["signin-link", "--email", email]);
       expect(r.lines, email).toEqual([NO_LINK]);
       expect(r.code).toBe(1);
     }
@@ -261,7 +303,7 @@ describe("the server command", () => {
     await db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [member.userId]);
     const before = await written();
     for (const email of ["stranger@example.com", "member@example.com", "not an address", "alex"]) {
-      const r = await run(s.env, ["signin-link", "--email", email]);
+      const r = await run({ ...s.env, ...ON }, ["signin-link", "--email", email]);
       expect(r.lines, email).toEqual([NO_LINK]);
       expect(r.code).toBe(1);
     }
@@ -284,17 +326,18 @@ describe("the server command", () => {
     expect((await redeemSignInCode(depsOn(db), r.lines[5].split("#c=")[1], null, null))?.userId).toBe(s.userId);
 
     // The same for a later link; with SITE_HOST set it is whole, and a forged request cannot matter: no request is involved.
-    const path = await run(env, ["signin-link", "--email", "you@example.com"]);
+    const path = await run({ ...env, ...ON }, ["signin-link", "--email", "you@example.com"]);
     expect(path.code).toBe(0);
-    expect(path.lines).toHaveLength(3);
+    expect(path.lines).toHaveLength(4);
+    expect(path.lines[3]).toBe(REMIND);
     expect(path.lines.slice(0, 2)).toEqual(r.lines.slice(3, 5));
     expect(path.lines[2]).toMatch(/^\/signin\/link#c=dpl_[0-9a-f]{40}$/);
-    const whole = await run({ ...env, SITE_HOST: "Tours.Example.com" }, ["signin-link", "--email", "you@example.com"]);
-    expect(whole.lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(/^https:\/\/tours\.example\.com\/signin\/link#c=dpl_[0-9a-f]{40}$/)]);
+    const whole = await run({ ...env, ...ON, SITE_HOST: "Tours.Example.com" }, ["signin-link", "--email", "you@example.com"]);
+    expect(whole.lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(/^https:\/\/tours\.example\.com\/signin\/link#c=dpl_[0-9a-f]{40}$/), REMIND]);
   });
 
   it("a link step that fails after the claim was written says so in one sentence and exits 1", async () => {
-    const MADE_NO_LINK = "The admin was made, but no link was made. Run the command again with --email alone for a link.";
+    const MADE_NO_LINK = "The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.";
     // An error from the database while the link is made: the claim is already written.
     const broken = await site();
     const db = connect(broken.dir);
@@ -304,12 +347,12 @@ describe("the server command", () => {
     expect(r.code).toBe(1);
     expect(await db.first("SELECT username, is_admin FROM user WHERE id = ?", [broken.userId])).toEqual({ username: "alex", is_admin: 1 });
     // The same error outside a claim is the plain unexpected one.
-    const later = await run(broken.env, ["signin-link", "--email", "you@example.com"]);
+    const later = await run({ ...broken.env, ...ON }, ["signin-link", "--email", "you@example.com"]);
     expect(later.lines).toEqual(["The command stopped on an unexpected error."]);
     expect(later.code).toBe(1);
     // Once the cause is gone, the email alone gives the link the sentence promised.
     db.raw.exec("DROP TRIGGER no_codes");
-    expect((await run(broken.env, ["--email", "you@example.com"])).lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(LINK)]);
+    expect((await run({ ...broken.env, ...ON }, ["--email", "you@example.com"])).lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(LINK), REMIND]);
 
     // A link step that refuses (here: the account lost its sign-in method in the same moment).
     const refused = await site();
@@ -543,7 +586,7 @@ describe("the server command", () => {
     const stderr = vi.spyOn(process.stderr, "write");
 
     const s = await site();
-    const env = { ...s.env, ...SMTP };
+    const env = { ...s.env, ...SMTP, ...ON };
     const opts: AdminOptions = { makeMailer: () => new FakeMailer() };
     const said: string[] = [];
     const links: string[] = [];
