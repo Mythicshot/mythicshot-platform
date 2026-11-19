@@ -2,6 +2,15 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.8 (2026-11-19)
+
+- Storage allowance: a site can set how many bytes each workspace may use, with `STORAGE_ALLOWANCE_BYTES`. It is off unless the site sets it.
+- An upload that would take a workspace past its allowance is refused before anything is stored, with a clear message that says how much room is needed and how much is left. Nothing is ever deleted because of an allowance.
+- `GET /api/v1/usage` shows what a workspace uses and what its allowance is.
+- An upload can say the size of its logo with an optional `logo_bytes`, so an unchanged update of a tour with a logo needs no extra room.
+- Two copies of the app starting together during an update no longer trip over a database change.
+- With no allowance set, everything works as before.
+
 ## 0.1.7 (2026-11-18)
 
 - API documentation: the site has a public page at `/docs` with every request a token can make, a box to try them with your own token, and three guides with commands to copy.
