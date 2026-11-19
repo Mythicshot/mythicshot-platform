@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { makeDeps } from "#harness";
 import type { Deps } from "../src/ports.ts";
-import { COUNTER_KEEP_MS, COUNTER_SWEEP_PAGE, hit, LIMITS_SIGNIN, networkKey, over, recipientKey, SITE_KEY, sweepCounters } from "../src/rate.ts";
+import { COUNTER_KEEP_MS, COUNTER_SWEEP_PAGE, hit, hitLimit, LIMITS_SIGNIN, MAX_BUCKET_BYTES, MAX_KEY_BYTES, networkKey, over, recipientKey, SITE_KEY, SITE_QUIET_KEY, sweepCounters } from "../src/rate.ts";
 
 const NOW = 1_800_000_000_000;
 const MIN_15 = 900_000;
@@ -27,14 +27,13 @@ async function fill(deps: Deps, bucket: string, n: number, windowStart: number):
 }
 
 describe("rate limits", () => {
-  it("the limits are the six of the plan, each with its own bucket", () => {
+  it("the limits are the five that are kept, each with its own bucket", () => {
     expect(LIMITS_SIGNIN).toEqual({
       linkRecipient: { bucket: "link_recipient", windowMs: MIN_15, most: 3 },
       linkRecipientDay: { bucket: "link_recipient_day", windowMs: DAY, most: 10 },
       linkNetwork: { bucket: "link_network", windowMs: MIN_15, most: 10 },
       mailSite: { bucket: "mail_site", windowMs: HOUR, most: 100 },
       codeNetwork: { bucket: "code_network", windowMs: MIN_15, most: 20 },
-      codeUnknown: { bucket: "code_unknown", windowMs: HOUR, most: 600 },
     });
     // Two limits on one key must not share a row: a day's window starts where a quarter hour's does.
     const buckets = Object.values(LIMITS_SIGNIN).map((l) => l.bucket);
@@ -43,13 +42,62 @@ describe("rate limits", () => {
     for (const l of Object.values(LIMITS_SIGNIN)) expect(l.windowMs).toBeLessThanOrEqual(COUNTER_KEEP_MS);
     // The fixed key is a word, not a digest, and cannot be mistaken for one.
     expect(SITE_KEY).toBe("site");
+    // Requests that send nothing are counted under a second word, never under the real cap's.
+    expect(SITE_QUIET_KEY).toBe("site_quiet");
+    for (const l of Object.values(LIMITS_SIGNIN)) expect(new TextEncoder().encode(l.bucket).length).toBeLessThanOrEqual(MAX_BUCKET_BYTES);
 
     // "Most 3" lets three through and stops the fourth.
     expect(over(0, 3)).toBe(false);
     expect(over(3, 3)).toBe(false);
     expect(over(4, 3)).toBe(true);
-    // A count that is not a number is over, whatever the limit.
-    expect(over(Number.NaN, 3)).toBe(true);
+    expect(over(0, 0)).toBe(false);
+    expect(over(1, 0)).toBe(true);
+    // A count that is not a whole number from 0 up is over, whatever the limit.
+    for (const count of [Number.NaN, undefined, -1, null, true, [], [1], "1", 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(over(count as never, 3), String(count)).toBe(true);
+    }
+    // And so is any count against a limit that is not one.
+    for (const most of [Number.POSITIVE_INFINITY, Number.NaN, -1, 1.5, null, undefined, "3"]) {
+      expect(over(0, most as never), String(most)).toBe(true);
+      expect(over(1, most as never), String(most)).toBe(true);
+    }
+  });
+
+  it("a limit is counted and judged by itself, and says when its window ends", async () => {
+    const { deps, calls } = await makeDeps();
+    const limit = LIMITS_SIGNIN.linkRecipient;
+    const start = Math.floor(NOW / limit.windowMs) * limit.windowMs;
+    let now = start;
+    deps.now = () => now;
+    const key = await recipientKey("sam@example.com");
+
+    const before = calls();
+    expect(await hitLimit(deps, limit, key)).toEqual({ over: false, retryAfterSeconds: 900 });
+    expect(calls() - before).toBe(1);
+    now = start + 1;
+    expect(await hitLimit(deps, limit, key)).toEqual({ over: false, retryAfterSeconds: 900 });
+    now = start + 1000;
+    expect(await hitLimit(deps, limit, key)).toEqual({ over: false, retryAfterSeconds: 899 });
+    now = start + limit.windowMs - 1;
+    expect(await hitLimit(deps, limit, key)).toEqual({ over: true, retryAfterSeconds: 1 });
+    expect(await rows(deps)).toEqual([{ bucket: limit.bucket, key, window_start: start, count: 4 }]);
+    // The next window starts again.
+    now = start + limit.windowMs;
+    expect(await hitLimit(deps, limit, key)).toEqual({ over: false, retryAfterSeconds: 900 });
+
+    // The same key under another limit is another counter, judged by that limit's own number.
+    const day = LIMITS_SIGNIN.linkRecipientDay;
+    for (let i = 0; i < day.most; i++) expect((await hitLimit(deps, day, key)).over, String(i)).toBe(false);
+    expect((await hitLimit(deps, day, key)).over).toBe(true);
+
+    // A limit that is not one is refused before the database, and a counter that fails rejects.
+    const n = calls();
+    await expect(hitLimit(deps, { bucket: "b", windowMs: MIN_15, most: Number.POSITIVE_INFINITY }, key)).rejects.toThrow("bad limit");
+    await expect(hitLimit(deps, { bucket: "b", windowMs: MIN_15, most: -1 }, key)).rejects.toThrow("bad limit");
+    await expect(hitLimit(deps, { bucket: "b", windowMs: 0, most: 3 }, key)).rejects.toThrow("bad window");
+    expect(calls() - n).toBe(0);
+    const broken: Deps = { ...deps, db: { ...deps.db, first: () => Promise.reject(new Error("database is locked")) } };
+    await expect(hitLimit(broken, limit, key)).rejects.toThrow();
   });
 
   it("the count rises by one per hit and starts again in the next window", async () => {
@@ -126,8 +174,31 @@ describe("rate limits", () => {
     }
     await expect(hit(deps, "", "k", MIN_15)).rejects.toThrow("bad bucket");
     await expect(hit(deps, "b", "", MIN_15)).rejects.toThrow("bad key");
+    // A name longer than its column will take, counted in bytes.
+    await expect(hit(deps, "b".repeat(MAX_BUCKET_BYTES + 1), "k", MIN_15)).rejects.toThrow("bad bucket");
+    await expect(hit(deps, "é".repeat(MAX_BUCKET_BYTES / 2 + 1), "k", MIN_15)).rejects.toThrow("bad bucket");
+    await expect(hit(deps, "b", "k".repeat(MAX_KEY_BYTES + 1), MIN_15)).rejects.toThrow("bad key");
+    await expect(hit(deps, "b", "é".repeat(MAX_KEY_BYTES / 2 + 1), MIN_15)).rejects.toThrow("bad key");
+    await expect(hit(deps, 5 as never, "k", MIN_15)).rejects.toThrow("bad bucket");
+    await expect(hit(deps, "b", null as never, MIN_15)).rejects.toThrow("bad key");
+    // A clock that gives no time, or one before the start of time.
+    for (const t of [Number.NaN, -1, -MIN_15, 1.5, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, undefined, "5"]) {
+      await expect(hit({ ...deps, now: () => t as never }, "b", "k", MIN_15), String(t)).rejects.toThrow("bad clock");
+    }
     expect(calls() - before).toBe(0);
     expect(await rows(deps)).toEqual([]);
+    expect([MAX_BUCKET_BYTES, MAX_KEY_BYTES]).toEqual([40, 100]);
+
+    // The longest names are taken, and the clock's first millisecond is a time.
+    expect(await hit(deps, "b".repeat(MAX_BUCKET_BYTES), "k".repeat(MAX_KEY_BYTES), MIN_15)).toBe(1);
+    expect(await hit({ ...deps, now: () => 0 }, "b", "k", MIN_15)).toBe(1);
+
+    // A database that answers without a count is no count either.
+    for (const answer of [null, { count: 0 }, { count: -1 }, { count: 1.5 }, { count: "2" }, {}]) {
+      const odd: Deps = { ...deps, db: { ...deps.db, first: () => Promise.resolve(answer as never) } };
+      await expect(hit(odd, "b", "k", MIN_15), JSON.stringify(answer)).rejects.toThrow("rate counter gave no count");
+      await expect(hitLimit(odd, LIMITS_SIGNIN.linkNetwork, "k"), JSON.stringify(answer)).rejects.toThrow("rate counter gave no count");
+    }
   });
 
   it("a private, loopback or missing address has no network key", async () => {
@@ -165,7 +236,31 @@ describe("rate limits", () => {
       "::ffff:c0a8:0101",
       "::192.168.1.1",
       "64:ff9b::10.0.0.1",
+      "64:ff9b::7f00:1",
+      "FE80::1",
+      // Benchmarking, protocol assignments and the local-use translation prefix.
+      "198.18.0.1",
+      "198.19.255.255",
+      "192.0.0.1",
+      "192.0.0.255",
+      "::ffff:198.18.0.1",
+      "64:ff9b:1::1",
+      "64:ff9b:1:ffff::203.0.113.7",
       // Not an address: nothing is guessed from it.
+      "010.1.1.1",
+      "2130706433",
+      "0x7f000001",
+      "[2001:db8::1]:443",
+      "203.0.113.7\u0000",
+      "203.0.113.7\u0000.example",
+      "2001:db8::1\u0000",
+      "\u0000",
+      "1".repeat(1_000_000),
+      "1:".repeat(500_000),
+      "2001:db8::1%" + "z".repeat(1_000_000),
+      5 as never,
+      {} as never,
+      undefined as never,
       "1.2.3",
       "1.2.3.4.5",
       "256.1.1.1",
@@ -183,7 +278,11 @@ describe("rate limits", () => {
     for (const address of none) expect(await networkKey(address), String(address)).toBeNull();
 
     // The neighbours of each private range are public.
-    for (const address of ["9.255.255.255", "11.0.0.0", "100.63.255.255", "100.128.0.0", "126.255.255.255", "128.0.0.0", "169.253.0.1", "169.255.0.1", "172.15.255.255", "172.32.0.0", "192.167.0.1", "192.169.0.1", "223.255.255.255", "203.0.113.7", "2001:db8::1", "fbff::1", "fe00::1", "2a00::1"]) {
+    for (const address of ["9.255.255.255", "11.0.0.0", "100.63.255.255", "100.128.0.0", "126.255.255.255", "128.0.0.0", "169.253.0.1", "169.255.0.1", "172.15.255.255", "172.32.0.0", "192.167.0.1", "192.169.0.1", "223.255.255.255", "203.0.113.7", "2001:db8::1", "fbff::1", "fe00::1", "2a00::1", "198.17.255.255", "198.20.0.0", "191.255.255.255", "192.0.1.1", "64:ff9b:0:1::1", "64:ff9b:2::1"]) {
+      expect(await networkKey(address), address).toMatch(HEX_64);
+    }
+    // The ranges kept for examples are counted like any public address: counting is the safe direction.
+    for (const address of ["192.0.2.1", "198.51.100.1", "203.0.113.1", "2001:db8:1::1"]) {
       expect(await networkKey(address), address).toMatch(HEX_64);
     }
   });
@@ -235,6 +334,12 @@ describe("rate limits", () => {
     expect(recipient).not.toBe(await plain(email));
     expect(net4).not.toBe(await plain(address4));
     expect(await recipientKey(address4)).not.toBe(net4);
+    // Something that is not text has no key: a rejected promise, never a throw on the spot.
+    for (const v of [null, undefined, 5, {}, ["a@example.com"]]) {
+      let made: Promise<string> | undefined;
+      expect(() => (made = recipientKey(v as never)), String(v)).not.toThrow();
+      await expect(made, String(v)).rejects.toThrow("bad email");
+    }
 
     // Counted the way a sign-in request counts, the table holds digests and fixed words only.
     await hit(deps, LIMITS_SIGNIN.linkRecipient.bucket, recipient, LIMITS_SIGNIN.linkRecipient.windowMs);
@@ -242,10 +347,12 @@ describe("rate limits", () => {
     await hit(deps, LIMITS_SIGNIN.linkNetwork.bucket, net4, LIMITS_SIGNIN.linkNetwork.windowMs);
     await hit(deps, LIMITS_SIGNIN.codeNetwork.bucket, net6, LIMITS_SIGNIN.codeNetwork.windowMs);
     await hit(deps, LIMITS_SIGNIN.mailSite.bucket, SITE_KEY, LIMITS_SIGNIN.mailSite.windowMs);
-    await hit(deps, LIMITS_SIGNIN.codeUnknown.bucket, SITE_KEY, LIMITS_SIGNIN.codeUnknown.windowMs);
+    await hit(deps, LIMITS_SIGNIN.mailSite.bucket, SITE_QUIET_KEY, LIMITS_SIGNIN.mailSite.windowMs);
     const stored = await rows(deps);
     expect(stored).toHaveLength(6);
-    for (const r of stored) expect(r.key === SITE_KEY || HEX_64.test(r.key), r.key).toBe(true);
+    for (const r of stored) expect(r.key === SITE_KEY || r.key === SITE_QUIET_KEY || HEX_64.test(r.key), r.key).toBe(true);
+    // A request that sends nothing spends nothing of the real cap.
+    expect(stored.filter((r) => r.bucket === "mail_site").map((r) => [r.key, r.count])).toEqual([["site", 1], ["site_quiet", 1]]);
     const text = JSON.stringify(stored).toLowerCase();
     for (const part of [email, "sam", "jones", "example.com", "@", address4, "203.0", "113.77", address6, "2001:", "db8:", "aa:bb"]) {
       expect(text.includes(part), part).toBe(false);
