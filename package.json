@@ -23,7 +23,8 @@
     "build:docs": "node scripts/build-docs.ts",
     "setup:cloudflare": "node scripts/setup-cloudflare.ts",
     "package:cpanel": "node scripts/package-cpanel.ts",
-    "sync:core": "node scripts/sync-core.ts"
+    "sync:core": "node scripts/sync-core.ts",
+    "rehearse:upgrade": "node scripts/rehearse-upgrade.ts"
   },
   "dependencies": {
     "@hono/node-server": "2.1.9",

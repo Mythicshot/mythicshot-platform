@@ -255,6 +255,51 @@ The update refuses to start when it does not know the address, because it could 
 
 **How to tell it worked:** the script ends with "Updated to version" and the address. If it says the health check did not pass, it prints the commands to go back; see [step 12](#12-roll-back-an-update).
 
+### Rehearse an update on a copy of a backup
+
+Before an update that changes the database, you can try it first on a copy of your own data, on your own computer.
+
+The rehearsal starts the version you run today and the new version on that computer only, one after the other, on a copy of your backup. It checks that the new version shows your token the same tours, pages and pictures, keeps every file and every row, and that the version you run today still works on the changed database, which is your way back.
+
+> [!WARNING]
+> The backup folder holds real data: the owner's email, the token hashes, every image, and the settings file with the setup code and any mailbox password. Keep the copy on your computer as private as the backup itself, and delete it when you are done. The rehearsal copies only `db.sqlite`, `drafts` and `public` into a scratch folder, removes that folder at the end, and never reads the settings file.
+
+1. Make a backup, as in [step 10](#10-backups), and copy the backup folder to a computer with Node.js 24 or later and a copy of this repository.
+
+2. Unpack the version you run today and the new version into two empty folders, for example `~/rehearse/old` and `~/rehearse/new`. The version you run today is `app.tgz` in the backup folder; the new version is the new archive from [step 3](#3-build-the-archive).
+
+3. In each of the two folders, install the packages, as the update does on the hosting.
+
+```sh
+cd ~/rehearse/old && npm ci --omit=dev --ignore-scripts
+```
+
+```sh
+cd ~/rehearse/new && npm ci --omit=dev --ignore-scripts
+```
+
+4. In the copy of this repository, put your token in an environment variable without it landing in your shell's history: run the first command, paste the token, press Enter, then run the second.
+
+```sh
+read -rs REHEARSE_TOKENS
+```
+
+```sh
+export REHEARSE_TOKENS
+```
+
+5. Run the rehearsal on the backup folder. Put your backup folder's name in place of `tours-<date>-<time>`. If your platform has two addresses, as in [step 14](#14-a-second-address-for-the-app), add `--mode two` at the end.
+
+```sh
+npm run rehearse:upgrade -- ~/backups/tours-<date>-<time> ~/rehearse/old ~/rehearse/new
+```
+
+6. Read the report. Each check is one line that starts with PASS or FAIL, and the last line is `RESULT: PASS` or `RESULT: FAIL`. The report never shows your token, an email address or a name from your data, so you can pass it on to whoever helps you.
+
+**How to tell it worked:** the last line is `RESULT: PASS`. If any check says FAIL, do not run the update; the indented lines below that check say what differed.
+
+The rehearsal does not test your hosting: not how the hosting starts the app, not its file system and not its version of Node.js. It also proves only what your own data holds; a kind of tour your site does not have yet is not tried.
+
 ## 10. Backups
 
 1. Make a backup. The installed copy of the script does this; no archive is needed.
