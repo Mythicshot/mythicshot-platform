@@ -278,7 +278,8 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
         for (const line of linkLines(link)) out(line);
         return 0;
       }
-      case "audit": {
+      default: {
+        // audit
         const rows = await db.all<AuditRow>("SELECT at, event, user_id, workspace_id, subject, detail FROM audit ORDER BY at DESC, id DESC LIMIT ?", [parsed.last]);
         if (rows.length === 0) {
           out(SAID.auditEmpty);
