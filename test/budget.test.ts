@@ -5,10 +5,10 @@
 // cases are reached and record the highest count per route.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
-import { metered, SUBREQUEST_BUDGET } from "../src/budget.ts";
+import { metered, SUBREQUEST_BUDGET, withBudget } from "../src/budget.ts";
 import { LIMITS } from "../src/manifest.ts";
 import { MailOff, NO_MAIL } from "../src/mail.ts";
-import { deferOf, mailOf, type Deps } from "../src/ports.ts";
+import { DEFER_FAILED, deferOf, mailOf, type Deps } from "../src/ports.ts";
 import { COPY_BATCH, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../src/publish.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { FakeMailer } from "./fake-mail.ts";
@@ -619,5 +619,148 @@ describe("the call budget, route by route", () => {
     const rows = [...highest.entries()].sort().map(([route, n]) => `${String(n).padStart(3)}  ${route}`);
     console.log(`calls per request, highest seen (budget ${SUBREQUEST_BUDGET}):\n` + rows.join("\n"));
     expect(Math.max(...highest.values())).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
+  });
+});
+
+describe("the budget and work that goes on after the answer", () => {
+  const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const line = (n: number) => `budget: a POST request made ${n} storage and database calls, over the budget of ${SUBREQUEST_BUDGET}`;
+  /** Defers work that makes `n` calls through these deps, after the handler has returned. */
+  const later = (d: Deps, n: number, fail = false) =>
+    deferOf(d)(
+      (async () => {
+        await tick();
+        for (let i = 0; i < n; i++) await d.db.first("SELECT 1");
+        if (fail) throw new Error("made-up-secret");
+      })(),
+    );
+
+  it("a handler that defers work making more calls than the budget is reported", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { deps, settle } = await makeDeps();
+    // Under the budget when it answers, over it once its deferred work has run.
+    const res = await withBudget(deps, "POST", async (d) => {
+      await d.db.first("SELECT 1");
+      later(d, SUBREQUEST_BUDGET);
+      return new Response("ok");
+    });
+    expect(await res.text()).toBe("ok");
+    expect(errors).not.toHaveBeenCalled();
+    await settle();
+    await tick();
+    expect(errors.mock.calls).toEqual([[line(SUBREQUEST_BUDGET + 1)]]);
+  });
+
+  it("an over-budget request is reported once, never twice", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { deps, settle } = await makeDeps();
+    // Already over when it answers: said then, and not again when its deferred work ends.
+    await withBudget(deps, "POST", async (d) => {
+      for (let i = 0; i <= SUBREQUEST_BUDGET; i++) await d.db.first("SELECT 1");
+      later(d, 5);
+      later(d, 5);
+      return new Response("ok");
+    });
+    expect(errors.mock.calls).toEqual([[line(SUBREQUEST_BUDGET + 1)]]);
+    await settle();
+    await tick();
+    expect(errors.mock.calls).toEqual([[line(SUBREQUEST_BUDGET + 1)]]);
+
+    // Over only after two pieces of work, one of which defers a third: one line, with the whole count.
+    errors.mockClear();
+    await withBudget(deps, "POST", async (d) => {
+      later(d, 30);
+      deferOf(d)(
+        (async () => {
+          await tick();
+          later(d, 30);
+        })(),
+      );
+      return new Response("ok");
+    });
+    await settle();
+    await tick();
+    await settle();
+    await tick();
+    expect(errors.mock.calls).toEqual([[line(60)]]);
+  });
+
+  it("deferred work within the budget says nothing, and work that fails is still counted", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { deps, settle } = await makeDeps();
+    await withBudget(deps, "POST", async (d) => {
+      later(d, SUBREQUEST_BUDGET);
+      return new Response("ok");
+    });
+    await settle();
+    await tick();
+    expect(errors).not.toHaveBeenCalled();
+    // The work fails after going over: the target says its fixed line, the budget its own.
+    await withBudget(deps, "POST", async (d) => {
+      later(d, SUBREQUEST_BUDGET + 2, true);
+      return new Response("ok");
+    });
+    await settle();
+    await tick();
+    expect(errors.mock.calls.map((c) => c[0]).sort()).toEqual([DEFER_FAILED, line(SUBREQUEST_BUDGET + 2)].sort());
+    expect(JSON.stringify(errors.mock.calls)).not.toContain("made-up");
+  });
+
+  it("a handler that throws is still held to the budget, with its deferred work", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { deps, settle } = await makeDeps();
+    await expect(
+      withBudget(deps, "POST", async (d) => {
+        later(d, SUBREQUEST_BUDGET + 3);
+        throw new Error("the handler failed");
+      }),
+    ).rejects.toThrow("the handler failed");
+    await settle();
+    await tick();
+    expect(errors.mock.calls).toEqual([[line(SUBREQUEST_BUDGET + 3)]]);
+  });
+
+  it("the meter knows when the work deferred through it has ended", async () => {
+    const { deps } = await makeDeps();
+    const m = metered(deps);
+    expect(m.open()).toBe(0);
+    await m.idle();
+    let release: () => void = () => {};
+    deferOf(m.deps)(new Promise<void>((resolve) => (release = resolve)));
+    deferOf(m.deps)(Promise.reject(new Error("made-up")).catch(() => {}));
+    expect(m.open()).toBe(2);
+    let idle = false;
+    const waiting = m.idle().then(() => void (idle = true));
+    await tick();
+    expect(idle).toBe(false);
+    expect(m.open()).toBe(1);
+    release();
+    await waiting;
+    expect(m.open()).toBe(0);
+  });
+
+  it("send reads the count after the deferred work has ended, unless told not to wait", async () => {
+    const { deps, settle } = await makeDeps();
+    /** A stand-in app whose one route answers at once and defers work that makes `n` calls a little later. */
+    const app = (n: number) => (d: Deps) => ({
+      fetch: () => {
+        deferOf(d)(
+          (async () => {
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            for (let i = 0; i < n; i++) await d.db.first("SELECT 1");
+          })(),
+        );
+        return new Response("ok");
+      },
+    });
+    // The default: the calls made after the answer are in the count.
+    const waited = await send(deps, "GET", "/healthz", { app: app(3) });
+    expect([waited.status, waited.text, waited.calls]).toEqual([200, "ok", 3]);
+    // And they are held to the budget: a request that goes over it after its answer fails the test that sent it.
+    await expect(send(deps, "GET", "/healthz", { app: app(SUBREQUEST_BUDGET + 1) })).rejects.toThrow(`over the call budget: GET /healthz made ${SUBREQUEST_BUDGET + 1} calls`);
+    // Told not to wait, it counts what was made by the time the answer was read. The work is still tracked by the harness.
+    const quick = await send(deps, "GET", "/healthz", { app: app(3), settle: false });
+    expect(quick.calls).toBe(0);
+    await settle();
   });
 });
