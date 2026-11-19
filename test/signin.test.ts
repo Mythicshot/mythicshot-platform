@@ -7,9 +7,9 @@ import { makeDeps, seedAccount, type MakeOptions } from "#harness";
 import { createApp } from "../src/app.ts";
 import { setClientAddress } from "../src/client.ts";
 import type { Config, Db, Deps } from "../src/ports.ts";
-import { LIMITS_SIGNIN, SITE_KEY, SITE_QUIET_KEY } from "../src/rate.ts";
+import { LIMITS_SIGNIN, SITE_KEY, SITE_QUIET_KEY, recipientKey } from "../src/rate.ts";
 import { SESSION_COOKIE, SIGNIN_CODE_MS, clearedCookie, createSignInCode, csrfFor, redeemSignInCode, sessionCookie } from "../src/sessions.ts";
-import { signinRoutes } from "../src/signin.ts";
+import { SIGNIN_LINES, signinRoutes } from "../src/signin.ts";
 import { send, type Call, type SendOptions } from "./bundle.ts";
 
 const NOW = 1_800_000_000_000;
@@ -40,6 +40,7 @@ const API_HEADERS = [
 const CODE = /dpl_[0-9a-f]{40}/;
 const SECRET = /dps_[0-9a-f]{64}/;
 const HOUR_LINE = "signin: the hourly limit of sign-in mails was reached; none was sent";
+const RECIPIENT_LINE = "signin: an address asked for more sign-in links than its limit; none was sent";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -94,18 +95,51 @@ function codeIn(text: string): string {
   return found[0] ?? "";
 }
 
-/** Records the kind of every database call made through `deps.db` from now on. */
-function recordKinds(deps: Deps): string[] {
+/**
+ * Records the kind of every database call made through `deps.db` from now on; with
+ * `statements`, also each call's kind and SQL text (every statement of a batch).
+ */
+function recordKinds(deps: Deps, statements?: string[]): string[] {
   const kinds: string[] = [];
   const db = deps.db;
+  const note = (kind: string, sql: string) => (kinds.push(kind), statements?.push(`${kind} ${sql.replace(/\s+/g, " ").trim()}`));
   const wrapped: Db = {
-    all: (sql, params) => (kinds.push("all"), db.all(sql, params)),
-    first: (sql, params) => (kinds.push("first"), db.first(sql, params)),
-    run: (sql, params) => (kinds.push("run"), db.run(sql, params)),
-    batch: (stmts) => (kinds.push("batch"), db.batch(stmts)),
+    all: (sql, params) => (note("all", sql), db.all(sql, params)),
+    first: (sql, params) => (note("first", sql), db.first(sql, params)),
+    run: (sql, params) => (note("run", sql), db.run(sql, params)),
+    batch: (stmts) => (note("batch", stmts.map((x) => x.sql).join("; ")), db.batch(stmts)),
   };
   deps.db = wrapped;
   return kinds;
+}
+
+/** What every link request awaits before its answer: the two counts per recipient, the account read, the mail cap, the two sweeps. */
+const AWAITED = ["first", "first", "first", "first", "batch", "run"];
+/** What the job after the answer adds for an account that gets a link: its code, then the audit row. */
+const ACCOUNT_JOB = ["run", "batch"];
+/** The mark `answered` puts among the recorded calls when the app has handed back its answer. */
+const ANSWER = "| answer";
+
+/**
+ * The app (with the client address an entry would have set, if one is given) that puts
+ * ANSWER into each list the moment the answer is handed back, so the calls before it are
+ * the ones the answer waited for.
+ */
+const answered = (lists: string[][], address?: string) => (deps: Deps) => ({
+  fetch: async (req: Request) => {
+    if (address !== undefined) setClientAddress(req, address);
+    const res = await createApp(deps).fetch(req);
+    for (const list of lists) list.push(ANSWER);
+    return res;
+  },
+});
+
+/** Empties the list, and splits what it held at ANSWER: what came before the answer and what came after. */
+function split(list: string[]): { before: string[]; after: string[] } {
+  const all = list.splice(0);
+  const at = all.indexOf(ANSWER);
+  expect(at, "the answer was marked").toBeGreaterThanOrEqual(0);
+  return { before: all.slice(0, at), after: all.slice(at + 1) };
 }
 
 /** The app with the client address an entry would have set for every request. */
@@ -131,47 +165,97 @@ async function everythingStored(deps: Deps): Promise<string> {
 
 describe("asking for a sign-in link", () => {
   it("asking for a link answers the same for an account and for a stranger: status, body, headers and database calls", async () => {
-    const { deps, mail, calls, a } = await site();
+    const { deps, mail, a } = await site();
     const kinds = recordKinds(deps);
+    const app = answered([kinds]);
 
-    let before = calls();
-    const known = await ask(deps, a.email);
-    const knownCalls = calls() - before;
-    const knownKinds = kinds.splice(0);
-    before = calls();
-    const stranger = await ask(deps, STRANGER);
-    const strangerCalls = calls() - before;
-    const strangerKinds = kinds.splice(0);
+    const known = await ask(deps, a.email, { app });
+    const knownCalls = split(kinds);
+    const stranger = await ask(deps, STRANGER, { app });
+    const strangerCalls = split(kinds);
 
     expect(seen(known)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
     expect(seen(stranger)).toEqual(seen(known));
     expect(known.headers.getSetCookie()).toEqual([]);
-    // The same number of database calls, of the same kinds, in the same order.
-    expect(strangerCalls).toBe(knownCalls);
-    expect(strangerKinds).toEqual(knownKinds);
-    expect(knownKinds).toEqual(["first", "first", "first", "first", "run", "batch", "batch", "run"]);
+    // Before the answer: the same database calls, of the same kinds, in the same order.
+    expect(strangerCalls.before).toEqual(knownCalls.before);
+    expect(knownCalls.before).toEqual(AWAITED);
+    // After it, only the account's job writes anything: its code and the audit row.
+    expect(knownCalls.after).toEqual(ACCOUNT_JOB);
+    expect(strangerCalls.after).toEqual([]);
     // And they really were two different requests: one mail, to the account.
     expect(mail.sent.map((m) => m.to)).toEqual([a.email]);
     expect(await countOf(deps, "signin_code")).toBe(1);
 
     // The address as a person types it is the same address. (The count above was recorded too.)
     kinds.length = 0;
-    const typed = await ask(deps, `  ${a.email.toUpperCase()} `);
+    const typed = await ask(deps, `  ${a.email.toUpperCase()} `, { app });
     expect(seen(typed)).toEqual(seen(known));
-    expect(kinds.splice(0)).toEqual(knownKinds);
+    expect(split(kinds)).toEqual(knownCalls);
     expect(mail.sent.map((m) => m.to)).toEqual([a.email, a.email]);
 
-    // With a network to count for, each makes the same one call more.
-    const app = from("203.0.113.7");
-    const knownThere = await ask(deps, a.email, { app });
-    const knownThereKinds = kinds.splice(0);
-    const strangerThere = await ask(deps, STRANGER, { app });
-    expect(kinds.splice(0)).toEqual(knownThereKinds);
-    expect(knownThereKinds).toEqual(["first", ...knownKinds]);
+    // With a network to count for, each makes the same one call more, first.
+    const there = answered([kinds], "203.0.113.7");
+    const knownThere = await ask(deps, a.email, { app: there });
+    const knownThereCalls = split(kinds);
+    const strangerThere = await ask(deps, STRANGER, { app: there });
+    expect(split(kinds).before).toEqual(knownThereCalls.before);
+    expect(knownThereCalls.before).toEqual(["first", ...AWAITED]);
     expect(seen(strangerThere)).toEqual(seen(knownThere));
     expect(seen(knownThere)).toEqual(seen(known));
     // Nothing was recorded for the address nobody has: the audit holds the three links sent.
     expect(await rowsOf(deps, "SELECT event, user_id FROM audit")).toEqual(Array(3).fill({ event: "signin_link_sent", user_id: a.userId }));
+  });
+
+  it("no write that only an account causes runs before the answer is out", async () => {
+    const { deps, mail, a } = await site();
+    const statements: string[] = [];
+    recordKinds(deps, statements);
+    // The mail is marked among the statements when it is handed over.
+    const sent = mail.send.bind(mail);
+    deps.mail = { send: (m) => (statements.push("mail"), sent(m)) };
+    const app = answered([statements]);
+    const accountOnly = /^(run|batch) INSERT INTO (signin_code|audit)\b|^mail$/;
+
+    await ask(deps, a.email, { app });
+    const known = split(statements);
+    await ask(deps, STRANGER, { app });
+    const stranger = split(statements);
+
+    // Before the answer: no write of a code, an audit row or a mail, and the very same statements for both.
+    expect(known.before.filter((x) => accountOnly.test(x))).toEqual([]);
+    expect(known.before).toEqual(stranger.before);
+    // After it: the account's code, its audit row and one mail, in that order; nothing at all for the stranger.
+    expect(known.after.map((x) => x.split(" (")[0])).toEqual(["run INSERT INTO signin_code", "batch INSERT INTO audit", "mail"]);
+    expect(stranger.after).toEqual([]);
+    expect(mail.sent.map((m) => m.to)).toEqual([a.email]);
+  });
+
+  it("a code or audit row that cannot be written still answers as always, and sends nothing", async () => {
+    const { deps, mail, a } = await site();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const reference = seen(await ask(deps, STRANGER));
+    const db = deps.db;
+    for (const [what, table] of [["the code", "signin_code"], ["the audit row", "audit"]] as const) {
+      const failing: Db = {
+        ...db,
+        all: (sql, params) => db.all(sql, params),
+        first: (sql, params) => db.first(sql, params),
+        run: (sql, params) => (sql.includes(`INSERT INTO ${table}`) ? Promise.reject(new Error(`disk full ${a.email}`)) : db.run(sql, params)),
+        batch: (stmts) => (stmts.some((x) => x.sql.includes(`INSERT INTO ${table}`)) ? Promise.reject(new Error(`disk full ${a.email}`)) : db.batch(stmts)),
+      };
+      deps.db = failing;
+      errors.mockClear();
+      const r = await ask(deps, a.email);
+      deps.db = db;
+      // Not a 500 that only a real account could get: the answer every address gets.
+      expect(seen(r), what).toEqual(reference);
+      expect(mail.sent, what).toEqual([]);
+      expect(errors.mock.calls, what).toEqual([[SIGNIN_LINES.notMade]]);
+    }
+    // Nothing was recorded, and the line holds neither the address nor the failure's words.
+    expect(await countOf(deps, "audit")).toBe(0);
+    expect(JSON.stringify(errors.mock.calls)).not.toContain(a.email);
   });
 
   it("the answer does not wait for the mail", async () => {
@@ -188,7 +272,9 @@ describe("asking for a sign-in link", () => {
     // The mail server never answers while the request is looked at; the answer is there all the same.
     const r = await ask(deps, a.email, { settle: false });
     expect(seen(r)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
-    expect(handed).toBe(1);
+    // The answer came before the mail was even handed over; the job hands it over after.
+    expect(handed).toBe(0);
+    await vi.waitFor(() => expect(handed).toBe(1));
     release();
     await settle();
 
@@ -267,8 +353,9 @@ describe("asking for a sign-in link", () => {
   it("no admin, no link host, a disabled account, or mail off: the same answer and no mail", async () => {
     const reference = await site();
     const kinds = recordKinds(reference.deps);
-    const sent = seen(await ask(reference.deps, reference.a.email));
-    const sentKinds = kinds.splice(0);
+    const sent = seen(await ask(reference.deps, reference.a.email, { app: answered([kinds]) }));
+    const sentCalls = split(kinds);
+    expect(sentCalls.after).toEqual(ACCOUNT_JOB);
     expect(reference.mail.sent).toHaveLength(1);
 
     // Each site is made only when its turn comes: on Workers every site is the one test database, emptied anew.
@@ -298,9 +385,10 @@ describe("asking for a sign-in link", () => {
       const s = await make();
       const seenKinds = recordKinds(s.deps);
       // On a site with one address the request goes to whatever name it has.
-      const r = await ask(s.deps, s.a.email);
+      const r = await ask(s.deps, s.a.email, { app: answered([seenKinds]) });
       expect(seen(r), what).toEqual(sent);
-      expect(seenKinds, what).toEqual(sentKinds);
+      // The same calls before the answer, and none after it.
+      expect(split(seenKinds), what).toEqual({ before: sentCalls.before, after: [] });
       expect(s.mail.sent, what).toEqual([]);
       expect(await countOf(s.deps, "signin_code"), what).toBe(0);
       expect(await countOf(s.deps, "audit"), what).toBe(0);
@@ -312,21 +400,31 @@ describe("asking for a sign-in link", () => {
 
   it("the fourth request for one address in 15 minutes sends nothing and answers as always", async () => {
     const { deps, mail, clock, a, b } = await site();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     // The clock starts at the beginning of a quarter hour and of a day's window.
     clock.now = NOW - (NOW % 86_400_000) + 86_400_000;
     const first = seen(await ask(deps, a.email));
     for (let i = 0; i < 2; i++) expect(seen(await ask(deps, a.email))).toEqual(first);
     expect(mail.sent).toHaveLength(3);
+    expect(errors).not.toHaveBeenCalled();
     const kinds = recordKinds(deps);
     expect(seen(await ask(deps, a.email))).toEqual(first);
     expect(seen(await ask(deps, a.email.toUpperCase()))).toEqual(first);
     expect(mail.sent).toHaveLength(3);
-    expect(kinds).toEqual([...Array(2)].flatMap(() => ["first", "first", "first", "first", "run", "batch", "batch", "run"]));
+    // The calls every request waits for, and nothing after: no code, no audit row.
+    expect(kinds).toEqual([...AWAITED, ...AWAITED]);
+    // Each one held back is one fixed line, which names no address.
+    expect(errors.mock.calls).toEqual([[RECIPIENT_LINE], [RECIPIENT_LINE]]);
     // Another address is not held back by it, and a stranger asked four times is answered the same.
     expect(seen(await ask(deps, b.email))).toEqual(first);
     expect(mail.sent.map((m) => m.to)).toEqual([a.email, a.email, a.email, b.email]);
+    errors.mockClear();
     for (let i = 0; i < 4; i++) expect(seen(await ask(deps, STRANGER))).toEqual(first);
     expect(mail.sent).toHaveLength(4);
+    // A stranger's address is counted like an account's: four requests, and the fourth over the limit.
+    expect(await counter(deps, LIMITS_SIGNIN.linkRecipient.bucket, await recipientKey(STRANGER))).toBe(4);
+    expect(await counter(deps, LIMITS_SIGNIN.linkRecipientDay.bucket, await recipientKey(STRANGER))).toBe(4);
+    expect(errors.mock.calls).toEqual([[RECIPIENT_LINE]]);
     // Nothing of the mail cap was spent by the requests that sent nothing.
     expect(await counter(deps, LIMITS_SIGNIN.mailSite.bucket, SITE_KEY)).toBe(4);
 
@@ -389,7 +487,7 @@ describe("asking for a sign-in link", () => {
     const kinds = recordKinds(deps);
     const over = await ask(deps, b.email);
     expect(seen(over)).toEqual(seen(hundredth));
-    expect(kinds).toEqual(["first", "first", "first", "first", "run", "batch", "batch", "run"]);
+    expect(kinds).toEqual(AWAITED);
     expect(mail.sent).toHaveLength(1);
     expect(errors.mock.calls).toEqual([[HOUR_LINE]]);
     // No code was made for a mail that was not sent, and nothing recorded.

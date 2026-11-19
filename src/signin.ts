@@ -16,9 +16,9 @@
 // send. Without that, another site could sign a visitor in as someone else.
 //
 // Asking for a link answers the same whether or not the address has an account: the same
-// status, body and headers, and the same database calls of the same kinds in the same
-// order. Where the request for an account does something the other does not (store a
-// code, write the audit row), the other makes a call of the same kind that writes nothing.
+// status, body and headers, after the same database calls in the same order. Everything
+// only an account gets (its code, the audit row, the mail) is one job handed to the target
+// to run after the answer, so nothing an account costs can be timed from outside.
 import type { Hono } from "hono";
 import { parseEmail } from "./accounts.ts";
 import { auditStatement } from "./audit.ts";
@@ -42,9 +42,21 @@ const MAIL_REASONS: readonly string[] = ["connect", "tls", "auth", "refused", "t
 const NEEDS_EMAIL = 'the body must be JSON such as {"email": "name@example.com"}';
 const NEEDS_CODE = 'the body must be JSON such as {"code": "…"}';
 
+/** The fixed log lines of asking for a link. None holds an address, a code or a count. */
+export const SIGNIN_LINES = {
+  recipient: "signin: an address asked for more sign-in links than its limit; none was sent",
+  hour: "signin: the hourly limit of sign-in mails was reached; none was sent",
+  notMade: "signin: a sign-in link could not be made; none was sent",
+} as const;
+
 /** The 401 of `requireAuth`, for a session that ended between being resolved and being read. */
 function unauthorized(): Response {
-  return new Response('{"error":"unauthorized"}', { status: 401, headers: { "content-type": "application/json" } });
+  return new Response('{"error":"unauthorized"}', { status: 401, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+}
+
+/** Resolves once the current task is over, so work started now runs only after the answer has been handed back. */
+function afterTheAnswer(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 /** A copy of the answer with one more header. */
@@ -92,15 +104,38 @@ async function networkLimit(req: Request, deps: Deps, limit: Limit): Promise<Res
   return counted.over ? withHeader(json(429, { error: "rate_limited" }), "retry-after", String(counted.retryAfterSeconds)) : null;
 }
 
-/** Hands the mail over, for after the answer. A failure is one fixed line, and a mail is never handed over twice. */
-function sendLater(deps: Deps, to: string, link: string): void {
-  const work = (async () => mailOf(deps).send(signInMail(to, link)))().catch((err: unknown) => {
+/** What the job after a link request does: write lines, and for an account that may get a link, make it and mail it. */
+type LinkJob = { overRecipient: boolean; overHour: boolean; link: { userId: string; workspaceId: string; to: string; origin: string } | null };
+
+/**
+ * The work of a link request that runs after the answer, in one job: the fixed lines, and
+ * for an account that gets a link its code, the audit row and one mail. A code or audit row
+ * that cannot be written is one fixed line and no mail; a mail that fails is one fixed line.
+ * Nothing is ever tried twice: a mail that failed after its text was sent may have arrived.
+ */
+async function linkJob(deps: Deps, job: LinkJob): Promise<void> {
+  await afterTheAnswer();
+  if (job.overRecipient) console.error(SIGNIN_LINES.recipient);
+  if (job.overHour) console.error(SIGNIN_LINES.hour);
+  if (job.link === null) return;
+  const { userId, workspaceId, to, origin } = job.link;
+  let link: string;
+  try {
+    const code = await createSignInCode(deps, userId);
+    await deps.db.batch([auditStatement(deps, { event: "signin_link_sent", userId, workspaceId })]);
+    link = signInLink(origin, code);
+  } catch {
+    console.error(SIGNIN_LINES.notMade);
+    return;
+  }
+  try {
+    await mailOf(deps).send(signInMail(to, link));
+  } catch (err) {
     // Only a mail client's own fixed word is repeated: an error's text could hold
     // anything a mail server said, and the address.
     const reason = (err as { reason?: unknown } | null)?.reason;
     console.error(`mail: a sign-in mail could not be sent (${typeof reason === "string" && MAIL_REASONS.includes(reason) ? reason : "failed"})`);
-  });
-  deferOf(deps)(work);
+  }
 }
 
 export function signinRoutes(app: Hono, deps: Deps): void {
@@ -109,10 +144,12 @@ export function signinRoutes(app: Hono, deps: Deps): void {
    * link is mailed only to an active account that signs in by mail, on a site that has an
    * admin, a configured address for links and a mailer, and only while the limits allow.
    *
-   * The database calls, the same for every well-formed address: the two counts per
-   * recipient, the account lookup, the count of the site's mails, the code (or a
-   * statement that stores none), the audit row (or a batch that writes none), and the
-   * two sweeps. With a known network, its count comes first.
+   * Before the answer, the same database calls for every well-formed address: the two
+   * counts per recipient, the account lookup, the count of the site's mails (under the
+   * quiet key when nothing will be sent) and the two sweeps; with a known network, its
+   * count comes first. Then one job is handed to the target for every request; it waits
+   * until the answer is out, and only for an account that gets a link does it write the
+   * code and the audit row and send the mail.
    */
   app.post("/api/v1/signin/request", async (c) => {
     const req = c.req.raw;
@@ -147,23 +184,15 @@ export function signinRoutes(app: Hono, deps: Deps): void {
     // The site's cap counts only mails that are about to be sent. A request that sends
     // nothing makes the same call under the quiet key, and what that answers is not read.
     const cap = await hitLimit(deps, LIMITS_SIGNIN.mailSite, wanted ? SITE_KEY : SITE_QUIET_KEY);
-    if (wanted && cap.over) console.error("signin: the hourly limit of sign-in mails was reached; none was sent");
-
-    if (wanted && !cap.over && account !== null && origin !== null) {
-      const code = await createSignInCode(deps, account.id);
-      await deps.db.batch([auditStatement(deps, { event: "signin_link_sent", userId: account.id, workspaceId: account.workspace_id })]);
-      sendLater(deps, email, signInLink(origin, code));
-    } else {
-      // The same two calls, of the same kinds, storing nothing: no code is made and
-      // nothing is recorded for an address that gets no link.
-      await deps.db.run("INSERT INTO signin_code (id, user_id, hash, created_at, expires_at) SELECT NULL, NULL, NULL, NULL, NULL WHERE 0");
-      await deps.db.batch([{ sql: "INSERT INTO audit (id, at, event) SELECT NULL, NULL, NULL WHERE 0" }]);
-    }
 
     // Housekeeping rides on this request: sessions and codes that are over, old counters.
     // Bounded, the same for every request, and never a reason to fail it.
     await sweepSessions(deps).catch(() => {});
     await sweepCounters(deps);
+
+    // One job for every request, whatever it holds; it starts only after the answer.
+    const link = wanted && !cap.over && account !== null && origin !== null ? { userId: account.id, workspaceId: account.workspace_id, to: email, origin } : null;
+    deferOf(deps)(linkJob(deps, { overRecipient: quarter.over || day.over, overHour: wanted && cap.over, link }));
     return json(200, { ok: true });
   });
 
@@ -234,7 +263,12 @@ export function signinRoutes(app: Hono, deps: Deps): void {
     });
   });
 
-  /** Ends one of the caller's own sessions. Another account's id answers as one that never existed. Touches no cookie. */
+  /**
+   * Ends one of the caller's own sessions. Another account's id answers as one that never
+   * existed. Touches no cookie: ending the caller's own current session this way leaves its
+   * cookie in the browser (it then names no session), and the site's page treats a 204 for
+   * its own session's id as a sign-out.
+   */
   app.delete("/api/v1/sessions/:id", async (c) => {
     const auth = await requireAuth(c.req.raw, deps, { only: "session" });
     if (auth instanceof Response) return auth;
