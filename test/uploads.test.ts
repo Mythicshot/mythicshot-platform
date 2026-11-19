@@ -944,13 +944,62 @@ describe("workspaces and tokens", () => {
   });
 
   it("B's sweep never touches A's old uploads", async () => {
-    const { deps, a, b } = await setup();
+    const { deps, a, b, draftKeys } = await setup();
     let now = 1_800_000_000_000;
     deps.now = () => now;
-    await sendAll(deps, a.token, v2);
+    const stale = await sendAll(deps, a.token, v2);
     now += 2 * DAY;
-    await createUpload(deps, b.token, v2);
+    const keysBefore = await draftKeys();
+    expect((await createUpload(deps, b.token, v2)).status).toBe(201);
     expect(await count(deps, "upload")).toBe(2);
+    // B's sweep closed nothing of A's: the statement that closes stale uploads is held to
+    // the sweeping workspace, so A's upload is still open, with its files, and still commits.
+    expect(await deps.db.first("SELECT closing_at FROM upload WHERE id = ? AND workspace_id = ?", [stale, a.workspaceId])).toEqual({ closing_at: null });
+    expect(await count(deps, "upload WHERE closing_at IS NOT NULL")).toBe(0);
+    expect(await draftKeys()).toEqual(keysBefore);
+    const done = await commit(deps, a.token, stale);
+    expect(done.status, done.text).toBe(201);
+    expect(done.json.steps).toBe(v2.steps.length);
+  });
+
+  it("a create refused twice while room appears both times it is looked for answers the cap's 429, not an error", async () => {
+    const h = await makeDeps({ maxOpenUploads: 1 });
+    const deps = h.deps;
+    const a = await seedWorkspace(deps, "Workspace A");
+    const held = (await createUpload(deps, a.token, v2)).json.upload_id as string;
+    const setClosing = (at: number | null) => deps.db.run("UPDATE upload SET closing_at = ? WHERE id = ?", [at, held]);
+    // Another request closes the one open upload right after each create statement ran
+    // and found the cap full, and it is open again just before the second statement: both
+    // statements are refused, and both looks at why find room.
+    const real = deps.db.run.bind(deps.db);
+    let creates = 0;
+    deps.db.run = async (sql, params) => {
+      if (!sql.startsWith("INSERT INTO upload (id")) return real(sql, params);
+      creates += 1;
+      if (creates === 2) await setClosing(null);
+      const res = await real(sql, params);
+      await setClosing(1_800_000_000_000);
+      return res;
+    };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let refused: Awaited<ReturnType<typeof createUpload>>;
+    try {
+      refused = await createUpload(deps, a.token, v2);
+    } finally {
+      deps.db.run = real;
+    }
+    expect(creates).toBe(2);
+    // What 0.1.7 answered a create that the cap refused: come back in a minute.
+    expect([refused.status, refused.json?.error, refused.headers.get("retry-after")], refused.text).toEqual([429, "too_many_uploads", "60"]);
+    expect(refused.json.detail).toBe("this workspace already has 1 open uploads; finish or cancel one first");
+    expect(errors).not.toHaveBeenCalled();
+    // Nothing was made for it: the one row is the upload that held the place.
+    expect(await deps.db.all("SELECT id FROM upload")).toEqual([{ id: held }]);
+    expect(await count(deps, "upload_step")).toBe(0);
+    // Sent again once things are still, it is created.
+    await setClosing(null);
+    await abort(deps, a.token, held);
+    expect((await createUpload(deps, a.token, v2)).status).toBe(201);
   });
 
   it("every upload route needs the token", async () => {
