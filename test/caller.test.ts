@@ -120,7 +120,7 @@ describe("the caller", () => {
       ["dp_" + "0".repeat(40), 0],
       ["Bearer nope", 0],
       ["Bearer " + a.token.toUpperCase(), 0],
-      ["Bearer " + a.token + " ", 0],
+      ["Bearer  " + a.token, 0],
       ["Basic " + a.token, 0],
       ["Bearer dp_" + "0".repeat(40), 1],
     ];
@@ -279,7 +279,7 @@ describe("the caller", () => {
       ];
       for (const headers of origins) expect(await refusal(await requireAuth(request(withHeaders(headers)), deps)), `${method} ${JSON.stringify(headers).slice(0, 60)}`).toEqual(is403origin);
 
-      const tokens: (string | null)[] = [null, "", "x", mine2.csrf, theirs.csrf, s.csrf.toUpperCase(), s.csrf + "0", s.csrf.slice(0, -1), " " + s.csrf, s.secret, s.sessionId, "0".repeat(64)];
+      const tokens: (string | null)[] = [null, "", "x", mine2.csrf, theirs.csrf, s.csrf.toUpperCase(), s.csrf + "0", s.csrf.slice(0, -1), "x" + s.csrf, s.secret, s.sessionId, "0".repeat(64)];
       for (const token of tokens) {
         const headers: Record<string, string> = { origin: APP, "sec-fetch-site": "same-origin" };
         if (token !== null) headers["x-csrf-token"] = token;

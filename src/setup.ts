@@ -259,7 +259,7 @@ export function setupRoutes(app: Hono, deps: Deps): void {
   // Whether the recorder has used the token yet. Authenticates without touching
   // last_used_at, so the wizard's own polling never counts as a connection.
   app.get("/api/v1/setup/connected", async (c) => {
-    const auth = await requireAuth(c.req.raw, deps, { touch: false });
+    const auth = await requireAuth(c.req.raw, deps, { touch: false, only: "token" });
     if (auth instanceof Response) return auth;
     const row = await deps.db.first<{ last_used_at: number | null }>(
       "SELECT last_used_at FROM api_token WHERE id = ? AND workspace_id = ?",

@@ -553,7 +553,7 @@ describe("sessions", () => {
     await revokeSession(deps, a.userId, justRevoked.sessionId);
     const freshCode = await createSignInCode(deps, a.userId);
 
-    const hash = (kind: string, i: number) => (kind + i.toString(16)).padEnd(64, "0");
+    const hash = (kind: string, i: number) => kind + i.toString(16).padStart(63, "0");
     const session = (id: string, h: string, expiresAt: number, revokedAt: number | null) => ({
       sql: "INSERT INTO session (id, user_id, hash, label, created_at, last_used_at, expires_at, revoked_at) VALUES (?, ?, ?, 'Unknown browser', ?, ?, ?, ?)",
       params: [id, a.userId, h, NOW - SESSION_MS, NOW - SESSION_MS, expiresAt, revokedAt],
