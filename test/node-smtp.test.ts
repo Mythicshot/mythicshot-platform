@@ -331,6 +331,11 @@ describe("smtp client, scripted connection", () => {
       expect(opened()).toBe(0);
       expect(session.raw).toBe("");
     }
+    // Settings or a mail that are not there at all end the same way, not as a stray error.
+    const absent = memory();
+    expect(reasonOf(await outcome(smtpMailer(null as unknown as SmtpSettings, absent.connect).send(MAIL)))).toBe("refused");
+    expect(reasonOf(await outcome(smtpMailer(SETTINGS, absent.connect).send(null as unknown as typeof MAIL)))).toBe("refused");
+    expect(absent.opened()).toBe(0);
     // The message builder refuses the same on its own.
     for (const to of badAddresses) expect(() => buildMessage({ ...MAIL, to }, SETTINGS.from, 0, "abc")).toThrow(SmtpError);
     for (const subject of badSubjects) expect(() => buildMessage({ ...MAIL, subject }, SETTINGS.from, 0, "abc")).toThrow(SmtpError);

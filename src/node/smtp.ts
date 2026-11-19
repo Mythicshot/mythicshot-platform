@@ -386,6 +386,7 @@ async function converse(wire: Wire, s: SmtpSettings, mail: Mail, message: string
 
 async function deliver(s: SmtpSettings, connect: (s: SmtpSettings) => Promise<Duplex>, mail: Mail): Promise<void> {
   // Everything is checked before a connection exists, so a refusal writes nothing.
+  if (s === null || typeof s !== "object") throw new SmtpError("refused");
   checkEnvelope(mail, s.from);
   if (typeof s.helo !== "string" || !HELO.test(s.helo)) throw new SmtpError("refused");
   for (const secret of [s.user, s.password]) {
