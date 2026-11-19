@@ -267,6 +267,17 @@ describe("asking for a sign-in link", () => {
     expect(left).toEqual([{ window_start: clock.now - (clock.now % hour) }]);
   });
 
+  it("the job starts only after the answer, also when nothing in it has to wait", async () => {
+    const { deps } = await site();
+    const kinds = recordKinds(deps);
+    // Every digest answers at once, so the job itself never yields on its way to the database:
+    // only the wait for the answer keeps its writes after it. (A digest of zeros is enough for
+    // one stranger's request: it is a key no limit is near.)
+    vi.spyOn(crypto.subtle, "digest").mockImplementation(() => Promise.resolve(new ArrayBuffer(32)));
+    await ask(deps, STRANGER, { app: answered([kinds]) });
+    expect(split(kinds)).toEqual({ before: AWAITED, after: JOB });
+  });
+
   it("a code or audit row that cannot be written still answers as always, and sends nothing", async () => {
     const { deps, mail, a } = await site();
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -527,6 +538,8 @@ describe("asking for a sign-in link", () => {
     const over = await ask(deps, b.email);
     expect(seen(over)).toEqual(seen(hundredth));
     expect(kinds).toEqual([...AWAITED, ...JOB]);
+    // The job wrote all the same: both its calls changed the pad's row.
+    expect(await padCount(deps)).toBe(12);
     expect(mail.sent).toHaveLength(1);
     expect(errors.mock.calls).toEqual([[HOUR_LINE]]);
     // No code was made for a mail that was not sent, and nothing recorded.

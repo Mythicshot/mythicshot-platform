@@ -63,7 +63,14 @@ export const PAD_BUCKET = "signin_pad";
 export const PAD_KEY = "pad";
 const PAD_WINDOW_MS = 3_600_000;
 
-/** The statement that adds one to this hour's pad counter: it always changes one row. */
+/**
+ * The statement that adds one to this hour's pad counter: it always changes one row.
+ *
+ * It is written here, against `rate_counter` directly, and not through src/rate.ts: the
+ * pad is no limit, so `hitLimit` (which pairs a count with a limit's number) does not fit
+ * it, and a counter row costs no new table. No limit reads the pad bucket; it is in no
+ * entry of LIMITS_SIGNIN, and `sweepCounters` removes its old rows with every other counter's.
+ */
 function padStatement(deps: Deps): Stmt {
   const now = deps.now();
   return {
