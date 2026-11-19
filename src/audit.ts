@@ -2,10 +2,12 @@
 // web framework. This file is the only writer of the `audit` table.
 //
 // A row holds the time, the event, the acting account's id, the workspace id, a subject
-// id (a session or a workspace) and, for some events, a few numbers. It never holds an
-// email, a network address, a sign-in code, a cookie, a token or a digest of one: the
-// writer below refuses each of those shapes, so a mistake in a caller fails loudly in
-// its tests instead of putting a secret in the database.
+// id (a session, an account or a workspace) and, for some events, a few numbers. It never
+// holds an email, a network address, a sign-in code, a cookie, a token or a digest of
+// one. The writer below takes only what a row is meant to hold (ids of the one form every
+// row id has, whole numbers, nulls and short lowercase words) and refuses everything
+// else, so a mistake in a caller fails loudly in its tests instead of putting a secret
+// in the database.
 import type { Deps, Stmt } from "./ports.ts";
 
 export const AUDIT_EVENTS = [
@@ -22,66 +24,81 @@ export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 
 export type AuditEntry = {
   event: AuditEvent;
-  /** The account that acted. */
+  /** The id of the account that acted. */
   userId?: string | null;
+  /** The id of the workspace it happened in. */
   workspaceId?: string | null;
-  /** The id of what was acted on: a session or a workspace. */
+  /** The id of what was acted on: a session, an account or a workspace. */
   subject?: string | null;
-  /** A flat record of whole numbers and short plain words, such as the old and new allowance. */
-  detail?: Record<string, number | string> | null;
+  /**
+   * A flat record of at most 8 entries. A value is a whole number, null (such as an
+   * allowance that is the site's default) or a short lowercase word.
+   */
+  detail?: Record<string, number | string | null> | null;
 };
 
-/** The longest text one field or one detail value may hold. */
-const MAX_TEXT_CHARS = 200;
-
 /**
- * All a recorded text may be made of: ASCII letters, digits, the underscore, the dot, the
- * hyphen and the space. That alone keeps out an email (@), a cookie (=), an IPv6 address
- * (:), a line break and every character that is not ASCII.
+ * The form of every row id in this codebase, as `newId` in src/auth.ts makes them: a
+ * prefix of two to four lowercase letters (`ws`, `usr`, `tok`, `tour`, `ch`, `st`, `up`,
+ * and `aud` here), an underscore and 24 lowercase hex characters. A token, a sign-in
+ * code and a session secret have more hex than that, so none of them is an id.
  */
-const PLAIN_TEXT = /^[A-Za-z0-9_. -]*$/;
+const ROW_ID = /^[a-z]{2,4}_[0-9a-f]{24}$/;
 
-/** The prefix of a token (`dp_`), a sign-in code (`dpl_`) or a session secret (`dps_`) with hex after it, whole or cut short. */
-const SECRET_PREFIX = /dp[ls]?_[0-9a-f]{8}/i;
+/** A detail key or text value: a lowercase letter, then at most 39 lowercase letters, digits and underscores. */
+const WORD = /^[a-z][a-z0-9_]{0,39}$/;
 
-/** 32 or more hex characters in a row: a digest, or the random part of a secret. A row id has 24. */
-const LONG_HEX = /[0-9a-f]{32}/i;
+/** The prefix of a token (`dp_`), a sign-in code (`dpl_`) or a session secret (`dps_`) with hex after it: a word can be most of one. */
+const SECRET_PREFIX = /dp[ls]?_[0-9a-f]{8}/;
 
-/** Four numbers with dots between them: an IPv4 address. */
-const DOTTED_QUAD = /(?:^|[^0-9])[0-9]{1,3}(?:\.[0-9]{1,3}){3}(?:[^0-9]|$)/;
+/** 32 or more hex characters in a row: a digest, or the random part of a secret. */
+const LONG_HEX = /[0-9a-f]{32}/;
+
+/** Keys that name a part of every object. Refused, so a reader of the JSON can never be confused by one. */
+const OBJECT_PARTS = new Set(["__proto__", "constructor", "prototype"]);
+
+/** The most entries a detail may have. */
+const MAX_DETAIL_ENTRIES = 8;
 
 /** The one refusal for anything that must not be recorded. Fixed text: it never repeats the value. */
 function refuse(): never {
   throw new Error("audit: a value that must not be recorded");
 }
 
-/** Throws unless `s` is short plain text in none of the secret shapes. */
-function checkText(s: unknown): asserts s is string {
-  if (typeof s !== "string" || s.length > MAX_TEXT_CHARS) refuse();
-  if (!PLAIN_TEXT.test(s) || SECRET_PREFIX.test(s) || LONG_HEX.test(s) || DOTTED_QUAD.test(s)) refuse();
-}
-
-/** An id field: absent, null, or text that passes `checkText`. */
-function idField(v: string | null | undefined): string | null {
+/** An id field: absent or null, or a row id. */
+function idField(v: unknown): string | null {
   if (v === undefined || v === null) return null;
-  checkText(v);
+  if (typeof v !== "string" || !ROW_ID.test(v)) refuse();
   return v;
 }
 
-/** The detail as JSON text, or null. Keys are checked like values; a number must be a whole one that JSON keeps exactly. */
-function detailText(detail: AuditEntry["detail"]): string | null {
+/** Throws unless `s` is a word that is no part of a secret. */
+function checkWord(s: unknown): asserts s is string {
+  if (typeof s !== "string" || !WORD.test(s) || SECRET_PREFIX.test(s) || LONG_HEX.test(s)) refuse();
+}
+
+/** The detail as JSON text, or null when there is none. */
+function detailText(detail: unknown): string | null {
   if (detail === undefined || detail === null) return null;
   if (typeof detail !== "object" || Array.isArray(detail)) refuse();
-  const out: Record<string, number | string> = {};
-  for (const [key, value] of Object.entries(detail)) {
-    checkText(key);
-    if (key === "") refuse();
-    if (typeof value === "number") {
+  const proto: unknown = Object.getPrototypeOf(detail);
+  if (proto !== Object.prototype && proto !== null) refuse();
+  const entries = Object.entries(detail as Record<string, unknown>);
+  if (entries.length > MAX_DETAIL_ENTRIES) refuse();
+  // Built on no prototype, so no key can be anything but an entry.
+  const out: Record<string, number | string | null> = Object.create(null);
+  for (const [key, value] of entries) {
+    checkWord(key);
+    if (OBJECT_PARTS.has(key)) refuse();
+    if (value === null) {
+      out[key] = null;
+    } else if (typeof value === "number") {
       if (!Number.isSafeInteger(value)) refuse();
+      out[key] = value;
     } else {
-      checkText(value);
+      checkWord(value);
+      out[key] = value;
     }
-    out[key] = value;
   }
   return JSON.stringify(out);
 }
@@ -99,12 +116,20 @@ function newAuditId(): string {
  * Nothing is written by calling this. The time is `deps.now()`.
  *
  * Throws `Error("audit: unknown event")` for an event outside `AUDIT_EVENTS`, and
- * `Error("audit: a value that must not be recorded")` when an id, a detail key or a
- * detail value is not short plain text (ASCII letters, digits, `_`, `.`, `-` and the
- * space, at most 200 characters) or looks like a token, a sign-in code, a session secret
- * or cookie, a digest, an email or a network address; also for a detail that is not a
- * flat record, and for a number that is not a safe whole number. Neither message
- * repeats the value.
+ * `Error("audit: a value that must not be recorded")` when:
+ *
+ * - `userId`, `workspaceId` or `subject` is neither null nor a row id
+ *   (`^[a-z]{2,4}_[0-9a-f]{24}$`);
+ * - the detail is not a plain flat record of at most 8 entries;
+ * - a detail key, or a detail value that is text, is not a word
+ *   (`^[a-z][a-z0-9_]{0,39}$`, so never empty), is `__proto__`, `constructor` or
+ *   `prototype` as a key, or holds most of a token, a sign-in code, a session secret or
+ *   a digest;
+ * - a detail value is anything but such a word, a safe whole number or null.
+ *
+ * So no email, network address, cookie, token, code or digest can pass. Neither message
+ * repeats the value. The JSON of the largest detail is under 1000 bytes, the most the
+ * table takes.
  */
 export function auditStatement(deps: Deps, e: AuditEntry): Stmt {
   if (typeof e.event !== "string" || !(AUDIT_EVENTS as readonly string[]).includes(e.event)) throw new Error("audit: unknown event");
