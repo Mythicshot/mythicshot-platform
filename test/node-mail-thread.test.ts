@@ -3,7 +3,7 @@
 // 127.0.0.1; a stand-in worker, written to a scratch folder, plays the failures a real
 // server cannot be made to play on cue (a crash, a hang, a slow send). No real mail server
 // is ever contacted and no name is looked up.
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as net from "node:net";
@@ -674,20 +674,12 @@ m.send({ to: "a@example.com", subject: "slow 300", text: "x" }).then(() => conso
     expect(existsSync(MAIL_WORKER_URL)).toBe(true);
   });
 
-  describe("found and run from each layout, with the process's own trust store", () => {
+  // The build (dist/node/mail-worker.js) is run from the unpacked cPanel archive in
+  // test/node-cpanel-package.test.ts; here the source, by Node itself, from another folder.
+  describe("found and run from the source, with the process's own trust store", () => {
     const trusted = testCertificate();
     const caFile = join(scratch, "ca.pem");
-    let build = "";
-    beforeAll(() => {
-      writeFileSync(caFile, trusted.cert);
-      // The Node build, as npm run build:node and the cPanel packager make it, in a scratch folder.
-      build = join(scratch, "build");
-      const tsc = join(ROOT, "node_modules", "typescript", "bin", "tsc");
-      const made = spawnSync(process.execPath, [tsc, "-p", "tsconfig.build.json", "--outDir", build], { cwd: ROOT, encoding: "utf8", windowsHide: true });
-      expect(made.status, made.stdout + made.stderr).toBe(0);
-      // Beside dist/ there is always the package's own package.json, which makes the build ES modules.
-      writeFileSync(join(build, "package.json"), JSON.stringify({ type: "module" }));
-    }, 120_000);
+    beforeAll(() => writeFileSync(caFile, trusted.cert));
 
     const sendFrom = async (moduleUrl: string, cwd: string) => {
       const server = await fakeServer(trusted);
@@ -703,17 +695,6 @@ catch (e) { console.log("failed " + e.reason + " " + e.bodyWritten); }
       );
       return { result, server };
     };
-
-    it("the build: dist/node/mail-worker.js, from any working folder", async () => {
-      expect(existsSync(join(build, "node", "mail-worker.js"))).toBe(true);
-      const { result, server } = await sendFrom(pathToFileURL(join(build, "node", "mail-thread.js")).href, tmpdir());
-      expect(result).not.toBe("timeout");
-      if (result === "timeout") return;
-      expect(result.out).toBe("sent build/node/mail-worker.js\n");
-      expect(result.err).toBe("");
-      expect(server.sessions).toHaveLength(1);
-      expect(server.sessions[0].bodies).toHaveLength(1);
-    }, 30_000);
 
     it("the source, run by Node itself: src/node/mail-worker.ts", async () => {
       const { result, server } = await sendFrom(THREAD_URL, tmpdir());
