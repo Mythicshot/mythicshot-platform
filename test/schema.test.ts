@@ -1,15 +1,25 @@
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { isUniqueViolation, type Deps } from "../src/ports.ts";
+import { parseUsername } from "../src/usernames.ts";
+
+/** The tables migration 0008 adds. */
+const ACCOUNT_TABLES = ["audit", "membership", "rate_counter", "session", "signin_code", "signin_method"];
 
 const TABLES = [
   "api_token",
+  "audit",
   "chapter",
   "deleted_object",
+  "membership",
   "public_object",
   "publish_job",
+  "rate_counter",
   "replaced_object",
+  "session",
   "setup",
+  "signin_code",
+  "signin_method",
   "snapshot",
   "snapshot_object",
   "step",
@@ -256,5 +266,392 @@ describe("schema", () => {
       ]),
     );
     expect(await deps.db.first("SELECT count(*) AS n FROM user WHERE email = 'sam@example.com'")).toEqual({ n: 1 });
+  });
+
+  // Accounts (migration 0008).
+
+  const HASH_A = "a".repeat(64);
+  const HASH_B = "b".repeat(64);
+
+  /** The one user row a seeded workspace has. */
+  async function ownerOf(deps: Deps, workspaceId: string): Promise<string> {
+    return (await deps.db.first<{ id: string }>("SELECT id FROM user WHERE workspace_id = ?", [workspaceId]))!.id;
+  }
+
+  const setUsername = (deps: Deps, userId: string, username: string | null) =>
+    deps.db.run("UPDATE user SET username = ? WHERE id = ?", [username, userId]);
+
+  const insertSession = (deps: Deps, id: string, userId: string, hash: string) =>
+    deps.db.run("INSERT INTO session (id, user_id, hash, label, created_at, last_used_at, expires_at) VALUES (?, ?, ?, 'Firefox on Linux', ?, ?, ?)", [id, userId, hash, NOW, NOW, NOW + 1000]);
+
+  const insertCode = (deps: Deps, id: string, userId: string, hash: string) =>
+    deps.db.run("INSERT INTO signin_code (id, user_id, hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)", [id, userId, hash, NOW, NOW + 1000]);
+
+  it("the account tables are strict like every other table, and have no column for a secret in plain text", async () => {
+    const { deps } = await makeDeps();
+    const tables = await appTables(deps);
+    for (const t of tables) expect(t.sql, t.name).toMatch(/\)\s*STRICT$/);
+    for (const name of ACCOUNT_TABLES) {
+      const columns = (await deps.db.all<{ name: string }>(`SELECT name FROM pragma_table_info('${name}')`)).map((c) => c.name);
+      expect(columns.length, name).toBeGreaterThan(0);
+      for (const c of columns) expect(c, name).not.toMatch(/secret|token|password|cookie|code|email|address/);
+    }
+  });
+
+  it("a username is unique, lowercase and 3 to 30 long, and many accounts may have none", async () => {
+    const { deps } = await makeDeps();
+    const users: string[] = [];
+    for (const name of ["A", "B", "C"]) users.push(await ownerOf(deps, (await seedWorkspace(deps, name)).workspaceId));
+    // Three accounts, none with a username: the unique index leaves them alone.
+    expect(await deps.db.all("SELECT username FROM user")).toEqual([{ username: null }, { username: null }, { username: null }]);
+
+    await setUsername(deps, users[0], "sam");
+    expect(isUniqueViolation(await rejection(setUsername(deps, users[1], "sam")))).toBe(true);
+    // Capitals are never stored, so they cannot slip past the unique index.
+    await rejection(setUsername(deps, users[1], "Sam"));
+    await rejection(setUsername(deps, users[1], "SAM"));
+    await rejection(setUsername(deps, users[1], "ab"));
+    await rejection(setUsername(deps, users[1], ""));
+    await rejection(setUsername(deps, users[1], "a".repeat(31)));
+    await setUsername(deps, users[1], "a".repeat(30));
+    await setUsername(deps, users[2], "abc");
+    expect(await deps.db.all("SELECT username FROM user ORDER BY username")).toEqual([{ username: "a".repeat(30) }, { username: "abc" }, { username: "sam" }]);
+    // A name can be given up again, and two accounts can then both have none.
+    await setUsername(deps, users[1], null);
+    await setUsername(deps, users[2], null);
+    expect(await deps.db.first("SELECT count(*) AS n FROM user WHERE username IS NULL")).toEqual({ n: 2 });
+  });
+
+  it("the database refuses every username the shape rule refuses, and holds no list of reserved names", async () => {
+    const { deps } = await makeDeps();
+    const user = await ownerOf(deps, (await seedWorkspace(deps, "A")).workspaceId);
+    const names = [
+      "sam", "sam-9", "a-b-c", "x1y", "a".repeat(30), "ab", "a".repeat(31), "9am", "-sam", "sam-", "sa--m", "s-a-", "sam.b", "sam_b", "sa m", " sam", "sam ", "sam\n", "s\tam",
+      "Sam", "sAm", "s\u00e1m", "sam\u0430", "\u017fam", "sam\u200b", "sam*", "sam]", "sam[", "sam^", "sam?", "sam%", "sam'", 'sam"', "sam/", "sam\\", "sam@x", "sam:x", "a-b", "a--", "abc-", "0ab", "ab0", "a0-", "a-0",
+    ];
+    for (const name of names) {
+      // The rule's own answer for the stored form: a name the rule would first trim or lower is not a stored form.
+      const parsed = parseUsername(name);
+      const shapeOk = parsed.ok ? parsed.username === name : parsed.problem === "reserved";
+      let stored = true;
+      try {
+        await setUsername(deps, user, name);
+      } catch {
+        stored = false;
+      }
+      expect(stored, JSON.stringify(name)).toBe(shapeOk);
+      await setUsername(deps, user, null);
+    }
+    // Reserved names are the rule's business (src/usernames.ts), not the database's.
+    expect(parseUsername("admin")).toEqual({ ok: false, problem: "reserved" });
+    await setUsername(deps, user, "admin");
+  });
+
+  it("status and is_admin take only their values", async () => {
+    const { deps } = await makeDeps();
+    const { workspaceId } = await seedWorkspace(deps, "A");
+    const user = await ownerOf(deps, workspaceId);
+    // A row written without them, as every version before wrote it, is an active account that is no admin.
+    await deps.db.run("INSERT INTO user (id, workspace_id, email, created_at) VALUES ('usr_old', ?, 'old@example.com', ?)", [workspaceId, NOW]);
+    expect(await deps.db.all("SELECT username, status, is_admin FROM user ORDER BY id")).toEqual([
+      { username: null, status: "active", is_admin: 0 },
+      { username: null, status: "active", is_admin: 0 },
+    ]);
+    for (const [sql, params] of [
+      ["UPDATE user SET status = ? WHERE id = ?", ["gone", user]],
+      ["UPDATE user SET status = ? WHERE id = ?", ["Active", user]],
+      ["UPDATE user SET status = ? WHERE id = ?", ["", user]],
+      ["UPDATE user SET status = ? WHERE id = ?", [null, user]],
+      ["UPDATE user SET is_admin = ? WHERE id = ?", [2, user]],
+      ["UPDATE user SET is_admin = ? WHERE id = ?", [-1, user]],
+      ["UPDATE user SET is_admin = ? WHERE id = ?", [null, user]],
+      ["UPDATE user SET is_admin = ? WHERE id = ?", ["yes", user]],
+    ] as [string, (string | number | null)[]][]) {
+      await rejection(deps.db.run(sql, params));
+    }
+    expect(await deps.db.first("SELECT status, is_admin FROM user WHERE id = ?", [user])).toEqual({ status: "active", is_admin: 0 });
+    await deps.db.run("UPDATE user SET status = 'disabled', is_admin = 1 WHERE id = ?", [user]);
+    expect(await deps.db.first("SELECT status, is_admin, typeof(is_admin) AS t FROM user WHERE id = ?", [user])).toEqual({ status: "disabled", is_admin: 1, t: "integer" });
+  });
+
+  it("an account has at most one membership for now", async () => {
+    const { deps } = await makeDeps();
+    const a = await seedWorkspace(deps, "A");
+    const b = await seedWorkspace(deps, "B");
+    const userA = await ownerOf(deps, a.workspaceId);
+    const insert = (workspaceId: string, userId: string, role = "owner") =>
+      deps.db.run("INSERT INTO membership (workspace_id, user_id, role, created_at) VALUES (?, ?, ?, ?)", [workspaceId, userId, role, NOW]);
+    // The owner of A cannot also be a member of B, nor twice of A.
+    expect(isUniqueViolation(await rejection(insert(b.workspaceId, userA)))).toBe(true);
+    expect(isUniqueViolation(await rejection(insert(a.workspaceId, userA)))).toBe(true);
+    // A membership names a real workspace and a real account, and the one role there is.
+    await deps.db.run("INSERT INTO user (id, workspace_id, email, created_at) VALUES ('usr_new', ?, 'new@example.com', ?)", [b.workspaceId, NOW]);
+    await rejection(insert("ws_missing", "usr_new"));
+    await rejection(insert(b.workspaceId, "usr_missing"));
+    await rejection(insert(b.workspaceId, "usr_new", "member"));
+    await rejection(insert(b.workspaceId, "usr_new", "Owner"));
+    expect(await count(deps, "membership")).toBe(2);
+    await insert(b.workspaceId, "usr_new");
+    expect(await deps.db.all("SELECT workspace_id, role FROM membership WHERE user_id = 'usr_new'")).toEqual([{ workspace_id: b.workspaceId, role: "owner" }]);
+  });
+
+  it("a sign-in method is one of the known kinds, once per account", async () => {
+    const { deps } = await makeDeps();
+    const user = await ownerOf(deps, (await seedWorkspace(deps, "A")).workspaceId);
+    const insert = (userId: string, kind: string) => deps.db.run("INSERT INTO signin_method (user_id, kind, created_at) VALUES (?, ?, ?)", [userId, kind, NOW]);
+    expect(isUniqueViolation(await rejection(insert(user, "email_link")))).toBe(true);
+    await rejection(insert(user, "password"));
+    await rejection(insert("usr_missing", "email_link"));
+    expect(await deps.db.all("SELECT user_id, kind FROM signin_method")).toEqual([{ user_id: user, kind: "email_link" }]);
+  });
+
+  it("a session and a sign-in code hash are unique", async () => {
+    const { deps } = await makeDeps();
+    const a = await ownerOf(deps, (await seedWorkspace(deps, "A")).workspaceId);
+    const b = await ownerOf(deps, (await seedWorkspace(deps, "B")).workspaceId);
+    await insertSession(deps, "ses_1", a, HASH_A);
+    expect(isUniqueViolation(await rejection(insertSession(deps, "ses_2", b, HASH_A)))).toBe(true);
+    expect(isUniqueViolation(await rejection(insertSession(deps, "ses_1", b, HASH_B)))).toBe(true);
+    await insertSession(deps, "ses_2", a, HASH_B);
+    await insertCode(deps, "sic_1", a, HASH_A);
+    expect(isUniqueViolation(await rejection(insertCode(deps, "sic_2", b, HASH_A)))).toBe(true);
+    await insertCode(deps, "sic_2", b, HASH_B);
+    // Both belong to a real account.
+    await rejection(insertSession(deps, "ses_3", "usr_missing", "c".repeat(64)));
+    await rejection(insertCode(deps, "sic_3", "usr_missing", "c".repeat(64)));
+    expect(await deps.db.all("SELECT id, user_id, revoked_at FROM session ORDER BY id")).toEqual([
+      { id: "ses_1", user_id: a, revoked_at: null },
+      { id: "ses_2", user_id: a, revoked_at: null },
+    ]);
+    expect(await deps.db.all("SELECT id, user_id, used_at, session_id FROM signin_code ORDER BY id")).toEqual([
+      { id: "sic_1", user_id: a, used_at: null, session_id: null },
+      { id: "sic_2", user_id: b, used_at: null, session_id: null },
+    ]);
+  });
+
+  it("a session or sign-in code row holds a SHA-256 hex digest and nothing else in its hash column", async () => {
+    const { deps } = await makeDeps();
+    const a = await ownerOf(deps, (await seedWorkspace(deps, "A")).workspaceId);
+    const notHashes = ["dps_" + "a".repeat(64), "dpl_" + "a".repeat(40), "dp_" + "a".repeat(40), "a".repeat(63), "a".repeat(65), "A".repeat(64), "g".repeat(64), "a".repeat(63) + " ", ""];
+    for (const [i, v] of notHashes.entries()) {
+      await rejection(insertSession(deps, `ses_${i}`, a, v));
+      await rejection(insertCode(deps, `sic_${i}`, a, v));
+    }
+    expect(await count(deps, "session")).toBe(0);
+    expect(await count(deps, "signin_code")).toBe(0);
+    await insertSession(deps, "ses_ok", a, "0123456789abcdef".repeat(4));
+    await insertCode(deps, "sic_ok", a, "0123456789abcdef".repeat(4));
+  });
+
+  it("a rate counter is one row per bucket, key and window, and never counts below zero", async () => {
+    const { deps } = await makeDeps();
+    const insert = (bucket: string, key: string, start: number, n: number) =>
+      deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?)", [bucket, key, start, n]);
+    await insert("link_recipient", HASH_A, 900_000, 1);
+    expect(isUniqueViolation(await rejection(insert("link_recipient", HASH_A, 900_000, 1)))).toBe(true);
+    await insert("link_recipient", HASH_A, 1_800_000, 1);
+    await insert("link_recipient", HASH_B, 900_000, 1);
+    await insert("link_network", HASH_A, 900_000, 1);
+    await rejection(insert("mail_site", "all", 0, -1));
+    // The statement a limiter needs: add one, or start at one.
+    const hit = "INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, 1) ON CONFLICT (bucket, key, window_start) DO UPDATE SET count = count + 1";
+    await deps.db.run(hit, ["link_recipient", HASH_A, 900_000]);
+    await deps.db.run(hit, ["code_network", HASH_A, 900_000]);
+    expect(await deps.db.all("SELECT bucket, key, window_start, count FROM rate_counter ORDER BY bucket, key, window_start")).toEqual([
+      { bucket: "code_network", key: HASH_A, window_start: 900_000, count: 1 },
+      { bucket: "link_network", key: HASH_A, window_start: 900_000, count: 1 },
+      { bucket: "link_recipient", key: HASH_A, window_start: 900_000, count: 2 },
+      { bucket: "link_recipient", key: HASH_A, window_start: 1_800_000, count: 1 },
+      { bucket: "link_recipient", key: HASH_B, window_start: 900_000, count: 1 },
+    ]);
+  });
+
+  it("nothing new cascades", async () => {
+    const { deps } = await makeDeps();
+    const { workspaceId } = await seedWorkspace(deps, "A");
+    const user = await ownerOf(deps, workspaceId);
+    await insertSession(deps, "ses_1", user, HASH_A);
+    await insertCode(deps, "sic_1", user, HASH_A);
+    const tables = await appTables(deps);
+    for (const name of ACCOUNT_TABLES) {
+      const t = tables.find((x) => x.name === name);
+      expect(t, name).toBeDefined();
+      expect(t!.sql, name).not.toMatch(/cascade|set null|set default/i);
+    }
+    expect(await deps.db.all("SELECT name FROM sqlite_master WHERE type = 'trigger'")).toEqual([]);
+
+    // An account cannot be deleted out from under any row that names it: each kind of
+    // row alone holds it, and nothing of them goes with a refused delete.
+    const holders: [string, string][] = [
+      ["session", "DELETE FROM session WHERE user_id = ?"],
+      ["signin_code", "DELETE FROM signin_code WHERE user_id = ?"],
+      ["signin_method", "DELETE FROM signin_method WHERE user_id = ?"],
+      ["membership", "DELETE FROM membership WHERE user_id = ?"],
+    ];
+    for (const [table, remove] of holders) {
+      await rejection(deps.db.run("DELETE FROM user WHERE id = ?", [user]));
+      expect(await count(deps, "user"), table).toBe(1);
+      expect(await count(deps, table), table).toBe(1);
+      await deps.db.run(remove, [user]);
+    }
+    // The audit record names ids without pointing at their rows, so it outlives them.
+    await deps.db.run("INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES ('aud_1', ?, 'signin', ?, ?, 'ses_1', NULL)", [NOW, user, workspaceId]);
+    await deps.db.run("INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES ('aud_2', ?, 'signin', 'usr_gone', 'ws_gone', NULL, NULL)", [NOW]);
+    await deps.db.run("DELETE FROM user WHERE id = ?", [user]);
+    expect(await count(deps, "user")).toBe(0);
+    expect(await deps.db.all("SELECT id, user_id FROM audit ORDER BY id")).toEqual([
+      { id: "aud_1", user_id: user },
+      { id: "aud_2", user_id: "usr_gone" },
+    ]);
+  });
+
+  // SQLite's length() and GLOB stop at the first NUL character of a text, so a CHECK made
+  // of them alone would pass anything hidden behind one. Each such CHECK also compares the
+  // length in bytes. The NUL is built inside the statement with char(0), so these cases do
+  // not depend on what either target's binding does with one.
+
+  const SECRET = "dps_" + "0123456789abcdef".repeat(4);
+
+  /** The bytes of a hex string as text, one character per byte. */
+  const bytesOf = (hex: string) => (hex.match(/../g) ?? []).map((b) => String.fromCharCode(parseInt(b, 16))).join("");
+
+  it("a username cannot hide anything behind a NUL character", async () => {
+    const { deps } = await makeDeps();
+    const user = await ownerOf(deps, (await seedWorkspace(deps, "A")).workspaceId);
+    for (const tail of ["x", "Admin", " <b>", "-", "--", SECRET, "x".repeat(500)]) {
+      await rejection(deps.db.run("UPDATE user SET username = 'abc' || char(0) || ? WHERE id = ?", [tail, user]));
+    }
+    await rejection(deps.db.run("UPDATE user SET username = 'abc' || char(0) WHERE id = ?", [user]));
+    await rejection(deps.db.run("UPDATE user SET username = char(0) || 'abc' WHERE id = ?", [user]));
+    await rejection(deps.db.run("UPDATE user SET username = 'ab' || char(0) || 'c' WHERE id = ?", [user]));
+    // Letters outside ASCII are refused whether they are counted in characters or in bytes.
+    for (const name of ["s\u00e1m", "sam\u00e9", "\u00e9".repeat(3), "\u00e9".repeat(15), "sam\u{1f600}", "\u0430bc"]) await rejection(setUsername(deps, user, name));
+    expect(await deps.db.first("SELECT username FROM user WHERE id = ?", [user])).toEqual({ username: null });
+    // The same through a bound value. Whatever a target's binding does with a NUL, no stored name holds one or anything after it.
+    for (const name of ["abc\u0000x", "abc\u0000" + SECRET, "abc\u0000"]) {
+      let outcome = "stored";
+      try {
+        await setUsername(deps, user, name);
+      } catch {
+        outcome = "refused";
+      }
+      const stored = (await deps.db.first<{ none: number; h: string }>("SELECT username IS NULL AS none, hex(CAST(username AS BLOB)) AS h FROM user WHERE id = ?", [user]))!;
+      if (stored.none === 0) outcome += " as " + bytesOf(stored.h);
+      if (stored.none === 0) expect(bytesOf(stored.h), JSON.stringify(name)).toMatch(/^[a-z][a-z0-9-]{2,29}$/);
+      await setUsername(deps, user, null);
+    }
+  });
+
+  it("a bound NUL character reaches the database whole on this target, so the byte-length guard is what stops it", async () => {
+    const { deps } = await makeDeps();
+    const a = await ownerOf(deps, (await seedWorkspace(deps, "A")).workspaceId);
+    // A column with no CHECK on its content: the label of a session, under its cap.
+    await deps.db.run("INSERT INTO session (id, user_id, hash, label, created_at, last_used_at, expires_at) VALUES ('ses_1', ?, ?, ?, 1, 1, 2)", [a, HASH_A, "x\u0000y"]);
+    expect(await deps.db.first("SELECT hex(CAST(label AS BLOB)) AS h, length(label) AS chars, length(CAST(label AS BLOB)) AS bytes FROM session")).toEqual({ h: "780079", chars: 1, bytes: 3 });
+    // The same value as a username or a hash is refused by the CHECK, not cut short by the binding.
+    await rejection(setUsername(deps, a, "abc\u0000x"));
+    await rejection(insertSession(deps, "ses_2", a, HASH_B + "\u0000x"));
+    await rejection(insertCode(deps, "sic_1", a, HASH_B + "\u0000x"));
+    expect(await deps.db.first("SELECT (SELECT count(*) FROM session) AS s, (SELECT count(*) FROM signin_code) AS c, (SELECT username FROM user WHERE id = ?) AS u", [a])).toEqual({ s: 1, c: 0, u: null });
+  });
+
+  it("a session or sign-in code hash cannot hide a secret behind a NUL character, and is counted in bytes", async () => {
+    const { deps } = await makeDeps();
+    const a = await ownerOf(deps, (await seedWorkspace(deps, "A")).workspaceId);
+    const session = (hashSql: string, params: (string | number)[]) =>
+      deps.db.run(`INSERT INTO session (id, user_id, hash, label, created_at, last_used_at, expires_at) VALUES ('ses_x', ?, ${hashSql}, 'Firefox on Linux', 1, 1, 2)`, [a, ...params]);
+    const code = (hashSql: string, params: (string | number)[]) =>
+      deps.db.run(`INSERT INTO signin_code (id, user_id, hash, created_at, expires_at) VALUES ('sic_x', ?, ${hashSql}, 1, 2)`, [a, ...params]);
+    const cases: [string, string[]][] = [
+      ["? || char(0) || ?", [HASH_A, SECRET]],
+      ["? || char(0) || ?", [HASH_A, "x"]],
+      ["? || char(0)", [HASH_A]],
+      ["? || char(0) || ?", ["a".repeat(63), SECRET]],
+      ["? || char(0) || ?", ["a".repeat(32), "a".repeat(31)]],
+      ["char(0) || ?", [HASH_A]],
+      // 64 characters, more than 64 bytes: a letter outside ASCII among the hex.
+      ["?", ["a".repeat(63) + "\u00e9"]],
+      ["?", ["\u00e9".repeat(32)]],
+      ["?", ["\u00e9".repeat(64)]],
+    ];
+    for (const [sql, params] of cases) {
+      await rejection(session(sql, params));
+      await rejection(code(sql, params));
+    }
+    // A bound NUL: refused, or cut off by the binding before the database sees it. Either way no row holds one.
+    for (const insert of [session, code]) {
+      try {
+        await insert("?", [HASH_A + "\u0000" + SECRET]);
+      } catch {
+        // Refused.
+      }
+    }
+    for (const t of ["session", "signin_code"]) {
+      for (const row of await deps.db.all<{ h: string }>(`SELECT hex(CAST(hash AS BLOB)) AS h FROM ${t}`)) expect(bytesOf(row.h), t).toBe(HASH_A);
+    }
+  });
+
+  it("free text in the account tables is capped in bytes", async () => {
+    const { deps } = await makeDeps();
+    const a = await ownerOf(deps, (await seedWorkspace(deps, "A")).workspaceId);
+    let n = 0;
+    const session = (labelSql: string, params: (string | number)[] = []) =>
+      deps.db.run(`INSERT INTO session (id, user_id, hash, label, created_at, last_used_at, expires_at) VALUES (?, ?, ?, ${labelSql}, 1, 1, 2)`, [`ses_${++n}`, a, n.toString(16).padStart(64, "0"), ...params]);
+    // A session's label: at most 100 bytes.
+    await session("?", ["x".repeat(100)]);
+    await session("?", ["\u00e9".repeat(50)]);
+    await session("?", [""]);
+    await rejection(session("?", ["x".repeat(101)]));
+    await rejection(session("?", ["\u00e9".repeat(51)]));
+    await rejection(session("'x' || char(0) || ?", ["y".repeat(200)]));
+    await rejection(session("? || char(0) || 'y'", ["x".repeat(99)]));
+    expect(await count(deps, "session")).toBe(3);
+
+    // A rate counter's bucket: at most 40 bytes. Its key: at most 100.
+    const counter = (bucketSql: string, keySql: string, params: string[]) =>
+      deps.db.run(`INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (${bucketSql}, ${keySql}, 0, 1)`, params);
+    await counter("?", "?", ["b".repeat(40), "k".repeat(100)]);
+    await rejection(counter("?", "?", ["b".repeat(41), "k"]));
+    await rejection(counter("?", "?", ["b", "k".repeat(101)]));
+    await rejection(counter("?", "?", ["\u00e9".repeat(21), "k"]));
+    await rejection(counter("?", "?", ["b", "\u00e9".repeat(51)]));
+    await rejection(counter("'b' || char(0) || ?", "?", ["x".repeat(60), "k"]));
+    await rejection(counter("?", "'k' || char(0) || ?", ["b", "x".repeat(100)]));
+    expect(await count(deps, "rate_counter")).toBe(1);
+
+    // The audit record: event at most 40 bytes, the three ids at most 64 each, detail at most 1000.
+    const audit = (column: string, valueSql: string, params: string[]) => {
+      const values: Record<string, string> = { event: "'signin'", user_id: "NULL", workspace_id: "NULL", subject: "NULL", detail: "NULL" };
+      values[column] = valueSql;
+      return deps.db.run(`INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES (?, 1, ${values.event}, ${values.user_id}, ${values.workspace_id}, ${values.subject}, ${values.detail})`, [`aud_${++n}`, ...params]);
+    };
+    const caps: [string, number][] = [["event", 40], ["user_id", 64], ["workspace_id", 64], ["subject", 64], ["detail", 1000]];
+    for (const [column, most] of caps) {
+      await audit(column, "?", ["x".repeat(most)]);
+      await rejection(audit(column, "?", ["x".repeat(most + 1)]));
+      await rejection(audit(column, "?", ["\u00e9".repeat(most / 2 + 1)]));
+      await rejection(audit(column, "'x' || char(0) || ?", ["y".repeat(most)]));
+    }
+    expect(await count(deps, "audit")).toBe(caps.length);
+  });
+
+  it("the session a sign-in code names has the shape of an id, or is not set", async () => {
+    const { deps } = await makeDeps();
+    const a = await ownerOf(deps, (await seedWorkspace(deps, "A")).workspaceId);
+    let n = 0;
+    const code = (idSql: string, params: (string | null)[]) =>
+      deps.db.run(`INSERT INTO signin_code (id, user_id, hash, created_at, expires_at, used_at, session_id) VALUES (?, ?, ?, 1, 2, 1, ${idSql})`, [`sic_${++n}`, a, n.toString(16).padStart(64, "0"), ...params]);
+    const HEX = "0123456789abcdef01234567";
+    // A prefix of two to four lowercase letters, an underscore, 24 lowercase hex characters: the form every row id has.
+    for (const id of [null, "ses_" + HEX, "se_" + HEX, "sess_" + HEX, "st_" + "f".repeat(24)]) await code("?", [id]);
+    for (const id of [
+      "", "ses_1", "ses_", HEX, "_" + HEX, "s_" + HEX, "sessi_" + HEX, "SES_" + HEX, "s3s_" + HEX, "ses-" + HEX, "ses_" + HEX.toUpperCase(), "ses_" + HEX.slice(1), "ses_" + HEX + "0", "ses_" + HEX.slice(1) + "g",
+      "ses__" + HEX.slice(1), "s_s_" + HEX, " ses_" + HEX, "ses_" + HEX + " ", "ses_" + HEX.slice(1) + "\u00e9", "s\u00e9s_" + HEX, SECRET,
+    ]) {
+      await rejection(code("?", [id]));
+    }
+    await rejection(code("? || char(0) || ?", ["ses_" + HEX, SECRET]));
+    await rejection(code("? || char(0) || ?", ["ses_" + HEX.slice(2), "x"]));
+    expect(await count(deps, "signin_code")).toBe(5);
   });
 });

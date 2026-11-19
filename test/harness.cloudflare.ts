@@ -4,7 +4,7 @@ import { D1Db } from "../src/cloudflare/db.ts";
 import { R2FileStore } from "../src/cloudflare/files.ts";
 import type { Config, Deps } from "../src/ports.ts";
 import { newId } from "../src/auth.ts";
-import { createWorkspace } from "../src/workspaces.ts";
+import { createWorkspace, workspaceStatements } from "../src/workspaces.ts";
 import { counted } from "./counting.ts";
 
 type TestEnv = Env & { TEST_MIGRATIONS: D1Migration[]; TEST_STORAGE_IS_LOCAL?: unknown };
@@ -78,4 +78,24 @@ export async function makeDeps(config?: Partial<Config>) {
  */
 export async function seedWorkspace(deps: Deps, name: string): Promise<{ workspaceId: string; token: string }> {
   return createWorkspace(deps, name, `owner-${newId("usr").slice(4)}@example.com`);
+}
+
+/**
+ * An account with its own workspace and one token, made as a new workspace makes them,
+ * with the username and the admin flag asked for in the same batch. Without options: no
+ * username and no admin, which is what the owner of a new workspace is. Each account
+ * gets a fresh address. The username is stored as given: the database checks its shape,
+ * not whether it is reserved.
+ */
+export async function seedAccount(
+  deps: Deps,
+  opts: { username?: string; admin?: boolean } = {},
+): Promise<{ workspaceId: string; userId: string; token: string; email: string }> {
+  const email = `account-${newId("usr").slice(4)}@example.com`;
+  const { workspaceId, userId, token, stmts } = await workspaceStatements(deps, "Account", email);
+  await deps.db.batch([
+    ...stmts,
+    { sql: "UPDATE user SET username = ?, is_admin = ? WHERE id = ?", params: [opts.username ?? null, opts.admin === true ? 1 : 0, userId] },
+  ]);
+  return { workspaceId, userId, token, email };
 }
