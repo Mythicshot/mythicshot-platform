@@ -5,7 +5,9 @@ import { R2FileStore } from "../src/cloudflare/files.ts";
 import type { Config, Deps } from "../src/ports.ts";
 import { newId } from "../src/auth.ts";
 import { createWorkspace, workspaceStatements } from "../src/workspaces.ts";
+import { background as trackBackground, checkAtEndOfTest } from "./background.ts";
 import { counted } from "./counting.ts";
+import { FakeMailer } from "./fake-mail.ts";
 
 type TestEnv = Env & { TEST_MIGRATIONS: D1Migration[]; TEST_STORAGE_IS_LOCAL?: unknown };
 const testEnv = env as TestEnv;
@@ -53,19 +55,38 @@ async function reset(): Promise<void> {
   await applyD1Migrations(testEnv.DB, testEnv.TEST_MIGRATIONS);
 }
 
+/**
+ * `mail: false` gives deps with mail off exactly as a live site has it: no `deps.mail` at
+ * all, so `mailOf` gives the mailer that is off. By default the deps carry the fake mailer.
+ */
+export type MakeOptions = { mail?: boolean };
+
 /** Deps on the test D1 database and R2 buckets, emptied and migrated. */
-export async function makeDeps(config?: Partial<Config>) {
+export async function makeDeps(config?: Partial<Config>, opts: MakeOptions = {}) {
   await reset();
   const c = counted(new D1Db(testEnv.DB), new R2FileStore(testEnv.DRAFTS), new R2FileStore(testEnv.PUB));
+  const mail = new FakeMailer();
+  const background = trackBackground();
   const deps: Deps = {
     db: c.db,
     drafts: c.drafts,
     pub: c.pub,
     config: { publicImageBase: "", setupCode: null, ...config },
     now: () => Date.now(),
+    ...(opts.mail === false ? {} : { mail }),
+    defer: background.defer,
   };
+  // The test that made these deps fails if it ends with deferred work still running.
+  checkAtEndOfTest(background);
   return {
     deps,
+    /**
+     * The mailer of these deps: it keeps every mail it is handed and contacts nothing. Not
+     * counted in `calls`. With `mail: false` the deps carry no mailer and this one stays empty.
+     */
+    mail,
+    /** Resolves when all work deferred so far has ended. A failure of that work is the fixed line, as on a real target. */
+    settle: () => background.settle(),
     draftKeys: () => listAll(testEnv.DRAFTS),
     publicKeys: () => listAll(testEnv.PUB),
     calls: c.calls,
