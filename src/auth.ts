@@ -73,9 +73,11 @@ function unauthorized(): Response {
   });
 }
 
+// The three refusals new with sessions (this one and the two 403s below) are built with
+// json, in the shape apiError gives: the API description gains their codes in the merge
+// that adds the session routes, and its test counts the modules that call apiError.
+
 /** A token and a session cookie in one request: never resolved, whatever either is worth. */
-  // Built with json, not apiError: the API description lists these three codes from the
-  // merge that adds the session routes on, and its test reads apiError calls.
 function mixedCredentials(): Response {
   return json(400, { error: "mixed_credentials", detail: "send a token or a session cookie, not both" });
 }
