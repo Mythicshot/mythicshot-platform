@@ -528,7 +528,7 @@ describe("the settings reach the app on every install path", () => {
 
   it("the Node target reads the settings this test knows, so a new one cannot be forgotten here", () => {
     expect(settingsRead()).toEqual(
-      ["APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE", "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST"].sort(),
+      ["APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE", "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST", "INVITE_CONTACT"].sort(),
     );
   });
 

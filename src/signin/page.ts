@@ -13,6 +13,7 @@
 // history never show it. The code then lives in one variable of the link page's own
 // function and leaves it once: in the JSON body of POST /api/v1/signin/complete, when the
 // button is pressed. Nothing here writes to storage, to a cookie or to an address.
+import { escapeHtml, type InviteContact } from "./invite.ts";
 
 export const SIGNIN_HTML = `<!doctype html>
 <html lang="en">
@@ -111,6 +112,7 @@ export const ACCOUNT_HTML = `<!doctype html>
     <h2 class="label" id="h-storage">Storage</h2>
     <div class="bar" id="usage-bar" aria-hidden="true"><div class="fill" id="usage-fill"></div></div>
     <p class="usage" id="usage-text"></p>
+    <p class="over" id="usage-over" hidden>You are over your storage allowance. New uploads are refused until you delete tours or get more room.</p>
     <p class="hint">Tours and their pictures count. Deleting a tour frees its space within a few minutes.</p>
 
     <h2 class="label" id="h-where" tabindex="-1">Where you are signed in</h2>
@@ -248,6 +250,7 @@ a:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; bo
 .bar .fill { width: 0; height: 100%; border-radius: inherit; background: var(--accent); }
 .bar[data-over="true"] .fill { background: var(--warn); }
 .usage { margin: 0 0 4px; font-weight: 500; }
+.over { margin: 0 0 4px; color: var(--warn); font-size: 0.9rem; font-weight: 600; }
 .hint { margin: 0; color: var(--muted); font-size: 0.875rem; }
 .sessions { list-style: none; margin: 0 0 12px; padding: 0; border: 1px solid var(--line); border-radius: 10px; }
 .session { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; min-height: 60px; }
@@ -340,16 +343,17 @@ export const SIGNIN_JS = `(function () {
     }
   }
 
-  // The server's own rule for sizes (formatBytes in src/usage.ts): 1024-based, three
-  // significant digits. A test holds the two to the same table.
+  // Sizes as the owner chose for this page: 1024 to the next unit, as the server counts,
+  // at most one decimal and no trailing .0 (1.2 GB, 5 GB, 512 KB). The server's own
+  // formatBytes (src/usage.ts, three significant digits) stays as it is for the API.
   function formatBytes(n) {
     if (n < 1024) return n === 1 ? TEXT.oneByte : n + TEXT.bytes;
     var units = ["KB", "MB", "GB"];
     var value = n;
     for (var i = 0; i < units.length; i++) {
       value /= 1024;
-      var text = value < 9.995 ? value.toFixed(2) : value < 99.95 ? value.toFixed(1) : String(Math.round(value));
-      if (Number(text) < 1024 || i === units.length - 1) return text + " " + units[i];
+      var rounded = Math.round(value * 10) / 10;
+      if (rounded < 1024 || i === units.length - 1) return String(rounded) + " " + units[i];
     }
     return n + TEXT.bytes;
   }
@@ -499,11 +503,12 @@ export const SIGNIN_JS = `(function () {
       line += TEXT.used + TEXT.dot + (u.tours === 1 ? TEXT.oneTour : u.tours + TEXT.tours);
       say($("usage-text"), line);
       var bar = $("usage-bar");
+      var over = limit !== null && u.over === true;
+      $("usage-over").hidden = !over;
       if (limit === null) {
         bar.hidden = true;
         return true;
       }
-      var over = u.over === true;
       var share = over ? 100 : limit > 0 ? Math.min(100, (u.used_bytes / limit) * 100) : 0;
       $("usage-fill").style.width = Math.round(share * 100) / 100 + "%";
       if (over) bar.setAttribute("data-over", "true");
@@ -642,7 +647,20 @@ export const SIGNIN_JS = `(function () {
 })();
 `;
 
-/** Placeholder: written after its tests. */
-export function signinHtml(_contact: import("./invite.ts").InviteContact | null): string {
-  return SIGNIN_HTML;
+/** The invite line of the sign-in page as built, without a contact. */
+const INVITE_LINE = '<p class="small">Mythicshot is invite-only for now.</p>';
+
+/**
+ * The sign-in page with the invite line for `contact` (from INVITE_CONTACT through
+ * inviteContactFrom): an https address as the link "Ask for an invite", an email address
+ * after "Ask for an invite:" as its own mailto link. Without one it is SIGNIN_HTML itself.
+ * Every part of the contact is escaped.
+ */
+export function signinHtml(contact: InviteContact | null): string {
+  if (contact === null) return SIGNIN_HTML;
+  const line =
+    contact.kind === "url"
+      ? `<p class="small">Mythicshot is invite-only for now. <a href="${escapeHtml(contact.href)}" rel="noopener noreferrer">Ask for an invite</a></p>`
+      : `<p class="small">Mythicshot is invite-only for now. Ask for an invite: <a href="mailto:${escapeHtml(contact.address)}" class="address">${escapeHtml(contact.address)}</a></p>`;
+  return SIGNIN_HTML.replace(INVITE_LINE, () => line);
 }

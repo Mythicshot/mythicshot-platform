@@ -20,6 +20,7 @@ import { smtpMailer, type SmtpSettings } from "./smtp.ts";
 export const NODE_SETTINGS: readonly string[] = [
   "APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE",
   "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST",
+  "INVITE_CONTACT",
 ];
 
 /**
@@ -46,12 +47,15 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   const allowance = allowanceFromSetting(env.STORAGE_ALLOWANCE_BYTES);
   if (!allowance.ok) throw new Error(allowance.problem);
   const siteHost = hosts.hosts === null && typeof env.SITE_HOST === "string" ? normaliseHost(env.SITE_HOST) : null;
+  // Who to ask for an invite: passed on as written, checked by the sign-in page, never a reason to stop.
+  const inviteContact = typeof env.INVITE_CONTACT === "string" ? env.INVITE_CONTACT.trim() : "";
   return {
     publicImageBase: env.PUBLIC_IMAGE_BASE ?? "",
     setupCode: setupCodeFromEnv(env.SETUP_CODE),
     hosts: hosts.hosts,
     ...(allowance.bytes === null ? {} : { storageAllowanceBytes: allowance.bytes }),
     ...(siteHost === null ? {} : { siteHost }),
+    ...(inviteContact === "" ? {} : { inviteContact }),
   };
 }
 

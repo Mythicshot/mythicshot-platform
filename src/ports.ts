@@ -124,6 +124,12 @@ export type Config = {
    * Absent or null: none. It is not set in two-address mode, where the app address is used.
    */
   siteHost?: string | null;
+  /**
+   * Who to ask for an invite, from the INVITE_CONTACT setting, trimmed, as written: an
+   * email address or an https address. The sign-in page checks it (src/signin/invite.ts)
+   * and leaves out a value it cannot use. Absent or null: no contact is shown.
+   */
+  inviteContact?: string | null;
 };
 
 export type Deps = {

@@ -43,7 +43,8 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 
 ## Ask for a link
 
-- [ ] `http://localhost:3000/signin` shows the card with the small line "Mythicshot", the heading "Sign in", the lead, the field "Email address" with the placeholder `you@example.com`, the button "Send me a sign-in link" and the line "Mythicshot is invite-only for now." The cursor is in the field.
+- [ ] `http://localhost:3000/signin` shows the card with the small line "Mythicshot", the heading "Sign in", the lead, the field "Email address" with the placeholder `you@example.com`, the button "Send me a sign-in link" and the line "Mythicshot is invite-only for now." with nothing after it (no `INVITE_CONTACT` is set). The cursor is in the field.
+- [ ] Restart the server with `INVITE_CONTACT=hello@example.com`: the line reads "Mythicshot is invite-only for now. Ask for an invite: hello@example.com", the address can be selected and is a mail link. With `INVITE_CONTACT=https://example.com/invite` it reads "Mythicshot is invite-only for now. Ask for an invite", a link to that address. With `INVITE_CONTACT=javascript:alert(1)` the sentence stands alone and the site starts as usual. Restart without the setting afterwards.
 - [ ] The console shows no error and no policy violation ("Refused to …" or "Content Security Policy"); the network panel shows only requests to `localhost:3000`: the page, its stylesheet and its script (both under `/signin/`) and `GET /api/v1/session` (answering 401).
 - [ ] In the network panel, the page's answer has these headers: `content-security-policy: default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `x-frame-options: DENY`, `referrer-policy: no-referrer`, `cache-control: no-store`, `x-content-type-options: nosniff` and `cross-origin-opener-policy: same-origin`. The stylesheet, the script, `/signin/link` and `/account` carry the same six.
 - [ ] "name" and an empty field each give "That does not look like an email address." under the field, with no request in the network panel, and the field is marked as wrong. The button does not move when the message appears.
@@ -91,8 +92,8 @@ Read the usage with `curl -s -H "Authorization: Bearer <token>" http://localhost
 - [ ] No `STORAGE_ALLOWANCE_BYTES`: "<used> used · 1 tour" and no bar.
 - [ ] `STORAGE_ALLOWANCE_BYTES` set to twice `used_bytes`: "<used> of <allowance> used · 1 tour" and the bar half full in the site's green.
 - [ ] Set to exactly `used_bytes`: the bar full, still green.
-- [ ] Set to `used_bytes` minus 1: the bar full in the warning colour (amber).
-- [ ] The sizes read as Mythicshot and the server write them (`512 KB`, `14.2 MB`, `1.02 GB`).
+- [ ] Set to `used_bytes` minus 1: the bar full in the warning colour (amber), and under the line "You are over your storage allowance. New uploads are refused until you delete tours or get more room." in the same colour. Under or at the allowance that sentence is not there.
+- [ ] Sizes have at most one decimal and no trailing `.0`, counted 1024 to the next unit: `512 KB`, `14.2 MB`, `1.2 GB`, `5 GB`.
 
 ## Signing out
 

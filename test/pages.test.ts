@@ -429,7 +429,7 @@ describe("the owner's wording decisions", () => {
     // Whatever an address holds is escaped: it never becomes markup or leaves its attribute.
     const tricky = signinHtml({ kind: "url", href: `https://example.com/?a="><script>x</script>&b='c'` });
     expect(tricky).not.toContain("<script>x");
-    expect(tricky).not.toContain(`"><`);
+    expect(tricky).toContain(`href="https://example.com/?a=&quot;&gt;&lt;script&gt;x&lt;/script&gt;&amp;b=&#39;c&#39;" rel="noopener noreferrer"`);
     expect(inviteLine(tricky).links[0].href).toBe(`https://example.com/?a="><script>x</script>&b='c'`);
     const parsed = inviteContactFrom(`https://example.com/?a="><script>x</script>`);
     expect(parsed?.kind).toBe("url");

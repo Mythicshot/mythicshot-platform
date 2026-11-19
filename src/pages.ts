@@ -5,7 +5,8 @@
 // address, where the session cookie lives (on the one address in one-address mode).
 import type { Hono } from "hono";
 import type { Deps } from "./ports.ts";
-import { ACCOUNT_HTML, LINK_HTML, SIGNIN_CSS, SIGNIN_HTML, SIGNIN_JS } from "./signin/page.ts";
+import { inviteContactFrom } from "./signin/invite.ts";
+import { ACCOUNT_HTML, LINK_HTML, SIGNIN_CSS, SIGNIN_JS, signinHtml } from "./signin/page.ts";
 
 /**
  * The headers of all five answers, besides their content type: the setup wizard's policy,
@@ -23,10 +24,14 @@ export const ACCOUNT_PAGE_HEADERS: Readonly<Record<string, string>> = {
 
 const HTML = "text/html; charset=utf-8";
 
-/** Adds the sign-in pages' routes. They use no deps: nothing they answer depends on the site's data. */
-export function pageRoutesForAccounts(app: Hono, _deps: Deps): void {
+/**
+ * Adds the sign-in pages' routes. Nothing they answer depends on the site's data; the
+ * sign-in page carries the invite line of the INVITE_CONTACT setting, made once here from
+ * the configuration (a value that cannot be used gives the page without a contact).
+ */
+export function pageRoutesForAccounts(app: Hono, deps: Deps): void {
   const serve = (body: string, type: string) => () => new Response(body, { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": type } });
-  app.get("/signin", serve(SIGNIN_HTML, HTML));
+  app.get("/signin", serve(signinHtml(inviteContactFrom(deps.config.inviteContact)), HTML));
   app.get("/signin/link", serve(LINK_HTML, HTML));
   app.get("/account", serve(ACCOUNT_HTML, HTML));
   app.get("/signin/signin.css", serve(SIGNIN_CSS, "text/css; charset=utf-8"));

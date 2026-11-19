@@ -62,6 +62,10 @@
     // checked against it, and a value that is not a host name closes nothing: the install
     // then has no address for links. `npm run setup:cloudflare` keeps it the same way.
     //
+    // INVITE_CONTACT: not listed here either. Optional: who to ask for an invite, shown on
+    // the sign-in page, an email address or an https:// address, such as
+    // "INVITE_CONTACT": "hello@example.com". Anything else is left out and closes nothing.
+    //
     // Mail: this target sends no mail in this version, so MAIL_MODE, MAIL_FROM and the
     // SMTP settings of the Node target are not read here, and CLIENT_ADDRESS_HEADER is
     // not either: the client address is the connecting address Cloudflare gives.
