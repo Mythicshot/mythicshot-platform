@@ -311,6 +311,10 @@ grep '^SETUP_CODE=' .env
 
 If the wizard saved the workspace but the token never reached you (the page was closed or the connection dropped after step 2), setup is closed and nobody holds a token. These steps clear the half-finished setup so the wizard can run again. They delete nothing once the token has been used, a tour or upload exists, or there is more than one workspace.
 
+What they remove is everything of that half-finished site: the workspace, its token and its owner's account. From the version with sign-in on, that can include the first admin's account with its sessions and sign-in codes, so the site has no admin again until one is made after the new setup. This is the only way back to the setup step, and no tour can be lost by it, because the steps do nothing once a tour or an upload exists.
+
+Use the SQL on this page, not the SQL of an older copy of this runbook. On a database this version has updated, the older SQL fails at `DELETE FROM user`, and can leave the token deleted with setup still closed; the SQL below also clears that state.
+
 1. Open a root shell and go to the install folder.
 
 ```sh

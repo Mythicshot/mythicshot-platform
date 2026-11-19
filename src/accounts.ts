@@ -5,7 +5,7 @@
 // `workspace_id` on the account's own row is the workspace that was made with it, kept
 // because the table cannot lose a column, and never read here.
 import { normaliseHost } from "./hosts.ts";
-import type { Deps } from "./ports.ts";
+import type { Deps, Stmt } from "./ports.ts";
 
 /** The longest address a mail server takes. */
 const MAX_EMAIL_CHARS = 254;
@@ -92,4 +92,28 @@ export async function hasAdmin(deps: Deps): Promise<boolean> {
 export async function workspaceOf(deps: Deps, userId: string): Promise<string | null> {
   const row = await deps.db.first<{ workspace_id: string }>("SELECT workspace_id FROM membership WHERE user_id = ?", [userId]);
   return row === null ? null : row.workspace_id;
+}
+
+/**
+ * The statements that give every account lacking them its membership (owner of the
+ * workspace its own row names) and its sign-in method (a link sent by mail), for the
+ * caller to run in a batch. An account lacks them when a build from before accounts made
+ * its workspace on a database that already had them: the migration filled the rows once
+ * and does not run again.
+ *
+ * Idempotent: an account that has a membership, of any workspace, gets no second one, and
+ * one that has the sign-in method keeps it, so running this at every start changes
+ * nothing after the first time. Each new row is dated as its account is, as the
+ * migration dated its rows, so no clock is read and `deps` is not used yet. It changes no
+ * existing row and makes nobody an admin. Nothing is written by calling this.
+ */
+export function healMemberships(_deps: Deps): Stmt[] {
+  return [
+    {
+      sql: "INSERT INTO membership (workspace_id, user_id, role, created_at) SELECT u.workspace_id, u.id, 'owner', u.created_at FROM user u WHERE NOT EXISTS (SELECT 1 FROM membership m WHERE m.user_id = u.id)",
+    },
+    {
+      sql: "INSERT INTO signin_method (user_id, kind, created_at) SELECT u.id, 'email_link', u.created_at FROM user u WHERE NOT EXISTS (SELECT 1 FROM signin_method s WHERE s.user_id = u.id AND s.kind = 'email_link')",
+    },
+  ];
 }
