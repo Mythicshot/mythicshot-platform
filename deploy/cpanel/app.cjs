@@ -15,6 +15,15 @@
 // every other line; the app itself checks them and stops at the start on a pair it
 // cannot use.
 //
+// The optional mail settings are passed on the same way: MAIL_MODE (off, the default, or
+// smtp), MAIL_FROM, SMTP_HOST, SMTP_PORT, SMTP_USER and SMTP_PASSWORD, and with them
+// SITE_HOST (the host name sign-in links use when the app serves one address) and
+// CLIENT_ADDRESS_HEADER (the header in which the hosting's proxy writes the visitor's
+// address). SMTP_PASSWORD is a secret like SETUP_CODE: it lives in this file only, which
+// must be readable by this account alone. The app checks these settings itself and never
+// stops over them: a mail block it cannot use leaves mail off, with one line in the log
+// that names the setting and no value.
+//
 // Tests: test/node-cpanel-app.test.ts.
 const fs = require("node:fs");
 const path = require("node:path");

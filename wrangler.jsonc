@@ -52,7 +52,18 @@
     // workspace may use, unless it has a number of its own. "0" is a limit; empty is no
     // limit. Anything else (a sign, a decimal, a unit, a number written without quotes):
     // every request answers 500 `misconfigured`, /healthz included, until the value is
-    // fixed or removed. `npm run setup:cloudflare` does not keep this var yet: it writes
-    // the install's file from this one, so the var must be added again after each run.
+    // fixed or removed. `npm run setup:cloudflare` keeps the var as the install's file
+    // holds it.
+    //
+    // SITE_HOST: not listed here either. Only for an install on one address (TOURS_HOST
+    // and APP_HOST empty): the host name sign-in links use, such as "SITE_HOST":
+    // "tours.example.com", without https:// and without a path. With two addresses it is
+    // ignored: links use the app address. It is used for links only, no request is
+    // checked against it, and a value that is not a host name closes nothing: the install
+    // then has no address for links. `npm run setup:cloudflare` keeps it the same way.
+    //
+    // Mail: this target sends no mail in this version, so MAIL_MODE, MAIL_FROM and the
+    // SMTP settings of the Node target are not read here, and CLIENT_ADDRESS_HEADER is
+    // not either: the client address is the connecting address Cloudflare gives.
   }
 }

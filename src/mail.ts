@@ -59,19 +59,13 @@ export function signInMail(to: string, link: string, siteName: string = DEFAULT_
 }
 
 /**
- * What linkOrigin reads. `siteHost` is the SITE_HOST setting of a one-address site; it
- * joins `Config` itself with the settings task, and is declared here until then.
- */
-export type LinkConfig = Config & { siteHost?: string | null };
-
-/**
  * The origin every sign-in link starts with, or null when the site has no configured
  * address. It comes from configuration only, never from a request: the app address in
  * two-address mode, else SITE_HOST. Either goes through normaliseHost, so the origin is
  * always one signInLink takes; an app address that is not a plain host name gives null
  * rather than falling back. With null, no mail may be sent.
  */
-export function linkOrigin(config: LinkConfig): string | null {
+export function linkOrigin(config: Config): string | null {
   const app = config.hosts?.app;
   const raw = typeof app === "string" && app !== "" ? app : config.siteHost;
   const host = typeof raw === "string" ? normaliseHost(raw) : null;

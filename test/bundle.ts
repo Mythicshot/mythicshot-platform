@@ -53,8 +53,30 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 export type Call ={ status: number; text: string; json: any; headers: Headers; bytes: Uint8Array; calls: number };
 
-/** Sends one request to a fresh app on `deps` and reads the whole answer. `opts.origin` is the address it is sent to, ORIGIN unless given. */
-export async function send(deps: Deps, method: string, path: string, opts: { token?: string | null; body?: RequestInit["body"]; headers?: Record<string, string>; origin?: string } = {}): Promise<Call> {
+/** What `send` takes besides the request line. */
+export type SendOptions = {
+  token?: string | null;
+  body?: RequestInit["body"];
+  headers?: Record<string, string>;
+  /** The address the request is sent to, ORIGIN unless given. */
+  origin?: string;
+  /**
+   * False: do not wait for the work the request deferred (a mail on its way) before
+   * the calls are counted. Only for a test whose deferred work cannot end while the
+   * request is looked at, such as one with a mailer that never answers; that test
+   * lets the work end itself before it finishes.
+   */
+  settle?: boolean;
+  /** The app the request goes to, instead of the real one: for tests of this helper itself. */
+  app?: (deps: Deps) => { fetch(req: Request): Response | Promise<Response> };
+};
+
+/**
+ * Sends one request to a fresh app on `deps` and reads the whole answer. Then it waits
+ * for the work the request deferred, so `calls` holds the calls made after the answer
+ * too, and the budget is checked on all of them.
+ */
+export async function send(deps: Deps, method: string, path: string, opts: SendOptions = {}): Promise<Call> {
   const headers: Record<string, string> = { ...opts.headers };
   if (opts.token) headers.authorization = "Bearer " + opts.token;
   const init: RequestInit & { duplex?: string } = { method, headers };
@@ -65,8 +87,10 @@ export async function send(deps: Deps, method: string, path: string, opts: { tok
   // Every request any test sends is metered and held to the budget, so a path that makes
   // too many storage or database calls fails the test that reaches it.
   const meter = metered(deps);
-  const res = await createApp(meter.deps).fetch(new Request((opts.origin ?? ORIGIN) + path, init));
+  const res = await (opts.app ?? createApp)(meter.deps).fetch(new Request((opts.origin ?? ORIGIN) + path, init));
   const bytes = new Uint8Array(await res.arrayBuffer());
+  // Calls made after the answer count against the same budget, so they are waited for.
+  if (opts.settle !== false) await meter.idle();
   const calls = meter.calls();
   const route = `${method} ${routeOf(path)}`;
   budgetSeen.set(route, Math.max(budgetSeen.get(route) ?? 0, calls));
