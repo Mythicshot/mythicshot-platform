@@ -172,8 +172,19 @@ describe("the cPanel startup file run as the admin command", () => {
     expect(r.status).toBe(0);
     expect(r.started).toBeNull();
     expect(admin(r)).toEqual({ argv: args.slice(1), DATA_DIR: "/data/tours", APP_HOST: "app.example.com", SMTP_PASSWORD: "pw with spaces=and+signs" });
-    // A variable already set wins, as for the app.
-    expect(admin(start(l.app, { DATA_DIR: "/from/the/environment" }, ["admin", "audit"]))).toMatchObject({ argv: ["audit"], DATA_DIR: "/from/the/environment" });
+    // Unlike the app, the command takes the file's value over one set in the shell it was started from: a setting
+    // exported in an SSH session must not change what it does. A setting the file does not hold still comes through.
+    expect(admin(start(l.app, { DATA_DIR: "/from/the/shell", APP_HOST: "other.example.com", SMTP_PASSWORD: "from-the-shell" }, ["admin", "audit"]))).toEqual({
+      argv: ["audit"],
+      DATA_DIR: "/data/tours",
+      APP_HOST: "app.example.com",
+      SMTP_PASSWORD: "pw with spaces=and+signs",
+    });
+    writeFileSync(l.settings, `DATA_DIR=/data/tours
+`);
+    expect(admin(start(l.app, { APP_HOST: "from.example.com" }, ["admin", "audit"]))).toMatchObject({ DATA_DIR: "/data/tours", APP_HOST: "from.example.com" });
+    // The app itself keeps its rule: what is set already wins.
+    expect(start(l.app, { DATA_DIR: "/from/the/shell" }).started).toMatchObject({ DATA_DIR: "/from/the/shell" });
     // The command's exit code is the process's.
     expect(start(l.app, {}, ["admin", "--fail"]).status).toBe(1);
   });
@@ -203,7 +214,7 @@ describe("the cPanel startup file run as the admin command", () => {
     const missing = start(l.app, {}, ["admin", "audit"]);
     expect(missing.status).toBe(1);
     expect(missing.stdout).toBe("");
-    expect(lines(missing.stderr)).toEqual(["demo-platform: the admin command could not be run (ERR_MODULE_NOT_FOUND)."]);
+    expect(lines(missing.stderr)).toEqual(["demo-platform: the admin command could not be run. Update the site with a current archive and try again."]);
     expect(missing.stdout + missing.stderr).not.toContain(SECRET);
     expect(missing.stdout + missing.stderr).not.toContain("/data/tours");
   });

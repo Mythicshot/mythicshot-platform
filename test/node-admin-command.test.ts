@@ -2,14 +2,14 @@
 // scratch folder, as `node dist/node/admin.js` runs it beside the app. Node only. No mail
 // is sent: where a mailer is needed the fake one is handed in, and every host is a
 // placeholder.
-import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { auditStatement } from "../src/audit.ts";
 import { requireAuth } from "../src/auth.ts";
-import { runAdmin, type AdminOptions } from "../src/node/admin.ts";
+import { isMainModule, runAdmin, type AdminOptions } from "../src/node/admin.ts";
 import { NodeDb } from "../src/node/db.ts";
 import { migrate } from "../src/node/migrate.ts";
 import type { Deps } from "../src/ports.ts";
@@ -275,7 +275,7 @@ describe("the server command", () => {
     expect(r.code).toBe(0);
     expect(r.lines.slice(0, 3)).toEqual(CREATED("alex").slice(0, 3));
     expect(r.lines.slice(3, 5)).toEqual([
-      "No address for sign-in links is set (APP_HOST and TOURS_HOST, or SITE_HOST), so the link is shown without one. It works once and for 15 minutes.",
+      "No address for sign-in links is set, so the link is shown without one. Set APP_HOST and TOURS_HOST, or SITE_HOST.",
       "Open your site's address followed by:",
     ]);
     expect(r.lines[5]).toMatch(/^\/signin\/link#c=dpl_[0-9a-f]{40}$/);
@@ -291,6 +291,83 @@ describe("the server command", () => {
     expect(path.lines[2]).toMatch(/^\/signin\/link#c=dpl_[0-9a-f]{40}$/);
     const whole = await run({ ...env, SITE_HOST: "Tours.Example.com" }, ["signin-link", "--email", "you@example.com"]);
     expect(whole.lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(/^https:\/\/tours\.example\.com\/signin\/link#c=dpl_[0-9a-f]{40}$/)]);
+  });
+
+  it("a link step that fails after the claim was written says so in one sentence and exits 1", async () => {
+    const MADE_NO_LINK = "The admin was made, but no link was made. Run the command again with --email alone for a link.";
+    // An error from the database while the link is made: the claim is already written.
+    const broken = await site();
+    const db = connect(broken.dir);
+    db.raw.exec("CREATE TRIGGER no_codes BEFORE INSERT ON signin_code BEGIN SELECT RAISE(ABORT, 'made-up failure'); END");
+    const r = await run(broken.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    expect(r.lines).toEqual([MADE_NO_LINK]);
+    expect(r.code).toBe(1);
+    expect(await db.first("SELECT username, is_admin FROM user WHERE id = ?", [broken.userId])).toEqual({ username: "alex", is_admin: 1 });
+    // The same error outside a claim is the plain unexpected one.
+    const later = await run(broken.env, ["signin-link", "--email", "you@example.com"]);
+    expect(later.lines).toEqual(["The command stopped on an unexpected error."]);
+    expect(later.code).toBe(1);
+    // Once the cause is gone, the email alone gives the link the sentence promised.
+    db.raw.exec("DROP TRIGGER no_codes");
+    expect((await run(broken.env, ["--email", "you@example.com"])).lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(LINK)]);
+
+    // A link step that refuses (here: the account lost its sign-in method in the same moment).
+    const refused = await site();
+    const db2 = connect(refused.dir);
+    db2.raw.exec("CREATE TRIGGER drop_method AFTER UPDATE OF is_admin ON user BEGIN DELETE FROM signin_method WHERE user_id = NEW.id; END");
+    const r2 = await run(refused.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    expect(r2.lines).toEqual([MADE_NO_LINK]);
+    expect(r2.code).toBe(1);
+    expect(await db2.first("SELECT count(*) AS n FROM user WHERE is_admin = 1")).toEqual({ n: 1 });
+  });
+
+  it("a setup that did not finish has its own sentence, and the oldest account of the setup's workspace is the one made admin", async () => {
+    const s = await site({ setUp: false });
+    const db = connect(s.dir);
+    const ws = "ws_" + "b".repeat(24);
+    await db.batch([
+      { sql: "INSERT INTO workspace (id, name, created_at) VALUES (?, 'Half', 1)", params: [ws] },
+      { sql: "INSERT INTO setup (id, workspace_id, completed_at) VALUES (1, ?, 1)", params: [ws] },
+    ]);
+    const r = await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    expect(r.lines).toEqual(["This site's setup did not finish. Use the recovery steps in the guide, then run this again."]);
+    expect(r.code).toBe(1);
+    expect(await db.all("SELECT * FROM audit")).toEqual([]);
+
+    // Two accounts in that workspace: the older one is the owner.
+    const older = "usr_" + "1".repeat(24);
+    const newer = "usr_" + "2".repeat(24);
+    await db.batch([
+      { sql: "INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, 'newer@example.com', 20)", params: [newer, ws] },
+      { sql: "INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, 'older@example.com', 10)", params: [older, ws] },
+    ]);
+    expect((await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"])).code).toBe(0);
+    expect(await db.all("SELECT id FROM user WHERE is_admin = 1")).toEqual([{ id: older }]);
+  });
+
+  it("the usage names the command the way it was run", async () => {
+    const plain = await run({}, ["--help"]);
+    expect(plain.lines[0]).toBe("Usage: node dist/node/admin.js <command> [options]");
+    const wrapped = await run({ DEMO_PLATFORM_ADMIN_NAME: "./cpanel.sh admin" }, ["nonsense"]);
+    expect(wrapped.code).toBe(2);
+    expect(wrapped.lines[0]).toBe("Usage: ./cpanel.sh admin <command> [options]");
+    // A name that could break a line, or is long, is not used.
+    for (const bad of ["x\nUsage: evil", "a".repeat(101), ""]) expect((await run({ DEMO_PLATFORM_ADMIN_NAME: bad }, ["--help"])).lines[0]).toBe(plain.lines[0]);
+  });
+
+  it("it runs as the main module only when started as its own file, through any link to it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dp-admin-main-"));
+    made.push(dir);
+    mkdirSync(join(dir, "real"));
+    const file = join(dir, "real", "admin.js");
+    writeFileSync(file, "");
+    const url = pathToFileURL(file).href;
+    expect(isMainModule(file, url)).toBe(true);
+    expect(isMainModule(join(dir, "real", ".", "admin.js"), url)).toBe(true);
+    if (process.platform === "win32") expect(isMainModule(file.toUpperCase(), url)).toBe(true);
+    symlinkSync(join(dir, "real"), join(dir, "linked"), "junction");
+    expect(isMainModule(join(dir, "linked", "admin.js"), url)).toBe(true);
+    for (const other of [undefined, "", join(dir, "real", "app.cjs"), join(dir, "missing.js")]) expect(isMainModule(other, url), String(other)).toBe(false);
   });
 
   it("mail-check never prints a setting's value", async () => {

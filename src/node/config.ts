@@ -78,49 +78,54 @@ const NO_CONTROL = /^[^\p{Cc}\p{Zl}\p{Zp}]{1,255}$/u;
  * The password is read here and handed to the SMTP client only. It is taken exactly as
  * written; the other values are trimmed. Making the mailer contacts nothing: the first
  * connection is made by the first send. `make` replaces how the client is made (tests).
+ *
+ * `setting` is the name of the setting that line names (such as SMTP_PORT), for a caller
+ * that says it in words of its own; it is null when mail is on, is off by choice, or is
+ * off because no address for links is set at all.
  */
 export function mailFromEnv(
   env: NodeJS.ProcessEnv,
   config: Config,
   make: (settings: SmtpSettings) => Mailer = smtpMailer,
-): { mailer: Mailer; mode: "off" | "smtp"; problem: string | null } {
-  const off = (problem: string | null) => ({ mailer: NO_MAIL, mode: "off" as const, problem });
+): { mailer: Mailer; mode: "off" | "smtp"; problem: string | null; setting: string | null } {
+  const off = (problem: string | null, setting: string | null = null) => ({ mailer: NO_MAIL, mode: "off" as const, problem, setting });
+  const bad = (setting: string) => off(mailOffBecause(setting), setting);
   const text = (value: string | undefined) => (typeof value === "string" ? value.trim() : "");
 
   const mode = text(env.MAIL_MODE).toLowerCase();
   if (mode === "" || mode === "off") return off(null);
-  if (mode !== "smtp") return off(mailOffBecause("MAIL_MODE"));
+  if (mode !== "smtp") return bad("MAIL_MODE");
 
   const from = parseEmail(env.MAIL_FROM);
-  if (from === null) return off(mailOffBecause("MAIL_FROM"));
+  if (from === null) return bad("MAIL_FROM");
 
   // No colon at all in what was written: a port belongs in SMTP_PORT, and one the host
   // rule would drop (`:443`) must not end as a quiet connection on the default port.
   const hostText = text(env.SMTP_HOST);
   const host = hostText.includes(":") ? null : normaliseHost(hostText);
-  if (host === null) return off(mailOffBecause("SMTP_HOST"));
+  if (host === null) return bad("SMTP_HOST");
 
   const portText = text(env.SMTP_PORT);
   const port = portText === "" ? SMTP_TLS_PORT : /^[1-9][0-9]{0,4}$/.test(portText) ? Number(portText) : 0;
-  if (port < 1 || port > 65535) return off(mailOffBecause("SMTP_PORT"));
+  if (port < 1 || port > 65535) return bad("SMTP_PORT");
 
   const user = text(env.SMTP_USER);
-  if (!NO_CONTROL.test(user)) return off(mailOffBecause("SMTP_USER"));
+  if (!NO_CONTROL.test(user)) return bad("SMTP_USER");
 
   const password = env.SMTP_PASSWORD;
-  if (typeof password !== "string" || !NO_CONTROL.test(password)) return off(mailOffBecause("SMTP_PASSWORD"));
+  if (typeof password !== "string" || !NO_CONTROL.test(password)) return bad("SMTP_PASSWORD");
 
   // Last: where a sign-in link points. A SITE_HOST that was written but is not a host
   // name is named as the setting to fix; with nothing written the line says what to set.
   const origin = linkOrigin(config);
   if (origin === null) {
     const written = (config.hosts ?? null) === null && text(env.SITE_HOST) !== "" && normaliseHost(text(env.SITE_HOST)) === null;
-    return off(written ? mailOffBecause("SITE_HOST") : NO_LINK_HOST);
+    return written ? bad("SITE_HOST") : off(NO_LINK_HOST);
   }
   // The name this site gives the mail server is its own link host, without a port.
   const helo = origin.replace(/^https?:\/\//, "").split(":")[0];
 
-  return { mailer: make({ host, port, user, password, from, helo }), mode: "smtp", problem: null };
+  return { mailer: make({ host, port, user, password, from, helo }), mode: "smtp", problem: null, setting: null };
 }
 
 /** The line for a CLIENT_ADDRESS_HEADER that cannot be used. It never repeats the value. */

@@ -142,6 +142,7 @@ EOF
 if [ "${1:-}" != "-e" ]; then
   printf 'node[venv=%s umask=%s cwd=%s] %s\n' "${STUB_VENV:-none}" "$(umask)" "$PWD" "$*" >>"$STUB_LOG"
   printf 'stand-in admin command, %s arguments\n' "$#"
+  printf 'name[%s]\n' "${DEMO_PLATFORM_ADMIN_NAME:-}"
   for a in "$@"; do printf 'arg[%s]\n' "$a"; done
   exit "${STUB_ADMIN_EXIT:-0}"
 fi
@@ -2058,6 +2059,7 @@ test_admin_runs_the_command_in_the_apps_node_with_the_data_folder() {
     "node[venv=apps/tours/24 umask=0077 cwd=$APP] app.cjs admin first-admin --email owner@example.com --username owner" "$LOG"
   expect "nothing else is run" test "$(calls)" = "node "
   expect "what the command says is shown, after one empty line, and nothing before it" test "$(head -n 2 "$OUT")" = "$(printf '\nstand-in admin command, 7 arguments')"
+  expect "the command is told how it was run, for its usage text" grep -qxF "name[$REL/cpanel.sh admin]" "$OUT"
   expect "nothing on stderr" test ! -s "$ERR"
   expect "no secret and no value of the settings file is shown" no_setting_shown
   expect "nothing in the home folder changed" test "$(snapshot)" = "$before"

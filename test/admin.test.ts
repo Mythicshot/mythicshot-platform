@@ -112,6 +112,25 @@ describe("the first admin", () => {
     expect(signedIn?.userId).toBe(owner);
   });
 
+  it("with several accounts in the setup's workspace the oldest is the owner, and with none there is nobody", async () => {
+    const { deps } = await makeDeps();
+    const ws = "ws_" + "c".repeat(24);
+    await deps.db.batch([
+      { sql: "INSERT INTO workspace (id, name, created_at) VALUES (?, 'Shared', 1)", params: [ws] },
+      { sql: "INSERT INTO setup (id, workspace_id, completed_at) VALUES (1, ?, 1)", params: [ws] },
+    ]);
+    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" })).toEqual({ ok: false, problem: "not_set_up" });
+    const older = "usr_" + "1".repeat(24);
+    const newer = "usr_" + "2".repeat(24);
+    await deps.db.batch([
+      { sql: "INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, 'newer@example.com', 20)", params: [newer, ws] },
+      { sql: "INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, 'older@example.com', 10)", params: [older, ws] },
+    ]);
+    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" })).toEqual({ ok: true, userId: older });
+    expect(await deps.db.all("SELECT id FROM user WHERE is_admin = 1")).toEqual([{ id: older }]);
+    expect(await deps.db.first("SELECT email FROM user WHERE id = ?", [newer])).toEqual({ email: "newer@example.com" });
+  });
+
   it("it works once", async () => {
     const { deps, calls } = await makeDeps();
     const site = await setUpSite(deps);

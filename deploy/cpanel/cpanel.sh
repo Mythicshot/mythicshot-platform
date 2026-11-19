@@ -1250,7 +1250,8 @@ cmd_admin() {
     # shellcheck source=/dev/null
     . "$ACTIVATE" >/dev/null || exit 1
     cd "$APP_DIR" || exit 1
-    exec node app.cjs admin "${ADMIN_ARGS[@]}"
+    # How the command was run, so that its usage text names it that way.
+    DEMO_PLATFORM_ADMIN_NAME="$SELF admin" exec node app.cjs admin "${ADMIN_ARGS[@]}"
   )
 }
 

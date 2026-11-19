@@ -15,8 +15,9 @@
 // says to update first. Everything it says goes through `out`, one line at a time, to
 // the terminal: no line names a setting's value, a token, the setup code, a digest or a
 // cookie. The only secret it ever prints is a sign-in link, which is the point of it.
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseEmail } from "../accounts.ts";
 import { claimFirstAdmin, signInLinkFor, type ClaimProblem } from "../admin.ts";
 import type { Mailer } from "../mail.ts";
@@ -31,8 +32,21 @@ export type AdminOptions = { makeMailer?: (settings: SmtpSettings) => Mailer };
 /** The migration that made the tables this command reads and writes. */
 const ACCOUNTS_MIGRATION = "0008_accounts.sql";
 
-const USAGE = [
-  "Usage: node dist/node/admin.js <command> [options]",
+/** How the usage names the command when nothing else is said: run as its own file. */
+const DIRECT_NAME = "node dist/node/admin.js";
+
+/**
+ * The name the usage gives the command: DEMO_PLATFORM_ADMIN_NAME when a wrapper set it to
+ * one short line of plain characters (cpanel.sh admin sets it to how it was started
+ * itself), else DIRECT_NAME.
+ */
+function usageName(env: NodeJS.ProcessEnv): string {
+  const name = env.DEMO_PLATFORM_ADMIN_NAME;
+  return typeof name === "string" && /^[ -~]{1,100}$/.test(name) && name.trim() !== "" ? name : DIRECT_NAME;
+}
+
+const usage = (name: string): string[] => [
+  `Usage: ${name} <command> [options]`,
   "",
   "  first-admin --email <address> --username <name>",
   "      Make the site's owner its admin, with this address and username, and print a sign-in link. Works once.",
@@ -51,7 +65,7 @@ const MAX_AUDIT_ROWS = 1000;
 
 const SAID = {
   linkFollows: "Open this link within 15 minutes to sign in:",
-  noLinkHost: "No address for sign-in links is set (APP_HOST and TOURS_HOST, or SITE_HOST), so the link is shown without one. It works once and for 15 minutes.",
+  noLinkHost: "No address for sign-in links is set, so the link is shown without one. Set APP_HOST and TOURS_HOST, or SITE_HOST.",
   pathFollows: "Open your site's address followed by:",
   noLink: "No link was made. Check the address, and that the site has an admin.",
   notAnEmail: "That is not an email address.",
@@ -59,7 +73,9 @@ const SAID = {
   noDataDir: "DATA_DIR is not set, so the site's data is not known. Nothing was changed.",
   noDatabase: "There is no database in the data folder yet. Start the site once, then run this again.",
   busy: "The database is busy. Try again in a moment.",
-  failed: "The command stopped on an error it does not know. Nothing more was changed.",
+  failed: "The command stopped on an unexpected error.",
+  madeNoLink: "The admin was made, but no link was made. Run the command again with --email alone for a link.",
+  setupUnfinished: "This site's setup did not finish. Use the recovery steps in the guide, then run this again.",
   mailOff: "Mail is off.",
   mailOn: "Mail is set to SMTP: host, port, user, password and sender are set.",
   mailNoLinkHost: "Mail is off because no address for sign-in links is set. Set APP_HOST and TOURS_HOST, or SITE_HOST.",
@@ -157,11 +173,10 @@ function isBusy(err: unknown): boolean {
 }
 
 /** The mail settings in one sentence, with the exit code a check of them gets. Never a value. */
-function mailState(problem: string | null, mode: "off" | "smtp"): { line: string; usable: boolean; code: number } {
-  if (mode === "smtp") return { line: SAID.mailOn, usable: true, code: 0 };
-  if (problem === null) return { line: SAID.mailOff, usable: false, code: 0 };
-  const setting = /^mail: off, because ([A-Z_]+) is missing or not usable\./.exec(problem);
-  return { line: setting === null ? SAID.mailNoLinkHost : `Mail is off because ${setting[1]} is missing or not usable.`, usable: false, code: 1 };
+function mailState(mail: { mode: "off" | "smtp"; problem: string | null; setting: string | null }): { line: string; usable: boolean; code: number } {
+  if (mail.mode === "smtp") return { line: SAID.mailOn, usable: true, code: 0 };
+  if (mail.problem === null) return { line: SAID.mailOff, usable: false, code: 0 };
+  return { line: mail.setting === null ? SAID.mailNoLinkHost : `Mail is off because ${mail.setting} is missing or not usable.`, usable: false, code: 1 };
 }
 
 /** The lines that hand a person their link, or the path when the site has no configured address. */
@@ -190,7 +205,7 @@ function auditLine(row: AuditRow): string {
 export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (line: string) => void, opts: AdminOptions = {}): Promise<number> {
   const parsed = parseArgs(argv);
   if (parsed === null || parsed.kind === "help") {
-    for (const line of USAGE) out(line);
+    for (const line of usage(usageName(env))) out(line);
     return parsed === null ? 2 : 0;
   }
 
@@ -217,7 +232,7 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
         return 1;
       }
     }
-    const state = mailState(mail.problem, mail.mode);
+    const state = mailState(mail);
     out(state.line);
     if (to === null) return state.code;
     if (!state.usable) return 1;
@@ -252,20 +267,30 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
 
     switch (parsed.kind) {
       case "first-admin": {
+        // The owner is the oldest account of the workspace the setup row names (claimFirstAdmin).
         const claim = await claimFirstAdmin(deps, { email: parsed.email, username: parsed.username });
         if (!claim.ok) {
-          out(REFUSED[claim.problem]);
+          // A setup row with nobody in its workspace is a setup that stopped half-way, not a site never set up.
+          const unfinished = claim.problem === "not_set_up" && (await db.first("SELECT 1 AS x FROM setup WHERE id = 1")) !== null;
+          out(unfinished ? SAID.setupUnfinished : REFUSED[claim.problem]);
+          return 1;
+        }
+        // The claim is written. Whatever goes wrong from here (a refusal, a busy database,
+        // any error), the one true thing to say is that the admin exists and how to get a link.
+        let link: Awaited<ReturnType<typeof signInLinkFor>>;
+        try {
+          link = await signInLinkFor(deps, parsed.email);
+        } catch {
+          link = { ok: false };
+        }
+        if (!link.ok) {
+          out(SAID.madeNoLink);
           return 1;
         }
         const name = parseUsername(parsed.username);
         out(`The admin account "${name.ok ? name.username : ""}" was created.`);
         out("Your tours, their links and your tokens stay exactly as they are.");
         out("");
-        const link = await signInLinkFor(deps, parsed.email);
-        if (!link.ok) {
-          out(SAID.noLink);
-          return 1;
-        }
         for (const line of linkLines(link)) out(line);
         return 0;
       }
@@ -307,4 +332,21 @@ export async function main(argv: string[]): Promise<void> {
   });
 }
 
-if (import.meta.main) void main(process.argv.slice(2));
+/**
+ * True when `argv1` (the script Node was started with) is the file at `moduleUrl`, also
+ * through a link to it or to its folder, and on Windows whatever the letter case. False
+ * for anything else, a path that does not exist included. (import.meta.main is not used:
+ * it needs a later Node 24 than the one this package allows.)
+ */
+export function isMainModule(argv1: string | undefined, moduleUrl: string): boolean {
+  if (typeof argv1 !== "string" || argv1 === "") return false;
+  try {
+    const started = realpathSync.native(argv1);
+    const self = realpathSync.native(fileURLToPath(moduleUrl));
+    return process.platform === "win32" ? started.toLowerCase() === self.toLowerCase() : started === self;
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule(process.argv[1], import.meta.url)) void main(process.argv.slice(2));

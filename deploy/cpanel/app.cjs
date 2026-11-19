@@ -41,27 +41,31 @@ try {
   process.exit(1);
 }
 
+// `node app.cjs admin <arguments>` runs the site's admin command (dist/node/admin.js)
+// instead of the app, with these same settings: that is how `cpanel.sh admin` runs it.
+// The guard is the first argument: whatever loads this file to start the app (Passenger,
+// through a loader of its own) does not hand it `admin` first, and no line of the
+// settings file can choose the command. For the command the settings file wins over the
+// environment for every setting it holds, so a setting exported in the shell it is run
+// from cannot change what it does; for the app the environment wins, as before.
+const runAdmin = require.main === module && process.argv[2] === "admin";
+
 for (const raw of text.split(/\r?\n/)) {
   const line = raw.trim();
   if (line === "" || line.startsWith("#")) continue;
   const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
-  if (!m || process.env[m[1]] !== undefined) continue;
+  if (!m || (!runAdmin && process.env[m[1]] !== undefined)) continue;
   const quoted = /^"(.*)"$/.exec(m[2]) || /^'(.*)'$/.exec(m[2]);
   process.env[m[1]] = quoted ? quoted[1] : m[2];
 }
 
-// `node app.cjs admin <arguments>` runs the site's admin command (dist/node/admin.js)
-// instead of the app, with these same settings: that is how `cpanel.sh admin` runs it.
-// The arguments after `admin` reach the command unchanged. Passenger loads this file
-// through a loader of its own, so there this file is never the main module and the app
-// is started as always; no line of the settings file can choose the command either.
-if (require.main === module && process.argv[2] === "admin") {
+// The arguments after `admin` reach the command unchanged.
+if (runAdmin) {
   import("./dist/node/admin.js")
     .then((admin) => admin.main(process.argv.slice(3)))
-    .catch((err) => {
-      // Only the error's code, as above: nothing of the settings and nothing the error says.
-      const code = err && typeof err.code === "string" ? err.code : "unknown error";
-      console.error(`demo-platform: the admin command could not be run (${code}).`);
+    .catch(() => {
+      // A fixed sentence: nothing of the settings and nothing the error says.
+      console.error("demo-platform: the admin command could not be run. Update the site with a current archive and try again.");
       process.exit(1);
     });
 } else {
