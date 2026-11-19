@@ -850,12 +850,14 @@ describe("smtp client, fake server on 127.0.0.1", () => {
   // that says so. The tests that need none still run.
   const canTrust = typeof tls.setDefaultCACertificates === "function" && typeof tls.getCACertificates === "function";
   const trustedIt = canTrust ? it : it.skip;
-  if (!canTrust) {
-    console.warn(`node-smtp: this Node (${process.version}) has no tls.setDefaultCACertificates; the tests that need a trusted test certificate are skipped.`);
-  }
+  const SKIP_REASON = `node-smtp: this Node (${process.version}) has no tls.setDefaultCACertificates; the tests that need a trusted test certificate are skipped.`;
 
   beforeAll(() => {
-    if (!canTrust) return;
+    if (!canTrust) {
+      // Written straight to stderr, so the reason shows whatever the reporter does with console output.
+      process.stderr.write(SKIP_REASON + "\n");
+      return;
+    }
     // Read first, before anything that can throw, so afterAll always has them to put back.
     defaults = tls.getCACertificates("default");
     tls.setDefaultCACertificates([...defaults, trusted.cert, misnamed.cert]);
