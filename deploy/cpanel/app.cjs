@@ -50,7 +50,23 @@ for (const raw of text.split(/\r?\n/)) {
   process.env[m[1]] = quoted ? quoted[1] : m[2];
 }
 
-import("./dist/node/entry.js").catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// `node app.cjs admin <arguments>` runs the site's admin command (dist/node/admin.js)
+// instead of the app, with these same settings: that is how `cpanel.sh admin` runs it.
+// The arguments after `admin` reach the command unchanged. Passenger loads this file
+// through a loader of its own, so there this file is never the main module and the app
+// is started as always; no line of the settings file can choose the command either.
+if (require.main === module && process.argv[2] === "admin") {
+  import("./dist/node/admin.js")
+    .then((admin) => admin.main(process.argv.slice(3)))
+    .catch((err) => {
+      // Only the error's code, as above: nothing of the settings and nothing the error says.
+      const code = err && typeof err.code === "string" ? err.code : "unknown error";
+      console.error(`demo-platform: the admin command could not be run (${code}).`);
+      process.exit(1);
+    });
+} else {
+  import("./dist/node/entry.js").catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
