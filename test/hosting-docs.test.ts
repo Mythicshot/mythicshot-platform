@@ -660,7 +660,18 @@ describe("the shared cPanel hosting guide", () => {
     expect(part).toMatch(/by a link sent by mail[^\n]*needs no shell/);
     // Which account becomes the admin, and which settings the command sees.
     expect(part).toMatch(/the oldest of them/);
-    expect(part).toMatch(/^The command reads the settings the settings file holds from that file only[^\n]*are not seen by it\.$/m);
+    expect(part).toContain(
+      "\nThrough `./cpanel.sh admin` the command takes its settings from the settings file only: a setting exported in your SSH session, or entered in the environment screen of the hosting's **Setup Node.js App** page, is not seen by it. Run any other way on shared hosting, the recovery setting is always off.\n",
+    );
+    expect(part).not.toMatch(/never taken from the shell at all/);
+    expect(part).toContain(
+      "\nThe recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the hosting account: whoever can change the settings file or the data folder can change the site directly.\n",
+    );
+    // The command's sentence for a half-finished setup names a section that exists, in this guide as in the runbook.
+    expect(adminTs).toContain(`'This site\\'s setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.'`);
+    expect(part).toMatch(/^### If the setup did not finish$/m);
+    expect(part).toContain("[If the setup did not finish](#if-the-setup-did-not-finish)");
+    expect(part).toContain("restore it as in [step 11](#11-restore-from-a-backup)");
     // The script's usage line is the planned one.
     expect(cpanelSh).toContain("  admin       Run the site's admin command, for example: admin first-admin --email you@example.com --username yourname");
   });
@@ -678,6 +689,12 @@ describe("the shared cPanel hosting guide", () => {
     expect(runbook).toContain("The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.");
     expect(runbook).toMatch(/`RECOVERY_LINKS=on`[^\n]*`\.env`[^\n]*remove the line again/);
     expect(runbook).toMatch(/by a link sent by mail[^\n]*needs no shell/);
+    expect(runbook).toContain("passing it to `docker compose exec` with `-e` does not work");
+    expect(runbook).toContain(
+      "\nThe recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the server: whoever can change `.env` or the data folder can change the site directly.\n",
+    );
+    expect(runbook).toMatch(/^### If the setup did not finish$/m);
+    expect(runbook).toContain("the steps in [If the token was lost before anyone saved it](#if-the-token-was-lost-before-anyone-saved-it) clear that half-finished setup");
   });
 
   it("the second address is set up in the order that keeps the platform reachable, and attaching it stays marked Unconfirmed", () => {

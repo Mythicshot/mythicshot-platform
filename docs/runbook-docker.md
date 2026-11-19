@@ -437,10 +437,18 @@ docker compose exec app node dist/node/admin.js signin-link --email you@example.
 
 Then remove the `RECOVERY_LINKS=on` line from `.env` with `nano .env` and run `docker compose up -d --force-recreate --wait app` again.
 
+The line must be in `.env` and the container recreated: the command reads the setting from the app's own process in the container, so passing it to `docker compose exec` with `-e` does not work.
+
+The recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the server: whoever can change `.env` or the data folder can change the site directly.
+
 The command also has `mail-check`, which says whether mail is set up without showing any setting, and `audit`, which shows the last sign-ins and admin changes; `--help` lists them. Its usage text names it the way `DEMO_PLATFORM_ADMIN_NAME` says when a wrapper sets that, as `cpanel.sh admin` does; nothing else reads it. It runs beside the app without a restart and changes only the database: making the admin is one step that is written whole or not at all, and the link and its record in the audit follow it. It applies no database update itself.
 
 > [!WARNING]
 > Never open the database with the server's `sqlite3` tool: an older one cannot read the platform's tables, so use the app's own commands, which run on the app's Node.js.
+
+### If the setup did not finish
+
+The command says `This site's setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.` when the setup wizard wrote its setup record but stopped before it wrote the owner's account, so the site has nobody to make admin. While no tour or upload exists and the token was never used, the steps in [If the token was lost before anyone saved it](#if-the-token-was-lost-before-anyone-saved-it) clear that half-finished setup, and the wizard can run again. Otherwise restore a backup from before the setup, as in [step 9](#9-back-up-and-restore).
 
 ## 9. Back up and restore
 
