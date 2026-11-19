@@ -19,6 +19,7 @@ import installSh from "../deploy/install.sh?raw";
 import packageJson from "../package.json?raw";
 import packageCpanelTs from "../scripts/package-cpanel.ts?raw";
 import appTs from "../src/app.ts?raw";
+import adminTs from "../src/node/admin.ts?raw";
 import hostGateTs from "../src/host-gate.ts?raw";
 
 const HOSTING = import.meta.glob("../docs/hosting/*.md", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
@@ -497,12 +498,19 @@ describe("the shared cPanel hosting guide", () => {
 
   it("every cpanel.sh command and option the guide names exists, and every one the script has is in the guide", () => {
     const { commands, flags } = vocabulary();
-    expect([...commands].sort()).toEqual(["backup", "install", "status", "update"]);
+    expect([...commands].sort()).toEqual(["admin", "backup", "install", "status", "update"]);
     expect([...flags].sort()).toEqual(["--allow-downgrade", "--app-domain", "--app-root", "--domain", "--dry-run", "--node", "--yes"]);
+    // After `admin`, the script takes only its own options; from the first other word on, every word is the admin command's.
+    const ADMIN_OWN = ["--app-root", "--node", "--dry-run"];
     const named = new Set<string>();
     for (const l of lines) {
       for (const m of l.matchAll(/cpanel\.sh((?: +(?:--[a-z][a-z-]*|[a-z]+(?=\s|$)|(?:tours|app)\.example\.com|<[a-z]+>))*)/g)) {
-        for (const w of m[1].trim().split(/ +/).filter((x) => /^(--)?[a-z-]+$/.test(x))) named.add(w);
+        let admin = false;
+        for (const w of m[1].trim().split(/ +/).filter((x) => /^(--)?[a-z-]+$/.test(x))) {
+          if (admin && !ADMIN_OWN.includes(w)) break;
+          named.add(w);
+          if (w === "admin") admin = true;
+        }
       }
     }
     for (const w of named) expect([...commands, ...flags], `cpanel.sh ${w}`).toContain(w);
@@ -606,11 +614,48 @@ describe("the shared cPanel hosting guide", () => {
   it("has a numbered section on a second address, after the troubleshooting and before the closing section", () => {
     const have = sections(guide);
     expect(have.indexOf("A second address for the app")).toBe(have.indexOf("Troubleshooting") + 1);
-    expect(have.indexOf("A second address for the app")).toBe(have.indexOf("What has been run where") - 1);
+    // Only the section on the first admin, added after it, stands between it and the closing section.
+    expect(have.indexOf("A second address for the app")).toBe(have.indexOf("What has been run where") - 2);
     expect(guide).toMatch(/^- \[\d+\. A second address for the app\]\(#\d+-a-second-address-for-the-app\)$/m);
     // The numbers of the sections before it did not move: links to them still hold.
     expect(guide).toMatch(/^## 13\. Troubleshooting$/m);
     expect(guide).toMatch(/^## 14\. A second address for the app$/m);
+  });
+
+  it("has a numbered section on making the first admin, with the command, what it prints and a warning against the hosting's sqlite3 tool", () => {
+    const have = sections(guide);
+    // Added last, so no number before it moved.
+    expect(have.indexOf("Make yourself the admin")).toBe(have.indexOf("What has been run where") - 1);
+    expect(guide).toMatch(/^## 15\. Make yourself the admin$/m);
+    const from = guide.search(/^## 15\. Make yourself the admin$/m);
+    const part = guide.slice(from, guide.indexOf("## What has been run where"));
+    // The command as the owner approved it, from the installed copy, and the words it prints.
+    expect(lines).toContain("cd ~/apps/tours && ./cpanel.sh admin --email you@example.com --username yourname");
+    expect(part).toContain(
+      '```text\nThe admin account "yourname" was created.\nYour tours, their links and your tokens stay exactly as they are.\n\nOpen this link within 15 minutes to sign in:\nhttps://app.example.com/signin/link#…\n```',
+    );
+    // Each of those lines is the command's own.
+    for (const said of ["was created.", "Your tours, their links and your tokens stay exactly as they are.", "Open this link within 15 minutes to sign in:", "This site already has an admin. Nothing was changed.", "The database is from an older version. Update the site first."]) {
+      expect(part, said).toContain(said);
+      expect(adminTs, said).toContain(said);
+    }
+    // A link while mail is off, and the dry run.
+    expect(lines).toContain("cd ~/apps/tours && ./cpanel.sh admin --email you@example.com");
+    expect(part).toContain("`./cpanel.sh admin --dry-run first-admin --email you@example.com --username yourname`");
+    // The update section points to it.
+    expect(guide).toMatch(/^\*\*After the update that brings accounts,\*\*[^\n]*\[step 15\]\(#15-make-yourself-the-admin\)\.$/m);
+    expect(part).toMatch(/^> \[!WARNING\]\n> The link signs in whoever opens it first/m);
+    expect(part).toMatch(/^> \[!WARNING\]\n> Never open the database with the hosting's `sqlite3` tool/m);
+    // The script's usage line is the planned one.
+    expect(cpanelSh).toContain("  admin       Run the site's admin command, for example: admin first-admin --email you@example.com --username yourname");
+  });
+
+  it("the Docker runbook makes the first admin with the same command, run in the container", () => {
+    const runbook = allDocs["docs/runbook-docker.md"];
+    const code = codeLines(runbook);
+    expect(code).toContain("docker compose exec app node dist/node/admin.js first-admin --email you@example.com --username yourname");
+    expect(code).toContain("docker compose exec app node dist/node/admin.js signin-link --email you@example.com");
+    expect(runbook).toMatch(/> \[!WARNING\]\n> Never open the database with the server's `sqlite3` tool/);
   });
 
   it("the second address is set up in the order that keeps the platform reachable, and attaching it stays marked Unconfirmed", () => {

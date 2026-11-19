@@ -26,6 +26,7 @@ Examples use `tours.example.com` for the platform's address and `you` for your c
 - [12. Roll back an update](#12-roll-back-an-update)
 - [13. Troubleshooting](#13-troubleshooting)
 - [14. A second address for the app](#14-a-second-address-for-the-app)
+- [15. Make yourself the admin](#15-make-yourself-the-admin)
 - [What has been run where](#what-has-been-run-where)
 
 ## 1. What you need
@@ -255,6 +256,8 @@ The update refuses to start when it does not know the address, because it could 
 
 **How to tell it worked:** the script ends with "Updated to version" and the address. If it says the health check did not pass, it prints the commands to go back; see [step 12](#12-roll-back-an-update).
 
+**After the update that brings accounts,** the site works as before until it has an admin: make yourself the admin as in [step 15](#15-make-yourself-the-admin).
+
 ## 10. Backups
 
 1. Make a backup. The installed copy of the script does this; no archive is needed.
@@ -469,6 +472,47 @@ cd ~/apps/tours && ./cpanel.sh status
 
 The subdomain `app.example.com` can stay or be removed in cPanel. With one address the platform answers on every name the hosting sends to it.
 
+## 15. Make yourself the admin
+
+From the version with accounts on, people sign in to the platform in a browser with a link instead of a password. A site that was updated keeps working exactly as before: its tours, their links and its tokens are not changed, and nobody can sign in until the site has an admin. The admin is made once, by a command run on the hosting. There is no web page for it, and the setup code plays no part in it.
+
+1. Update to a version with accounts, as in [step 9](#9-updates), and see that `./cpanel.sh status` shows the health as ok.
+2. Run the command from the installed copy of the script, with your own email address and the username you want. The account that set up the site becomes the admin, with that address in place of the one typed in the setup wizard.
+
+```sh
+cd ~/apps/tours && ./cpanel.sh admin --email you@example.com --username yourname
+```
+
+It prints this, with your username and a link of your own:
+
+```text
+The admin account "yourname" was created.
+Your tours, their links and your tokens stay exactly as they are.
+
+Open this link within 15 minutes to sign in:
+https://app.example.com/signin/link#…
+```
+
+3. Open the link in your browser to sign in. It works once and for 15 minutes. With two addresses it is on the app address; with one address it is on the name in a `SITE_HOST=tours.example.com` line of the settings file. Without either, the command prints only the part after the address, `/signin/link#…`, and you put your site's address in front of it.
+
+> [!WARNING]
+> The link signs in whoever opens it first, like a password for 15 minutes: open it in your own browser and never paste it into a chat, a ticket or a file.
+
+**How to tell it worked:** the command ends with the link and no other line. Run it again and it says `This site already has an admin. Nothing was changed.`: there is only ever one first admin, and the command changes nothing the second time. A username is 3 to 30 lowercase letters, digits and hyphens and starts with a letter; a reserved name such as `admin` is refused with its own sentence, and so is an address that is not one. Nothing is changed when it refuses.
+
+**A new sign-in link, at any time,** for instance while mail is not set up: give the address alone. The command never sends mail for this; it prints the link here and nowhere else, and not into any log.
+
+```sh
+cd ~/apps/tours && ./cpanel.sh admin --email you@example.com
+```
+
+The same command has three more uses: `./cpanel.sh admin mail-check` says whether mail is set up without showing any setting, `./cpanel.sh admin audit` shows the last sign-ins and admin changes, and `./cpanel.sh admin --help` lists them. Options of the script itself, such as `--app-root` or `--dry-run`, go before the command's own: `./cpanel.sh admin --dry-run first-admin --email you@example.com --username yourname` prints what it would run and runs nothing.
+
+The command runs beside the running app, without a restart, and changes only the database, in one step. It does not apply a database update itself: on a site that was not updated yet it says `The database is from an older version. Update the site first.` and changes nothing.
+
+> [!WARNING]
+> Never open the database with the hosting's `sqlite3` tool: on many hosting accounts it is older than 3.37 and cannot read the platform's tables, so use only the script and the app, which use the app's own Node.js.
+
 ## What has been run where
 
 **Run by hand on real hosting,** on one shared cPanel account at one provider (CloudLinux, with the app run by Passenger):
@@ -494,6 +538,7 @@ The subdomain `app.example.com` can stay or be removed in cPanel. With one addre
 - The database copy made with the `sqlite3` tool, which is used only where the app's Node.js is not found. It was only run against a stand-in.
 - Resuming an update that was cut off, and the commands to go back. Both were run against stand-ins, with the cut made at the points the tests can reach.
 - The second address of [step 14](#14-a-second-address-for-the-app): the `--app-domain` option, the check before an update records it, and the check that each address reports its own role. All of it was run against stand-ins only.
+- `./cpanel.sh admin` of [step 15](#15-make-yourself-the-admin): the script's part was run against stand-ins, and once with a real Node.js and the real `app.cjs` in front of a stand-in command; the command itself was run against a real database on a development computer only. The backup that refuses a `sqlite3` tool older than 3.37 was run against a stand-in.
 - The restore steps in [step 11](#11-restore-from-a-backup), and the labels of cPanel's pages and buttons throughout, which are written from memory of cPanel and may differ at your provider.
 
 **Not yet confirmed on real hosting,** in the order to check them on the first real install:

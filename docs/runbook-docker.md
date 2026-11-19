@@ -398,6 +398,31 @@ Keeping Debian and Docker patched is yours to do, for example with `apt-get upda
 
 **How to tell it worked:** the run ends with `==> Updated`, and `sudo bash install.sh status` shows the app `healthy`.
 
+### Make yourself the admin
+
+From the version with accounts on, people sign in in a browser with a link instead of a password. An updated site keeps working exactly as before, its tours, links and tokens unchanged, and nobody can sign in until the site has an admin. The admin is made once, by a command run in the app container, with the settings the app itself runs with; there is no web page for it, and the setup code plays no part in it.
+
+1. From a root shell in `/opt/demo-platform`, run the command with your own email address and the username you want. The account that set up the site becomes the admin, with that address in place of the one typed in the setup wizard.
+
+```sh
+docker compose exec app node dist/node/admin.js first-admin --email you@example.com --username yourname
+```
+
+It prints `The admin account "yourname" was created.`, says that your tours, their links and your tokens stay exactly as they are, and ends with `Open this link within 15 minutes to sign in:` and a link on the app address, or on the one address with `SITE_HOST` set in `.env`; without either it prints only the part after the address, for you to put your site's address in front of.
+
+2. Open the link in your browser. It works once and for 15 minutes. Run the command again and it says `This site already has an admin. Nothing was changed.`
+
+3. For a new link at any time, for instance while mail is not set up, ask for one by address. It is printed here only, never mailed and never logged.
+
+```sh
+docker compose exec app node dist/node/admin.js signin-link --email you@example.com
+```
+
+The command also has `mail-check`, which says whether mail is set up without showing any setting, and `audit`, which shows the last sign-ins and admin changes; `--help` lists them. It runs beside the app without a restart, changes only the database, and applies no database update itself.
+
+> [!WARNING]
+> Never open the database with the server's `sqlite3` tool: an older one cannot read the platform's tables, so use the app's own commands, which run on the app's Node.js.
+
 ## 9. Back up and restore
 
 ### Back up
