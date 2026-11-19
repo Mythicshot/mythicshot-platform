@@ -10,12 +10,10 @@ import { APP_UID, prepareDataDir } from "./datadir.ts";
 import { NodeDb } from "./db.ts";
 import { NodeFileStore } from "./files.ts";
 import { migrate } from "./migrate.ts";
+import { stopSequence } from "./stop.ts";
 
 // src/node/entry.ts and dist/node/entry.js both sit two folders below the repo root.
 const MIGRATIONS_DIR = fileURLToPath(new URL("../../migrations/", import.meta.url));
-
-/** How long open requests may run after SIGTERM before their connections are cut. */
-const STOP_GRACE_MS = 5000;
 
 /**
  * A client must send all request headers within 15 s and the whole request, body
@@ -89,31 +87,29 @@ async function main(): Promise<void> {
   });
 
   // `docker stop` sends SIGTERM, and Node running as PID 1 has no default handler for
-  // it. Stop taking requests, let open ones finish, then close the database so SQLite
-  // checkpoints its WAL into db.sqlite and the file is whole on the volume. If requests
-  // are still open after the grace period they are cut, before Docker's own 10 s kill.
-  let stopping = false;
-  const stop = (signal: string) => {
-    if (stopping) return;
-    stopping = true;
-    console.log(`${signal} received, stopping`);
-    const finish = () => {
-      // Work still going on after its answer (a mail on its way) is given the same grace
-      // as open requests before the database is closed under it. Nothing is tried again:
-      // a mail cut off here is not sent a second time.
-      const grace = new Promise<void>((done) => setTimeout(done, STOP_GRACE_MS));
-      void Promise.race([background.settle(), grace]).then(() => {
-        db.close();
-        console.log("stopped");
-        process.exit(0);
-      });
-    };
-    server.close(finish);
-    if ("closeIdleConnections" in server) server.closeIdleConnections();
-    setTimeout(() => {
-      if ("closeAllConnections" in server) server.closeAllConnections();
-    }, STOP_GRACE_MS).unref();
-  };
+  // it. Stop taking requests, let open ones finish, wait for work deferred by a request
+  // (a mail on its way), then close the database so SQLite checkpoints its WAL into
+  // db.sqlite and the file is whole on the volume. The whole stop has one deadline,
+  // counted from the signal and well before the 10 s kill: requests still open after
+  // STOP_CUT_REQUESTS_MS are cut, and at STOP_DEADLINE_MS the database is closed whatever
+  // is still going on. The sequence and its test are in ./stop.ts.
+  const stop = stopSequence({
+    server: {
+      close: (done) => server.close(done),
+      closeIdleConnections: () => {
+        if ("closeIdleConnections" in server) server.closeIdleConnections();
+      },
+      closeAllConnections: () => {
+        if ("closeAllConnections" in server) server.closeAllConnections();
+      },
+    },
+    settle: () => background.settle(),
+    closeDb: () => db.close(),
+    setTimeout: (run, ms) => setTimeout(run, ms),
+    log: (line) => console.log(line),
+    error: (line) => console.error(line),
+    exit: (code) => process.exit(code),
+  });
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
 }
