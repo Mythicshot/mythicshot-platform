@@ -71,7 +71,7 @@ async function ownJsonBody(req: Request, deps: Deps, needs: string): Promise<Rec
   if (bytes === "too_large") return apiError(400, "bad_request", needs);
   let body: unknown;
   try {
-    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    body = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
   } catch {
     return apiError(400, "bad_request", needs);
   }

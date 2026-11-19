@@ -91,7 +91,7 @@ const seen = (c: Call) => ({ status: c.status, headers: [...c.headers.entries()]
 function codeIn(text: string): string {
   const found = text.match(/dpl_[0-9a-f]{40}/g) ?? [];
   expect(found, "a mail holds its code once").toHaveLength(1);
-  return found[0];
+  return found[0] ?? "";
 }
 
 /** Records the kind of every database call made through `deps.db` from now on. */

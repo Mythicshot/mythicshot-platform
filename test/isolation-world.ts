@@ -12,16 +12,19 @@
 // - an open upload for a new tour: step 1 sent, step 2 and the logo not;
 // - a tour of 13 steps with a publish in progress (12 pictures copied, not live);
 // - a tour whose delete was cut off after its rows went and before its files did;
-// - a second token that was revoked (written by SQL: no route revokes a token yet).
+// - a second token that was revoked (written by SQL: no route revokes a token yet);
+// - two live sessions of its account, signed in as the server signs a browser in; the
+//   first is the one the suite sends requests with. The first side's account is the site's
+//   admin, since nobody can sign in on a site without one.
 // The two sides differ in every title, every picture's bytes and every size, so a value of
 // one can never be mistaken for the other's.
 //
 // world() also takes over the clock (a fixed time that only tick() moves) and puts a
 // journal in front of both stores: every put and delete any request makes is recorded.
 //
-// Task 10 adds a session to each side here (Side.session) and the suite's session column.
 import { seedAccount } from "#harness";
 import { hashToken, newId, newSlug, newToken } from "../src/auth.ts";
+import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import type { Deps, FileStore } from "../src/ports.ts";
 import { clone, commit, createUpload, fixtures, putStep, send, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 
@@ -51,6 +54,9 @@ export type Ids = {
   pictures: { upload: Json[]; replaceUpload: Json[]; draft: Json[] };
   /** The byte the side's pictures are filled with. */
   fill: number;
+  /** The session the suite sends the side's requests with, and a second live session of the same account. */
+  session: string;
+  otherSession: string;
 };
 
 export type Side = {
@@ -63,6 +69,8 @@ export type Side = {
   tokenId: string;
   revokedToken: string;
   revokedTokenId: string;
+  /** The account's session: its secret, the Cookie header that carries it, and its anti-forgery value. */
+  session: { id: string; secret: string; cookie: string; csrf: string };
   ids: Ids;
 };
 
@@ -130,6 +138,8 @@ export function inventedIds(like?: Ids): Ids {
       draft: manifestOf(s.replaced, "x").steps,
     },
     fill: like?.fill ?? 0,
+    session: newId("ses"),
+    otherSession: newId("ses"),
   };
 }
 
@@ -175,8 +185,18 @@ function journal(name: string, store: FileStore, log: string[]): FileStore {
   };
 }
 
-async function side(deps: Deps, name: string, base: number, fill: number): Promise<Side> {
-  const account = await seedAccount(deps);
+/** What a browser sends as its User-Agent; only the label made from it is stored. */
+const BROWSER = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
+
+/** A session of the account, made as completing a sign-in makes one. The site must have an admin. */
+async function signIn(deps: Deps, userId: string): Promise<Side["session"]> {
+  const made = await redeemSignInCode(deps, await createSignInCode(deps, userId), BROWSER, null);
+  if (made === null) throw new Error("the world could not be built: the sign-in was refused");
+  return { id: made.sessionId, secret: made.secret, cookie: `${SESSION_COOKIE}=${made.secret}`, csrf: await csrfFor(made.secret) };
+}
+
+async function side(deps: Deps, name: string, base: number, fill: number, admin: boolean): Promise<Side> {
+  const account = await seedAccount(deps, { admin });
   const { workspaceId, token } = account;
   const s = sizes(base);
   // Every account's workspace is seeded with the same name; these two must differ.
@@ -261,8 +281,13 @@ async function side(deps: Deps, name: string, base: number, fill: number): Promi
     replaceUpload: second.json.upload_id,
     pictures: { upload: uploading.steps, replaceUpload: openReplace.steps, draft: replaced.steps },
     fill,
+    session: "",
+    otherSession: "",
   };
-  return { name, workspaceId, workspaceName, userId: account.userId, email: account.email, token, tokenId, revokedToken, revokedTokenId, ids };
+  const session = await signIn(deps, account.userId);
+  ids.session = session.id;
+  ids.otherSession = (await signIn(deps, account.userId)).id;
+  return { name, workspaceId, workspaceName, userId: account.userId, email: account.email, token, tokenId, revokedToken, revokedTokenId, session, ids };
 }
 
 /**
@@ -276,9 +301,9 @@ export async function world(deps: Deps, keys: StoreKeys): Promise<World> {
   const log: string[] = [];
   deps.drafts = journal("drafts", deps.drafts, log);
   deps.pub = journal("public", deps.pub, log);
-  const a = await side(deps, "Alpha", 300, 0xa1);
+  const a = await side(deps, "Alpha", 300, 0xa1, true);
   now += 1000;
-  const b = await side(deps, "Bravo", 500, 0xb2);
+  const b = await side(deps, "Bravo", 500, 0xb2, false);
   now += 60_000;
   log.length = 0;
   return { deps, keys, a, b, tick: (ms = 100) => void (now += ms), writes: () => [...log], forgetWrites: () => void (log.length = 0) };
@@ -374,15 +399,17 @@ export type Dump = { rows: Record<string, Json[]>; drafts: string[]; public: str
 
 /**
  * The whole database and the key lists of both stores, whoever anything belongs to.
- * `touched` names tokens whose `last_used_at` is left out: an accepted token records its
- * use, and that is the one write a refused request may make. With `files`, also the
- * length, hash and type of every stored file.
+ * `touched` names tokens whose `last_used_at`, and sessions whose `last_used_at` and
+ * `expires_at`, are left out: an accepted token or session records its use, and that is
+ * the one write a refused request may make. With `files`, also the length, hash and type
+ * of every stored file.
  */
 export async function dumpOf(deps: Deps, keys: StoreKeys, opts: { touched?: string[]; files?: boolean } = {}): Promise<Dump> {
   const rows: Record<string, Json[]> = {};
   for (const table of await tablesOf(deps)) {
     const found = await deps.db.all<Json>(`SELECT * FROM "${table}"`);
     if (table === "api_token") for (const row of found) if (opts.touched?.includes(row.id)) row.last_used_at = "(its own use)";
+    if (table === "session") for (const row of found) if (opts.touched?.includes(row.id)) row.last_used_at = row.expires_at = "(its own use)";
     rows[table] = byText(found);
   }
   const dump: Dump = { rows, drafts: await keys.draftKeys(), public: await keys.publicKeys() };

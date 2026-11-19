@@ -5,12 +5,13 @@
 // an id that never existed (status, body and headers, byte for byte), when a row of any
 // table changed, or when anything was written to or deleted from either store.
 //
-// Every route of the app is in exactly one of four tables, keyed "<METHOD> <route path>"
+// Every route of the app is in exactly one of five tables, keyed "<METHOD> <route path>"
 // exactly as in `createApp(deps).routes`:
 // - CASES: routes with an id in the path. Each lists the requests in which one workspace
 //   names the other's ids, with the exact answer.
 // - BODY_IDS: routes with no id in the path whose body carries one. The same kind of list.
 // - LISTS: routes that answer a collection or a summary of the caller's own workspace.
+// - SELF: routes with no id that change only the caller's own session or account.
 // - OPEN: routes with no owner at all, each with its reason.
 // A route in none of them, or in two, fails the first test below; so does a table key no
 // route has. The route list is the router's own, as in test/openapi.test.ts, so the
@@ -25,18 +26,21 @@
 // - A new route: add its key to one table. With an id in the path it goes in CASES with
 //   one request per foreign id it can be given; add what the requests need to `Ids` and to
 //   `inventedIds` in test/isolation-world.ts.
-// - Sessions (Task 10): add `session` to `Side` in the world, and a second entry to
-//   CREDENTIALS below. Every test that sends a case sends it once per credential.
+// - Every test that sends a case sends it once per credential in CREDENTIALS: the side's
+//   token, and its session with the anti-forgery header and an Origin of the address the
+//   request goes to, as the site's own page sends them. A route that takes only a session
+//   marks its requests `only: "session"`; a token is then answered 401, never the data.
 // - Admin routes (Task 12): a fifth table, ADMIN, added to TABLES.
 import { describe, expect, it } from "vitest";
 import { makeDeps } from "#harness";
 import { createApp } from "../src/app.ts";
 import { hashToken, newToken } from "../src/auth.ts";
+import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { openapi, type OpenApiDoc } from "../src/docs/openapi.ts";
 import type { Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
-import { commit, logoPng, putStep, send, stepImage, type Call, type Json } from "./bundle.ts";
+import { ORIGIN, commit, logoPng, putStep, send, stepImage, type Call, type Json } from "./bundle.ts";
 import { OWNED, SHARED, createReplace, dumpOf, inventedIds, manifestOf, namesIn, needlesOf, snapshotOf, tablesOf, world, type Ids, type Side, type World } from "./isolation-world.ts";
 
 const SLOW = { timeout: 120_000 };
@@ -53,6 +57,9 @@ const NO_TOUR = notFound("tour");
 const NO_CHAPTER = notFound("chapter");
 const NO_STEP = notFound("step");
 const NO_UPLOAD = notFound("upload");
+const NO_SESSION = notFound("session");
+/** What a credential that may not be used here gets: a token on a route that takes only a session, a session on the tours address. */
+const NOBODY: Expect = { status: 401, body: { error: "unauthorized" } };
 /** Aborting an upload answers 204 whatever the id: there is nothing to tell apart. */
 const NOTHING: Expect = { status: 204, body: null };
 /** A publish id the tour does not have: the publish it names was stopped, or never was. */
@@ -72,6 +79,8 @@ type Req = {
   bytes?: Uint8Array;
   /** The body field that carries the foreign id, when it is not in the path. */
   field?: string;
+  /** The route takes a session and no token: any other credential is answered NOBODY. */
+  only?: "session";
   expect: Expect;
 };
 
@@ -127,6 +136,10 @@ const CASES: Record<string, Entry> = {
     { what: "their live publish, named for the caller's own tour", method: "POST", path: tourPath(m.published.tour, "/publish"), json: { publish_id: t.published.publishId }, field: "publish_id", expect: NO_PUBLISH },
   ],
   "POST /api/v1/tours/:id/unpublish": (t) => theirTours(t).map(([what, id]) => ({ what, method: "POST", path: tourPath(id, "/unpublish"), expect: NO_TOUR })),
+  "DELETE /api/v1/sessions/:id": (t) => [
+    { what: "the session they are signed in with", method: "DELETE", path: `/api/v1/sessions/${t.session}`, only: "session", expect: NO_SESSION },
+    { what: "another live session of theirs", method: "DELETE", path: `/api/v1/sessions/${t.otherSession}`, only: "session", expect: NO_SESSION },
+  ],
 };
 
 /** A create for the open upload's own pictures, into `target`. */
@@ -159,12 +172,14 @@ const BODY_IDS: Record<string, Entry> = {
   ],
 };
 
-/** Routes that answer the caller's own workspace as a whole: what the answer holds. */
-const LISTS: Record<string, { path: string; holds: string }> = {
+/** Routes that answer the caller's own workspace or account as a whole: what the answer holds, and the one credential it takes when it does not take both. */
+const LISTS: Record<string, { path: string; holds: string; only?: "token" | "session" }> = {
   "GET /api/v1/me": { path: "/api/v1/me", holds: "the caller's workspace name" },
   "GET /api/v1/usage": { path: "/api/v1/usage", holds: "the caller's workspace's usage and allowance" },
   "GET /api/v1/tours": { path: "/api/v1/tours", holds: "the caller's workspace's tours" },
-  "GET /api/v1/setup/connected": { path: "/api/v1/setup/connected", holds: "whether the caller's own token was used" },
+  "GET /api/v1/setup/connected": { path: "/api/v1/setup/connected", holds: "whether the caller's own token was used", only: "token" },
+  "GET /api/v1/session": { path: "/api/v1/session", holds: "the caller's account, workspace, session and anti-forgery value", only: "session" },
+  "GET /api/v1/sessions": { path: "/api/v1/sessions", holds: "the live sessions of the caller's own account", only: "session" },
 };
 
 type Sample = { method: string; path: string; json?: unknown; headers?: Record<string, string> };
@@ -197,10 +212,27 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[] }> 
   "GET /docs/licences.txt": { reason: "licence notices, fixed text", samples: () => [{ method: "GET", path: "/docs/licences.txt" }] },
   "GET /api/v1/openapi.json": { reason: "the API description, fixed text", samples: () => [{ method: "GET", path: "/api/v1/openapi.json" }] },
   "GET /api/v1/openapi.yaml": { reason: "the API description, fixed text", samples: () => [{ method: "GET", path: "/api/v1/openapi.yaml" }] },
+  "POST /api/v1/signin/request": {
+    reason: "asks for a sign-in link: the answer is the same for every address and every caller, and a link goes only to the address's own mailbox",
+    samples: () => [{ method: "POST", path: "/api/v1/signin/request", json: { email: "nobody-here@example.com" }, headers: { origin: ORIGIN } }],
+  },
+  "POST /api/v1/signin/complete": {
+    reason: "turns a mailed code into a session: the code alone says whose, the caller's credential is not read, and the answer names nothing",
+    samples: () => [{ method: "POST", path: "/api/v1/signin/complete", json: { code: "dpl_" + "0".repeat(40) }, headers: { origin: ORIGIN } }],
+  },
+};
+
+/**
+ * Routes with no id that change only the caller's own session or account: what they end.
+ * Each is sent by one workspace with its session; nothing of the other may change.
+ */
+const SELF: Record<string, { path: string; ends: string }> = {
+  "POST /api/v1/signout": { path: "/api/v1/signout", ends: "the session the request is sent with" },
+  "POST /api/v1/signout/everywhere": { path: "/api/v1/signout/everywhere", ends: "every session of the caller's own account" },
 };
 
 type Tables = Record<string, Record<string, unknown>>;
-const TABLES: Tables = { CASES, BODY_IDS, LISTS, OPEN };
+const TABLES: Tables = { CASES, BODY_IDS, LISTS, OPEN, SELF };
 
 // ---- The route list against the tables ----
 
@@ -215,7 +247,7 @@ const hasParameter = (key: string) => key.slice(key.indexOf(" ") + 1).includes("
 function whereToAdd(key: string): string {
   return hasParameter(key)
     ? "add it to CASES in test/isolation.test.ts, with a request for every id it can be given (or to OPEN with its reason, if it has no owner)"
-    : "add it to LISTS in test/isolation.test.ts if it answers a collection or a summary, to BODY_IDS if its body carries an id, or to OPEN with its reason if it has no owner";
+    : "add it to LISTS in test/isolation.test.ts if it answers a collection or a summary, to SELF if it changes only the caller's own session or account, to BODY_IDS if its body carries an id, or to OPEN with its reason if it has no owner";
 }
 
 /** Everything wrong between a route list and the tables: one line per problem, none when each route is in exactly one table and no table has a key without a route. */
@@ -236,7 +268,7 @@ function tableProblems(routes: string[], tables: Tables = TABLES): string[] {
 function parameterProblems(routes: string[], tables: Tables = TABLES): string[] {
   return routes
     .filter((key) => hasParameter(key) && !Object.hasOwn(tables.CASES ?? {}, key) && !Object.hasOwn(tables.OPEN ?? {}, key))
-    .map((key) => `${key} takes an id in its path: it belongs in CASES (or in OPEN with its reason), not in LISTS or BODY_IDS`);
+    .map((key) => `${key} takes an id in its path: it belongs in CASES (or in OPEN with its reason), not in LISTS, SELF or BODY_IDS`);
 }
 
 /** For each operation of the description, the names ending in `_id` anywhere in its request body. */
@@ -272,17 +304,26 @@ function bodyIdFields(doc: OpenApiDoc): Record<string, string[]> {
 // ---- Sending ----
 
 /**
- * The credentials every case is sent with. Today a side has one, its token; Task 10 adds
- * its session (with the anti-forgery header) as a second entry.
+ * One credential as a request carries it. `page`: the request comes from the site's own
+ * page, so it also carries an Origin of the address it is sent to.
  */
-const CREDENTIALS: { name: string; of: (side: Side) => { token: string | null; headers?: Record<string, string> } }[] = [
+type Credential = { token: string | null; headers?: Record<string, string>; page?: boolean };
+
+/**
+ * The credentials every case is sent with: the side's token, and its session with the
+ * anti-forgery value, as the site's own page sends a change. The session's header is
+ * right for the session, so a refusal can only be about whose the ids are.
+ */
+const CREDENTIALS: { name: "token" | "session"; of: (side: Side) => Credential }[] = [
   { name: "token", of: (side) => ({ token: side.token }) },
+  { name: "session", of: (side) => ({ token: null, headers: { cookie: side.session.cookie, "x-csrf-token": side.session.csrf, "sec-fetch-site": "same-origin" }, page: true }) },
 ];
+const [BY_TOKEN, BY_SESSION] = CREDENTIALS as [(typeof CREDENTIALS)[number], (typeof CREDENTIALS)[number]];
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
-function fire(deps: Deps, r: Req | Sample, credential: { token: string | null; headers?: Record<string, string> }, origin?: string): Promise<Call> {
-  const headers = { ...(r.json !== undefined ? JSON_HEADERS : {}), ...("headers" in r ? r.headers : {}), ...credential.headers };
+function fire(deps: Deps, r: Req | Sample, credential: Credential, origin?: string): Promise<Call> {
+  const headers = { ...(r.json !== undefined ? JSON_HEADERS : {}), ...("headers" in r ? r.headers : {}), ...credential.headers, ...(credential.page ? { origin: origin ?? ORIGIN } : {}) };
   const body = r.json !== undefined ? JSON.stringify(r.json) : "bytes" in r ? r.bytes : undefined;
   return send(deps, r.method, r.path, { token: credential.token, body: body as RequestInit["body"], headers, origin });
 }
@@ -290,8 +331,25 @@ function fire(deps: Deps, r: Req | Sample, credential: { token: string | null; h
 /** Everything a client can see of an answer. */
 const seen = (c: Call) => ({ status: c.status, headers: [...c.headers.entries()].sort(), body: c.text });
 
-function expectAnswer(c: Call, r: Req, label: string): void {
-  expect({ status: c.status, body: r.expect.body === null ? c.text : c.json }, label).toEqual({ status: r.expect.status, body: r.expect.body ?? "" });
+/** The tours address's answer for a route only the app address has, whoever asks. */
+const NOT_HERE: Expect = { status: 404, body: { error: "not_found" } };
+
+/**
+ * The answer a request must get by this credential: its own, unless the credential may not
+ * be used there, which is NOBODY: a token on a route that takes only a session, or a
+ * session on the tours address of a site with two addresses (`onTours`), where sessions do
+ * not count. A route that takes only a session is not on the tours address at all.
+ */
+function wanted(r: Req, credential: string, onTours = false): Expect {
+  if (r.only === "session" && onTours) return NOT_HERE;
+  if (r.only === "session" && credential !== "session") return NOBODY;
+  if (credential === "session" && onTours) return NOBODY;
+  return r.expect;
+}
+
+function expectAnswer(c: Call, r: Req, label: string, credential: string, onTours = false): void {
+  const want = wanted(r, credential, onTours);
+  expect({ status: c.status, body: want.body === null ? c.text : c.json }, label).toEqual({ status: want.status, body: want.body ?? "" });
 }
 
 /** Every request of CASES and BODY_IDS with its route key. */
@@ -312,13 +370,14 @@ const directions = (w: World): [Side, Side][] => [[w.b, w.a], [w.a, w.b]];
 describe("the tables against the route table", () => {
   const routes = () => routeKeysOf(createApp({ config: { publicImageBase: "", setupCode: null } } as Deps));
 
-  it("every route in the route table is in exactly one of the four tables, and nothing else is", () => {
+  it("every route in the route table is in exactly one of the tables, and nothing else is", () => {
     expect(tableProblems(routes())).toEqual([]);
     // The routes are really there: an empty route list would agree with empty tables.
     expect(routes().length).toBeGreaterThanOrEqual(27);
     expect(routes()).toContain("DELETE /api/v1/tours/:id");
     for (const [key, entry] of Object.entries(OPEN)) expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(LISTS)) expect(entry.holds.length, `${key} must say what it holds`).toBeGreaterThan(10);
+    for (const [key, entry] of Object.entries(SELF)) expect(entry.ends.length, `${key} must say what it ends`).toBeGreaterThan(10);
   });
 
   it("every route whose path has a parameter is in CASES or OPEN", () => {
@@ -381,7 +440,7 @@ describe("the tables against the route table", () => {
     const asList: Tables = { ...TABLES, LISTS: { ...LISTS, "GET /api/v1/tours/:id/notes": {} } };
     expect(tableProblems(["GET /api/v1/tours/:id/notes", ...routes()], asList)).toEqual([]);
     expect(parameterProblems(["GET /api/v1/tours/:id/notes", ...routes()], asList)).toEqual([
-      "GET /api/v1/tours/:id/notes takes an id in its path: it belongs in CASES (or in OPEN with its reason), not in LISTS or BODY_IDS",
+      "GET /api/v1/tours/:id/notes takes an id in its path: it belongs in CASES (or in OPEN with its reason), not in LISTS, SELF or BODY_IDS",
     ]);
     // A route in two tables, and a table key left behind by a route that is gone.
     const twice: Tables = { ...TABLES, LISTS: { ...LISTS, "GET /healthz": {} } };
@@ -400,7 +459,7 @@ describe("one workspace against another", () => {
     for (const n of invented) expect(names).not.toContain(n);
     for (const side of [w.a, w.b]) {
       const s = await snapshotOf(w.deps, side, w.keys);
-      for (const table of ["workspace", "user", "membership", "signin_method", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object"]) {
+      for (const table of ["workspace", "user", "membership", "signin_method", "signin_code", "session", "audit", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object"]) {
         expect(s.rows[table].length, `${side.name} has no row in ${table}`).toBeGreaterThan(0);
       }
       // Every file a row names is there, but the one picture the publish in progress has not copied yet.
@@ -428,13 +487,18 @@ describe("one workspace against another", () => {
       for (const credential of CREDENTIALS) {
         for (const { key, req } of everyCase(theirs.ids, mine.ids)) {
           w.tick();
-          expectAnswer(await fire(w.deps, req, credential.of(mine)), req, label(key, req, credential.name, mine));
+          expectAnswer(await fire(w.deps, req, credential.of(mine)), req, label(key, req, credential.name, mine), credential.name);
         }
       }
     }
-    // The same requests are not refused for everyone: with its own ids a workspace is answered otherwise.
-    const own = await fire(w.deps, CASES["PATCH /api/v1/tours/:id"](w.a.ids, w.a.ids)[1], { token: w.a.token });
-    expect(own.status).toBe(200);
+    // The same requests are not refused for everyone: with its own ids a workspace is answered otherwise, by either credential.
+    for (const credential of CREDENTIALS) {
+      w.tick();
+      const own = await fire(w.deps, CASES["PATCH /api/v1/tours/:id"](w.a.ids, w.a.ids)[1], credential.of(w.a));
+      expect(own.status, credential.name).toBe(200);
+    }
+    const ownSession = await fire(w.deps, CASES["DELETE /api/v1/sessions/:id"](w.a.ids, w.a.ids)[1], BY_SESSION.of(w.a));
+    expect(ownSession.status).toBe(204);
   });
 
   it("that answer is byte for byte the answer for an id that never existed", SLOW, async () => {
@@ -456,10 +520,11 @@ describe("one workspace against another", () => {
 
   it("nothing of the first workspace changed: rows and files are identical before and after every case", SLOW, async () => {
     const w = await build();
-    const start = await dumpOf(w.deps, w.keys, { files: true, touched: [w.a.tokenId, w.b.tokenId] });
+    const everyUse = [w.a.tokenId, w.b.tokenId, w.a.session.id, w.b.session.id];
+    const start = await dumpOf(w.deps, w.keys, { files: true, touched: everyUse });
     for (const [mine, theirs] of directions(w)) {
-      // A request with an accepted token records that the token was used; nothing else may differ.
-      const look = () => dumpOf(w.deps, w.keys, { touched: [mine.tokenId] });
+      // A request with an accepted token or session records that it was used; nothing else may differ.
+      const look = () => dumpOf(w.deps, w.keys, { touched: [mine.tokenId, mine.session.id] });
       const before = await look();
       const real = everyCase(theirs.ids, mine.ids);
       const invented = everyCase(inventedIds(theirs.ids), mine.ids);
@@ -474,7 +539,7 @@ describe("one workspace against another", () => {
       }
     }
     // And every file still holds the bytes it held, under the type it had.
-    expect(await dumpOf(w.deps, w.keys, { files: true, touched: [w.a.tokenId, w.b.tokenId] })).toEqual(start);
+    expect(await dumpOf(w.deps, w.keys, { files: true, touched: everyUse })).toEqual(start);
     expect(Object.keys(start.files ?? {}).length).toBeGreaterThan(60);
   });
 
@@ -494,7 +559,7 @@ describe("one workspace against another", () => {
       for (const { key, req } of everyCase(w.a.ids, w.b.ids)) {
         w.tick();
         const what = label(key, req, credential.name, w.b);
-        expectAnswer(await fire(w.deps, req, credential.of(w.b)), req, what);
+        expectAnswer(await fire(w.deps, req, credential.of(w.b)), req, what, credential.name);
         expect(await snapshotOf(w.deps, w.a, w.keys), `${what} changed something of the other workspace`).toEqual(before);
       }
     }
@@ -526,12 +591,16 @@ describe("one workspace against another", () => {
   it("no list or summary of one workspace holds anything of the other", SLOW, async () => {
     const w = await build();
     const { deps } = w;
-    const needles = async (side: Side) => needlesOf(await snapshotOf(deps, side, w.keys), [side.token, side.revokedToken, side.workspaceName, side.email]);
+    const needles = async (side: Side) => needlesOf(await snapshotOf(deps, side, w.keys), [side.token, side.revokedToken, side.workspaceName, side.email, side.session.secret, side.session.csrf]);
+    // Each list by each credential it takes, keyed "<route> by <credential>".
     const answers = async (side: Side) => {
       const out: Record<string, { status: number; body: string }> = {};
       for (const [key, list] of Object.entries(LISTS)) {
-        const r = await send(deps, "GET", list.path, { token: side.token });
-        out[key] = { status: r.status, body: r.text };
+        for (const credential of CREDENTIALS) {
+          if (list.only !== undefined && list.only !== credential.name) continue;
+          const r = await fire(deps, { method: "GET", path: list.path }, credential.of(side));
+          out[`${key} by ${credential.name}`] = { status: r.status, body: r.text };
+        }
       }
       return out;
     };
@@ -544,16 +613,23 @@ describe("one workspace against another", () => {
     expect(mine.a.length).toBeGreaterThan(80);
 
     const first = { a: await answers(w.a), b: await answers(w.b) };
-    for (const key of Object.keys(LISTS)) {
+    // Three lists take one credential, the others both.
+    expect(Object.keys(first.a)).toHaveLength(Object.keys(LISTS).length * 2 - 3);
+    for (const key of Object.keys(first.a)) {
       expect(first.a[key].status, key).toBe(200);
       expect(first.b[key].status, key).toBe(200);
       for (const n of mine.a) expect(first.b[key].body.includes(n), `${key} told the second workspace ${n} of the first`).toBe(false);
       for (const n of mine.b) expect(first.a[key].body.includes(n), `${key} told the first workspace ${n} of the second`).toBe(false);
     }
     // A leak would be seen: each workspace's own answers do hold its own names.
-    expect(first.a["GET /api/v1/tours"].body).toContain(w.a.ids.published.tour);
-    expect(first.a["GET /api/v1/tours"].body).toContain("Alpha draft tour");
-    expect(first.a["GET /api/v1/me"].body).toContain("Alpha workspace");
+    expect(first.a["GET /api/v1/tours by token"].body).toContain(w.a.ids.published.tour);
+    expect(first.a["GET /api/v1/tours by session"].body).toContain("Alpha draft tour");
+    expect(first.a["GET /api/v1/me by session"].body).toContain("Alpha workspace");
+    expect(first.a["GET /api/v1/session by session"].body).toContain(w.a.email);
+    expect(first.a["GET /api/v1/sessions by session"].body).toContain(w.a.ids.otherSession);
+    // A token and a session of one workspace see the same tours and the same usage.
+    expect(first.b["GET /api/v1/tours by session"]).toEqual(first.b["GET /api/v1/tours by token"]);
+    expect(first.b["GET /api/v1/usage by session"]).toEqual(first.b["GET /api/v1/usage by token"]);
 
     // The numbers of a workspace are its own rows' and nobody else's.
     const usage = async (side: Side) => {
@@ -564,12 +640,12 @@ describe("one workspace against another", () => {
       const uploads = sum(s.rows.upload.filter((u) => u.closing_at === null), "reserved_bytes");
       return { used_bytes: pictures + logos + uploads, allowance_bytes: null, over: false, tours: s.rows.tour.length, counted: { pictures, logos, uploads_in_progress: uploads } };
     };
-    const usedA = JSON.parse(first.a["GET /api/v1/usage"].body);
-    const usedB = JSON.parse(first.b["GET /api/v1/usage"].body);
+    const usedA = JSON.parse(first.a["GET /api/v1/usage by token"].body);
+    const usedB = JSON.parse(first.b["GET /api/v1/usage by token"].body);
     expect(usedA).toEqual(await usage(w.a));
     expect(usedB).toEqual(await usage(w.b));
     expect(usedA.used_bytes).not.toBe(usedB.used_bytes);
-    expect(JSON.parse(first.b["GET /api/v1/tours"].body).tours).toHaveLength(3);
+    expect(JSON.parse(first.b["GET /api/v1/tours by token"].body).tours).toHaveLength(3);
 
     // Whatever the first workspace then does, the second's answers stay the same, byte for byte.
     w.tick();
@@ -585,15 +661,48 @@ describe("one workspace against another", () => {
     for (const r of steps) expect(r.status, r.text).toBeLessThan(300);
     const second = { a: await answers(w.a), b: await answers(w.b) };
     expect(second.b).toEqual(first.b);
-    expect(second.a["GET /api/v1/usage"].body).not.toBe(first.a["GET /api/v1/usage"].body);
-    expect(second.a["GET /api/v1/tours"].body).not.toBe(first.a["GET /api/v1/tours"].body);
+    expect(second.a["GET /api/v1/usage by token"].body).not.toBe(first.a["GET /api/v1/usage by token"].body);
+    expect(second.a["GET /api/v1/tours by session"].body).not.toBe(first.a["GET /api/v1/tours by session"].body);
 
     // And a workspace at its allowance does not take room from another: the limit is per workspace.
-    await deps.db.run("UPDATE workspace SET storage_allowance_bytes = ? WHERE id = ?", [JSON.parse(second.a["GET /api/v1/usage"].body).used_bytes, w.a.workspaceId]);
+    await deps.db.run("UPDATE workspace SET storage_allowance_bytes = ? WHERE id = ?", [JSON.parse(second.a["GET /api/v1/usage by token"].body).used_bytes, w.a.workspaceId]);
     const full = await send(deps, "POST", "/api/v1/uploads", { token, body: JSON.stringify({ manifest: manifestOf([10], "Alpha one more"), target: { kind: "new" } }), headers: JSON_HEADERS });
     expect(full.status).toBe(413);
     const other = await send(deps, "POST", "/api/v1/uploads", { token: w.b.token, body: JSON.stringify({ manifest: manifestOf([10], "Bravo one more"), target: { kind: "new" } }), headers: JSON_HEADERS });
     expect(other.status).toBe(201);
+  });
+
+  it("signing out, here or everywhere, ends nothing of the other workspace", SLOW, async () => {
+    const w = await build();
+    const { deps, a, b } = w;
+    const fresh = async (side: Side): Promise<Credential> => {
+      const made = await redeemSignInCode(deps, await createSignInCode(deps, side.userId), null, null);
+      if (made === null) throw new Error("the sign-in was refused");
+      return { token: null, headers: { cookie: `${SESSION_COOKIE}=${made.secret}`, "x-csrf-token": await csrfFor(made.secret), "sec-fetch-site": "same-origin" }, page: true };
+    };
+    const alive = async (credential: Credential) => (await fire(deps, { method: "GET", path: "/api/v1/session" }, credential)).status;
+    for (const [mine, theirs] of directions(w)) {
+      for (const [key, self] of Object.entries(SELF)) {
+        const caller = await fresh(mine);
+        const theirsLive = await fresh(theirs);
+        // Asked once, so that asking again below writes nothing.
+        expect(await alive(theirsLive)).toBe(200);
+        const before = await snapshotOf(deps, theirs, w.keys);
+        w.tick();
+        // By token: nobody, and nothing ends.
+        expect((await fire(deps, { method: "POST", path: self.path }, BY_TOKEN.of(mine))).status, `${key} by token`).toBe(401);
+        expect(await alive(caller), `${key} by token`).toBe(200);
+        // By session: the caller's own session ends, and nothing of the other workspace does.
+        expect((await fire(deps, { method: "POST", path: self.path }, caller)).status, key).toBe(204);
+        expect(await alive(caller), key).toBe(401);
+        expect(await snapshotOf(deps, theirs, w.keys), `${key} by ${mine.name} changed something of ${theirs.name}`).toEqual(before);
+        expect(await alive(theirsLive), `${key} by ${mine.name} ended a session of ${theirs.name}`).toBe(200);
+      }
+    }
+    expect(w.writes()).toEqual([]);
+    // Everywhere did end the caller's own sessions: the ones the world made, too.
+    expect(await alive(BY_SESSION.of(a))).toBe(401);
+    expect(await alive(BY_SESSION.of(b))).toBe(401);
   });
 
   it("an upload cannot target another workspace's tour or chapter", SLOW, async () => {
@@ -604,8 +713,10 @@ describe("one workspace against another", () => {
     const had = await uploadsOfB();
     // Every way of naming the other's tour or chapter in a create leaves no upload behind.
     for (const req of BODY_IDS["POST /api/v1/uploads"](a.ids, b.ids)) {
-      expectAnswer(await fire(deps, req, { token: b.token }), req, req.what);
-      expect(await uploadsOfB(), req.what).toBe(had);
+      for (const credential of CREDENTIALS) {
+        expectAnswer(await fire(deps, req, credential.of(b)), req, `${req.what} (by ${credential.name})`, credential.name);
+        expect(await uploadsOfB(), req.what).toBe(had);
+      }
     }
 
     // A hash reaches only the pictures of the chapter being replaced, and that chapter is the
@@ -643,8 +754,9 @@ describe("one workspace against another", () => {
 
   it("on a site with two addresses every case answers the same on the tours address and on the app address", SLOW, async () => {
     const w = await build({ hosts: HOSTS });
-    const start = await dumpOf(w.deps, w.keys, { files: true, touched: [w.a.tokenId, w.b.tokenId] });
-    const needles = needlesOf(await snapshotOf(w.deps, w.a, w.keys), [w.a.token, w.a.workspaceName, w.a.email]);
+    const everyUse = [w.a.tokenId, w.b.tokenId, w.a.session.id, w.b.session.id];
+    const start = await dumpOf(w.deps, w.keys, { files: true, touched: everyUse });
+    const needles = needlesOf(await snapshotOf(w.deps, w.a, w.keys), [w.a.token, w.a.workspaceName, w.a.email, w.a.session.secret, w.a.session.csrf]);
     for (const origin of [TOURS, APP]) {
       for (const [mine, theirs] of directions(w)) {
         const real = everyCase(theirs.ids, mine.ids);
@@ -654,20 +766,27 @@ describe("one workspace against another", () => {
             w.tick();
             const what = `${label(real[i].key, real[i].req, credential.name, mine)} on ${origin}`;
             const r = await fire(w.deps, real[i].req, credential.of(mine), origin);
-            expectAnswer(r, real[i].req, what);
+            // A session counts on the app address only: on the tours address it is nobody.
+            expectAnswer(r, real[i].req, what, credential.name, origin === TOURS);
             expect(seen(r), what).toEqual(seen(await fire(w.deps, invented[i].req, credential.of(mine), origin)));
           }
         }
       }
     }
     expect(w.writes()).toEqual([]);
-    expect(await dumpOf(w.deps, w.keys, { files: true, touched: [w.a.tokenId, w.b.tokenId] })).toEqual(start);
+    expect(await dumpOf(w.deps, w.keys, { files: true, touched: everyUse })).toEqual(start);
     // The lists last: listing tours also clears the caller's own replaced pictures.
     for (const origin of [TOURS, APP]) {
       for (const [key, list] of Object.entries(LISTS)) {
-        const r = await send(w.deps, "GET", list.path, { token: w.b.token, origin });
-        expect(r.status, `${key} on ${origin}`).toBe(200);
-        for (const n of needles) expect(r.text.includes(n), `${key} on ${origin} told the second workspace ${n} of the first`).toBe(false);
+        for (const credential of CREDENTIALS) {
+          if (list.only !== undefined && list.only !== credential.name) continue;
+          const what = `${key} by ${credential.name} on ${origin}`;
+          const r = await fire(w.deps, { method: "GET", path: list.path }, credential.of(w.b), origin);
+          // The session's own routes are not on the tours address at all, and a session there is nobody.
+          const status = origin === APP ? 200 : list.only === "session" ? 404 : credential.name === "session" ? 401 : 200;
+          expect(r.status, what).toBe(status);
+          for (const n of needles) expect(r.text.includes(n), `${what} told the second workspace ${n} of the first`).toBe(false);
+        }
       }
     }
   });
@@ -720,6 +839,38 @@ describe("a caller that is nobody", () => {
     expect((await send(deps, "GET", "/api/v1/tours", { token: a.token })).status).toBe(200);
   });
 
+  it("a signed-out session, and a cookie that is no session, get 401 everywhere", SLOW, async () => {
+    const w = await build();
+    const { deps, a } = w;
+    const live = BY_SESSION.of(a);
+    // The side's session ends, as signing out ends it; its other session stays live.
+    await deps.db.run("UPDATE session SET revoked_at = ? WHERE id = ?", [deps.now(), a.session.id]);
+    const before = await dumpOf(deps, w.keys, { files: true });
+    const nobody = "dps_" + "0".repeat(64);
+    // Each with the anti-forgery value its cookie would have, so only the cookie is wrong.
+    const cookies: [string, string, string][] = [
+      ["the signed-out session", a.session.cookie, a.session.csrf],
+      ["a session nobody was given", `${SESSION_COOKIE}=${nobody}`, await csrfFor(nobody)],
+      ["the session's id as the cookie", `${SESSION_COOKIE}=${a.session.id}`, a.session.csrf],
+      ["the session in capitals", `${SESSION_COOKIE}=${a.session.secret.toUpperCase()}`, a.session.csrf],
+      ["the session twice", `${a.session.cookie}; ${a.session.cookie}`, a.session.csrf],
+    ];
+    const requests = ownRequests(a);
+    for (const [what, cookie, csrf] of cookies) {
+      for (const { key, req } of requests) {
+        w.tick();
+        const r = await fire(deps, req, { token: null, headers: { cookie, "x-csrf-token": csrf, "sec-fetch-site": "same-origin" }, page: true });
+        expect(seen(r), `${key} with ${what}`).toEqual(UNAUTHORIZED);
+      }
+      expect(w.writes(), what).toEqual([]);
+      expect(await dumpOf(deps, w.keys), what).toEqual({ rows: before.rows, drafts: before.drafts, public: before.public });
+    }
+    expect(await dumpOf(deps, w.keys, { files: true })).toEqual(before);
+    // The same request with a live session of the other workspace is answered: the 401s were about the cookie.
+    expect((await fire(deps, { method: "GET", path: "/api/v1/tours" }, BY_SESSION.of(w.b))).status).toBe(200);
+    expect((await fire(deps, { method: "GET", path: "/api/v1/tours" }, live)).status).toBe(401);
+  });
+
   // The token lookup does not yet look at the owner's status: `requireAuth` gains that
   // condition with sessions (Task 9, src/auth.ts). Until then this test is expected to fail,
   // and vitest reports it as failing the build the moment it passes: then change `it.fails`
@@ -729,14 +880,17 @@ describe("a caller that is nobody", () => {
     const { deps, a } = w;
     await deps.db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [a.userId]);
     const before = await dumpOf(deps, w.keys);
-    for (const { key, req } of ownRequests(a)) {
-      const r = await fire(deps, req, { token: a.token });
-      expect(seen(r), key).toEqual(UNAUTHORIZED);
+    for (const credential of CREDENTIALS) {
+      for (const { key, req } of ownRequests(a)) {
+        const r = await fire(deps, req, credential.of(a));
+        expect(seen(r), `${key} by ${credential.name}`).toEqual(UNAUTHORIZED);
+      }
     }
     expect(w.writes()).toEqual([]);
     expect(await dumpOf(deps, w.keys)).toEqual(before);
-    // The other workspace is not disabled with it.
+    // The other workspace is not disabled with it, by either credential.
     expect((await send(deps, "GET", "/api/v1/tours", { token: w.b.token })).status).toBe(200);
+    expect((await fire(deps, { method: "GET", path: "/api/v1/tours" }, BY_SESSION.of(w.b))).status).toBe(200);
   });
 });
 
@@ -744,8 +898,22 @@ describe("routes with no owner", () => {
   it("an open route answers everyone the same, reads no credential and shows only what was published", SLOW, async () => {
     const w = await build({ setupCode: SETUP_CODE });
     const { deps, a, b } = w;
-    const before = await dumpOf(deps, w.keys, { files: true });
-    const callers: [string, { token: string | null }][] = [["nobody", { token: null }], ["the owner", { token: a.token }], ["the other workspace", { token: b.token }], ["a revoked token", { token: a.revokedToken }]];
+    // Asking for a sign-in link counts the request in the site's own counters, whoever asks;
+    // they belong to no workspace (SHARED) and are left out here.
+    const look = async (files: boolean) => {
+      const d = await dumpOf(deps, w.keys, { files });
+      delete d.rows.rate_counter;
+      return d;
+    };
+    const before = await look(true);
+    const callers: [string, Credential][] = [
+      ["nobody", { token: null }],
+      ["the owner", { token: a.token }],
+      ["the other workspace", { token: b.token }],
+      ["a revoked token", { token: a.revokedToken }],
+      ["the owner's session", BY_SESSION.of(a)],
+      ["the other workspace's session", BY_SESSION.of(b)],
+    ];
     const statuses: Record<string, number[]> = {};
     for (const [key, entry] of Object.entries(OPEN)) {
       const samples = entry.samples(w);
@@ -758,16 +926,18 @@ describe("routes with no owner", () => {
         for (const [who, credential] of callers.slice(1)) expect(seen(await fire(deps, sample, credential)), `${key} ${sample.path} for ${who}`).toEqual(seen(first));
       }
     }
-    // No token was looked at (none records a use), nothing was claimed and nothing stored.
+    // No token or session was looked at (none records a use), nothing was claimed and nothing stored.
     expect(w.writes()).toEqual([]);
-    expect(await dumpOf(deps, w.keys, { files: true })).toEqual(before);
+    expect(await look(true)).toEqual(before);
 
     // What each answers: the wizard is closed on a site that has workspaces; a tour page and
     // a picture answer only for what is live (or retired and inside its grace).
     for (const key of Object.keys(OPEN).filter((k) => k.includes(" /setup"))) expect(statuses[key], key).toEqual([404]);
     expect(statuses["GET /t/:slug"]).toEqual([200, 404, 404, 404]);
     expect(statuses["GET /p/:name"]).toEqual([200, 200, 404, 404]);
-    for (const key of Object.keys(OPEN).filter((k) => !k.includes(" /setup") && !k.includes(":slug") && !k.includes(":name"))) for (const s of statuses[key]) expect(s, key).toBe(200);
+    // A code nobody was given gets the one refusal of a sign-in link.
+    expect(statuses["POST /api/v1/signin/complete"]).toEqual([403]);
+    for (const key of Object.keys(OPEN).filter((k) => !k.includes(" /setup") && !k.includes(":slug") && !k.includes(":name") && !k.endsWith("/signin/complete"))) for (const s of statuses[key]) expect(s, key).toBe(200);
 
     // A draft's link, the link of a tour whose publish has not finished, and a picture that
     // publish has already copied answer exactly as a name that never existed.
