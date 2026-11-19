@@ -6,6 +6,7 @@ import type { Deps } from "./ports.ts";
 import { pageRoutes } from "./page.ts";
 import { publishRoutes } from "./publish.ts";
 import { setupRoutes } from "./setup.ts";
+import { signinRoutes } from "./signin.ts";
 import { tourRoutes } from "./tours.ts";
 import { uploadRoutes } from "./uploads.ts";
 import { usageRoutes } from "./usage.ts";
@@ -30,6 +31,7 @@ export function createApp(deps: Deps): Hono {
   uploadRoutes(app, deps);
   tourRoutes(app, deps);
   usageRoutes(app, deps);
+  signinRoutes(app, deps);
   publishRoutes(app, deps);
   pageRoutes(app, deps);
 
