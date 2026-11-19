@@ -21,6 +21,7 @@ const NOT_FOUND = '{"error":"not_found"}';
 const TOUR = "tour_0123456789abcdef01234567";
 const UPLOAD = "up_0123456789abcdef01234567";
 const STEP = "st_0123456789abcdef01234567";
+const SESSION = "ses_0123456789abcdef01234567";
 
 type Row = {
   method: string;
@@ -36,6 +37,7 @@ type Row = {
 
 const api = (method: string, path: string): Row => ({ method, path, one: 401, tours: 401, app: 401, unknown: 421 });
 const wizard = (method: string, path: string, status: number, body?: unknown): Row => ({ method, path, body, one: status, tours: status, app: 404, unknown: 421 });
+const session = (method: string, path: string, status: number, body?: unknown): Row => ({ method, path, body, one: status, tours: 404, app: status, unknown: 421 });
 
 /** Keyed like HOST_RULES: "<METHOD> <route path>" exactly as in the route table. */
 const ROWS: Record<string, Row> = {
@@ -60,6 +62,16 @@ const ROWS: Record<string, Row> = {
   "GET /api/v1/tours/:id/steps/:step_id/image": api("GET", `/api/v1/tours/${TOUR}/steps/${STEP}/image`),
   "POST /api/v1/tours/:id/publish": api("POST", `/api/v1/tours/${TOUR}/publish`),
   "POST /api/v1/tours/:id/unpublish": api("POST", `/api/v1/tours/${TOUR}/unpublish`),
+  // Signing in and the session: on the app address only. Asking for a link answers 200
+  // for any well-formed address; a code nobody was given is the one refusal; the rest
+  // need a session and answer 401 without one.
+  "POST /api/v1/signin/request": session("POST", "/api/v1/signin/request", 200, { email: "nobody@example.com" }),
+  "POST /api/v1/signin/complete": session("POST", "/api/v1/signin/complete", 403, { code: "dpl_" + "0".repeat(40) }),
+  "GET /api/v1/session": session("GET", "/api/v1/session", 401),
+  "GET /api/v1/sessions": session("GET", "/api/v1/sessions", 401),
+  "DELETE /api/v1/sessions/:id": session("DELETE", `/api/v1/sessions/${SESSION}`, 401),
+  "POST /api/v1/signout": session("POST", "/api/v1/signout", 401),
+  "POST /api/v1/signout/everywhere": session("POST", "/api/v1/signout/everywhere", 401),
   "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421 },
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { method: "GET", path: "/player.js", one: 200, tours: 200, app: 404, unknown: 421 },
   "GET /t/:slug": { method: "GET", path: "/t/no-such-tour", one: 404, tours: 404, app: 308, unknown: 421 },
@@ -74,8 +86,10 @@ const ROWS: Record<string, Row> = {
 
 const KEYS = Object.keys(ROWS);
 const DESCRIPTION_KEYS = KEYS.filter((k) => k.includes(" /api/v1/openapi."));
-/** The token API: everything under /api/v1/ but the description files, which need no token. */
-const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k));
+/** Signing in and the session: the app address's own part of the API. */
+const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?)(?:\/|$)/.test(k));
+/** The token API: everything under /api/v1/ but the description files, which need no token, and the session's own routes. */
+const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k) && !SESSION_KEYS.includes(k));
 const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
 const DOCS_PAGE_KEY = "GET /docs";
@@ -175,6 +189,8 @@ describe("the host-routing matrix", () => {
     for (const key of DESCRIPTION_KEYS) expect(HOST_RULES[key], key).toBe("both");
     expect(HOST_RULES[DOCS_PAGE_KEY]).toBe("app-redirect");
     for (const key of DOCS_FILE_KEYS) expect(HOST_RULES[key], key).toBe("app");
+    for (const key of SESSION_KEYS) expect(HOST_RULES[key], key).toBe("app");
+    expect(SESSION_KEYS.length).toBe(7);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
     expect(API_KEYS.length).toBe(14);
@@ -199,16 +215,16 @@ describe("the host-routing matrix", () => {
     expect(await count(deps, "workspace")).toBe(0);
   });
 
-  it("the tours address answers every route but the documentation page and its files", async () => {
+  it("the tours address answers every route but the documentation page, its files and the session's routes", async () => {
     const { deps } = await twoAddress();
     const answers = await column(deps, TOURS);
     expect(statuses(answers)).toEqual(expected("tours"));
     // As in one-address mode, except for the documentation page, which lives on the app address.
-    const onApp = [DOCS_PAGE_KEY, ...DOCS_FILE_KEYS];
+    const onApp = [DOCS_PAGE_KEY, ...DOCS_FILE_KEYS, ...SESSION_KEYS];
     const without = (col: Record<string, number>) => Object.fromEntries(Object.entries(col).filter(([k]) => !onApp.includes(k)));
     expect(without(expected("tours"))).toEqual(without(expected("one")));
     expect(answers[DOCS_PAGE_KEY].headers.get("location")).toBe(APP + "/docs");
-    for (const key of DOCS_FILE_KEYS) expectNotHere(answers[key], key);
+    for (const key of [...DOCS_FILE_KEYS, ...SESSION_KEYS]) expectNotHere(answers[key], key);
     for (const key of DESCRIPTION_KEYS) expect(answers[key].status, key).toBe(200);
     for (const key of API_KEYS) expect(answers[key].json.error, key).toBe("unauthorized");
     expect(answers["GET /setup"].headers.get("content-type")).toBe("text/html; charset=utf-8");

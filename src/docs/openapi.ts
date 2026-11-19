@@ -1,4 +1,5 @@
-// The API description: every request a token can make, as one OpenAPI 3.1 document.
+// The API description: every request a token or a session can make, as one OpenAPI 3.1
+// document.
 //
 // It is a plain object built from the code's own constants (the version, the manifest's
 // caps, the publish and upload limits), so those cannot drift from what the server does.
@@ -12,6 +13,7 @@ import { LIMITS } from "../manifest.ts";
 import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../publish.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
 import { DELETE_FILES_PER_CALL } from "../tours.ts";
+import { SESSION_COOKIE, SESSION_MS, SIGNIN_CODE_MS } from "../sessions.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS, UPLOAD_MAX_AGE_MS } from "../uploads.ts";
 import { VERSION } from "../version.ts";
 
@@ -21,8 +23,11 @@ export type OpenApiOperation = {
   summary: string;
   description: string;
   operationId: string;
-  /** Empty for a request that needs no token. */
-  security: [] | [{ token: [] }];
+  /**
+   * Who may call: empty for a request that needs no credential; the token or the session
+   * cookie (either one, never both) for most; the session alone for the session's own requests.
+   */
+  security: [] | [{ token: [] }, { session: [] }] | [{ session: [] }];
   parameters?: OpenApiParameter[];
   requestBody?: { required: boolean; description?: string; content: Record<string, unknown> };
   responses: Record<string, unknown>;
@@ -33,7 +38,11 @@ export type OpenApiDoc = {
   servers: [{ url: "/" }];
   tags: { name: string; description: string }[];
   paths: Record<string, Record<string, OpenApiOperation>>;
-  components: { securitySchemes: { token: { type: "http"; scheme: "bearer" } }; schemas: Record<string, unknown>; responses: Record<string, unknown> };
+  components: {
+    securitySchemes: { token: { type: "http"; scheme: "bearer" }; session: { type: "apiKey"; in: "cookie"; name: string } };
+    schemas: Record<string, unknown>;
+    responses: Record<string, unknown>;
+  };
 };
 
 /** The placeholder address of the example; the documentation page puts its own address in its place. */
@@ -110,12 +119,24 @@ const percent = (description: string): Schema => ({ type: "number", minimum: 0, 
 const colour = (description: string): Schema => ({ type: "string", pattern: "^#[0-9A-Fa-f]{6}$", description });
 const whole = (description: string, minimum = 0): Schema => ({ type: "integer", minimum, description });
 
-const TOKEN = [{ token: [] }] as [{ token: [] }];
+/** The token or the session cookie, either one. */
+const TOKEN = [{ token: [] }, { session: [] }] as [{ token: [] }, { session: [] }];
+/** The session cookie alone: the session's own requests. */
+const SESSION = [{ session: [] }] as [{ session: [] }];
 const UNAUTHORIZED = { $ref: "#/components/responses/Unauthorized" };
+/** Said on every request that takes only a session. */
+const NOT_FROM_THE_PAGE = "It needs the session cookie, so it cannot be tried from the documentation page, which never sends a cookie.";
+/** A refusal that carries a code and no detail. */
+const bare = (...codes: string[]): Schema => object(["error"], { error: { type: "string", enum: codes } });
+/** A refusal whose codes come with a detail or, for those the description says so of, without one. */
+const someDetail = (...codes: string[]): Schema => object(["error"], { error: { type: "string", enum: codes }, detail: { type: "string" } });
+const retryAfter = { "retry-after": { description: "Seconds until the count starts again.", schema: { type: "integer", minimum: 1 } } };
+const setCookie = (description: string) => ({ "set-cookie": { description, schema: { type: "string", pattern: `^${SESSION_COOKIE}=` } } });
 
 const tourId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The tour's id, as the tour list and an upload's commit give it.", schema: { type: "string", pattern: "^tour_[0-9a-f]{24}$" } };
 const uploadId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The upload's id, from the answer that started it.", schema: { type: "string", pattern: "^up_[0-9a-f]{24}$" } };
 const stepId: OpenApiParameter = { name: "step_id", in: "path", required: true, description: "The step's id.", schema: { type: "string", pattern: "^st_[0-9a-f]{24}$" } };
+const sessionId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The session's id, as the list of sessions gives it.", schema: { type: "string", pattern: "^ses_[0-9a-f]{24}$" } };
 
 function introduction(): string {
   const hours = UPLOAD_MAX_AGE_MS / 3_600_000;
@@ -125,7 +146,7 @@ function introduction(): string {
     "",
     "## Get connected",
     "",
-    'Every request except the health check carries a token, as the header `Authorization: Bearer YOUR_TOKEN`. A token starts with "dp_" and is 43 characters long. It acts only inside its own workspace: another workspace\'s tour answers 404, the same as one that does not exist.',
+    'Every request except the health check and the two sign-in requests carries a token, as the header `Authorization: Bearer YOUR_TOKEN`, or a session cookie (see below). A token starts with "dp_" and is 43 characters long. It acts only inside its own workspace: another workspace\'s tour answers 404, the same as one that does not exist.',
     "",
     "The first request to try answers with your workspace's name and the server's version:",
     "",
@@ -133,13 +154,24 @@ function introduction(): string {
     GET_STARTED,
     "```",
     "",
+    "## Signing in and sessions",
+    "",
+    `The site's own pages sign a person in with a link sent by mail: POST /api/v1/signin/request mails the link, and POST /api/v1/signin/complete turns the code in it into a session. The link works once and for ${SIGNIN_CODE_MS / 60_000} minutes. The session is a cookie, ${SESSION_COOKIE}, on the app address only (on a server with one address, on that address); it lasts ${SESSION_MS / 86_400_000} days from its last use. Every request that lists the session can be sent with it instead of a token, and acts in the account's one workspace.`,
+    "",
+    "A request with a session that changes anything (any method but GET and HEAD) must come from the site's own pages: its Origin must be the address it is sent to, and it must carry the session's anti-forgery value in the header `X-Csrf-Token`, which GET /api/v1/session gives. A token and a session cookie together are refused.",
+    "",
+    "The documentation page never sends a cookie, so a session cannot be tried from it; with a token, try the requests that take one.",
+    "",
     "## Errors",
     "",
     'Every refusal is JSON with an error code and, mostly, a detail in plain words: `{"error":"bad_title","detail":"the title must not be empty"}`. The codes are stable; the detail text may change.',
     "",
     "Some answers can come from any request and are not repeated on each one:",
     "",
-    '- `401 {"error":"unauthorized"}`, with no detail: the token is missing, malformed, unknown or revoked.',
+    '- `401 {"error":"unauthorized"}`, with no detail: the token or session cookie is missing, malformed, unknown, expired or revoked, or a session cookie was sent to the tours address.',
+    '- `400 {"error":"mixed_credentials","detail":"send a token or a session cookie, not both"}`: the request carries a token and a session cookie.',
+    '- `403 {"error":"bad_origin","detail":"this request must come from the site\'s own pages"}`: a change made with a session did not come from a page of the address it was sent to.',
+    '- `403 {"error":"bad_csrf","detail":"the anti-forgery header is missing or wrong"}`: a change made with a session lacks the session\'s X-Csrf-Token.',
     '- `404 {"error":"not_found"}`, with no detail: no request has that address.',
     "- `421` with nothing in it: on a server with two addresses, the request was sent to another host name.",
     '- `500 {"error":"internal"}`: the server failed; nothing about the failure is given.',
@@ -175,7 +207,7 @@ function schemas(): Record<string, Schema> {
       { error: { type: "string", description: "A stable code, such as not_found." }, detail: { type: "string", description: "The reason in plain words. The text may change; do not match on it." } },
       "The shape of every refusal. Each request lists the codes it can answer.",
     ),
-    Unauthorized: object(["error"], { error: { type: "string", const: "unauthorized" } }, "The one answer for a missing, malformed, unknown or revoked token."),
+    Unauthorized: object(["error"], { error: { type: "string", const: "unauthorized" } }, "The one answer for a missing, malformed, unknown, expired or revoked token or session."),
     InProgress: object(
       ["status", "done", "total"],
       { status: inProgress, done: whole("Files removed so far."), total: whole("Files to remove in all.") },
@@ -267,6 +299,45 @@ function schemas(): Record<string, Schema> {
       },
       "The upload would take the workspace over its storage allowance. Nothing was stored and no upload exists.",
     ),
+    SignInRequest: input(["email"], { email: text(254, "The address to send the link to. Spaces around it are dropped and capitals do not count.", 3) }),
+    SignInComplete: input(["code"], { code: { type: "string", pattern: "^dpl_[0-9a-f]{40}$", description: "The code of the link, the part after #c= in its address." } }),
+    Ok: object(["ok"], { ok: { type: "boolean", const: true } }),
+    Session: object(
+      ["account", "workspace", "session", "csrf"],
+      {
+        account: object(
+          ["id", "username", "email", "admin"],
+          {
+            id: { type: "string", pattern: "^usr_[0-9a-f]{24}$" },
+            username: { type: ["string", "null"], description: "null until the account has one." },
+            email: { type: "string" },
+            admin: { type: "boolean", description: "true for the site's admin." },
+          },
+          "The account the session belongs to.",
+        ),
+        workspace: object(["id", "name"], { id: { type: "string", pattern: "^ws_[0-9a-f]{24}$" }, name: { type: "string" } }, "The account's workspace, the one every request of the session acts in."),
+        session: object(
+          ["id", "created_at", "expires_at"],
+          { id: { type: "string", pattern: "^ses_[0-9a-f]{24}$" }, created_at: whole("When the browser signed in, in milliseconds since 1970."), expires_at: whole("When the session ends unless it is used, in milliseconds since 1970.") },
+          "This session.",
+        ),
+        csrf: { type: "string", pattern: "^[0-9a-f]{64}$", description: "The anti-forgery value: send it in the X-Csrf-Token header of every change made with this session." },
+      },
+    ),
+    SessionList: object(["sessions"], {
+      sessions: {
+        type: "array",
+        description: "The account's live sessions, the current one first.",
+        items: object(["id", "label", "created_at", "last_used_at", "expires_at", "current"], {
+          id: { type: "string", pattern: "^ses_[0-9a-f]{24}$" },
+          label: { type: "string", maxLength: 40, description: "The browser and the system it was signed in on, such as Firefox on Linux, or Unknown browser." },
+          created_at: whole("When it was signed in, in milliseconds since 1970."),
+          last_used_at: whole("When it was last used, to the hour, in milliseconds since 1970."),
+          expires_at: whole("When it ends unless it is used, in milliseconds since 1970."),
+          current: { type: "boolean", description: "true for the session this request was sent with." },
+        }),
+      },
+    }),
     Health: object(
       ["ok"],
       { ok: { type: "boolean", const: true }, address: { type: "string", enum: ["tours", "app"], description: "Only on a server with two addresses, when asked on one of them: which of the two this request reached." } },
@@ -684,6 +755,89 @@ function paths(): OpenApiDoc["paths"] {
         responses: { "200": answer("The workspace's numbers.", ref("Usage")), "401": UNAUTHORIZED },
       },
     },
+    "/api/v1/signin/request": {
+      post: {
+        tags: ["Accounts"],
+        summary: "Ask for a sign-in link",
+        description: `Mails a sign-in link to the address, when it belongs to an account that may sign in, the site has an admin and mail is on. The answer is the same in every case, so it does not tell whether the address has an account, and it does not wait for the mail. The link works once and for ${SIGNIN_CODE_MS / 60_000} minutes. Needs no credential, but must come from a page of the address it is sent to, as JSON. One address gets at most a few links in a quarter hour and in a day; past that the answer is the same and no mail is sent.`,
+        operationId: "requestSignInLink",
+        security: [],
+        requestBody: { required: true, content: json(ref("SignInRequest")) },
+        responses: {
+          "200": answer("The same for every well-formed address.", ref("Ok")),
+          "400": answer("bad_request: the body is not a JSON object sent as application/json. bad_email, with no detail: email is not an email address.", someDetail("bad_request", "bad_email")),
+          "403": refusal("The request did not come from a page of this address: no Origin, another one, or the browser says it came from another site.", "bad_origin"),
+          "429": { description: "Too many requests from this network. Nothing was sent.", headers: retryAfter, content: json(bare("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/signin/complete": {
+      post: {
+        tags: ["Accounts"],
+        summary: "Finish signing in",
+        description: "Turns the code of a sign-in link into a session, once, and sets the session cookie on this address. A session the browser already had ends. Needs no credential, but must come from a page of the address it is sent to, as JSON. A code that is unknown, already used, expired or of an account that may not sign in gets the one answer link_invalid. The answer never repeats the code.",
+        operationId: "completeSignIn",
+        security: [],
+        requestBody: { required: true, content: json(ref("SignInComplete")) },
+        responses: {
+          "200": { ...answer("Signed in.", ref("Ok")), headers: setCookie("The session cookie: host-only, Secure, HttpOnly and SameSite=Lax.") },
+          "400": answer("bad_request: the body is not a JSON object sent as application/json. bad_code, with no detail: code is not a sign-in code.", someDetail("bad_request", "bad_code")),
+          "403": refusal("bad_origin: the request did not come from a page of this address. link_invalid: the link has expired or was already used; ask for a new one.", "bad_origin", "link_invalid"),
+          "429": { description: "Too many tries from this network. Nothing was looked at.", headers: retryAfter, content: json(bare("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/session": {
+      get: {
+        tags: ["Accounts"],
+        summary: "The session and who it is",
+        description: `The account, its workspace and this session, and the anti-forgery value a change made with the session needs. Sets the session cookie again. ${NOT_FROM_THE_PAGE}`,
+        operationId: "getSession",
+        security: SESSION,
+        responses: { "200": { ...answer("The session.", ref("Session")), headers: setCookie("The same session cookie again.") }, "401": UNAUTHORIZED },
+      },
+    },
+    "/api/v1/sessions": {
+      get: {
+        tags: ["Accounts"],
+        summary: "List the account's sessions",
+        description: `Every live session of the caller's own account, where it is signed in, with the current one first and marked. ${NOT_FROM_THE_PAGE}`,
+        operationId: "listSessions",
+        security: SESSION,
+        responses: { "200": answer("The sessions.", ref("SessionList")), "401": UNAUTHORIZED },
+      },
+    },
+    "/api/v1/sessions/{id}": {
+      delete: {
+        tags: ["Accounts"],
+        summary: "End one of the account's sessions",
+        description: `Ends one session of the caller's own account, such as one in another browser; the cookie is not touched. Another account's session answers 404, the same as one that does not exist. ${NOT_FROM_THE_PAGE}`,
+        operationId: "endSession",
+        security: SESSION,
+        parameters: [sessionId],
+        responses: { "204": empty("The session has ended."), "401": UNAUTHORIZED, "404": refusal("No such live session of this account.", "not_found") },
+      },
+    },
+    "/api/v1/signout": {
+      post: {
+        tags: ["Accounts"],
+        summary: "Sign out",
+        description: `Ends the session the request is sent with and clears its cookie. ${NOT_FROM_THE_PAGE}`,
+        operationId: "signOut",
+        security: SESSION,
+        responses: { "204": { ...empty("Signed out."), headers: setCookie("Clears the session cookie.") }, "401": UNAUTHORIZED },
+      },
+    },
+    "/api/v1/signout/everywhere": {
+      post: {
+        tags: ["Accounts"],
+        summary: "Sign out everywhere",
+        description: `Ends every session of the caller's account, in every browser, and clears this one's cookie. Tokens keep working. ${NOT_FROM_THE_PAGE}`,
+        operationId: "signOutEverywhere",
+        security: SESSION,
+        responses: { "204": { ...empty("Every session of the account has ended."), headers: setCookie("Clears the session cookie.") }, "401": UNAUTHORIZED },
+      },
+    },
     "/healthz": {
       get: {
         tags: ["Server"],
@@ -706,15 +860,16 @@ export function openapi(): OpenApiDoc {
     tags: [
       { name: "Tours", description: "List, rename, publish, unpublish and delete tours, and read a draft step's image." },
       { name: "Uploads", description: "Send a tour, a new chapter or a chapter's replacement: start, one request per image, finish." },
-      { name: "Workspace", description: "The workspace a token belongs to." },
+      { name: "Workspace", description: "The workspace a token or a session belongs to." },
+      { name: "Accounts", description: "Signing in with a link sent by mail, and the browser sessions of an account. The site's own pages use these." },
       { name: "Server", description: "Whether the server is up. Needs no token." },
     ],
     paths: paths(),
     components: {
-      securitySchemes: { token: { type: "http", scheme: "bearer" } },
+      securitySchemes: { token: { type: "http", scheme: "bearer" }, session: { type: "apiKey", in: "cookie", name: SESSION_COOKIE } },
       schemas: schemas(),
       responses: {
-        Unauthorized: answer("The token is missing, malformed, unknown or revoked.", ref("Unauthorized")),
+        Unauthorized: answer("The token or session is missing, malformed, unknown, expired or revoked.", ref("Unauthorized")),
       },
     },
   };

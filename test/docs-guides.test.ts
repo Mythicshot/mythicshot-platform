@@ -331,8 +331,8 @@ describe("the guides of the documentation page", () => {
     for (const m of text.matchAll(/"error":\{"type":"string","enum":\[([^\]]*)\]/g)) for (const code of JSON.parse(`[${m[1]}]`) as string[]) listed.add(code);
     expect(listed.size).toBeGreaterThan(10);
     expect(codes.map((c) => c.code).sort()).toEqual([...listed, "unauthorized", ...Object.keys(ANY_REQUEST_CODES)].sort());
-    // The codes any request can answer are the ones the description's introduction states, with their status.
-    for (const [code, status] of Object.entries(ANY_REQUEST_CODES)) expect(doc.info.description, code).toContain(`\`${status} {"error":"${code}"}\``);
+    // The codes any request can answer are the ones the description's introduction states, with their status (and a detail, for some).
+    for (const [code, status] of Object.entries(ANY_REQUEST_CODES)) expect(doc.info.description, code).toMatch(new RegExp("`" + status + ' \\{"error":"' + code + '"(\\}`|,"detail":)'));
     expect(codes.find((c) => c.code === "unauthorized")?.statuses).toEqual([401]);
     expect(codes.find((c) => c.code === "not_found")?.statuses).toEqual([404]);
     expect(codes.find((c) => c.code === "too_many_uploads")?.statuses).toEqual([429]);

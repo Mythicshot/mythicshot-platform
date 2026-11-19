@@ -20,10 +20,13 @@
 // Where the description and the code disagree, the code wins: correct src/docs/openapi.ts
 // and run `npm run build:docs`. Never change a route to fit the description.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { makeDeps, seedWorkspace } from "#harness";
+import { makeDeps, seedAccount, seedWorkspace } from "#harness";
+import { createApp } from "../src/app.ts";
+import { setClientAddress } from "../src/client.ts";
 import { openapi } from "../src/docs/openapi.ts";
 import type { Deps } from "../src/ports.ts";
 import { COPY_BATCH } from "../src/publish.ts";
+import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS } from "../src/uploads.ts";
 import { VERSION } from "../src/version.ts";
@@ -456,9 +459,10 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     vi.spyOn(console, "error").mockImplementation(() => {});
 
     // Without a token, and with one no server knows: every request that needs one.
-    const example = (op: Op) => op.path.replace("{id}", op.path.includes("/uploads/") ? NO_UPLOAD : NO_TOUR).replace("{step_id}", NO_STEP).replace("{n}", "1");
+    const example = (op: Op) => op.path.replace("{id}", op.path.includes("/uploads/") ? NO_UPLOAD : op.path.includes("/sessions/") ? "ses_" + "0".repeat(24) : NO_TOUR).replace("{step_id}", NO_STEP).replace("{n}", "1");
     const guarded = OPS.filter((op) => op.op.security.length > 0);
-    expect(guarded).toHaveLength(OPS.length - 1);
+    // All but health and the two sign-in requests.
+    expect(guarded).toHaveLength(OPS.length - 3);
     for (const op of guarded) {
       for (const token of [null, NO_TOKEN]) {
         const r = await api.call(op.method, example(op), { token });
@@ -616,6 +620,64 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     expect((await api.health("https://other.example.net")).json).toEqual({ ok: true });
   });
 
+  it("every answer of signing in and of a session is as documented", async () => {
+    // One address, with the host name sign-in links use.
+    const { deps, mail, settle } = await makeDeps({ siteHost: "tours.example.com" });
+    const api = client(deps);
+    await seedAccount(deps, { admin: true });
+    const a = await seedAccount(deps);
+    const page = { "content-type": JSON_TYPE, origin: "https://tours.example.com" };
+    const body = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v));
+    const ask = (v: unknown, more: Opts = {}) => api.call("POST", "/api/v1/signin/request", { ...more, body: body(v), headers: { ...page, ...more.headers } });
+    const press = (v: unknown, more: Opts = {}) => api.call("POST", "/api/v1/signin/complete", { ...more, body: body(v), headers: { ...page, ...more.headers } });
+    // Requests from one network, as an entry would have recorded its address.
+    const network = (d: Deps) => ({ fetch: (req: Request) => (setClientAddress(req, "203.0.113.50"), createApp(d).fetch(req)) });
+    const withCookie = async (secret: string) => ({ cookie: `${SESSION_COOKIE}=${secret}`, origin: "https://tours.example.com", "x-csrf-token": await csrfFor(secret) });
+    const signIn = async () => {
+      const made = await redeemSignInCode(deps, await createSignInCode(deps, a.userId), null, null);
+      if (made === null) throw new Error("the sign-in was refused");
+      return made;
+    };
+
+    // Asking for a link.
+    expect((await ask({ email: a.email })).json).toEqual({ ok: true });
+    await settle();
+    expect(mail.sent).toHaveLength(1);
+    refused(await ask("not json"), 400, "bad_request");
+    refused(await ask({ email: "not an address" }), 400, "bad_email");
+    refused(await ask({ email: a.email }, { headers: { origin: "https://evil.example.net" } }), 403, "bad_origin");
+    for (let i = 0; i < 10; i++) expect((await ask({ email: `someone-${i}@example.com` }, { app: network })).status).toBe(200);
+    refused(await ask({ email: a.email }, { app: network }), 429, "rate_limited");
+
+    // Completing it.
+    const code = (mail.sent[0]?.text.match(/dpl_[0-9a-f]{40}/) ?? [""])[0];
+    const signedIn = await press({ code });
+    expect(signedIn.json).toEqual({ ok: true });
+    const secret = (signedIn.headers.get("set-cookie") ?? "").match(/dps_[0-9a-f]{64}/)?.[0] ?? "";
+    refused(await press({ code }), 403, "link_invalid");
+    refused(await press("{"), 400, "bad_request");
+    refused(await press({ code: "not a code" }), 400, "bad_code");
+    refused(await press({ code }, { headers: { origin: "https://evil.example.net" } }), 403, "bad_origin");
+    for (let i = 0; i < 20; i++) expect((await press({ code: "dpl_" + String(i).padStart(40, "0") }, { app: network })).status).toBe(403);
+    refused(await press({ code }, { app: network }), 429, "rate_limited");
+
+    // The session's own requests, with the cookie the sign-in set, and nobody without it.
+    const mine = await withCookie(secret);
+    const session = await api.call("GET", "/api/v1/session", { headers: { cookie: mine.cookie } });
+    expect(session.json.account.id).toBe(a.userId);
+    expect(session.json.csrf).toBe(mine["x-csrf-token"]);
+    const list = await api.call("GET", "/api/v1/sessions", { headers: { cookie: mine.cookie } });
+    expect(list.json.sessions).toHaveLength(1);
+    const other = await signIn();
+    expect((await api.call("DELETE", `/api/v1/sessions/${other.sessionId}`, { headers: mine })).status).toBe(204);
+    refused(await api.call("DELETE", `/api/v1/sessions/${other.sessionId}`, { headers: mine }), 404, "not_found");
+    for (const path of ["/api/v1/session", "/api/v1/sessions"]) refused(await api.call("GET", path, { token: a.token }), 401, "unauthorized");
+    refused(await api.call("DELETE", `/api/v1/sessions/${session.json.session.id}`, { token: a.token }), 401, "unauthorized");
+    for (const path of ["/api/v1/signout", "/api/v1/signout/everywhere"]) refused(await api.call("POST", path, {}), 401, "unauthorized");
+    expect((await api.call("POST", "/api/v1/signout/everywhere", { headers: await withCookie((await signIn()).secret) })).status).toBe(204);
+    expect((await api.call("POST", "/api/v1/signout", { headers: await withCookie((await signIn()).secret) })).status).toBe(204);
+  });
+
   it("the answers any request can get are as the introduction says", async () => {
     const intro = DOC.info.description;
     const hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -641,6 +703,28 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const failed = await send(deps, "GET", "/api/v1/tours", { token: a.token });
     deps.db.all = realAll;
     expect([failed.status, failed.text]).toEqual([500, '{"error":"internal"}']);
+
+    // The three answers of a request that carries a session cookie, on any route that takes one.
+    const account = await seedAccount(deps, { admin: true });
+    const made = await redeemSignInCode(deps, await createSignInCode(deps, account.userId), null, null);
+    if (made === null) throw new Error("the sign-in was refused");
+    const cookie = `${SESSION_COOKIE}=${made.secret}`;
+    const APP = "https://app.example.com";
+    const mixed = '`400 {"error":"mixed_credentials","detail":"send a token or a session cookie, not both"}`';
+    expect(intro).toContain(mixed);
+    const both = await send(deps, "GET", "/api/v1/tours", { origin: APP, token: account.token, headers: { cookie } });
+    expect("`400 " + both.text + "`").toBe(mixed);
+    const badOrigin = "`403 {\"error\":\"bad_origin\",\"detail\":\"this request must come from the site's own pages\"}`";
+    expect(intro).toContain(badOrigin);
+    const forged = await send(deps, "PATCH", "/api/v1/tours/tour_" + "0".repeat(24), { origin: APP, body: "{}", headers: { cookie, "content-type": JSON_TYPE, origin: "https://tours.example.com", "x-csrf-token": await csrfFor(made.secret) } });
+    expect("`403 " + forged.text + "`").toBe(badOrigin);
+    const badCsrf = '`403 {"error":"bad_csrf","detail":"the anti-forgery header is missing or wrong"}`';
+    expect(intro).toContain(badCsrf);
+    const noHeader = await send(deps, "DELETE", "/api/v1/tours/tour_" + "0".repeat(24), { origin: APP, headers: { cookie, origin: APP } });
+    expect("`403 " + noHeader.text + "`").toBe(badCsrf);
+    // A session on the tours address is nobody: the one 401.
+    const onTours = await send(deps, "GET", "/api/v1/tours", { origin: "https://tours.example.com", headers: { cookie } });
+    expect([onTours.status, onTours.text]).toEqual([401, '{"error":"unauthorized"}']);
     // `500 {"error":"misconfigured"}` is answered by the Cloudflare entry before the app
     // runs (test/worker-hosts.test.ts); no route answers it.
   });
@@ -776,9 +860,18 @@ describe("the error codes in the code", () => {
       for (const m of literal) inCode.add(`${m[1]} ${m[2]}`);
     }
     expect(calls).toBeGreaterThan(40);
-    // Those three are the only modules that answer with apiError (src/http.ts defines it).
+    // The sign-in routes answer with apiError, and with plain JSON for the refusals that have no detail.
+    const signin = source("signin.ts");
+    const signinLiteral = [...signin.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
+    expect(signinLiteral.length, "signin.ts: an apiError call without a literal status and code").toBe([...signin.matchAll(/\bapiError\(/g)].length);
+    for (const m of signinLiteral) inCode.add(`${m[1]} ${m[2]}`);
+    const signinPlain = [...signin.matchAll(/\bjson\((\d{3}), \{ error: "([a-z_]+)"/g)];
+    expect(signinPlain.length, "signin.ts: an error answer not built in place").toBe([...signin.matchAll(/\berror: "/g)].length);
+    for (const m of signinPlain) inCode.add(`${m[1]} ${m[2]}`);
+    expect([...inCode]).toEqual(expect.arrayContaining(["400 bad_email", "400 bad_code", "403 link_invalid", "429 rate_limited"]));
+    // Those four are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/http.ts", "../src/publish.ts", "../src/tours.ts", "../src/uploads.ts"]);
+    expect(callers).toEqual(["../src/http.ts", "../src/publish.ts", "../src/signin.ts", "../src/tours.ts", "../src/uploads.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.
@@ -802,6 +895,14 @@ describe("the error codes in the code", () => {
     expect(described.has("413 storage_full")).toBe(true);
     expect([...described].sort(), "a status and code only one side has; the code wins: correct src/docs/openapi.ts").toEqual([...inCode].sort());
 
+    // The refusals of the caller guard, which any route that takes a session can answer: in
+    // the introduction's list of answers any request can get, not repeated on each request.
+    const guard = [...source("auth.ts").matchAll(/\bjson\((\d{3}), \{ error: "([a-z_]+)"/g)].map((m) => `${m[1]} ${m[2]}`);
+    expect(guard).toEqual(["400 mixed_credentials", "404 not_found", "403 bad_origin", "403 bad_csrf"]);
+    for (const answer of guard) {
+      const [status, code] = answer.split(" ");
+      expect(DOC.info.description, answer).toContain("`" + status + ' {"error":"' + code + '"');
+    }
     // The three that are not made by apiError: the token guard's, and the app's own two.
     expect(source("auth.ts")).toContain(`'{"error":"unauthorized"}'`);
     expect((DOC.components.schemas as Json).Unauthorized.properties.error.const).toBe("unauthorized");

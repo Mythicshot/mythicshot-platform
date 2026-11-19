@@ -31,6 +31,11 @@ const EXAMPLE_ORIGIN = "https://YOUR-SITE";
 
 const METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "trace"];
 
+/** The operations anyone may call, with no credential at all. */
+const PUBLIC = ["GET /healthz", "POST /api/v1/signin/request", "POST /api/v1/signin/complete"];
+/** The operations that take a session and no token. */
+const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere"];
+
 /** Every operation of the description, with its key in the form of the route table. */
 function operations(doc: OpenApiDoc): { key: string; path: string; method: string; op: Json }[] {
   const out: { key: string; path: string; method: string; op: Json }[] = [];
@@ -194,7 +199,7 @@ describe("the API description", () => {
 
   it("every operation has a tag, a one-line summary, a description, an operationId that is unique, and a 401 unless it is public", () => {
     const doc = openapi();
-    expect(doc.tags.map((t) => t.name)).toEqual(["Tours", "Uploads", "Workspace", "Server"]);
+    expect(doc.tags.map((t) => t.name)).toEqual(["Tours", "Uploads", "Workspace", "Accounts", "Server"]);
     for (const t of doc.tags) expect(t.description.length, t.name).toBeGreaterThan(10);
     const ids: string[] = [];
     const summaries: string[] = [];
@@ -209,7 +214,7 @@ describe("the API description", () => {
       const statuses = Object.keys(op.responses);
       expect(statuses.length, key).toBeGreaterThan(0);
       for (const status of statuses) expect(status, key).toMatch(/^[1-5][0-9][0-9]$/);
-      expect(statuses.includes("401"), `${key}: 401`).toBe(key !== "GET /healthz");
+      expect(statuses.includes("401"), `${key}: 401`).toBe(!PUBLIC.includes(key));
       for (const [status, res] of Object.entries(op.responses as Json)) {
         const r = (res.$ref ? resolve(doc, res.$ref) : res) as Json;
         expect(typeof r?.description, `${key} ${status} needs a description`).toBe("string");
@@ -231,6 +236,13 @@ describe("the API description", () => {
       "Cancel an upload",
       "The workspace and the server version",
       "The workspace's storage use",
+      "Ask for a sign-in link",
+      "Finish signing in",
+      "The session and who it is",
+      "List the account's sessions",
+      "End one of the account's sessions",
+      "Sign out",
+      "Sign out everywhere",
       "Whether the server is up",
     ]);
   });
@@ -284,12 +296,23 @@ describe("the API description", () => {
     expect(operations(doc).find((o) => o.key === "POST /api/v1/uploads")!.op.description).toContain("storage_full");
   });
 
-  it("only health is public", () => {
+  it("health, the description and the two sign-in requests are the only public operations", async () => {
     const doc = openapi();
-    expect(doc.components.securitySchemes).toEqual({ token: { type: "http", scheme: "bearer" } });
+    // The session cookie is the second way to call, beside the token.
+    expect(doc.components.securitySchemes).toEqual({ token: { type: "http", scheme: "bearer" }, session: { type: "apiKey", in: "cookie", name: "__Host-dp_session" } });
+    const keys = operations(doc).map((o) => o.key);
+    for (const key of [...PUBLIC, ...SESSION_ONLY]) expect(keys, key).toContain(key);
     for (const { key, op } of operations(doc)) {
-      expect(op.security, key).toEqual(key === "GET /healthz" ? [] : [{ token: [] }]);
+      const want = PUBLIC.includes(key) ? [] : SESSION_ONLY.includes(key) ? [{ session: [] }] : [{ token: [] }, { session: [] }];
+      expect(op.security, key).toEqual(want);
+      // An operation a session may call says that the documentation page cannot try it with one.
+      if (SESSION_ONLY.includes(key)) expect(op.description, key).toContain("cannot be tried from the documentation page");
     }
+    // The description itself is served to anyone, without a credential.
+    const { deps } = await makeDeps();
+    for (const path of ["/api/v1/openapi.json", "/api/v1/openapi.yaml"]) expect((await send(deps, "GET", path)).status, path).toBe(200);
+    // What a session change needs, and what a request with both credentials gets, is said where a client reads it.
+    for (const text of ["X-Csrf-Token", "GET /api/v1/session", "mixed_credentials", "bad_origin", "bad_csrf", "never sends a cookie"]) expect(doc.info.description, text).toContain(text);
   });
 
   it("the description names no host and no real token", () => {

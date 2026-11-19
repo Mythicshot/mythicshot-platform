@@ -33,7 +33,7 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "POST /setup/check": "tours",
   "POST /setup/claim": "tours",
 
-  // The token API.
+  // The API a token or a session calls.
   "GET /api/v1/setup/connected": "both",
   "POST /api/v1/uploads": "both",
   "PUT /api/v1/uploads/:id/steps/:n": "both",
@@ -48,6 +48,16 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /api/v1/tours/:id/steps/:step_id/image": "both",
   "POST /api/v1/tours/:id/publish": "both",
   "POST /api/v1/tours/:id/unpublish": "both",
+
+  // Signing in and the session. The session cookie belongs to the app address alone, so
+  // none of these answers on the tours address, which holds what users publish.
+  "POST /api/v1/signin/request": "app",
+  "POST /api/v1/signin/complete": "app",
+  "GET /api/v1/session": "app",
+  "GET /api/v1/sessions": "app",
+  "DELETE /api/v1/sessions/:id": "app",
+  "POST /api/v1/signout": "app",
+  "POST /api/v1/signout/everywhere": "app",
 
   // Tour pages, their pictures and the player's files.
   "GET /p/:name": "tours-redirect",
