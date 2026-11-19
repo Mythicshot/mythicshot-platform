@@ -197,7 +197,7 @@ An upload that carries a logo (a new tour, or an update of a tour's first chapte
 
 So an update that does not grow the chapter works in a full workspace when it carries no logo, or when it gives a `logo_bytes` no larger than the present logo's recorded size. Without `logo_bytes`, an update of a first chapter with a logo needs up to 200,000 bytes free even when nothing changed.
 
-Deleting a tour makes room at once; waiting does not, except that an upload nobody finished gives its room back when it is removed after 24 hours.
+Deleting a tour makes room at once; waiting alone does not. An upload nobody finished keeps its room until it is removed, and it is removed when the workspace next starts an upload once it is more than 24 hours old, not by the clock alone. Until then `GET /api/v1/usage` still counts it.
 
 > [!warning] Lowering an allowance deletes nothing
 > A workspace that is over its allowance keeps every tour, link and image: listing, publishing, unpublishing, renaming, deleting and updates that need no room still work, and only new tours, new chapters and updates that need room (a larger chapter, or a logo sent without its size) are refused until tours are deleted or the allowance is raised.
