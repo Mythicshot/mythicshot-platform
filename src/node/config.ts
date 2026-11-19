@@ -2,7 +2,7 @@
 // of the app. Pure: no file, no network and no listener, so all of it can be tested
 // without starting the app. (The SMTP client it makes for a usable mail block opens its
 // first connection only when a mail is sent.)
-import { isIP } from "node:net";
+import { canonicalAddress } from "../client.ts";
 import { parseEmail } from "../accounts.ts";
 import { misdirected } from "../host-gate.ts";
 import { normaliseHost, resolveHosts, type Hosts } from "../hosts.ts";
@@ -94,8 +94,11 @@ export function mailFromEnv(
   const from = parseEmail(env.MAIL_FROM);
   if (from === null) return off(mailOffBecause("MAIL_FROM"));
 
-  const host = normaliseHost(text(env.SMTP_HOST));
-  if (host === null || host.includes(":")) return off(mailOffBecause("SMTP_HOST"));
+  // No colon at all in what was written: a port belongs in SMTP_PORT, and one the host
+  // rule would drop (`:443`) must not end as a quiet connection on the default port.
+  const hostText = text(env.SMTP_HOST);
+  const host = hostText.includes(":") ? null : normaliseHost(hostText);
+  if (host === null) return off(mailOffBecause("SMTP_HOST"));
 
   const portText = text(env.SMTP_PORT);
   const port = portText === "" ? SMTP_TLS_PORT : /^[1-9][0-9]{0,4}$/.test(portText) ? Number(portText) : 0;
@@ -120,22 +123,27 @@ export function mailFromEnv(
   return { mailer: make({ host, port, user, password, from, helo }), mode: "smtp", problem: null };
 }
 
-/** The line for a CLIENT_ADDRESS_HEADER that is not a header name. It never repeats the value. */
-const BAD_CLIENT_HEADER = "client address: unknown, because CLIENT_ADDRESS_HEADER is not a header name. The site runs; no request is counted by its network address.";
+/** The line for a CLIENT_ADDRESS_HEADER that cannot be used. It never repeats the value. */
+const BAD_CLIENT_HEADER = "client address: unknown, because CLIENT_ADDRESS_HEADER is not a usable header name. The site runs; no request is counted by its network address.";
 
 const HEADER_NAME = /^[A-Za-z0-9-]{1,64}$/;
 
+/**
+ * Header names that cannot carry the client address, because of how Node hands them over.
+ * For the first group Node keeps only the first occurrence and drops the rest, so the
+ * "last value" would be the first one: the one a visitor sends, not the one the proxy
+ * added. (The list is Node's own, from the documentation of `message.headers`.) Cookie
+ * values are joined with `; `, and Set-Cookie is always a list.
+ */
+const UNUSABLE_HEADERS = new Set([
+  "age", "authorization", "content-length", "content-type", "etag", "expires", "from", "host", "if-modified-since",
+  "if-unmodified-since", "last-modified", "location", "max-forwards", "proxy-authorization", "referer", "retry-after",
+  "server", "user-agent",
+  "cookie", "set-cookie",
+]);
+
 /** What clientAddressFrom reads of an incoming request: its headers as Node gives them, and its socket. */
 export type Incoming = { headers: Record<string, string | string[] | undefined>; socket: { remoteAddress?: string } };
-
-/** `text` as one IP address, an IPv4 address written as IPv6 (`::ffff:192.0.2.1`) as the IPv4 address, or null. */
-function addressOf(text: string | undefined): string | null {
-  if (typeof text !== "string") return null;
-  const trimmed = text.trim();
-  const mapped = /^::ffff:([0-9.]+)$/i.exec(trimmed);
-  const address = mapped !== null && isIP(mapped[1]) === 4 ? mapped[1] : trimmed;
-  return isIP(address) === 0 ? null : address;
-}
 
 /**
  * The client address of one incoming request, for rate limits only, or null when it is
@@ -144,28 +152,34 @@ function addressOf(text: string | undefined): string | null {
  * proxy's, so the install names the header its proxy writes: the address is then the
  * last value of that header (a proxy appends to what the client sent, so the last value
  * is the one the nearest proxy wrote, and anything before it is the client's own claim),
- * and never the socket's. A header that is missing, or whose last value is not an IP
- * address, gives null: unknown, not a guess.
+ * and never the socket's. With two proxies in a chain that both append, the last value is
+ * the one the proxy next to the app wrote, which is the address of the outer proxy. A
+ * header that is missing, or whose last value is not one bare IP address (no port, no
+ * brackets, no `for=`), gives null: unknown, not a guess.
+ *
+ * The address comes back in the one form canonicalAddress gives: lower case, no zone, an
+ * IPv4 address written as IPv6 as the IPv4 address.
  */
 export function clientAddressFrom(headerName: string | undefined, incoming: Incoming): string | null {
-  if (headerName === undefined) return addressOf(incoming.socket.remoteAddress);
+  if (headerName === undefined) return canonicalAddress(incoming.socket.remoteAddress);
   const value = incoming.headers[headerName.toLowerCase()];
   const last = Array.isArray(value) ? value[value.length - 1] : value;
   if (typeof last !== "string") return null;
-  return addressOf(last.slice(last.lastIndexOf(",") + 1));
+  return canonicalAddress(last.slice(last.lastIndexOf(",") + 1));
 }
 
 /**
  * How the Node entry reads the client address, from the CLIENT_ADDRESS_HEADER setting.
  * Unset or empty: the socket's address. A header name: that header's last value. Anything
- * else never stops the start: every address is then unknown (reading the socket instead
- * could give every visitor the proxy's address, and so one shared limit), and `problem`
- * is the one fixed line for the entry to write.
+ * else (not a header name, or one of UNUSABLE_HEADERS, of which Node does not hand over
+ * the last value) never stops the start: every address is then unknown (reading the
+ * socket instead could give every visitor the proxy's address, and so one shared limit),
+ * and `problem` is the one fixed line for the entry to write.
  */
 export function clientAddressReader(raw: string | undefined): { read: (incoming: Incoming) => string | null; problem: string | null } {
   const name = typeof raw === "string" ? raw.trim() : "";
   if (name === "") return { read: (incoming) => clientAddressFrom(undefined, incoming), problem: null };
-  if (!HEADER_NAME.test(name)) return { read: () => null, problem: BAD_CLIENT_HEADER };
+  if (!HEADER_NAME.test(name) || UNUSABLE_HEADERS.has(name.toLowerCase())) return { read: () => null, problem: BAD_CLIENT_HEADER };
   return { read: (incoming) => clientAddressFrom(name, incoming), problem: null };
 }
 

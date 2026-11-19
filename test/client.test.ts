@@ -4,10 +4,11 @@
 // opens a connection: the mailer is the fake one or the one that is off.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps } from "#harness";
-import { clientAddressOf, setClientAddress } from "../src/client.ts";
+import { canonicalAddress, clientAddressOf, setClientAddress } from "../src/client.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { linkOrigin, MailOff, NO_MAIL, type Mail } from "../src/mail.ts";
 import { DEFER_FAILED, deferOf, deferTracker, mailOf, type Deps } from "../src/ports.ts";
+import { background, endOfTest } from "./background.ts";
 import { FakeMailer } from "./fake-mail.ts";
 
 type Entry = {
@@ -209,5 +210,137 @@ describe("the mailer and the deferred work of deps", () => {
     await tick();
     expect(done).toBe(true);
     expect(errors.mock.calls).toEqual([[DEFER_FAILED]]);
+  });
+});
+
+describe("the one form of a client address", () => {
+  it("an address is handed on in one form: lower case, no zone, IPv4 written as IPv6 folded to IPv4", () => {
+    const same: [string, string][] = [
+      ["203.0.113.7", "203.0.113.7"],
+      ["  203.0.113.7\t", "203.0.113.7"],
+      ["2001:DB8::1", "2001:db8::1"],
+      ["2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::1"],
+      ["2001:db8:0:0:1:0:0:1", "2001:db8::1:0:0:1"],
+      ["2001:db8:0:1:0:0:0:1", "2001:db8:0:1::1"],
+      ["2001:db8::", "2001:db8::"],
+      ["::1", "::1"],
+      ["::", "::"],
+      ["1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7:8"],
+      ["1:0:3:4:5:6:7:8", "1:0:3:4:5:6:7:8"],
+      // A zone names an interface of this machine, not the client.
+      ["fe80::1%eth0", "fe80::1"],
+      ["FE80::A%25", "fe80::a"],
+      // IPv4 written as IPv6, short, long and in hex groups.
+      ["::ffff:198.51.100.4", "198.51.100.4"],
+      ["::FFFF:198.51.100.4", "198.51.100.4"],
+      ["0:0:0:0:0:ffff:198.51.100.4", "198.51.100.4"],
+      ["0000:0000:0000:0000:0000:FFFF:C633:6404", "198.51.100.4"],
+      ["::ffff:c633:6404", "198.51.100.4"],
+      // An IPv4 tail on any other address is only another way to write the last two groups.
+      ["64:ff9b::198.51.100.4", "64:ff9b::c633:6404"],
+    ];
+    for (const [given, canonical] of same) {
+      expect(canonicalAddress(given), given).toBe(canonical);
+      // What it gives is already in that form.
+      expect(canonicalAddress(canonical), canonical).toBe(canonical);
+      const req = new Request("https://app.example.com/healthz");
+      setClientAddress(req, given);
+      expect(clientAddressOf(req), given).toBe(canonical);
+    }
+  });
+
+  it("what is not a bare IP address is no address", () => {
+    const none: unknown[] = [
+      null,
+      undefined,
+      7,
+      "",
+      "   ",
+      "made-up",
+      "tours.example.com",
+      "203.0.113",
+      "203.0.113.7.1",
+      "203.0.113.256",
+      "203.0.113.07",
+      "203.0.113.7:4711",
+      "203.0.113.7, 198.51.100.4",
+      "203.0.113.7%eth0",
+      "[2001:db8::1]",
+      "[2001:db8::1]:4711",
+      "2001:db8::1::2",
+      "2001:db8:::1",
+      "1:2:3:4:5:6:7",
+      "1:2:3:4:5:6:7:8:9",
+      "1:2:3:4:5:6:7::8",
+      "2001:db8::12345",
+      "2001:db8::g",
+      ":2001:db8::1",
+      "2001:db8::1:",
+      "::ffff:198.51.100",
+      "198.51.100.4::",
+      "1:2:3:4:5:6:7:198.51.100.4",
+      "fe80::1%",
+      "fe80::1%eth0%eth1",
+      "fe80::1%made up",
+      "for=203.0.113.7",
+      "203.0.113.7\r\nx-made-up: 1",
+      "2001:db8::1" + " ".repeat(200),
+    ];
+    for (const given of none) {
+      expect(canonicalAddress(given as string), String(given)).toBeNull();
+      const req = new Request("https://app.example.com/healthz");
+      setClientAddress(req, "203.0.113.7");
+      setClientAddress(req, given as string);
+      expect(clientAddressOf(req), String(given)).toBeNull();
+    }
+  });
+
+  it("on Workers a connecting address that is not an IP address is unknown, and one that is arrives in the one form", async () => {
+    const ask = async (value: string) => {
+      const req = new Request("https://app.example.com/api/v1/me", { headers: { "cf-connecting-ip": value } });
+      expect((await entry.default.fetch(req, bindings(), {})).status).toBe(401);
+      return clientAddressOf(req);
+    };
+    expect(await ask("2001:DB8:0:0:0:0:0:1")).toBe("2001:db8::1");
+    expect(await ask("::ffff:198.51.100.4")).toBe("198.51.100.4");
+    for (const value of ["made-up", "203.0.113.7, 198.51.100.4", "203.0.113.7:4711", "tours.example.com"]) expect(await ask(value), value).toBeNull();
+  });
+});
+
+describe("the harness", () => {
+  it("can make deps with mail off exactly as a live site has it", async () => {
+    const off = await makeDeps(undefined, { mail: false });
+    expect("mail" in off.deps).toBe(false);
+    expect(mailOf(off.deps)).toBe(NO_MAIL);
+    await expect(mailOf(off.deps).send(MAIL)).rejects.toBeInstanceOf(MailOff);
+    expect(off.mail.sent).toEqual([]);
+    // Deferred work is tracked all the same.
+    let done = false;
+    deferOf(off.deps)(tick().then(() => void (done = true)));
+    await off.settle();
+    expect(done).toBe(true);
+    // The default, and `mail: true`, carry the fake mailer.
+    expect((await makeDeps()).deps.mail).toBeInstanceOf(FakeMailer);
+    expect((await makeDeps({}, { mail: true })).deps.mail).toBeInstanceOf(FakeMailer);
+  });
+
+  it("a test that ends with deferred work still running fails, and one whose work ends in time does not", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const tracker = background();
+    expect(tracker.open()).toBe(0);
+    await endOfTest(tracker, 20);
+    // Work that ends within the wait is waited for.
+    tracker.defer(tick());
+    tracker.defer(Promise.reject(new Error("made-up")));
+    expect(tracker.open()).toBe(2);
+    await endOfTest(tracker, 2000);
+    expect(tracker.open()).toBe(0);
+    // Work that never ends fails the check, with a line that says what to do.
+    let release: () => void = () => {};
+    tracker.defer(new Promise<void>((resolve) => (release = resolve)));
+    await expect(endOfTest(tracker, 20)).rejects.toThrow(/1 piece\(s\) of deferred work still running/);
+    release();
+    await tracker.settle();
+    await endOfTest(tracker, 20);
   });
 });

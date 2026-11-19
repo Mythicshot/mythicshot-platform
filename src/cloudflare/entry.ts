@@ -127,7 +127,8 @@ export default {
       return misconfigured();
     }
     // The client address, for rate limits only: the connecting address as Cloudflare gives
-    // it, which a visitor cannot set. No other header is read for it.
+    // it, which a visitor cannot set. No other header is read for it, and it is kept only
+    // when it is one bare IP address (setClientAddress checks); else it is unknown.
     setClientAddress(request, request.headers.get("cf-connecting-ip"));
     // Each request gets its own metered ports, so one that goes over the call budget is logged.
     const defers = typeof (ctx as { waitUntil?: unknown } | undefined)?.waitUntil === "function" ? ctx : undefined;

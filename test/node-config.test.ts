@@ -2,7 +2,7 @@
 // real startup does with a bad pair of addresses.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createServer, type AddressInfo } from "node:net";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -196,7 +196,7 @@ describe("the storage allowance setting on the Node target", () => {
 
 const mailOff = (setting: string) => `mail: off, because ${setting} is missing or not usable. The site runs; sign-in mails are not sent.`;
 const NO_LINK_HOST = "mail: off, because no address for sign-in links is set. Set APP_HOST and TOURS_HOST, or SITE_HOST.";
-const BAD_HEADER = "client address: unknown, because CLIENT_ADDRESS_HEADER is not a header name. The site runs; no request is counted by its network address.";
+const BAD_HEADER = "client address: unknown, because CLIENT_ADDRESS_HEADER is not a usable header name. The site runs; no request is counted by its network address.";
 
 /** A mail block that can be used, with a made-up password that must never be shown. */
 const PASSWORD = "made-up-password-9f3c";
@@ -308,6 +308,11 @@ describe("the mail settings on the Node target", () => {
     ["no server", { SMTP_HOST: undefined }, "SMTP_HOST"],
     ["a server with a scheme", { SMTP_HOST: "smtps://made-up.example.com" }, "SMTP_HOST"],
     ["a server with its port in the name", { SMTP_HOST: "made-up.example.com:465" }, "SMTP_HOST"],
+    // A port the host rule would drop: refused, never connected on 465 instead.
+    ["a server with the web port in the name", { SMTP_HOST: "made-up.example.com:443" }, "SMTP_HOST"],
+    ["a server with port 80 in the name", { SMTP_HOST: " made-up.example.com:80 " }, "SMTP_HOST"],
+    ["a server with an empty port", { SMTP_HOST: "made-up.example.com:" }, "SMTP_HOST"],
+    ["a server written as an IPv6 address", { SMTP_HOST: "2001:db8::25" }, "SMTP_HOST"],
     ["a server with a line break", { SMTP_HOST: "mail.example.com\r\nmade-up" }, "SMTP_HOST"],
     ["a port that is not a number", { SMTP_PORT: "made-up" }, "SMTP_PORT"],
     ["a port of zero", { SMTP_PORT: "0" }, "SMTP_PORT"],
@@ -375,8 +380,19 @@ describe("the client address on the Node target", () => {
     const claims = { "x-forwarded-for": "203.0.113.7", "x-real-ip": "203.0.113.8", forwarded: "for=203.0.113.9" };
     expect(clientAddressFrom(undefined, incoming(claims, "198.51.100.4"))).toBe("198.51.100.4");
     expect(clientAddressFrom(undefined, incoming({}, "2001:db8::1"))).toBe("2001:db8::1");
-    // An IPv4 address written as IPv6 is the IPv4 address.
+    // An IPv4 address written as IPv6 is the IPv4 address, in the short form and the long one.
     expect(clientAddressFrom(undefined, incoming({}, "::ffff:198.51.100.4"))).toBe("198.51.100.4");
+    expect(clientAddressFrom(undefined, incoming({}, "0:0:0:0:0:FFFF:198.51.100.4"))).toBe("198.51.100.4");
+    expect(clientAddressFrom(undefined, incoming({}, "::ffff:c633:6404"))).toBe("198.51.100.4");
+    // One form for every address: lower case, shortened, and without the zone of a local interface.
+    expect(clientAddressFrom(undefined, incoming({}, "2001:DB8:0:0:0:0:0:1"))).toBe("2001:db8::1");
+    expect(clientAddressFrom(undefined, incoming({}, "fe80::1%eth0"))).toBe("fe80::1");
+    expect(clientAddressFrom("x-real-ip", incoming({ "x-real-ip": "192.0.2.66, 2001:DB8::A%7" }, "127.0.0.1"))).toBe("2001:db8::a");
+    expect(clientAddressFrom("x-real-ip", incoming({ "x-real-ip": "0:0:0:0:0:ffff:c633:6404" }, "127.0.0.1"))).toBe("198.51.100.4");
+    // The value must be the bare address: brackets, a port or a label make it no address.
+    for (const value of ["[2001:db8::1]", "[2001:db8::1]:4711", "for=203.0.113.7", "203.0.113.7;proto=https"]) {
+      expect(clientAddressFrom("x-real-ip", incoming({ "x-real-ip": value }, "198.51.100.4")), value).toBeNull();
+    }
     expect(clientAddressFrom(undefined, incoming({}, undefined))).toBeNull();
     expect(clientAddressFrom(undefined, incoming({}, "not an address"))).toBeNull();
 
@@ -411,6 +427,21 @@ describe("the client address on the Node target", () => {
       // Unknown is the safe reading: the socket's address could be a proxy's, shared by every visitor.
       expect(reader.read(from), raw).toBeNull();
     }
+  });
+
+  it("a header of which Node keeps only the first value, or joins in its own way, cannot be the client address header", () => {
+    // For these Node drops every occurrence after the first, so the "last value" would be the first: the one a visitor sends.
+    const single = ["age", "authorization", "content-length", "content-type", "etag", "expires", "from", "host", "if-modified-since", "if-unmodified-since", "last-modified", "location", "max-forwards", "proxy-authorization", "referer", "retry-after", "server", "user-agent"];
+    // Cookie values are joined with "; " and Set-Cookie is a list of its own.
+    const other = ["cookie", "set-cookie"];
+    for (const name of [...single, ...other, "From", " REFERER ", "User-Agent"]) {
+      const reader = clientAddressReader(name);
+      expect(reader.problem, name).toBe(BAD_HEADER);
+      const key = name.trim().toLowerCase();
+      expect(reader.read(incoming({ [key]: "203.0.113.7" }, "198.51.100.4")), name).toBeNull();
+    }
+    // A header Node joins with ", " is taken, whatever its name.
+    for (const name of ["x-real-ip", "x-forwarded-for", "cf-connecting-ip", "x-client-address", "true-client-ip", "forwarded-for"]) expect(clientAddressReader(name).problem, name).toBeNull();
   });
 });
 
@@ -482,4 +513,50 @@ describe("the real Node startup with mail settings", () => {
       await end();
     }
   }, 240_000);
+});
+
+describe("the settings reach the app on every install path", () => {
+  const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+
+  /** Every setting the Node target reads from its environment, from the source of its settings and its entry. */
+  function settingsRead(): string[] {
+    const names = new Set<string>();
+    for (const file of ["../src/node/config.ts", "../src/node/entry.ts"]) for (const m of read(file).matchAll(/\benv\.([A-Z][A-Z0-9_]*)/g)) names.add(m[1]);
+    return [...names].sort();
+  }
+
+  it("the Node target reads the settings this test knows, so a new one cannot be forgotten here", () => {
+    expect(settingsRead()).toEqual(
+      ["APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE", "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST"].sort(),
+    );
+  });
+
+  it("the tunnel stack, which names the app's settings one by one, names every one the app reads", () => {
+    const stack = read("../deploy/tunnel/docker-compose.yml");
+    const app = stack.match(/^  app:\n((?:(?:    .*)?\n)*)/m)?.[1] ?? "";
+    expect(app).not.toMatch(/^\s*env_file:/m);
+    // Set by the stack itself, from other lines of .env or as fixed values.
+    const own = ["APP_HOST", "TOURS_HOST", "DATA_DIR", "PORT", "SETUP_CODE"];
+    for (const name of own) expect(app, name).toMatch(new RegExp(`^      ${name}: `, "m"));
+    // Every other one is optional: passed on as written in .env, empty without a line there.
+    for (const name of settingsRead().filter((n) => !own.includes(n))) expect(app, name).toContain(`      ${name}: \${${name}:-}\n`);
+    // The mailbox password goes to the app only, as the tunnel token goes to cloudflared only.
+    expect(stack.match(/SMTP_PASSWORD/g)?.length).toBe(app.match(/SMTP_PASSWORD/g)?.length);
+    // The copy inside install.sh is the same file (test/docs.test.ts holds them equal).
+    expect(read("../deploy/install.sh")).toContain("      SMTP_PASSWORD: ${SMTP_PASSWORD:-}\n");
+  });
+
+  it("the direct stack hands the app its whole .env, so every setting written there arrives", () => {
+    const app = read("../deploy/docker-compose.yml").match(/^  app:\n((?:(?:    .*)?\n)*)/m)?.[1] ?? "";
+    expect(app).toContain("    env_file: .env\n");
+    // What the stack sets itself wins over .env; none of the optional settings is among it.
+    const set = [...app.matchAll(/^      ([A-Z][A-Z0-9_]*): /gm)].map((m) => m[1]).sort();
+    expect(set).toEqual(["APP_HOST", "DATA_DIR", "PORT", "TOURS_HOST"]);
+  });
+
+  it("the cPanel startup file passes every NAME=value line on, whatever the name", () => {
+    const startup = read("../deploy/cpanel/app.cjs");
+    expect(startup).toContain("const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);");
+    expect(startup).toContain("process.env[m[1]] = quoted ? quoted[1] : m[2];");
+  });
 });
