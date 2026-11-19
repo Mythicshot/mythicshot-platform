@@ -136,6 +136,16 @@ EOF
   {
     printf '#!/bin/bash\n%s\n' "$SIGNAL_THE_SCRIPT"
     cat <<'EOF'
+# Called as: node app.cjs admin <arguments>, by cpanel.sh admin. It records where it ran
+# and with what, prints each argument on a line of its own, so a test sees them exactly,
+# and exits with STUB_ADMIN_EXIT.
+if [ "${1:-}" != "-e" ]; then
+  printf 'node[venv=%s umask=%s cwd=%s] %s\n' "${STUB_VENV:-none}" "$(umask)" "$PWD" "$*" >>"$STUB_LOG"
+  printf 'stand-in admin command, %s arguments\n' "$#"
+  printf 'name[%s]\n' "${DEMO_PLATFORM_ADMIN_NAME:-}"
+  for a in "$@"; do printf 'arg[%s]\n' "$a"; done
+  exit "${STUB_ADMIN_EXIT:-0}"
+fi
 # Called as: node -e <program> <database> <copy>. The program text is not recorded.
 printf 'node[venv=%s umask=%s] %s <program> %s %s\n' "${STUB_VENV:-none}" "$(umask)" "$1" "$3" "$4" >>"$STUB_LOG"
 [ "${STUB_NODE_FAIL:-0}" != 1 ] || { echo "Error: database is locked" >&2; exit 1; }
@@ -149,6 +159,8 @@ EOF
 #!/bin/bash
 printf 'sqlite3 %s\n' "$*" >>"$STUB_LOG"
 [ "${STUB_SQLITE_FAIL:-0}" != 1 ] || { echo "Error: unable to open database file" >&2; exit 1; }
+# STUB_SQLITE_VERSION: what --version answers (also when empty); a tool new enough for STRICT tables unless set.
+[ "${1:-}" != --version ] || { echo "${STUB_SQLITE_VERSION-3.46.1 2024-08-13 09:16:08 (64-bit)}"; exit 0; }
 case "$2" in
   "PRAGMA integrity_check;") echo "${STUB_INTEGRITY:-ok}" ;;
   .backup*) target="${2#.backup \'}"; target="${target%\'}"; printf 'SQLite format 3\0(stand-in copy by sqlite3)\n' >"$target" ;;
@@ -1329,7 +1341,8 @@ test_backup_falls_back_to_sqlite3_only_without_node() {
   local b; b="$(only_backup)"
   expect "the copy is made by sqlite3's own backup" grep -qxF "sqlite3 $DATA/db.sqlite .backup '$b.partial/db.sqlite'" "$LOG"
   expect "the copy is then checked" grep -qxF "sqlite3 $b.partial/db.sqlite PRAGMA integrity_check;" "$LOG"
-  expect "copy first, check second, nothing else" test "$(calls)" = "sqlite3 sqlite3 "
+  expect "the tool's version is asked first" test "$(head -n 1 "$LOG")" = "sqlite3 --version"
+  expect "version, then copy, then check, nothing else" test "$(calls)" = "sqlite3 sqlite3 sqlite3 "
   expect "the copy is what sqlite3 wrote" grep -qa "stand-in copy by sqlite3" "$b/db.sqlite"
   expect "says why sqlite3 is used" has "$OUT" "the app's Node.js was not found"
   local how
@@ -2018,6 +2031,178 @@ test_app_domain_never_shows_the_setup_code() {
   cpanel_in "$T/new" "" update --app-domain other.example.com --dry-run
   expect "a dry run does not show it" code_not_shown
   expect "and the settings file still holds the code it was given" test "$(setup_code)" = "$c"
+}
+
+# ---------------------------------------------------------------- the admin command
+
+# An install whose version has the admin command, that has run, with a mail password in
+# its settings file (a secret besides the setup code that must never be shown).
+admin_install() {
+  fresh_install
+  app_has_run
+  printf '// the admin command\n' >"$APP/dist/node/admin.js"
+  printf 'SMTP_PASSWORD=a-made-up-mail-password-42\n' >>"$SETTINGS"
+  : >"$LOG"
+}
+# Neither the setup code nor the mail password is in what the run printed or in any command line.
+secrets_not_shown() { code_not_shown && ! grep -qF -- "a-made-up-mail-password-42" "$OUT" "$ERR" "$LOG"; }
+# Nor is the data folder, a value of the settings file too.
+no_setting_shown() { secrets_not_shown && ! grep -qF -- "$DATA" "$OUT" "$ERR"; }
+
+test_admin_runs_the_command_in_the_apps_node_with_the_data_folder() {
+  new_sandbox
+  admin_install
+  local before; before="$(snapshot)"
+  cpanel "" admin first-admin --email owner@example.com --username owner
+  expect "exit code 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "the command runs in the app folder, inside the app's Node.js environment, through the startup file that reads the settings" grep -qxF \
+    "node[venv=apps/tours/24 umask=0077 cwd=$APP] app.cjs admin first-admin --email owner@example.com --username owner" "$LOG"
+  expect "nothing else is run" test "$(calls)" = "node "
+  expect "what the command says is shown, after one empty line, and nothing before it" test "$(head -n 2 "$OUT")" = "$(printf '\nstand-in admin command, 7 arguments')"
+  expect "the command is told how it was run, for its usage text" grep -qxF "name[$REL/cpanel.sh admin]" "$OUT"
+  expect "nothing on stderr" test ! -s "$ERR"
+  expect "no secret and no value of the settings file is shown" no_setting_shown
+  expect "nothing in the home folder changed" test "$(snapshot)" = "$before"
+  # The command's exit code is the script's, and the script adds no words of its own.
+  STUB_ADMIN_EXIT=1 cpanel "" admin signin-link --email stranger@example.com
+  expect "a refusal of the command is exit 1" test "$RC" = 1
+  expect "with no ERROR line from the script" test ! -s "$ERR"
+  # The installed copy of the script runs it the same way.
+  : >"$LOG"
+  cpanel_raw "" bash "$APP/cpanel.sh" admin audit
+  expect "the installed copy runs it too (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "from the app folder" grep -qxF "node[venv=apps/tours/24 umask=0077 cwd=$APP] app.cjs admin audit" "$LOG"
+}
+
+test_admin_passes_its_arguments_unchanged() {
+  new_sandbox
+  admin_install
+  # The script's own options go before the command's first argument; from there on every
+  # argument is the command's, also one that looks like the script's own.
+  cpanel "" --app-root apps/tours admin --node 24 --email you@example.com --username alex
+  expect "the approved form runs (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "as typed" grep -qxF "node[venv=apps/tours/24 umask=0077 cwd=$APP] app.cjs admin --email you@example.com --username alex" "$LOG"
+  # shellcheck disable=SC2016 # the literal $(id) and * are the input
+  cpanel "" admin first-admin --email=' you@example.com' --username 'a b' '' '$(id)' '*' --dry-run --app-root x install
+  expect "exit code 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "every argument arrives as one, unchanged" test "$(sed -n 's/^arg\[\(.*\)\]$/\1/p' "$OUT" | tr '\n' '|')" = \
+    'app.cjs|admin|first-admin|--email= you@example.com|--username|a b||$(id)|*|--dry-run|--app-root|x|install|'
+  expect "an option after the first argument is not taken as a dry run" grep -q "^stand-in admin command" "$OUT"
+}
+
+test_admin_needs_an_install() {
+  new_sandbox
+  local before; before="$(snapshot)"
+  cpanel "" admin first-admin --email you@example.com --username alex
+  expect "nothing installed: refused" test "$RC" = 1
+  expect "nothing installed: says so" has "$ERR" "nothing is installed at $APP"
+  cpanel "" admin
+  expect "admin without arguments: a usage error" test "$RC" = 2
+  expect "and says what to give" has "$ERR" "admin first-admin --email you@example.com --username yourname"
+  cpanel "" --app-domain "$APP_DOMAIN" admin audit
+  expect "the address options do not go with admin" test "$RC" = 2
+  cpanel "" --allow-downgrade admin audit
+  expect "nor --allow-downgrade" test "$RC" = 2
+  expect "no stand-in was called" test ! -s "$LOG"
+  expect "nothing was written" test "$(snapshot)" = "$before"
+  # An install of a version before the command.
+  fresh_install
+  app_has_run
+  : >"$LOG"
+  cpanel "" admin audit
+  expect "a version without the command: refused" test "$RC" = 1
+  expect "and told to update" has "$ERR" "has no admin command yet"
+  # Without its settings file, its data folder or its Node.js environment.
+  printf '// the admin command\n' >"$APP/dist/node/admin.js"
+  mv "$SETTINGS" "$T/settings.away"
+  cpanel "" admin audit
+  expect "no settings file: refused" test "$RC" = 1
+  expect "no settings file: says which" has "$ERR" "the settings file $SETTINGS is missing"
+  mv "$T/settings.away" "$SETTINGS"
+  mv "$DATA" "$T/data.away"
+  cpanel "" admin audit
+  expect "no data folder: refused" test "$RC" = 1
+  expect "no data folder: says which, without naming it" has "$ERR" "the data folder that DATA_DIR in $SETTINGS names does not exist"
+  expect "no data folder: no value of the settings file is shown" no_setting_shown
+  mv "$T/data.away" "$DATA"
+  mv "$ACTIVATE" "$T/activate.away"
+  cpanel "" admin audit
+  expect "no Node.js environment: refused" test "$RC" = 1
+  expect "no Node.js environment: says where it was looked for" has "$ERR" "$ACTIVATE"
+  mv "$T/activate.away" "$ACTIVATE"
+  expect "the command was never run" test ! -s "$LOG"
+  expect "no secret is shown" code_not_shown
+}
+
+test_admin_dry_run_runs_nothing() {
+  new_sandbox
+  admin_install
+  local before; before="$(snapshot)"
+  cpanel "" admin --dry-run first-admin --email owner@example.com --username owner
+  expect "exit code 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "no stand-in was called" test ! -s "$LOG"
+  expect "prints the command" has "$OUT" "&& node app.cjs admin first-admin --email owner@example.com --username owner"
+  expect "in the app's Node.js environment and the app folder" has "$OUT" "source $ACTIVATE && cd $APP &&"
+  expect "says nothing was changed" has "$OUT" "Dry run: nothing was changed"
+  expect "nothing was written" test "$(snapshot)" = "$before"
+  expect "no secret and no value of the settings file is shown" no_setting_shown
+}
+
+test_an_old_sqlite3_tool_is_not_used_for_the_copy() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  # No Node.js environment, so the copy would fall to the sqlite3 tool.
+  rm "$ACTIVATE"
+  local v
+  for v in "3.31.1 2020-01-27 19:55:54 3bfa9cc97da10598521b342961df8f5f68c7388fa117345eeb516eaa837balt1" "3.36.0 2021-06-18" "2.8.17" "something else" ""; do
+    : >"$LOG"
+    STUB_SQLITE_VERSION="$v" cpanel "" backup
+    expect "$v: the backup fails" test "$RC" != 0
+    expect "$v: says why, in one sentence" has "$ERR" "the sqlite3 tool here is older than 3.37 and cannot read this database, so it is not used for the copy; the app's Node.js is needed for a backup"
+    expect "$v: the tool is asked its version and nothing else" test "$(cat "$LOG")" = "sqlite3 --version"
+    expect "$v: no backup folder" test -z "$(backup_dirs)"
+  done
+  for v in "3.37.0 2021-11-27" "3.46.1 2024-08-13" "4.0.0"; do
+    : >"$LOG"
+    STUB_SQLITE_VERSION="$v" cpanel "" backup
+    expect "$v: the tool is used (stderr: $(cat "$ERR"))" test "$RC" = 0
+    expect "$v: for the copy" grep -q "^sqlite3 .* \.backup " "$LOG"
+  done
+}
+
+test_admin_with_real_node_hands_the_command_the_settings() {
+  new_sandbox
+  rm "$T/bin/node"
+  command -v node >/dev/null 2>&1 || skip "no real node on this system"
+  admin_install
+  # A stand-in command, with the real one's exports, behind the real startup file: it says what it was given.
+  cat >"$APP/dist/node/admin.js" <<'EOF'
+export const ADMIN_SETTINGS = ["DATA_DIR", "SETUP_CODE", "SMTP_PASSWORD", "APP_HOST", "RECOVERY_LINKS"];
+export function isRecoveryOn(v) { return typeof v === "string" && v.trim().toLowerCase() === "on"; }
+export async function main(argv, opts) {
+  console.log("argv=" + JSON.stringify(argv));
+  console.log("DATA_DIR=" + process.env.DATA_DIR);
+  console.log("SETUP_CODE is " + (process.env.SETUP_CODE ? "set" : "not set"));
+  console.log("SMTP_PASSWORD is " + (process.env.SMTP_PASSWORD ? "set" : "not set"));
+  console.log("APP_HOST is " + (process.env.APP_HOST ? "set" : "not set"));
+  console.log("gate=" + (opts && opts.recoveryLinks === true ? "on" : "off"));
+  process.exitCode = 3;
+}
+EOF
+  # A setting exported in the shell reaches the command neither as a setting nor as the gate.
+  APP_HOST=other.example.com RECOVERY_LINKS=on cpanel "" admin first-admin --email 'you@example.com' --username 'a b'
+  expect "the command's exit code comes back (stderr: $(cat "$ERR"))" test "$RC" = 3
+  expect "the arguments arrive unchanged" has "$OUT" 'argv=["first-admin","--email","you@example.com","--username","a b"]'
+  expect "with the data folder from the settings file" grep -qxF "DATA_DIR=$DATA" "$OUT"
+  expect "and every other setting, as the app gets them" has "$OUT" "SMTP_PASSWORD is set"
+  expect "the setup code too" has "$OUT" "SETUP_CODE is set"
+  expect "but not a host exported in the shell" has "$OUT" "APP_HOST is not set"
+  expect "and the gate stays closed without the line in the file" has "$OUT" "gate=off"
+  expect "no secret is shown" secrets_not_shown
+  printf 'RECOVERY_LINKS=on\n' >>"$SETTINGS"
+  cpanel "" admin --email 'you@example.com'
+  expect "the file's line opens the gate" has "$OUT" "gate=on"
 }
 
 # ---------------------------------------------------------------- run

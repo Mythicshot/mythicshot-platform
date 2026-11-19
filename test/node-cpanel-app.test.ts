@@ -33,11 +33,11 @@ function layout(name = "tours"): { home: string; app: string; settings: string }
   return { home, app, settings: join(home, "apps", `${name}-config.env`) };
 }
 
-function start(app: string, env: Record<string, string> = {}): { status: number | null; stdout: string; stderr: string; started: Record<string, string | null> | null } {
+function start(app: string, env: Record<string, string> = {}, args: string[] = []): { status: number | null; stdout: string; stderr: string; started: Record<string, string | null> | null } {
   // Only what Node itself needs, so nothing from the test runner's environment leaks in.
   const base: Record<string, string> = {};
   for (const k of ["PATH", "Path", "SystemRoot", "TEMP", "TMP"]) if (process.env[k] !== undefined) base[k] = process.env[k] as string;
-  const r = spawnSync(process.execPath, [join(app, "app.cjs")], { env: { ...base, ...env }, encoding: "utf8", timeout: 20_000, windowsHide: true });
+  const r = spawnSync(process.execPath, [join(app, "app.cjs"), ...args], { env: { ...base, ...env }, encoding: "utf8", timeout: 20_000, windowsHide: true });
   const line = r.stdout.split("\n").find((l) => l.startsWith("STARTED "));
   return { status: r.status, stdout: r.stdout, stderr: r.stderr, started: line ? (JSON.parse(line.slice(8)) as Record<string, string | null>) : null };
 }
@@ -139,5 +139,98 @@ describe("the cPanel startup file", () => {
     const r = start(l.app);
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/entry\.js/);
+  });
+});
+
+describe("the cPanel startup file run as the admin command", () => {
+  /**
+   * A stand-in dist/node/admin.js with the real one's exports: the settings to clear, the
+   * gate's rule, and a main that prints the arguments, the settings it sees and the gate
+   * it was handed, and sets the exit code.
+   */
+  function withAdmin(l: { app: string }): void {
+    writeFileSync(
+      join(l.app, "dist", "node", "admin.js"),
+      [
+        'export const ADMIN_SETTINGS = ["DATA_DIR", "APP_HOST", "TOURS_HOST", "SITE_HOST", "SMTP_PASSWORD", "RECOVERY_LINKS"];',
+        'export function isRecoveryOn(v) { return typeof v === "string" && v.trim().toLowerCase() === "on"; }',
+        "export async function main(argv, opts) {",
+        "  const pick = (k) => process.env[k] ?? null;",
+        '  console.log("ADMIN " + JSON.stringify({ argv, DATA_DIR: pick("DATA_DIR"), APP_HOST: pick("APP_HOST"), TOURS_HOST: pick("TOURS_HOST"), SITE_HOST: pick("SITE_HOST"), SMTP_PASSWORD: pick("SMTP_PASSWORD"), RECOVERY_LINKS: pick("RECOVERY_LINKS"), gate: opts?.recoveryLinks ?? null }));',
+        '  process.exitCode = argv.includes("--fail") ? 1 : 0;',
+        "}",
+        "",
+      ].join("\n"),
+    );
+  }
+  const admin = (r: { stdout: string }): Record<string, unknown> | null => {
+    const line = r.stdout.split("\n").find((x) => x.startsWith("ADMIN "));
+    return line ? (JSON.parse(line.slice(6)) as Record<string, unknown>) : null;
+  };
+  const lines = (text: string) => text.split("\n").filter((x) => x !== "");
+
+  it("`node app.cjs admin …` runs the admin command with the arguments unchanged and the settings file as its only source", () => {
+    const l = layout();
+    withAdmin(l);
+    writeFileSync(l.settings, [`DATA_DIR=/data/tours`, `SETUP_CODE=${SECRET}`, `APP_HOST="app.example.com"`, `SMTP_PASSWORD=pw with spaces=and+signs`, ""].join("\n"));
+    const args = ["admin", "first-admin", "--email", "You@Example.com", "--username=alex", "a b", ""];
+    const r = start(l.app, {}, args);
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+    expect(r.started).toBeNull();
+    const all = { DATA_DIR: "/data/tours", APP_HOST: "app.example.com", TOURS_HOST: null, SITE_HOST: null, SMTP_PASSWORD: "pw with spaces=and+signs", RECOVERY_LINKS: null, gate: false };
+    expect(admin(r)).toEqual({ argv: args.slice(1), ...all });
+    // A setting set in the shell it is started from never reaches the command: the file holds it or nobody does.
+    const shell = { DATA_DIR: "/from/the/shell", APP_HOST: "other.example.com", TOURS_HOST: "tours.other.example.com", SITE_HOST: "site.other.example.com", SMTP_PASSWORD: "from-the-shell" };
+    expect(admin(start(l.app, shell, ["admin", "audit"]))).toEqual({ argv: ["audit"], ...all });
+    writeFileSync(l.settings, "SITE_HOST=tours.example.com\n");
+    expect(admin(start(l.app, shell, ["admin", "audit"]))).toEqual({ argv: ["audit"], ...all, DATA_DIR: null, APP_HOST: null, SMTP_PASSWORD: null, SITE_HOST: "tours.example.com" });
+    // The app itself keeps its rule: what is set already wins.
+    expect(start(l.app, { DATA_DIR: "/from/the/shell" }).started).toMatchObject({ DATA_DIR: "/from/the/shell" });
+    // The command's exit code is the process's.
+    expect(start(l.app, {}, ["admin", "--fail"]).status).toBe(1);
+  });
+
+  it("the recovery gate is the settings file's RECOVERY_LINKS, handed over explicitly and never as a variable", () => {
+    const l = layout();
+    withAdmin(l);
+    writeFileSync(l.settings, "DATA_DIR=/data/tours\n");
+    // Exported in the SSH session, with the file silent about it: closed, and not passed on.
+    for (const value of ["on", "ON", " on "]) expect(admin(start(l.app, { RECOVERY_LINKS: value }, ["admin", "signin-link"])), value).toMatchObject({ RECOVERY_LINKS: null, gate: false });
+    // In the file: open, by the command's own rule, and still not in the environment.
+    writeFileSync(l.settings, "DATA_DIR=/data/tours\nRECOVERY_LINKS= On \n");
+    expect(admin(start(l.app, {}, ["admin", "signin-link"]))).toMatchObject({ RECOVERY_LINKS: null, gate: true });
+    writeFileSync(l.settings, "DATA_DIR=/data/tours\nRECOVERY_LINKS=off\n");
+    expect(admin(start(l.app, { RECOVERY_LINKS: "on" }, ["admin", "signin-link"]))).toMatchObject({ RECOVERY_LINKS: null, gate: false });
+  });
+
+  it("without `admin` first, or with it only in the settings file, the app starts as always", () => {
+    const l = layout();
+    withAdmin(l);
+    writeFileSync(l.settings, ["DATA_DIR=/data/tours", "COMMAND=admin", "DEMO_PLATFORM_COMMAND=admin", ""].join("\n"));
+    for (const args of [[], ["status"], ["--admin"], ["first-admin", "admin"]]) {
+      const r = start(l.app, {}, args);
+      expect(r.status, args.join(" ")).toBe(0);
+      expect(r.started, args.join(" ")).toMatchObject({ DATA_DIR: "/data/tours" });
+      expect(admin(r), args.join(" ")).toBeNull();
+    }
+  });
+
+  it("a missing settings file stops the command with the app's one line, and a build without the command says so in one line without a value", () => {
+    const l = layout();
+    withAdmin(l);
+    const none = start(l.app, {}, ["admin", "audit"]);
+    expect(none.status).toBe(1);
+    expect(admin(none)).toBeNull();
+    expect(lines(none.stderr)).toEqual([expect.stringContaining(l.settings)]);
+
+    writeFileSync(l.settings, `DATA_DIR=/data/tours\nSETUP_CODE=${SECRET}\n`);
+    rmSync(join(l.app, "dist", "node", "admin.js"));
+    const missing = start(l.app, {}, ["admin", "audit"]);
+    expect(missing.status).toBe(1);
+    expect(missing.stdout).toBe("");
+    expect(lines(missing.stderr)).toEqual(["demo-platform: the admin command could not be run. Update the site with a current archive and try again."]);
+    expect(missing.stdout + missing.stderr).not.toContain(SECRET);
+    expect(missing.stdout + missing.stderr).not.toContain("/data/tours");
   });
 });

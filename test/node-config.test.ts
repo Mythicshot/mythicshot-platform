@@ -263,7 +263,7 @@ describe("the mail settings on the Node target", () => {
     ];
     for (const env of quiet) {
       const { result, settings } = mailOf(env);
-      expect(result, JSON.stringify(Object.keys(env))).toEqual({ mailer: NO_MAIL, mode: "off", problem: null });
+      expect(result, JSON.stringify(Object.keys(env))).toEqual({ mailer: NO_MAIL, mode: "off", problem: null, setting: null });
       expect(result.mailer).toBe(NO_MAIL);
       expect(settings).toEqual([]);
     }
@@ -273,7 +273,7 @@ describe("the mail settings on the Node target", () => {
 
   it("a full SMTP block gives the SMTP mailer", () => {
     const two = mailOf({ ...BLOCK, ...TWO });
-    expect(two.result).toEqual({ mailer: two.made, mode: "smtp", problem: null });
+    expect(two.result).toEqual({ mailer: two.made, mode: "smtp", problem: null, setting: null });
     expect(two.result.mailer).toBe(two.made);
     // TLS from the first byte on port 465 unless another port is written; the site names itself by its link host.
     expect(two.settings).toEqual([{ host: "mail.example.com", port: 465, user: "no-reply@example.com", password: PASSWORD, from: "no-reply@example.com", helo: "app.example.com" }]);
@@ -291,8 +291,8 @@ describe("the mail settings on the Node target", () => {
     expect([real.mode, real.problem]).toEqual(["smtp", null]);
     expect(real.mailer).not.toBe(NO_MAIL);
     expect(typeof real.mailer.send).toBe("function");
-    // The result holds the mailer and two words about it: no setting, no password.
-    expect(Object.keys(real).sort()).toEqual(["mailer", "mode", "problem"]);
+    // The result holds the mailer and three words about it: no setting's value, no password.
+    expect(Object.keys(real).sort()).toEqual(["mailer", "mode", "problem", "setting"]);
     expect(JSON.stringify(real)).not.toContain(PASSWORD);
   });
 
@@ -339,7 +339,7 @@ describe("the mail settings on the Node target", () => {
         else env[key] = value;
       }
       const { result, settings } = mailOf(env);
-      expect(result, label).toEqual({ mailer: NO_MAIL, mode: "off", problem: mailOff(setting) });
+      expect(result, label).toEqual({ mailer: NO_MAIL, mode: "off", problem: mailOff(setting), setting });
       expect(result.mailer, label).toBe(NO_MAIL);
       // No client was made, so the password went nowhere.
       expect(settings, label).toEqual([]);
@@ -360,7 +360,8 @@ describe("the mail settings on the Node target", () => {
   it("SMTP without a link host leaves mail off", () => {
     for (const hosts of [{}, { SITE_HOST: "" }, { SITE_HOST: "   " }] as Record<string, string>[]) {
       const { result, settings } = mailOf({ ...BLOCK, ...hosts });
-      expect(result).toEqual({ mailer: NO_MAIL, mode: "off", problem: NO_LINK_HOST });
+      // No setting is wrong: one is missing, and the line says which to set.
+      expect(result).toEqual({ mailer: NO_MAIL, mode: "off", problem: NO_LINK_HOST, setting: null });
       expect(settings).toEqual([]);
     }
     // A configuration handed in without a usable link host is refused the same way, whatever the environment says.
@@ -540,6 +541,8 @@ describe("the settings reach the app on every install path", () => {
     for (const name of own) expect(app, name).toMatch(new RegExp(`^      ${name}: `, "m"));
     // Every other one is optional: passed on as written in .env, empty without a line there.
     for (const name of settingsRead().filter((n) => !own.includes(n))) expect(app, name).toContain(`      ${name}: \${${name}:-}\n`);
+    // The admin command, run in this container with `docker compose exec`, reads the container's environment: its recovery setting is passed on too.
+    expect(app).toContain("      RECOVERY_LINKS: ${RECOVERY_LINKS:-}\n");
     // The mailbox password goes to the app only, as the tunnel token goes to cloudflared only.
     expect(stack.match(/SMTP_PASSWORD/g)?.length).toBe(app.match(/SMTP_PASSWORD/g)?.length);
     // The copy inside install.sh is the same file (test/docs.test.ts holds them equal).
@@ -557,6 +560,8 @@ describe("the settings reach the app on every install path", () => {
   it("the cPanel startup file passes every NAME=value line on, whatever the name", () => {
     const startup = read("../deploy/cpanel/app.cjs");
     expect(startup).toContain("const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);");
-    expect(startup).toContain("process.env[m[1]] = quoted ? quoted[1] : m[2];");
+    expect(startup).toContain("out.push([m[1], quoted ? quoted[1] : m[2]]);");
+    // The app gets every line the environment does not already set.
+    expect(startup).toContain("for (const [name, value] of settingsLines()) if (process.env[name] === undefined) process.env[name] = value;");
   });
 });

@@ -398,6 +398,58 @@ Keeping Debian and Docker patched is yours to do, for example with `apt-get upda
 
 **How to tell it worked:** the run ends with `==> Updated`, and `sudo bash install.sh status` shows the app `healthy`.
 
+### Make yourself the admin
+
+The version with accounts prepares sign-in with a link sent instead of a password. An updated site keeps working exactly as before, its tours, links and tokens unchanged, and nobody can sign in until the site has an admin. The admin is made once, by a command run in the app container, with the settings the app itself runs with; there is no web page for it, and the setup code plays no part in it.
+
+The page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, get a new link with the recovery setting, as in step 3.
+
+1. From a root shell in `/opt/demo-platform`, run the command with your own email address and the username you want. The account that set up the site becomes the admin, with that address in place of the one typed in the setup wizard; should its workspace hold several accounts, the oldest of them.
+
+```sh
+docker compose exec app node dist/node/admin.js first-admin --email you@example.com --username yourname
+```
+
+It prints `The admin account "yourname" was created.`, says that your tours, their links and your tokens stay exactly as they are, and ends with `Open this link within 15 minutes to sign in:` and a link on the app address, or on the one address with `SITE_HOST` set in `.env`; without either it prints only the part after the address, for you to put your site's address in front of.
+
+If it says `The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.`, the admin exists and only the link is missing: get one as in step 3, where the settings file is `.env`.
+
+2. Once the version with the sign-in page is installed, open the link in your browser. It works once and for 15 minutes. Run the first command again and it says `This site already has an admin. Nothing was changed.`
+
+> [!WARNING]
+> The link signs in whoever opens it first, like a password for 15 minutes: open it in your own browser and never paste it into a chat, a ticket or a file.
+
+Signing in normally is by a link sent by mail from the sign-in page, and needs no shell. Making the admin is a one-time act, and the command is not a standing way in.
+
+3. A new link is a recovery tool. If the first link was not used, for example because the sign-in page arrives in a later version, turn the recovery setting on for one run: add the line `RECOVERY_LINKS=on` to `.env`, recreate the app container so that it sees the line, ask for the link, then remove the line again and recreate the container once more. Each recreate restarts the app for a moment. Without the line the command says that recovery links are off and makes nothing; with it, it prints the link here only, never mails it, records it in the audit, and ends by reminding you to remove the line.
+
+```sh
+nano .env
+```
+
+```sh
+docker compose up -d --force-recreate --wait app
+```
+
+```sh
+docker compose exec app node dist/node/admin.js signin-link --email you@example.com
+```
+
+Then remove the `RECOVERY_LINKS=on` line from `.env` with `nano .env` and run `docker compose up -d --force-recreate --wait app` again.
+
+The line must be in `.env` and the container recreated: the command reads the setting from the app's own process in the container, so passing it to `docker compose exec` with `-e` does not work. Whoever can run Docker commands on the server controls the site anyway, so this setting is about not leaving a door open, not about stopping the server's owner.
+
+The recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the server: whoever can change `.env` or the data folder can change the site directly.
+
+The command also has `mail-check`, which says whether mail is set up without showing any setting, and `audit`, which shows the last sign-ins and admin changes; `--help` lists them. Its usage text names it the way `DEMO_PLATFORM_ADMIN_NAME` says when a wrapper sets that, as `cpanel.sh admin` does; nothing else reads it. It runs beside the app without a restart and changes only the database: making the admin is one step that is written whole or not at all, and the link and its record in the audit follow it. It applies no database update itself.
+
+> [!WARNING]
+> Never open the database with the server's `sqlite3` tool: an older one cannot read the platform's tables, so use the app's own commands, which run on the app's Node.js.
+
+### If the setup did not finish
+
+The command says `This site's setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.` when the setup record names a workspace that has no account in it, for example after a manual change to the data or after an older version of the platform, so the site has nobody to make admin. Restoring a backup from before that change is the first choice, as in [step 9](#9-back-up-and-restore). While no tour or upload exists and the token was never used, the steps in [If the token was lost before anyone saved it](#if-the-token-was-lost-before-anyone-saved-it) clear that half-finished setup instead, and the wizard can run again.
+
 ## 9. Back up and restore
 
 ### Back up

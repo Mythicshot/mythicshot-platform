@@ -41,16 +41,52 @@ try {
   process.exit(1);
 }
 
-for (const raw of text.split(/\r?\n/)) {
-  const line = raw.trim();
-  if (line === "" || line.startsWith("#")) continue;
-  const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
-  if (!m || process.env[m[1]] !== undefined) continue;
-  const quoted = /^"(.*)"$/.exec(m[2]) || /^'(.*)'$/.exec(m[2]);
-  process.env[m[1]] = quoted ? quoted[1] : m[2];
+/** The lines of the settings file as [NAME, value], with one pair of quotes dropped. */
+function settingsLines() {
+  const out = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
+    if (!m) continue;
+    const quoted = /^"(.*)"$/.exec(m[2]) || /^'(.*)'$/.exec(m[2]);
+    out.push([m[1], quoted ? quoted[1] : m[2]]);
+  }
+  return out;
 }
 
-import("./dist/node/entry.js").catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// `node app.cjs admin <arguments>` runs the site's admin command (dist/node/admin.js)
+// instead of the app: that is how `cpanel.sh admin` runs it. The guard is the first
+// argument: whatever loads this file to start the app (Passenger, through a loader of its
+// own) does not hand it `admin` first, and no line of the settings file can choose the
+// command. For the command the settings file is the only source: every setting the app
+// reads, and the recovery setting, is first cleared from the environment (the list comes
+// from the command itself, ADMIN_SETTINGS), so a variable set in the shell it is run from
+// cannot point it at another database or another address. RECOVERY_LINKS is not put in
+// the environment at all: the command is handed it as an explicit yes or no. For the app
+// the environment wins, as before.
+if (require.main === module && process.argv[2] === "admin") {
+  import("./dist/node/admin.js")
+    .then((admin) => {
+      if (!Array.isArray(admin.ADMIN_SETTINGS) || typeof admin.isRecoveryOn !== "function") throw new Error("not this command");
+      for (const name of admin.ADMIN_SETTINGS) delete process.env[name];
+      let recovery;
+      for (const [name, value] of settingsLines()) {
+        if (name === "RECOVERY_LINKS") recovery = value;
+        else process.env[name] = value;
+      }
+      // The arguments after `admin` reach the command unchanged.
+      return admin.main(process.argv.slice(3), { recoveryLinks: admin.isRecoveryOn(recovery) });
+    })
+    .catch(() => {
+      // A fixed sentence: nothing of the settings and nothing the error says.
+      console.error("demo-platform: the admin command could not be run. Update the site with a current archive and try again.");
+      process.exit(1);
+    });
+} else {
+  for (const [name, value] of settingsLines()) if (process.env[name] === undefined) process.env[name] = value;
+  import("./dist/node/entry.js").catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

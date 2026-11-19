@@ -3,13 +3,20 @@
 // archive is then read back with a small tar reader written here, independent of the
 // packager's writer, and with the system's own tar where there is one.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ARCHIVE_TOP_LEVEL, packageCpanel, tarGz, type PackageResult } from "../scripts/package-cpanel.ts";
+import { NodeDb } from "../src/node/db.ts";
+import { migrate } from "../src/node/migrate.ts";
+import type { FileStore } from "../src/ports.ts";
+import { workspaceStatements } from "../src/workspaces.ts";
+
+/** No file is stored or read by the set-up rows the admin test writes. */
+const NO_STORE: FileStore = { put: async () => {}, get: async () => null, delete: async () => {} };
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const read = (p: string) => readFileSync(join(ROOT, p));
@@ -144,6 +151,80 @@ describe("the cPanel archive", () => {
     expect(r.status).toBe(0);
     expect(r.stdout.split(/\r?\n/).filter(Boolean).sort()).toEqual(entries.map((e) => e.path).sort());
   });
+
+  it("test_the_archive_holds_the_admin_command", async () => {
+    expect(files.map((e) => e.path)).toContain("dist/node/admin.js");
+    expect(files.map((e) => e.path)).toContain("migrations/0008_accounts.sql");
+    // Unpacked as on the hosting, with its packages, its settings file beside it and a set-up
+    // site's database: the shipped startup file runs the shipped command, as cpanel.sh admin does.
+    const home = mkdtempSync(join(tmpdir(), "dp-cpanel-admin-"));
+    try {
+      const app = join(home, "apps", "tours");
+      for (const e of entries) {
+        const to = join(app, ...e.path.split("/"));
+        if (e.type === "dir") {
+          mkdirSync(to, { recursive: true });
+        } else {
+          mkdirSync(dirname(to), { recursive: true });
+          writeFileSync(to, e.data);
+        }
+      }
+      symlinkSync(join(ROOT, "node_modules"), join(app, "node_modules"), "junction");
+      const data = join(home, "apps", "tours-data");
+      mkdirSync(data);
+      const db = new NodeDb(join(data, "db.sqlite"));
+      try {
+        await migrate(db, join(app, "migrations"));
+        const deps = { db, drafts: NO_STORE, pub: NO_STORE, config: { publicImageBase: "", setupCode: null }, now: () => Date.now() };
+        const w = await workspaceStatements(deps, "Acme", "typed-at-setup@example.com");
+        await db.batch([...w.stmts, { sql: "INSERT INTO setup (id, workspace_id, completed_at) VALUES (1, ?, 1)", params: [w.workspaceId] }]);
+      } finally {
+        db.close();
+      }
+      writeFileSync(join(home, "apps", "tours-config.env"), `DATA_DIR=${data}\nSETUP_CODE=made-up-setup-code-0123456789abcdef\nTOURS_HOST=tours.example.com\nAPP_HOST=app.example.com\n`);
+      const base: Record<string, string> = {};
+      for (const k of ["PATH", "Path", "SystemRoot", "TEMP", "TMP"]) if (process.env[k] !== undefined) base[k] = process.env[k] as string;
+      const r = spawnSync(process.execPath, ["app.cjs", "admin", "--email", "you@example.com", "--username", "alex"], { cwd: app, env: base, encoding: "utf8", timeout: 60_000, windowsHide: true });
+      expect(r.stderr).toBe("");
+      expect(r.status).toBe(0);
+      const out = r.stdout.split("\n");
+      expect(out.slice(0, 4)).toEqual(['The admin account "alex" was created.', "Your tours, their links and your tokens stay exactly as they are.", "", "Open this link within 15 minutes to sign in:"]);
+      expect(out[4]).toMatch(/^https:\/\/app\.example\.com\/signin\/link#c=dpl_[0-9a-f]{40}$/);
+      expect(out.slice(5)).toEqual([""]);
+      // Run directly, as in a container, it reads the same settings from the environment.
+      const again = spawnSync(process.execPath, ["dist/node/admin.js", "first-admin", "--email", "you@example.com", "--username", "alex"], { cwd: app, env: { ...base, DATA_DIR: data }, encoding: "utf8", timeout: 60_000, windowsHide: true });
+      expect(again.stdout).toBe("This site already has an admin. Nothing was changed.\n");
+      expect(again.status).toBe(1);
+
+      // The settings file is the command's only source: hosts exported in the shell do not move the link,
+      // and its recovery line opens the gate for this run.
+      const settings = join(home, "apps", "tours-config.env");
+      writeFileSync(settings, `DATA_DIR=${data}\nSITE_HOST=tours.example.com\nRECOVERY_LINKS=on\n`);
+      const shell = { ...base, APP_HOST: "app.other.example.com", TOURS_HOST: "tours.other.example.com", SITE_HOST: "site.other.example.com" };
+      const recovered = spawnSync(process.execPath, ["app.cjs", "admin", "--email", "you@example.com"], { cwd: app, env: shell, encoding: "utf8", timeout: 60_000, windowsHide: true });
+      expect(recovered.stderr).toBe("");
+      expect(recovered.stdout.split("\n")).toEqual([
+        "Open this link within 15 minutes to sign in:",
+        expect.stringMatching(/^https:\/\/tours\.example\.com\/signin\/link#c=dpl_[0-9a-f]{40}$/),
+        "Remove the line RECOVERY_LINKS=on from the settings file now.",
+        "",
+      ]);
+      // No DATA_DIR in the file: the shell's does not count.
+      writeFileSync(settings, "SITE_HOST=tours.example.com\n");
+      const noData = spawnSync(process.execPath, ["app.cjs", "admin", "audit"], { cwd: app, env: { ...shell, DATA_DIR: data }, encoding: "utf8", timeout: 60_000, windowsHide: true });
+      expect(noData.stdout).toBe("DATA_DIR is not set, so the site's data is not known. Nothing was changed.\n");
+      expect(noData.status).toBe(1);
+      // Run directly with the gate in its own environment, with or without the file's extension: refused.
+      const off = "Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.\n";
+      for (const script of ["dist/node/admin.js", "dist/node/admin"]) {
+        const direct = spawnSync(process.execPath, [script, "--email", "you@example.com"], { cwd: app, env: { ...base, DATA_DIR: data, SITE_HOST: "tours.example.com", RECOVERY_LINKS: "on" }, encoding: "utf8", timeout: 60_000, windowsHide: true });
+        expect(direct.stdout, script).toBe(off);
+        expect(direct.status, script).toBe(1);
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it("git ignores the output folder", (ctx) => {
     const r = spawnSync("git", ["check-ignore", "-q", "dist/cpanel/demo-platform-0.0.0-cpanel.tgz"], { cwd: ROOT, windowsHide: true });

@@ -26,6 +26,7 @@ Examples use `tours.example.com` for the platform's address and `you` for your c
 - [12. Roll back an update](#12-roll-back-an-update)
 - [13. Troubleshooting](#13-troubleshooting)
 - [14. A second address for the app](#14-a-second-address-for-the-app)
+- [15. Make yourself the admin](#15-make-yourself-the-admin)
 - [What has been run where](#what-has-been-run-where)
 
 ## 1. What you need
@@ -300,6 +301,8 @@ npm run rehearse:upgrade -- ~/backups/tours-<date>-<time> ~/rehearse/old ~/rehea
 
 The rehearsal does not test your hosting: not how the hosting starts the app, not its file system and not its version of Node.js. It also proves only what your own data holds; a kind of tour your site does not have yet is not tried.
 
+**After the update that brings accounts,** the site works as before until it has an admin: make yourself the admin as in [step 15](#15-make-yourself-the-admin).
+
 ## 10. Backups
 
 1. Make a backup. The installed copy of the script does this; no archive is needed.
@@ -514,6 +517,82 @@ cd ~/apps/tours && ./cpanel.sh status
 
 The subdomain `app.example.com` can stay or be removed in cPanel. With one address the platform answers on every name the hosting sends to it.
 
+## 15. Make yourself the admin
+
+The version with accounts prepares sign-in with a link sent instead of a password. A site that was updated keeps working exactly as before: its tours, their links and its tokens are not changed, and nobody can sign in until the site has an admin. The admin is made once, by a command run on the hosting. There is no web page for it, and the setup code plays no part in it.
+
+The page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, get a new link with the recovery setting, as described below.
+
+1. Update to a version with accounts, as in [step 9](#9-updates), and see that `./cpanel.sh status` shows the health as ok.
+2. Run the command from the installed copy of the script, with your own email address and the username you want. The account that set up the site becomes the admin, with that address in place of the one typed in the setup wizard. Should the site's workspace hold several accounts, the oldest of them is the one made admin.
+
+```sh
+cd ~/apps/tours && ./cpanel.sh admin --email you@example.com --username yourname
+```
+
+It prints this, with your username and a link of your own:
+
+```text
+The admin account "yourname" was created.
+Your tours, their links and your tokens stay exactly as they are.
+
+Open this link within 15 minutes to sign in:
+https://app.example.com/signin/link#…
+```
+
+3. Once the version with the sign-in page is installed, open the link in your browser to sign in. It works once and for 15 minutes. With two addresses it is on the app address; with one address it is on the name in a `SITE_HOST=tours.example.com` line of the settings file. Without either, the command prints only the part after the address, `/signin/link#…`, and you put your site's address in front of it.
+
+> [!WARNING]
+> The link signs in whoever opens it first, like a password for 15 minutes: open it in your own browser and never paste it into a chat, a ticket or a file.
+
+**How to tell it worked:** the command prints the lines above, ending with the link. If it says `The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.`, the admin exists and only the link is missing: get one as described below. Run the first command again and it says `This site already has an admin. Nothing was changed.`: there is only ever one first admin, and the command changes nothing the second time. A username is 3 to 30 lowercase letters, digits and hyphens and starts with a letter; a reserved name such as `admin` is refused with its own sentence, and so is an address that is not one. Nothing is changed when it refuses.
+
+Signing in normally is by a link sent by mail from the sign-in page, and needs no shell. The first admin's link above works once and for 15 minutes; making the admin is a one-time act, and the command is not a standing way in.
+
+**A new sign-in link is a recovery tool.** If the first link was not used, for example because the sign-in page arrives in a later version, or mail is not set up yet, turn the recovery setting on for one run: add the line `RECOVERY_LINKS=on` to the settings file, run the command with the address alone, then remove the line again. Without the line the command says `Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.` and makes nothing. With it, the command prints the link here and nowhere else, never mails it, records it in the audit, and ends with `Remove the line RECOVERY_LINKS=on from the settings file now.`
+
+```sh
+nano ~/apps/tours-config.env
+```
+
+```text
+RECOVERY_LINKS=on
+```
+
+```sh
+cd ~/apps/tours && ./cpanel.sh admin --email you@example.com
+```
+
+Then open the settings file again, remove the line and save. The app itself never reads this setting, so it needs no restart either way.
+
+The same command has three more uses: `./cpanel.sh admin mail-check` says whether mail is set up without showing any setting, `./cpanel.sh admin audit` shows the last sign-ins and admin changes, and `./cpanel.sh admin --help` lists them. Options of the script itself, such as `--app-root` or `--dry-run`, go before the command's own: `./cpanel.sh admin --dry-run first-admin --email you@example.com --username yourname` prints what it would run and runs nothing.
+
+The command runs beside the running app, without a restart, and changes only the database: making the admin is one step that is written whole or not at all, and the link and its record in the audit follow it. It does not apply a database update itself: on a site that was not updated yet it says `The database is from an older version. Update the site first.` and changes nothing. If it says `This site's setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.`, see [If the setup did not finish](#if-the-setup-did-not-finish) below.
+
+Through `./cpanel.sh admin` the command takes its settings from the settings file only: a setting exported in your SSH session, or entered in the environment screen of the hosting's **Setup Node.js App** page, is not seen by it. Run any other way on shared hosting, the recovery setting is off unless someone deliberately fakes the app's own process.
+
+The recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the hosting account: whoever can change the settings file or the data folder can change the site directly.
+
+> [!WARNING]
+> Never open the database with the hosting's `sqlite3` tool: on many hosting accounts it is older than 3.37 and cannot read the platform's tables, so use only the script and the app, which use the app's own Node.js.
+
+### If the setup did not finish
+
+The command says this when the setup record names a workspace that has no account in it, for example after a manual change to the data or after an older version of the platform, so the site has nobody to make admin. Restoring a backup from before that change is the first choice: restore it as in [step 11](#11-restore-from-a-backup).
+
+Without such a backup, the setup can be started again on an empty database. That is safe only if Mythicshot was never used to upload a tour to this site: the old files are kept, but any tours in them would be missing from the live site until the files are moved back. The steps follow the order of the restore steps:
+
+1. Stop the app: in cPanel, open **Setup Node.js App** and stop the app for `tours.example.com`.
+2. Make a backup, as in [step 10](#10-backups).
+
+```sh
+cd ~/apps/tours && ./cpanel.sh backup
+```
+
+3. Move `db.sqlite`, `db.sqlite-wal` and `db.sqlite-shm` (the last two only when they are there) out of the data folder into a folder of their own, such as `~/apps/tours-data.before-setup`. Nothing is deleted.
+4. Start the app again in **Setup Node.js App**. It makes a new, empty database.
+5. Open the setup wizard with the setup code from the settings file, as in [step 7](#7-open-the-setup-wizard), then make yourself the admin as above.
+
 ## What has been run where
 
 **Run by hand on real hosting,** on one shared cPanel account at one provider (CloudLinux, with the app run by Passenger):
@@ -539,6 +618,7 @@ The subdomain `app.example.com` can stay or be removed in cPanel. With one addre
 - The database copy made with the `sqlite3` tool, which is used only where the app's Node.js is not found. It was only run against a stand-in.
 - Resuming an update that was cut off, and the commands to go back. Both were run against stand-ins, with the cut made at the points the tests can reach.
 - The second address of [step 14](#14-a-second-address-for-the-app): the `--app-domain` option, the check before an update records it, and the check that each address reports its own role. All of it was run against stand-ins only.
+- `./cpanel.sh admin` of [step 15](#15-make-yourself-the-admin): the script's part was run against stand-ins, and once with a real Node.js and the real `app.cjs` in front of a stand-in command; the command itself was run against a real database on a development computer only. The backup that refuses a `sqlite3` tool older than 3.37 was run against a stand-in.
 - The restore steps in [step 11](#11-restore-from-a-backup), and the labels of cPanel's pages and buttons throughout, which are written from memory of cPanel and may differ at your provider.
 
 **Not yet confirmed on real hosting,** in the order to check them on the first real install:

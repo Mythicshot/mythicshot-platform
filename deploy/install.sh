@@ -2091,6 +2091,8 @@ services:
       SITE_HOST: ${SITE_HOST:-}
       # The header in which a proxy writes the visitor's address, for rate limits only.
       CLIENT_ADDRESS_HEADER: ${CLIENT_ADDRESS_HEADER:-}
+      # Read by the admin command only, run here with docker compose exec, never by the app.
+      RECOVERY_LINKS: ${RECOVERY_LINKS:-}
       # Paths and port inside the container; in .env, DATA_DIR is the folder on the host.
       DATA_DIR: /data
       PORT: "3000"

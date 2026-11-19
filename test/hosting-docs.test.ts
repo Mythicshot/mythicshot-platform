@@ -19,6 +19,7 @@ import installSh from "../deploy/install.sh?raw";
 import packageJson from "../package.json?raw";
 import packageCpanelTs from "../scripts/package-cpanel.ts?raw";
 import appTs from "../src/app.ts?raw";
+import adminTs from "../src/node/admin.ts?raw";
 import hostGateTs from "../src/host-gate.ts?raw";
 
 const HOSTING = import.meta.glob("../docs/hosting/*.md", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
@@ -497,12 +498,19 @@ describe("the shared cPanel hosting guide", () => {
 
   it("every cpanel.sh command and option the guide names exists, and every one the script has is in the guide", () => {
     const { commands, flags } = vocabulary();
-    expect([...commands].sort()).toEqual(["backup", "install", "status", "update"]);
+    expect([...commands].sort()).toEqual(["admin", "backup", "install", "status", "update"]);
     expect([...flags].sort()).toEqual(["--allow-downgrade", "--app-domain", "--app-root", "--domain", "--dry-run", "--node", "--yes"]);
+    // After `admin`, the script takes only its own options; from the first other word on, every word is the admin command's.
+    const ADMIN_OWN = ["--app-root", "--node", "--dry-run"];
     const named = new Set<string>();
     for (const l of lines) {
       for (const m of l.matchAll(/cpanel\.sh((?: +(?:--[a-z][a-z-]*|[a-z]+(?=\s|$)|(?:tours|app)\.example\.com|<[a-z]+>))*)/g)) {
-        for (const w of m[1].trim().split(/ +/).filter((x) => /^(--)?[a-z-]+$/.test(x))) named.add(w);
+        let admin = false;
+        for (const w of m[1].trim().split(/ +/).filter((x) => /^(--)?[a-z-]+$/.test(x))) {
+          if (admin && !ADMIN_OWN.includes(w)) break;
+          named.add(w);
+          if (w === "admin") admin = true;
+        }
       }
     }
     for (const w of named) expect([...commands, ...flags], `cpanel.sh ${w}`).toContain(w);
@@ -606,11 +614,105 @@ describe("the shared cPanel hosting guide", () => {
   it("has a numbered section on a second address, after the troubleshooting and before the closing section", () => {
     const have = sections(guide);
     expect(have.indexOf("A second address for the app")).toBe(have.indexOf("Troubleshooting") + 1);
-    expect(have.indexOf("A second address for the app")).toBe(have.indexOf("What has been run where") - 1);
+    // Only the section on the first admin, added after it, stands between it and the closing section.
+    expect(have.indexOf("A second address for the app")).toBe(have.indexOf("What has been run where") - 2);
     expect(guide).toMatch(/^- \[\d+\. A second address for the app\]\(#\d+-a-second-address-for-the-app\)$/m);
     // The numbers of the sections before it did not move: links to them still hold.
     expect(guide).toMatch(/^## 13\. Troubleshooting$/m);
     expect(guide).toMatch(/^## 14\. A second address for the app$/m);
+  });
+
+  it("has a numbered section on making the first admin, with the command, what it prints and a warning against the hosting's sqlite3 tool", () => {
+    const have = sections(guide);
+    // Added last, so no number before it moved.
+    expect(have.indexOf("Make yourself the admin")).toBe(have.indexOf("What has been run where") - 1);
+    expect(guide).toMatch(/^## 15\. Make yourself the admin$/m);
+    const from = guide.search(/^## 15\. Make yourself the admin$/m);
+    const part = guide.slice(from, guide.indexOf("## What has been run where"));
+    // The command as the owner approved it, from the installed copy, and the words it prints.
+    expect(lines).toContain("cd ~/apps/tours && ./cpanel.sh admin --email you@example.com --username yourname");
+    expect(part).toContain(
+      '```text\nThe admin account "yourname" was created.\nYour tours, their links and your tokens stay exactly as they are.\n\nOpen this link within 15 minutes to sign in:\nhttps://app.example.com/signin/link#…\n```',
+    );
+    // Each of those lines is the command's own.
+    for (const said of ["was created.", "Your tours, their links and your tokens stay exactly as they are.", "Open this link within 15 minutes to sign in:", "This site already has an admin. Nothing was changed.", "The database is from an older version. Update the site first."]) {
+      expect(part, said).toContain(said);
+      expect(adminTs, said).toContain(said);
+    }
+    // A link while mail is off, and the dry run.
+    expect(lines).toContain("cd ~/apps/tours && ./cpanel.sh admin --email you@example.com");
+    expect(part).toContain("`./cpanel.sh admin --dry-run first-admin --email you@example.com --username yourname`");
+    // The update section points to it.
+    expect(guide).toMatch(/^\*\*After the update that brings accounts,\*\*[^\n]*\[step 15\]\(#15-make-yourself-the-admin\)\.$/m);
+    expect(part).toMatch(/^> \[!WARNING\]\n> The link signs in whoever opens it first/m);
+    expect(part).toMatch(/^> \[!WARNING\]\n> Never open the database with the hosting's `sqlite3` tool/m);
+    // The sign-in page is not in this version: the guide says so, and does not claim a sign-in works yet.
+    expect(part).toContain(
+      "\nThe page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, get a new link with the recovery setting, as described below.\n",
+    );
+    expect(part).not.toMatch(/ends with the link and no other line|in one step/);
+    expect(part).toContain("The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.");
+    // A link for an existing account is a recovery tool: on for one run, off again; signing in normally needs no shell.
+    expect(part).toMatch(/^\*\*A new sign-in link is a recovery tool\.\*\*[^\n]*`RECOVERY_LINKS=on`[^\n]*remove the line again[^\n]*$/m);
+    expect(lines).toContain("RECOVERY_LINKS=on");
+    expect(part).toContain("Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.");
+    expect(part).toContain("Remove the line RECOVERY_LINKS=on from the settings file now.");
+    expect(part).toMatch(/by a link sent by mail[^\n]*needs no shell/);
+    // Which account becomes the admin, and which settings the command sees.
+    expect(part).toMatch(/the oldest of them/);
+    expect(part).toContain(
+      "\nThrough `./cpanel.sh admin` the command takes its settings from the settings file only: a setting exported in your SSH session, or entered in the environment screen of the hosting's **Setup Node.js App** page, is not seen by it. Run any other way on shared hosting, the recovery setting is off unless someone deliberately fakes the app's own process.\n",
+    );
+    expect(part).not.toMatch(/never taken from the shell at all/);
+    expect(part).toContain(
+      "\nThe recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the hosting account: whoever can change the settings file or the data folder can change the site directly.\n",
+    );
+    // The command's sentence for a half-finished setup names a section that exists, in this guide as in the runbook.
+    expect(adminTs).toContain(`'This site\\'s setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.'`);
+    expect(part).toMatch(/^### If the setup did not finish$/m);
+    expect(part).toContain("[If the setup did not finish](#if-the-setup-did-not-finish)");
+    expect(part).toContain("restore it as in [step 11](#11-restore-from-a-backup)");
+    // The cause as it is, and the steps in the restore steps' order, with when it is safe.
+    const unfinished = part.slice(part.indexOf("### If the setup did not finish"));
+    expect(unfinished).toContain("the setup record names a workspace that has no account in it, for example after a manual change to the data or after an older version of the platform");
+    expect(unfinished).not.toMatch(/stopped before it wrote/);
+    expect(unfinished).toMatch(/Restoring a backup from before that change is the first choice/);
+    expect(unfinished).toMatch(/only if Mythicshot was never used to upload a tour to this site[^\n]*missing from the live site until the files are moved back/);
+    const steps = [...split(unfinished).prose.matchAll(/^(\d+)\. (.+)$/gm)].map((m) => m[2]);
+    expect(steps).toHaveLength(5);
+    expect(steps[0]).toMatch(/^Stop the app/);
+    expect(steps[1]).toMatch(/^Make a backup/);
+    expect(steps[2]).toMatch(/^Move `db\.sqlite`, `db\.sqlite-wal` and `db\.sqlite-shm`/);
+    expect(steps[3]).toMatch(/^Start the app/);
+    expect(steps[4]).toMatch(/^Open the setup wizard/);
+    expect(codeLines(unfinished)).toContain("cd ~/apps/tours && ./cpanel.sh backup");
+    // The script's usage line is the planned one.
+    expect(cpanelSh).toContain("  admin       Run the site's admin command, for example: admin first-admin --email you@example.com --username yourname");
+  });
+
+  it("the Docker runbook makes the first admin with the same command, run in the container", () => {
+    const runbook = allDocs["docs/runbook-docker.md"];
+    const code = codeLines(runbook);
+    expect(code).toContain("docker compose exec app node dist/node/admin.js first-admin --email you@example.com --username yourname");
+    expect(code).toContain("docker compose exec app node dist/node/admin.js signin-link --email you@example.com");
+    expect(runbook).toMatch(/> \[!WARNING\]\n> Never open the database with the server's `sqlite3` tool/);
+    expect(runbook).toMatch(/> \[!WARNING\]\n> The link signs in whoever opens it first/);
+    expect(runbook).toContain(
+      "\nThe page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, get a new link with the recovery setting, as in step 3.\n",
+    );
+    expect(runbook).toContain("The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.");
+    expect(runbook).toMatch(/`RECOVERY_LINKS=on`[^\n]*`\.env`[^\n]*remove the line again/);
+    expect(runbook).toMatch(/by a link sent by mail[^\n]*needs no shell/);
+    expect(runbook).toContain(
+      "passing it to `docker compose exec` with `-e` does not work. Whoever can run Docker commands on the server controls the site anyway, so this setting is about not leaving a door open, not about stopping the server's owner.",
+    );
+    expect(runbook).toContain("the setup record names a workspace that has no account in it, for example after a manual change to the data or after an older version of the platform");
+    expect(runbook).not.toMatch(/stopped before it wrote the owner's account/);
+    expect(runbook).toContain(
+      "\nThe recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the server: whoever can change `.env` or the data folder can change the site directly.\n",
+    );
+    expect(runbook).toMatch(/^### If the setup did not finish$/m);
+    expect(runbook).toContain("the steps in [If the token was lost before anyone saved it](#if-the-token-was-lost-before-anyone-saved-it) clear that half-finished setup");
   });
 
   it("the second address is set up in the order that keeps the platform reachable, and attaching it stays marked Unconfirmed", () => {
