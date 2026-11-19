@@ -59,7 +59,8 @@ describe("migration 0006 on an existing install", () => {
       await db.run("INSERT INTO upload_step (upload_id, n, image_key, bytes, stored_at) VALUES ('up_open', 1, 'u/up_open/step-001.png', 100, 1500)");
       await tour("tour_draft", 500, 2, [1]);
 
-      expect(await migrate(db, MIGRATIONS_DIR)).toEqual(["0006_replace_chapter.sql"]);
+      // 0006 and every migration after it: the folder has grown since this test was written.
+      expect(await migrate(db, MIGRATIONS_DIR)).toEqual(files.slice(5));
       const versions = Object.fromEntries((await db.all<{ tour_id: string; draft_version: number | null }>("SELECT tour_id, draft_version FROM snapshot")).map((r) => [r.tour_id, r.draft_version]));
       expect(versions).toEqual({
         tour_untouched: 3,
