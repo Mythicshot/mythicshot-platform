@@ -1,7 +1,7 @@
 // The Node target's settings, read from the environment, and the guard it puts in front
 // of the app. Pure: no file, no network and no listener, so all of it can be tested
-// without starting the app. (The SMTP client it makes for a usable mail block opens its
-// first connection only when a mail is sent.)
+// without starting the app. (The mailer it makes for a usable mail block starts its
+// worker thread, and opens its first connection, only when a mail is sent.)
 import { canonicalAddress } from "../client.ts";
 import { parseEmail } from "../accounts.ts";
 import { misdirected } from "../host-gate.ts";
@@ -10,7 +10,8 @@ import { linkOrigin, NO_MAIL, type Mailer } from "../mail.ts";
 import type { Config } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
 import { allowanceFromSetting } from "../usage.ts";
-import { smtpMailer, type SmtpSettings } from "./smtp.ts";
+import { workerMailer } from "./mail-thread.ts";
+import type { SmtpSettings } from "./smtp.ts";
 
 /**
  * Every setting the Node target reads from the environment, here and in entry.ts. A test
@@ -86,8 +87,11 @@ const NO_CONTROL = /^[^\p{Cc}\p{Zl}\p{Zp}]{1,255}$/u;
  * else SITE_HOST), without which a mail would have no link to carry.
  *
  * The password is read here and handed to the SMTP client only. It is taken exactly as
- * written; the other values are trimmed. Making the mailer contacts nothing: the first
- * connection is made by the first send. `make` replaces how the client is made (tests).
+ * written; the other values are trimmed. The mailer is the SMTP client in a worker thread
+ * (workerMailer), so that no part of a send runs on the thread that answers requests.
+ * Making it contacts nothing and starts no thread: the first send makes the worker, and
+ * the worker makes the first connection. `make` replaces how the mailer is made (tests,
+ * and the admin command, which uses the client directly in its own short-lived process).
  *
  * `setting` is the name of the setting that line names (such as SMTP_PORT), for a caller
  * that says it in words of its own; it is null when mail is on, is off by choice, or is
@@ -96,7 +100,7 @@ const NO_CONTROL = /^[^\p{Cc}\p{Zl}\p{Zp}]{1,255}$/u;
 export function mailFromEnv(
   env: NodeJS.ProcessEnv,
   config: Config,
-  make: (settings: SmtpSettings) => Mailer = smtpMailer,
+  make: (settings: SmtpSettings) => Mailer = (settings) => workerMailer(settings),
 ): { mailer: Mailer; mode: "off" | "smtp"; problem: string | null; setting: string | null } {
   const off = (problem: string | null, setting: string | null = null) => ({ mailer: NO_MAIL, mode: "off" as const, problem, setting });
   const bad = (setting: string) => off(mailOffBecause(setting), setting);

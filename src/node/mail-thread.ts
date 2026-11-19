@@ -212,8 +212,10 @@ export function workerMailer(s: SmtpSettings, options: WorkerMailerOptions = {})
       // No environment: the worker needs none, so it holds no other setting. Its output
       // is taken here and never read, so nothing it could print reaches a log. (Reading
       // it would keep the process alive: a stream that flows holds the event loop. The
-      // worker prints nothing, so nothing piles up unread.)
-      made = new Worker(workerUrl, { workerData, env: {}, stdout: true, stderr: true, name: "mail" });
+      // worker prints nothing, so nothing piles up unread.) None of the flags this process
+      // was started with either: one meant for it (such as --input-type) can stop a worker
+      // from loading at all.
+      made = new Worker(workerUrl, { workerData, env: {}, execArgv: [], stdout: true, stderr: true, name: "mail" });
     } catch {
       return null;
     }
