@@ -32,9 +32,14 @@ describe("migration 0007 on an existing install", () => {
     const root = await mkdtemp(join(tmpdir(), "demo-platform-migrate-"));
     const upTo6 = join(root, "upto6");
     await mkdir(upTo6);
+    // Only the first seven files are ever applied here, so a later migration that changes
+    // other tables cannot break what this test says about this one.
+    const upTo7 = join(root, "upto7");
+    await mkdir(upTo7);
     const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith(".sql")).sort();
     expect(files[6]).toBe(NAME);
     for (const f of files.slice(0, 6)) await copyFile(join(MIGRATIONS_DIR, f), join(upTo6, f));
+    for (const f of files.slice(0, 7)) await copyFile(join(MIGRATIONS_DIR, f), join(upTo7, f));
     const db = new NodeDb(join(root, "db.sqlite"));
     try {
       expect(await migrate(db, upTo6)).toEqual(files.slice(0, 6));
@@ -66,7 +71,7 @@ describe("migration 0007 on an existing install", () => {
       await db.run("INSERT INTO upload_step (upload_id, n, image_key, bytes, stored_at) VALUES ('up_open', 1, 'u/up_open/step-001.png', 5000, ?)", [NOW - 500]);
       const before = await everything(db);
 
-      expect(await migrate(db, MIGRATIONS_DIR)).toEqual(files.slice(6));
+      expect(await migrate(db, upTo7)).toEqual([NAME]);
       const after = await everything(db);
       // Every row is still there, unchanged in every column it had.
       expect(withoutNewColumns(after)).toEqual(before);
@@ -96,8 +101,15 @@ describe("migration 0007 on an existing install", () => {
       );
       expect(await db.first("SELECT storage_allowance_bytes AS a, (SELECT reserved_bytes FROM upload WHERE id = 'up_later') AS r, (SELECT logo_bytes FROM tour WHERE id = 'tour_later') AS l FROM workspace WHERE id = 'ws_3'")).toEqual({ a: null, r: 0, l: null });
 
+      // The database refuses a negative size in either new column, for old rows and new.
+      for (const sql of ["UPDATE upload SET reserved_bytes = -1 WHERE id = 'up_open'", "UPDATE tour SET logo_bytes = -1 WHERE id = 'tour_live'", "UPDATE upload SET reserved_bytes = NULL WHERE id = 'up_later'"]) {
+        await expect(db.run(sql), sql).rejects.toThrow(/constraint failed/);
+      }
+      await db.run("UPDATE tour SET logo_bytes = 0 WHERE id = 'tour_later'");
+      await db.run("UPDATE tour SET logo_bytes = NULL WHERE id = 'tour_later'");
+
       // Running the migrations again applies nothing.
-      expect(await migrate(db, MIGRATIONS_DIR)).toEqual([]);
+      expect(await migrate(db, upTo7)).toEqual([]);
       // And a process that meets the file a second time (two starting together) fails as a
       // whole and leaves the database exactly as it was: nothing is half applied.
       const sql = await readFile(join(MIGRATIONS_DIR, NAME), "utf8");
@@ -118,8 +130,8 @@ describe("migration 0007 on an existing install", () => {
     const statements = sql.split(";").map((s) => s.trim().replace(/\s+/g, " ")).filter((s) => s !== "");
     expect(statements).toEqual([
       "ALTER TABLE workspace ADD COLUMN storage_allowance_bytes INTEGER CHECK (storage_allowance_bytes IS NULL OR storage_allowance_bytes >= 0)",
-      "ALTER TABLE upload ADD COLUMN reserved_bytes INTEGER NOT NULL DEFAULT 0",
-      "ALTER TABLE tour ADD COLUMN logo_bytes INTEGER",
+      "ALTER TABLE upload ADD COLUMN reserved_bytes INTEGER NOT NULL DEFAULT 0 CHECK (reserved_bytes >= 0)",
+      "ALTER TABLE tour ADD COLUMN logo_bytes INTEGER CHECK (logo_bytes IS NULL OR logo_bytes >= 0)",
     ]);
   });
 });
