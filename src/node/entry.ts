@@ -9,6 +9,7 @@ import { clientAddressReader, configFromEnv, guardTarget, mailFromEnv, type Inco
 import { APP_UID, prepareDataDir } from "./datadir.ts";
 import { NodeDb } from "./db.ts";
 import { NodeFileStore } from "./files.ts";
+import type { ClosableMailer } from "./mail-thread.ts";
 import { migrate } from "./migrate.ts";
 import { stopSequence } from "./stop.ts";
 
@@ -38,9 +39,10 @@ async function main(): Promise<void> {
   // Mail and the client address never stop the start. A mail block that cannot be used
   // leaves mail off, and a header name that cannot be used leaves every address unknown;
   // each says so in one fixed line that holds no value. The mail server is not contacted
-  // here: the first connection is made by the first mail.
+  // here, and the mail worker thread is not made: the first mail makes both.
   const mail = mailFromEnv(process.env, config);
   if (mail.problem !== null) console.error(mail.problem);
+  const closeMail = (mail.mailer as Partial<ClosableMailer>).close;
   const client = clientAddressReader(process.env.CLIENT_ADDRESS_HEADER);
   if (client.problem !== null) console.error(client.problem);
   // Work that goes on after an answer (a mail being sent) is tracked here, so a stop can
@@ -88,8 +90,8 @@ async function main(): Promise<void> {
 
   // `docker stop` sends SIGTERM, and Node running as PID 1 has no default handler for
   // it. Stop taking requests, let open ones finish, wait for work deferred by a request
-  // (a mail on its way), then close the database so SQLite checkpoints its WAL into
-  // db.sqlite and the file is whole on the volume. The whole stop has one deadline,
+  // (a mail on its way), then end the mail worker and close the database so SQLite
+  // checkpoints its WAL into db.sqlite and the file is whole on the volume. The whole stop has one deadline,
   // counted from the signal and well before the 10 s kill: requests still open after
   // STOP_CUT_REQUESTS_MS are cut, and at STOP_DEADLINE_MS the database is closed whatever
   // is still going on. The sequence and its test are in ./stop.ts.
@@ -104,6 +106,9 @@ async function main(): Promise<void> {
       },
     },
     settle: () => background.settle(),
+    // Just before the database: a mail still on its way has had the time up to the
+    // deadline, and is then ended with its worker, so the thread cannot outlive the stop.
+    ...(typeof closeMail === "function" ? { closeMail: () => closeMail.call(mail.mailer) } : {}),
     closeDb: () => db.close(),
     setTimeout: (run, ms) => setTimeout(run, ms),
     log: (line) => console.log(line),

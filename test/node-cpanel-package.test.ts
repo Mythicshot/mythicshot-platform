@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ARCHIVE_TOP_LEVEL, packageCpanel, tarGz, type PackageResult } from "../scripts/package-cpanel.ts";
@@ -150,6 +150,34 @@ describe("the cPanel archive", () => {
     expect(r.stderr).toBe("");
     expect(r.status).toBe(0);
     expect(r.stdout.split(/\r?\n/).filter(Boolean).sort()).toEqual(entries.map((e) => e.path).sort());
+  });
+
+  it("the mail worker ships beside the mailer and runs from the unpacked archive", () => {
+    expect(files.map((e) => e.path)).toContain("dist/node/mail-worker.js");
+    expect(files.map((e) => e.path)).toContain("dist/node/mail-thread.js");
+    const home = mkdtempSync(join(tmpdir(), "dp-cpanel-mail-"));
+    try {
+      const app = join(home, "apps", "tours");
+      for (const e of files) {
+        const to = join(app, ...e.path.split("/"));
+        mkdirSync(dirname(to), { recursive: true });
+        writeFileSync(to, e.data);
+      }
+      // A send to a port with nothing behind it, from another working folder: `connect` with
+      // nothing written can only come from the client inside the worker. A worker file that
+      // was not found would end as `refused`, maybe sent.
+      const script = [
+        `const { workerMailer } = await import(${JSON.stringify(pathToFileURL(join(app, "dist", "node", "mail-thread.js")).href)});`,
+        `const m = workerMailer({ host: "127.0.0.1", port: 9, user: "u", password: "made-up-password", from: "no-reply@example.com", helo: "app.example.com" });`,
+        `await m.send({ to: "ada@example.com", subject: "Test", text: "x" }).then(() => console.log("sent"), (e) => console.log(e.name, e.reason, e.bodyWritten));`,
+      ].join("\n");
+      const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { cwd: home, encoding: "utf8", timeout: 60_000, windowsHide: true });
+      expect(r.stderr).toBe("");
+      expect(r.stdout).toBe("SmtpError connect false\n");
+      expect(r.status).toBe(0);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("test_the_archive_holds_the_admin_command", async () => {

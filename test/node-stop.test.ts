@@ -68,7 +68,7 @@ function fakeServer(opts: { openRequest: boolean; closesWhenCut?: boolean }) {
   };
 }
 
-function world(opts: { openRequest: boolean; closesWhenCut?: boolean; settle: () => Promise<void>; closeDb?: () => void }) {
+function world(opts: { openRequest: boolean; closesWhenCut?: boolean; settle: () => Promise<void>; closeDb?: () => void; closeMail?: () => unknown }) {
   const clock = fakeClock();
   const server = fakeServer(opts);
   const events: string[] = [];
@@ -80,6 +80,14 @@ function world(opts: { openRequest: boolean; closesWhenCut?: boolean; settle: ()
   const stop = stopSequence({
     server,
     settle: opts.settle,
+    ...(opts.closeMail === undefined
+      ? {}
+      : {
+          closeMail: () => {
+            note("mail closed");
+            return opts.closeMail?.();
+          },
+        }),
     closeDb: () => {
       note("db closed");
       opts.closeDb?.();
@@ -193,5 +201,40 @@ describe("the stop sequence of the Node target", () => {
     w.stop("SIGTERM");
     await flush();
     expect(w.events).toEqual(["log: SIGTERM received, stopping", "db closed", "error: stop: the database could not be closed", "exit 1"]);
+  });
+
+  it("the mailer is closed once, just before the database, whether the work ended or the deadline came", async () => {
+    const early = world({ openRequest: false, settle: () => Promise.resolve(), closeMail: () => Promise.resolve() });
+    early.stop("SIGTERM");
+    await flush();
+    expect(early.events).toEqual(["log: SIGTERM received, stopping", "mail closed", "db closed", "log: stopped", "exit 0"]);
+    await early.clock.advance(60_000);
+    expect(early.events.filter((e) => e === "mail closed")).toHaveLength(1);
+
+    // A mail still on its way has until the deadline; then the mailer is closed, and the database.
+    const late = world({ openRequest: false, settle: never, closeMail: () => Promise.resolve() });
+    late.stop("SIGTERM");
+    await late.clock.advance(STOP_DEADLINE_MS - 1);
+    expect(late.events).toEqual(["log: SIGTERM received, stopping"]);
+    await late.clock.advance(1);
+    expect(late.events).toEqual(["log: SIGTERM received, stopping", "mail closed", "db closed", "log: stopped", "exit 0"]);
+    expect(late.at["mail closed"]).toBe(STOP_DEADLINE_MS);
+  });
+
+  it("a mailer that throws or rejects on close does not hold up the stop and leaves no rejection", async () => {
+    const throwing = world({
+      openRequest: false,
+      settle: () => Promise.resolve(),
+      closeMail: () => {
+        throw new Error("made-up-secret");
+      },
+    });
+    throwing.stop("SIGTERM");
+    await flush();
+    expect(throwing.events).toEqual(["log: SIGTERM received, stopping", "mail closed", "db closed", "log: stopped", "exit 0"]);
+    const rejecting = world({ openRequest: false, settle: () => Promise.resolve(), closeMail: () => Promise.reject(new Error("made-up-secret")) });
+    rejecting.stop("SIGTERM");
+    await flush();
+    expect(rejecting.events).toEqual(["log: SIGTERM received, stopping", "mail closed", "db closed", "log: stopped", "exit 0"]);
   });
 });

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { linkOrigin, NO_MAIL, type Mailer } from "../src/mail.ts";
 import { clientAddressFrom, clientAddressReader, configFromEnv, guardTarget, isPathTarget, mailFromEnv } from "../src/node/config.ts";
+import type { ClosableMailer } from "../src/node/mail-thread.ts";
 import type { SmtpSettings } from "../src/node/smtp.ts";
 import type { Config } from "../src/ports.ts";
 
@@ -285,12 +286,16 @@ describe("the mail settings on the Node target", () => {
     expect(mailOf({ ...BLOCK, ...TWO, SMTP_PORT: "" }).settings[0].port).toBe(465);
     expect(mailOf({ ...BLOCK, ...TWO, SMTP_HOST: "192.0.2.25" }).settings[0].host).toBe("192.0.2.25");
 
-    // With the real maker the mailer is the SMTP client. Nothing is sent, so nothing is contacted.
+    // With the real maker the mailer is the SMTP client in a worker thread. Nothing is sent,
+    // so nothing is contacted, and the worker is not even made: the first send makes it.
     const env = { ...BLOCK, ...TWO };
     const real = mailFromEnv(env, configFromEnv(env));
     expect([real.mode, real.problem]).toEqual(["smtp", null]);
     expect(real.mailer).not.toBe(NO_MAIL);
     expect(typeof real.mailer.send).toBe("function");
+    const threaded = real.mailer as ClosableMailer;
+    expect(typeof threaded.close).toBe("function");
+    expect(threaded.stats()).toEqual({ starts: 0, running: false, busy: false, queued: 0 });
     // The result holds the mailer and three words about it: no setting's value, no password.
     expect(Object.keys(real).sort()).toEqual(["mailer", "mode", "problem", "setting"]);
     expect(JSON.stringify(real)).not.toContain(PASSWORD);

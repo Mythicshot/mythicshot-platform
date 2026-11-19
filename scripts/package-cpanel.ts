@@ -152,6 +152,8 @@ export async function packageCpanel(opts: PackageOptions): Promise<PackageResult
 
     // Checks on what is about to ship, so a change to the build cannot widen it unseen.
     if (!files.some((f) => f.path === "dist/node/entry.js")) throw new Error("the build has no dist/node/entry.js");
+    // The mail worker is loaded by path at run time, beside the mailer, so no import names it.
+    if (!files.some((f) => f.path === "dist/node/mail-worker.js")) throw new Error("the build has no dist/node/mail-worker.js");
     const top: readonly string[] = ARCHIVE_TOP_LEVEL;
     for (const f of files) {
       if (!top.includes(f.path.split("/")[0])) throw new Error(`not part of the archive: ${f.path}`);
