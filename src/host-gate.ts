@@ -59,6 +59,11 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "POST /api/v1/signout": "app",
   "POST /api/v1/signout/everywhere": "app",
 
+  // The site admin's routes: they take an admin's session alone, so they answer only where
+  // the session cookie lives.
+  "GET /api/v1/admin/accounts": "app",
+  "PATCH /api/v1/admin/workspaces/:id": "app",
+
   // Tour pages, their pictures and the player's files.
   "GET /p/:name": "tours-redirect",
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": "tours",

@@ -247,19 +247,28 @@ describe("who may call an admin route", () => {
     expect((await ask(deps, "PATCH", path, { headers: page(a.session), json })).status).toBe(200);
   });
 
-  it("no admin route answers on the tours address, and the refusal there is the same", SLOW, async () => {
+  it("no admin route answers on the tours address, and the refusal there is the same for everyone", SLOW, async () => {
     const w = await build({ hosts: HOSTS });
-    const { deps, a } = w;
+    const { deps, a, b } = w;
     const before = await dumpOf(deps, w.keys, { touched: [a.session.id] });
+    // The tours address's answer for a route only the app address has (the host gate's),
+    // whoever asks: the same status and body as every refusal on the app address. Its
+    // headers are the gate's, which lack only x-content-type-options; they say which
+    // address was asked, which the caller knows, and nothing of the caller.
+    const ON_TOURS = { ...REFUSED, headers: REFUSED.headers.filter(([name]) => name !== "x-content-type-options") };
     for (const route of routes(w)) {
-      const nobodyOnApp = seen(await ask(deps, route.method, route.path, { origin: APP, json: route.json }));
-      expect(nobodyOnApp, route.what).toEqual(REFUSED);
+      expect(seen(await ask(deps, route.method, route.path, { origin: APP, json: route.json })), `${route.what}: nobody on the app address`).toEqual(REFUSED);
+      expect(seen(await ask(deps, route.method, route.path, { origin: APP, headers: page(b.session, APP), json: route.json })), `${route.what}: a member on the app address`).toEqual(REFUSED);
       for (const [who, opts] of [
         ["nobody", {}],
         ["the admin's session", { headers: page(a.session, TOURS) }],
         ["the admin's session, as if from the app address's page", { headers: page(a.session, APP) }],
+        ["a member's session", { headers: page(b.session, TOURS) }],
+        ["the admin's own token", { token: a.token }],
       ] as [string, Ask][]) {
-        expect(seen(await ask(deps, route.method, route.path, { ...opts, origin: TOURS, json: route.json })), `${route.what} on the tours address: ${who}`).toEqual(REFUSED);
+        const r = await ask(deps, route.method, route.path, { ...opts, origin: TOURS, json: route.json });
+        expect(seen(r), `${route.what} on the tours address: ${who}`).toEqual(ON_TOURS);
+        expect(r.calls, `${route.what} on the tours address: ${who}`).toBe(0);
       }
     }
     expect(await dumpOf(deps, w.keys, { touched: [a.session.id] })).toEqual(before);
@@ -272,7 +281,11 @@ describe("setting a workspace's allowance", () => {
   it("setting an allowance changes that workspace only and is in the audit record with both numbers", SLOW, async () => {
     const w = await build();
     const { deps, a, b } = w;
-    const before = await dumpOf(deps, w.keys, { files: true, touched: [a.session.id] });
+    // Asking a workspace's own usage records its token's use: that is left out of the comparison.
+    const touched = [a.session.id, a.tokenId, b.tokenId];
+    // Read before the change: its audit row names the workspace changed beside the admin's account.
+    const forbidden = [...(await forbiddenOf(w, a)), ...(await forbiddenOf(w, b))];
+    const before = await dumpOf(deps, w.keys, { files: true, touched });
     const usedB = (await usageOf(w, b)).used_bytes as number;
     const usageA = await usageOf(w, a);
 
@@ -290,7 +303,7 @@ describe("setting a workspace's allowance", () => {
     expect(batches[0].map((s) => s.sql.split(" ").slice(0, 3).join(" "))).toEqual(["UPDATE workspace SET", "INSERT INTO audit"]);
 
     // Only that workspace's allowance changed, and one audit row was added.
-    const after = await dumpOf(deps, w.keys, { files: true, touched: [a.session.id] });
+    const after = await dumpOf(deps, w.keys, { files: true, touched });
     const audit = await deps.db.all<Json>("SELECT event, user_id, workspace_id, subject, detail FROM audit WHERE event = 'allowance_set'");
     expect(audit).toEqual([{ event: "allowance_set", user_id: a.userId, workspace_id: b.workspaceId, subject: b.workspaceId, detail: '{"old_bytes":null,"new_bytes":12345}' }]);
     const withoutAllowance = (d: typeof before) => ({ ...d, rows: { ...d.rows, audit: d.rows.audit.filter((x) => x.event !== "allowance_set"), workspace: d.rows.workspace.map((x) => ({ ...x, storage_allowance_bytes: null })) } });
@@ -317,10 +330,8 @@ describe("setting a workspace's allowance", () => {
     // No answer holds anything of either workspace's content.
     const listed = await list(w);
     expect(listed.json.accounts.map((x: Json) => x.storage_allowance_bytes)).toEqual([5, MAX]);
-    for (const side of [a, b]) {
-      expectNothingOf(r.text, await forbiddenOf(w, side), "the change");
-      expectNothingOf(listed.text, await forbiddenOf(w, side), "the list");
-    }
+    expectNothingOf(r.text, forbidden, "the change");
+    expectNothingOf(listed.text, forbidden, "the list");
   });
 
   it("null goes back to the site's number", SLOW, async () => {
@@ -394,7 +405,9 @@ describe("setting a workspace's allowance", () => {
     const w = await build();
     const { deps, a, b } = w;
     const usage = await usageOf(w, b);
+    // Listing its tours runs the workspace's own housekeeping (a replaced picture is removed): done first, so it is not counted below.
     const tours = await send(deps, "GET", "/api/v1/tours", { token: b.token });
+    w.forgetWrites();
     const pageBefore = await send(deps, "GET", `/t/${b.ids.published.slug}`);
     expect(pageBefore.status).toBe(200);
     const before = await snapshotOf(deps, b, w.keys);

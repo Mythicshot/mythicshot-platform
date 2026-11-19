@@ -9,6 +9,7 @@
 //
 // It names no host: `servers` is "/", so a tool resolves every path against the address
 // it fetched the description from. The one example carries a placeholder address.
+import { ADMIN_PAGE, MAX_ALLOWANCE_BYTES } from "../admin-api.ts";
 import { LIMITS } from "../manifest.ts";
 import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../publish.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
@@ -136,6 +137,7 @@ const setCookie = (description: string) => ({ "set-cookie": { description, schem
 const tourId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The tour's id, as the tour list and an upload's commit give it.", schema: { type: "string", pattern: "^tour_[0-9a-f]{24}$" } };
 const uploadId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The upload's id, from the answer that started it.", schema: { type: "string", pattern: "^up_[0-9a-f]{24}$" } };
 const stepId: OpenApiParameter = { name: "step_id", in: "path", required: true, description: "The step's id.", schema: { type: "string", pattern: "^st_[0-9a-f]{24}$" } };
+const workspaceId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The workspace's id, as the list of accounts gives it in workspace_id.", schema: { type: "string", pattern: "^ws_[0-9a-f]{24}$" } };
 const sessionId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The session's id, as the list of sessions gives it.", schema: { type: "string", pattern: "^ses_[0-9a-f]{24}$" } };
 
 function introduction(): string {
@@ -338,6 +340,46 @@ function schemas(): Record<string, Schema> {
         }),
       },
     }),
+    AdminAccount: object(
+      ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted"],
+      {
+        id: { type: "string", pattern: "^usr_[0-9a-f]{24}$", description: "The account's id." },
+        username: { type: ["string", "null"], description: "null until the account has one." },
+        email: { type: "string", description: "The address the account signs in with." },
+        status: { type: "string", enum: ["active", "disabled"], description: "disabled: the account cannot sign in, and its workspace's tokens are refused." },
+        admin: { type: "boolean", description: "true for the site's admin." },
+        created_at: whole("When the account was made, in milliseconds since 1970."),
+        workspace_id: { type: "string", pattern: "^ws_[0-9a-f]{24}$", description: "The account's workspace: the id to set its allowance with." },
+        tours: whole("How many tours the workspace has, drafts and published."),
+        used_bytes: whole("What the workspace uses, in bytes, counted as GET /api/v1/usage counts it for the account itself."),
+        allowance_bytes: { type: ["integer", "null"], description: "The allowance in force, in bytes: the workspace's own number, else the server's setting. null when there is no limit." },
+        storage_allowance_bytes: { type: ["integer", "null"], description: "The workspace's own number, in bytes. null when it has none and the server's setting applies." },
+        over: { type: "boolean", description: "true when more is used than the allowance in force." },
+        counted: object(
+          ["pictures", "logos", "uploads_in_progress"],
+          { pictures: whole("The images of every step of every tour."), logos: whole("The tours' logos."), uploads_in_progress: whole("The room held by uploads that are not finished.") },
+          "What used_bytes is made of, in bytes, as in GET /api/v1/usage.",
+        ),
+      },
+      "One account and how its workspace uses its storage. Nothing of the workspace's tours: no tour, title, link, picture, token or session.",
+    ),
+    AdminAccountList: object(["accounts", "next"], {
+      accounts: { type: "array", maxItems: ADMIN_PAGE, description: `The accounts, in the order they were made, at most ${ADMIN_PAGE}.`, items: ref("AdminAccount") },
+      next: { type: ["string", "null"], pattern: "^usr_[0-9a-f]{24}$", description: "The id to ask for the next page with, as ?after=<id>. null on the last page." },
+    }),
+    AllowanceChange: object(["storage_allowance_bytes"], {
+      storage_allowance_bytes: { type: ["integer", "null"], minimum: 0, maximum: MAX_ALLOWANCE_BYTES, description: "The workspace's allowance in bytes, or null to go back to the server's setting." },
+    }),
+    AllowanceSet: object(
+      ["workspace_id", "allowance_bytes", "storage_allowance_bytes", "used_bytes", "over"],
+      {
+        workspace_id: { type: "string", pattern: "^ws_[0-9a-f]{24}$" },
+        allowance_bytes: { type: ["integer", "null"], description: "The allowance now in force, in bytes. null when there is no limit." },
+        storage_allowance_bytes: { type: ["integer", "null"], description: "The workspace's own number as just set. null when the server's setting applies." },
+        used_bytes: whole("What the workspace uses, in bytes."),
+        over: { type: "boolean", description: "true when the workspace uses more than its new allowance. Nothing is deleted: only uploads that need room are refused." },
+      },
+    ),
     Health: object(
       ["ok"],
       { ok: { type: "boolean", const: true }, address: { type: "string", enum: ["tours", "app"], description: "Only on a server with two addresses, when asked on one of them: which of the two this request reached." } },
@@ -838,6 +880,36 @@ function paths(): OpenApiDoc["paths"] {
         responses: { "204": { ...empty("Every session of the account has ended."), headers: setCookie("Clears the session cookie.") }, "401": UNAUTHORIZED },
       },
     },
+    "/api/v1/admin/accounts": {
+      get: {
+        tags: ["Admin"],
+        summary: "List every account's storage use",
+        description: `For the site's admin: every account, in the order they were made, ${ADMIN_PAGE} at a time, with its workspace's id, its tour count, what it uses of its storage (counted as GET /api/v1/usage counts it for the account itself) and its allowance. Nothing of any workspace's tours is in it. Add ?after=<id>, with the next of the previous answer, for the next page. To anyone but an admin's session it answers 404, as if it did not exist. ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminListAccounts",
+        security: SESSION,
+        responses: {
+          "200": answer("The accounts.", ref("AdminAccountList")),
+          "400": refusal("after is not the id of an account.", "bad_request"),
+          "404": answer("The caller is not the site's admin, signed in on this address: every other caller, with or without a token or a session, gets this.", bare("not_found")),
+        },
+      },
+    },
+    "/api/v1/admin/workspaces/{id}": {
+      patch: {
+        tags: ["Admin"],
+        summary: "Set a workspace's storage allowance",
+        description: `For the site's admin: sets the workspace's storage allowance in bytes, or with null goes back to the server's setting. The change is in the audit record with the old and the new number. An allowance below what the workspace already uses is taken: nothing is deleted or unpublished, and only starting an upload that needs more room is refused from then on. To anyone but an admin's session, and for a workspace that does not exist, it answers 404. ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminSetAllowance",
+        security: SESSION,
+        parameters: [workspaceId],
+        requestBody: { required: true, content: json(ref("AllowanceChange")) },
+        responses: {
+          "200": answer("The workspace's numbers after the change.", ref("AllowanceSet")),
+          "400": refusal("bad_request: the body is not a JSON object holding storage_allowance_bytes and nothing else. bad_allowance: the value is not a whole number of bytes from 0 to 9007199254740991, or null.", "bad_request", "bad_allowance"),
+          "404": answer("No such workspace, or the caller is not the site's admin, signed in on this address.", bare("not_found")),
+        },
+      },
+    },
     "/healthz": {
       get: {
         tags: ["Server"],
@@ -862,6 +934,7 @@ export function openapi(): OpenApiDoc {
       { name: "Uploads", description: "Send a tour, a new chapter or a chapter's replacement: start, one request per image, finish." },
       { name: "Workspace", description: "The workspace a token or a session belongs to." },
       { name: "Accounts", description: "Signing in with a link sent by mail, and the browser sessions of an account. The site's own pages use these." },
+      { name: "Admin", description: "For the site's admin alone: how each account uses its storage, and each workspace's allowance. To anyone else these answer 404." },
       { name: "Server", description: "Whether the server is up. Needs no token." },
     ],
     paths: paths(),

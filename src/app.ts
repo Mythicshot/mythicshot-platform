@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { adminRoutes } from "./admin-api.ts";
 import { docsRoutes } from "./docs/page.ts";
 import { hostGate } from "./host-gate.ts";
 import { requestHost, roleOf } from "./hosts.ts";
@@ -32,6 +33,7 @@ export function createApp(deps: Deps): Hono {
   tourRoutes(app, deps);
   usageRoutes(app, deps);
   signinRoutes(app, deps);
+  adminRoutes(app, deps);
   publishRoutes(app, deps);
   pageRoutes(app, deps);
 
