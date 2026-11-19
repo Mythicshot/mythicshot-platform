@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { intercept, looksLikeToken, REFUSED, type ViewerRequest } from "../src/docs/client/rules.ts";
 import { GUIDE_ORIGIN, GUIDES } from "../src/docs/guides.ts";
-import { GET_STARTED } from "../src/docs/openapi.ts";
+import { GET_STARTED, openapi } from "../src/docs/openapi.ts";
 import { DOCS_CSP, DOCS_PAGE_CACHE, docsFile, docsHtml } from "../src/docs/page.ts";
 import { DOCS_CSS, DOCS_CSS_ETAG, DOCS_CSS_PATH, DOCS_JS, DOCS_JS_ETAG, DOCS_JS_PATH } from "../src/docs/site-assets.ts";
 import { VIEWER_CSS, VIEWER_CSS_ETAG, VIEWER_CSS_PATH, VIEWER_JS, VIEWER_JS_ETAG, VIEWER_JS_PATH, VIEWER_LICENCES } from "../src/docs/viewer-assets.ts";
@@ -704,6 +704,47 @@ describe("the documentation page's parts", () => {
       expect(looksLikeToken(bad), JSON.stringify(bad)).toBe(false);
     }
     expect(FAKE_TOKEN).toHaveLength(43);
+  });
+
+  it("a request from the documentation page never carries a cookie, also to a session route", async () => {
+    const PAGE = "https://app.example.com/docs";
+    // Every operation of the description, as "Try it" would send it, asking for the browser's cookies.
+    const requests: ViewerRequest[] = [];
+    for (const [path, item] of Object.entries(openapi().paths)) {
+      for (const [method, op] of Object.entries(item)) {
+        const url = path.replace("{id}", "ses_" + "0".repeat(24)).replace("{step_id}", "st_" + "0".repeat(24)).replace("{n}", "1");
+        requests.push({ url, method: method.toUpperCase(), credentials: "include", headers: { Accept: "application/json" } });
+        // The operations a session may call are described with it, so the viewer knows of the cookie.
+        if (path !== "/healthz" && !path.startsWith("/api/v1/signin/")) expect(JSON.stringify(op.security), `${method} ${path}`).toContain("session");
+      }
+    }
+    const sessionRoutes = requests.filter((r) => /\/api\/v1\/(?:session|sessions|signout)/.test(r.url));
+    expect(sessionRoutes.map((r) => `${r.method} ${r.url}`)).toEqual([
+      "GET /api/v1/session",
+      "GET /api/v1/sessions",
+      "DELETE /api/v1/sessions/ses_000000000000000000000000",
+      "POST /api/v1/signout",
+      "POST /api/v1/signout/everywhere",
+    ]);
+    for (const token of [FAKE_TOKEN, ""]) {
+      for (const r of requests) {
+        const out = intercept({ ...r, headers: { ...r.headers } }, PAGE, token);
+        expect(out.credentials, `${r.method} ${r.url}`).toBe("omit");
+        // Nothing of a session is ever added: no cookie and no anti-forgery header.
+        for (const name of Object.keys(out.headers ?? {})) expect(["accept", "authorization"], `${r.method} ${r.url}: ${name}`).toContain(name.toLowerCase());
+      }
+    }
+    // The page script has no way to send one either: it never reads or writes a cookie, and never asks for the session.
+    expect(DOCS_JS).not.toMatch(/credentials: "(include|same-origin)"/);
+    expect(DOCS_JS.includes("x-csrf-token") || DOCS_JS.includes("X-Csrf-Token")).toBe(false);
+    expect(DOCS_JS.includes("/api/v1/session")).toBe(false);
+    // And the server answers a session route sent the way the page sends it (a token, no cookie) as nobody.
+    const { deps } = await twoAddress();
+    const a = await seedWorkspace(deps, "Acme");
+    for (const r of sessionRoutes) {
+      const answer = await send(deps, r.method ?? "GET", r.url, { origin: APP, token: a.token });
+      expect([answer.status, answer.text], `${r.method} ${r.url}`).toEqual([401, '{"error":"unauthorized"}']);
+    }
   });
 
   it("a seeded token is what the page script takes for a token, and the request the token box makes tells the three cases apart", async () => {

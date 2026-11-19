@@ -174,6 +174,11 @@ export const CODE_MEANINGS: Readonly<Record<string, string>> = {
   too_many_uploads: "The workspace has its number of open uploads; finish or cancel one. The retry-after header says how long to wait.",
   cleanup_pending: "The tour is deleted or unpublished, but some files are still to be removed; send the same request again.",
   publish_failed: "The tour could not be published; what was published before is unchanged.",
+  bad_email: "The address to send a sign-in link to is not an email address. This answer has no detail.",
+  bad_code: "The code of a sign-in link is not one. This answer has no detail.",
+  bad_origin: "The request did not come from a page of the site's own address, which signing in needs.",
+  link_invalid: "The sign-in link has expired or was already used; ask for a new one.",
+  rate_limited: "Too many sign-in requests from this network. The retry-after header says how long to wait.",
   internal: "The server failed; nothing about the failure is given.",
   misconfigured: "On Cloudflare, the two addresses in the settings cannot be used together.",
 };
