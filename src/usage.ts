@@ -53,7 +53,17 @@ export function allowanceFromSetting(raw: string | undefined): { ok: true; bytes
 const PICTURES = "(SELECT coalesce(sum(s.bytes), 0) FROM tour t JOIN step s ON s.tour_id = t.id WHERE t.workspace_id = p.ws)";
 const LOGOS = "(SELECT coalesce(sum(t.logo_bytes), 0) FROM tour t WHERE t.workspace_id = p.ws)";
 const UPLOADS = "(SELECT coalesce(sum(u.reserved_bytes), 0) FROM upload u WHERE u.workspace_id = p.ws AND u.closing_at IS NULL)";
+const TOURS = "(SELECT count(*) FROM tour t WHERE t.workspace_id = p.ws)";
 const PARAMS = "(SELECT ? AS ws) p";
+
+/**
+ * The three sums and the tour count as the columns `pictures`, `logos`, `uploads` and
+ * `tours`, for a SELECT whose FROM has a row `p` that holds the workspace id as p.ws. It
+ * takes no parameter. usageOf reads one workspace's numbers with it, and the admin's list
+ * of accounts reads every workspace's with it (src/admin-api.ts), so the two can never
+ * disagree.
+ */
+export const USAGE_COLUMNS = `${PICTURES} AS pictures, ${LOGOS} AS logos, ${UPLOADS} AS uploads, ${TOURS} AS tours`;
 
 /**
  * The bytes a workspace uses, as a scalar subquery for use inside another statement. It
@@ -91,21 +101,25 @@ export function allowanceParams(deps: Deps, workspaceId: string): Value[] {
  */
 export type Usage = { pictures: number; logos: number; uploads: number; used: number; allowance: number | null; over: boolean; tours: number };
 
+/** The numbers a row read with USAGE_COLUMNS and the allowance hold, as a Usage. usageOf and the admin's list both make theirs here. */
+export function usageFromRow(row: { pictures: number; logos: number; uploads: number; tours: number; allowance: number | null }): Usage {
+  const { pictures, logos, uploads, tours, allowance } = row;
+  const used = pictures + logos + uploads;
+  return { pictures, logos, uploads, used, allowance, over: allowance !== null && used > allowance, tours };
+}
+
 /** The usage of one workspace and the allowance it is held against, in one database call. */
 export async function usageOf(deps: Deps, workspaceId: string): Promise<Usage> {
   const site = deps.config.storageAllowanceBytes ?? null;
   const row = await deps.db.first<{ pictures: number; logos: number; uploads: number; tours: number; allowance: number | null }>(
-    `SELECT ${PICTURES} AS pictures, ${LOGOS} AS logos, ${UPLOADS} AS uploads,
-            (SELECT count(*) FROM tour t WHERE t.workspace_id = p.ws) AS tours,
+    `SELECT ${USAGE_COLUMNS},
             coalesce((SELECT ${ALLOWANCE_SQL} FROM workspace WHERE workspace.id = p.ws), ?) AS allowance
        FROM ${PARAMS}`,
     // In the order the placeholders stand in the text: the site's default twice (for a
     // workspace without a number of its own, and for an id no workspace has), then the row p.
     [site, site, workspaceId],
   );
-  const { pictures, logos, uploads, tours, allowance } = row!;
-  const used = pictures + logos + uploads;
-  return { pictures, logos, uploads, used, allowance, over: allowance !== null && used > allowance, tours };
+  return usageFromRow(row!);
 }
 
 /**

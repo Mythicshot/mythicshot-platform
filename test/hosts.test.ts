@@ -22,6 +22,7 @@ const TOUR = "tour_0123456789abcdef01234567";
 const UPLOAD = "up_0123456789abcdef01234567";
 const STEP = "st_0123456789abcdef01234567";
 const SESSION = "ses_0123456789abcdef01234567";
+const WORKSPACE = "ws_0123456789abcdef01234567";
 
 type Row = {
   method: string;
@@ -38,6 +39,8 @@ type Row = {
 const api = (method: string, path: string): Row => ({ method, path, one: 401, tours: 401, app: 401, unknown: 421 });
 const wizard = (method: string, path: string, status: number, body?: unknown): Row => ({ method, path, body, one: status, tours: status, app: 404, unknown: 421 });
 const session = (method: string, path: string, status: number, body?: unknown): Row => ({ method, path, body, one: status, tours: 404, app: status, unknown: 421 });
+/** An admin route: the one 404 to anyone but an admin's session, and on the app address only. */
+const admin = (method: string, path: string, body?: unknown): Row => ({ method, path, body, one: 404, tours: 404, app: 404, unknown: 421 });
 
 /** Keyed like HOST_RULES: "<METHOD> <route path>" exactly as in the route table. */
 const ROWS: Record<string, Row> = {
@@ -72,6 +75,9 @@ const ROWS: Record<string, Row> = {
   "DELETE /api/v1/sessions/:id": session("DELETE", `/api/v1/sessions/${SESSION}`, 401),
   "POST /api/v1/signout": session("POST", "/api/v1/signout", 401),
   "POST /api/v1/signout/everywhere": session("POST", "/api/v1/signout/everywhere", 401),
+  // The site admin's routes: on the app address only, and nobody here is an admin.
+  "GET /api/v1/admin/accounts": admin("GET", "/api/v1/admin/accounts"),
+  "PATCH /api/v1/admin/workspaces/:id": admin("PATCH", `/api/v1/admin/workspaces/${WORKSPACE}`, { storage_allowance_bytes: 1 }),
   "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421 },
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { method: "GET", path: "/player.js", one: 200, tours: 200, app: 404, unknown: 421 },
   "GET /t/:slug": { method: "GET", path: "/t/no-such-tour", one: 404, tours: 404, app: 308, unknown: 421 },
@@ -88,8 +94,10 @@ const KEYS = Object.keys(ROWS);
 const DESCRIPTION_KEYS = KEYS.filter((k) => k.includes(" /api/v1/openapi."));
 /** Signing in and the session: the app address's own part of the API. */
 const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?)(?:\/|$)/.test(k));
-/** The token API: everything under /api/v1/ but the description files, which need no token, and the session's own routes. */
-const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k) && !SESSION_KEYS.includes(k));
+/** The site admin's routes. */
+const ADMIN_KEYS = KEYS.filter((k) => k.includes(" /api/v1/admin/"));
+/** The token API: everything under /api/v1/ but the description files, which need no token, the session's own routes and the admin's. */
+const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k) && !SESSION_KEYS.includes(k) && !ADMIN_KEYS.includes(k));
 const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
 const DOCS_PAGE_KEY = "GET /docs";
@@ -190,7 +198,9 @@ describe("the host-routing matrix", () => {
     expect(HOST_RULES[DOCS_PAGE_KEY]).toBe("app-redirect");
     for (const key of DOCS_FILE_KEYS) expect(HOST_RULES[key], key).toBe("app");
     for (const key of SESSION_KEYS) expect(HOST_RULES[key], key).toBe("app");
+    for (const key of ADMIN_KEYS) expect(HOST_RULES[key], key).toBe("app");
     expect(SESSION_KEYS.length).toBe(7);
+    expect(ADMIN_KEYS.length).toBe(2);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
     expect(API_KEYS.length).toBe(14);
@@ -203,6 +213,7 @@ describe("the host-routing matrix", () => {
       const answers = await column(deps, origin);
       expect(statuses(answers), origin).toEqual(expected("one"));
       for (const key of API_KEYS) expect(answers[key].json.error, key).toBe("unauthorized");
+      for (const key of ADMIN_KEYS) expect(answers[key].text, key).toBe(NOT_FOUND);
       expect(answers["GET /healthz"].text).toBe('{"ok":true}');
       expect(answers["GET /setup"].headers.get("content-type")).toBe("text/html; charset=utf-8");
       expect(answers["POST /setup/claim"].text).toBe('{"error":"bad_workspace"}');
@@ -220,11 +231,11 @@ describe("the host-routing matrix", () => {
     const answers = await column(deps, TOURS);
     expect(statuses(answers)).toEqual(expected("tours"));
     // As in one-address mode, except for the documentation page, which lives on the app address.
-    const onApp = [DOCS_PAGE_KEY, ...DOCS_FILE_KEYS, ...SESSION_KEYS];
+    const onApp = [DOCS_PAGE_KEY, ...DOCS_FILE_KEYS, ...SESSION_KEYS, ...ADMIN_KEYS];
     const without = (col: Record<string, number>) => Object.fromEntries(Object.entries(col).filter(([k]) => !onApp.includes(k)));
     expect(without(expected("tours"))).toEqual(without(expected("one")));
     expect(answers[DOCS_PAGE_KEY].headers.get("location")).toBe(APP + "/docs");
-    for (const key of [...DOCS_FILE_KEYS, ...SESSION_KEYS]) expectNotHere(answers[key], key);
+    for (const key of [...DOCS_FILE_KEYS, ...SESSION_KEYS, ...ADMIN_KEYS]) expectNotHere(answers[key], key);
     for (const key of DESCRIPTION_KEYS) expect(answers[key].status, key).toBe(200);
     for (const key of API_KEYS) expect(answers[key].json.error, key).toBe("unauthorized");
     expect(answers["GET /setup"].headers.get("content-type")).toBe("text/html; charset=utf-8");
@@ -245,6 +256,7 @@ describe("the host-routing matrix", () => {
       expect(answers[key].json.error, key).toBe("unauthorized");
     }
     expect(answers["GET /healthz"].status).toBe(200);
+    for (const key of ADMIN_KEYS) expect([answers[key].status, answers[key].text], key).toEqual([404, NOT_FOUND]);
     for (const key of ["GET /t/:slug", "GET /p/:name"]) expectRedirect(answers[key], TOURS + ROWS[key].path, key);
     for (const key of [...WIZARD_KEYS, PLAYER_KEY]) expectNotHere(answers[key], key);
     // The documentation page, its files and the description answer here, and none of them redirects.

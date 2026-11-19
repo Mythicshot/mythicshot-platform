@@ -308,6 +308,7 @@ const NO_TOUR = "tour_" + "0".repeat(24);
 const NO_UPLOAD = "up_" + "0".repeat(24);
 const NO_STEP = "st_" + "0".repeat(24);
 const NO_CHAPTER = "ch_" + "0".repeat(24);
+const NO_WORKSPACE = "ws_" + "0".repeat(24);
 /** Well formed and known to no server: the placeholder the plan allows in tests. */
 const NO_TOKEN = "dp_" + "0".repeat(40);
 
@@ -459,14 +460,17 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     vi.spyOn(console, "error").mockImplementation(() => {});
 
     // Without a token, and with one no server knows: every request that needs one.
-    const example = (op: Op) => op.path.replace("{id}", op.path.includes("/uploads/") ? NO_UPLOAD : op.path.includes("/sessions/") ? "ses_" + "0".repeat(24) : NO_TOUR).replace("{step_id}", NO_STEP).replace("{n}", "1");
+    const idFor = (path: string) => (path.includes("/uploads/") ? NO_UPLOAD : path.includes("/sessions/") ? "ses_" + "0".repeat(24) : path.includes("/workspaces/") ? NO_WORKSPACE : NO_TOUR);
+    const example = (op: Op) => op.path.replace("{id}", idFor(op.path)).replace("{step_id}", NO_STEP).replace("{n}", "1");
     const guarded = OPS.filter((op) => op.op.security.length > 0);
     // All but health and the two sign-in requests.
     expect(guarded).toHaveLength(OPS.length - 3);
     for (const op of guarded) {
       for (const token of [null, NO_TOKEN]) {
         const r = await api.call(op.method, example(op), { token });
-        expect([r.status, r.text], op.key).toEqual([401, '{"error":"unauthorized"}']);
+        // An admin route answers everyone who is not an admin as if it did not exist.
+        const want = op.path.startsWith("/api/v1/admin/") ? [404, '{"error":"not_found"}'] : [401, '{"error":"unauthorized"}'];
+        expect([r.status, r.text], op.key).toEqual(want);
       }
     }
 
@@ -678,6 +682,37 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     expect((await api.call("POST", "/api/v1/signout", { headers: await withCookie((await signIn()).secret) })).status).toBe(204);
   });
 
+  it("every answer of the admin routes is as documented", async () => {
+    const { deps } = await makeDeps({ storageAllowanceBytes: 1_000_000 });
+    const api = client(deps);
+    const admin = await seedAccount(deps, { admin: true });
+    const member = await seedAccount(deps);
+    const made = await redeemSignInCode(deps, await createSignInCode(deps, admin.userId), null, null);
+    if (made === null) throw new Error("the sign-in was refused");
+    const headers = { cookie: `${SESSION_COOKIE}=${made.secret}`, origin: "https://tours.example.com", "x-csrf-token": await csrfFor(made.secret), "content-type": JSON_TYPE };
+    await api.upload(member.token, small(2));
+
+    // The list, and its next page.
+    const list = await api.call("GET", "/api/v1/admin/accounts", { headers });
+    expect(list.json.accounts.map((a: Json) => a.id)).toEqual([admin.userId, member.userId]);
+    expect(list.json.accounts[1]).toMatchObject({ tours: 1, used_bytes: 240, allowance_bytes: 1_000_000, storage_allowance_bytes: null });
+    expect((await api.call("GET", `/api/v1/admin/accounts?after=${admin.userId}`, { headers })).json.accounts.map((a: Json) => a.id)).toEqual([member.userId]);
+    refused(await api.call("GET", "/api/v1/admin/accounts?after=nobody", { headers }), 400, "bad_request");
+
+    // Setting the allowance, and going back to the server's.
+    const path = `/api/v1/admin/workspaces/${member.workspaceId}`;
+    const set = await api.call("PATCH", path, { headers, body: JSON.stringify({ storage_allowance_bytes: 100 }) });
+    expect(set.json).toEqual({ workspace_id: member.workspaceId, allowance_bytes: 100, storage_allowance_bytes: 100, used_bytes: 240, over: true });
+    expect((await api.call("PATCH", path, { headers, body: JSON.stringify({ storage_allowance_bytes: null }) })).json).toMatchObject({ allowance_bytes: 1_000_000, storage_allowance_bytes: null });
+    refused(await api.call("PATCH", path, { headers, body: JSON.stringify({ storage_allowance_bytes: -1 }) }), 400, "bad_allowance");
+    refused(await api.call("PATCH", path, { headers, body: "[]" }), 400, "bad_request");
+    refused(await api.call("PATCH", `/api/v1/admin/workspaces/${NO_WORKSPACE}`, { headers, body: JSON.stringify({ storage_allowance_bytes: 1 }) }), 404, "not_found");
+
+    // Anyone else: the one 404.
+    refused(await api.call("GET", "/api/v1/admin/accounts", { token: member.token }), 404, "not_found");
+    refused(await api.call("PATCH", path, { token: admin.token, body: JSON.stringify({ storage_allowance_bytes: 1 }), headers: JSON_HEADERS }), 404, "not_found");
+  });
+
   it("the answers any request can get are as the introduction says", async () => {
     const intro = DOC.info.description;
     const hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -869,9 +904,18 @@ describe("the error codes in the code", () => {
     expect(signinPlain.length, "signin.ts: an error answer not built in place").toBe([...signin.matchAll(/\berror: "/g)].length);
     for (const m of signinPlain) inCode.add(`${m[1]} ${m[2]}`);
     expect([...inCode]).toEqual(expect.arrayContaining(["400 bad_email", "400 bad_code", "403 link_invalid", "429 rate_limited"]));
-    // Those four are the only modules that answer with apiError (src/http.ts defines it).
+    // The admin routes answer with apiError, and with plain JSON for their one 404, which has no detail.
+    const admin = source("admin-api.ts");
+    const adminLiteral = [...admin.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
+    expect(adminLiteral.length, "admin-api.ts: an apiError call without a literal status and code").toBe([...admin.matchAll(/\bapiError\(/g)].length);
+    for (const m of adminLiteral) inCode.add(`${m[1]} ${m[2]}`);
+    const adminPlain = [...admin.matchAll(/\bjson\((\d{3}), \{ error: "([a-z_]+)"/g)];
+    expect(adminPlain.length, "admin-api.ts: an error answer not built in place").toBe([...admin.matchAll(/\berror: "/g)].length);
+    for (const m of adminPlain) inCode.add(`${m[1]} ${m[2]}`);
+    expect([...inCode]).toEqual(expect.arrayContaining(["400 bad_allowance", "404 not_found"]));
+    // These five are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/http.ts", "../src/publish.ts", "../src/signin.ts", "../src/tours.ts", "../src/uploads.ts"]);
+    expect(callers).toEqual(["../src/admin-api.ts", "../src/http.ts", "../src/publish.ts", "../src/signin.ts", "../src/tours.ts", "../src/uploads.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.

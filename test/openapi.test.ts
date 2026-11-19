@@ -35,6 +35,8 @@ const METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "tr
 const PUBLIC = ["GET /healthz", "POST /api/v1/signin/request", "POST /api/v1/signin/complete"];
 /** The operations that take a session and no token. */
 const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere"];
+/** The site admin's operations: an admin's session alone, and a 404 (never a 401) to everyone else. */
+const ADMIN_ONLY = ["GET /api/v1/admin/accounts", "PATCH /api/v1/admin/workspaces/:id"];
 
 /** Every operation of the description, with its key in the form of the route table. */
 function operations(doc: OpenApiDoc): { key: string; path: string; method: string; op: Json }[] {
@@ -199,7 +201,7 @@ describe("the API description", () => {
 
   it("every operation has a tag, a one-line summary, a description, an operationId that is unique, and a 401 unless it is public", () => {
     const doc = openapi();
-    expect(doc.tags.map((t) => t.name)).toEqual(["Tours", "Uploads", "Workspace", "Accounts", "Server"]);
+    expect(doc.tags.map((t) => t.name)).toEqual(["Tours", "Uploads", "Workspace", "Accounts", "Admin", "Server"]);
     for (const t of doc.tags) expect(t.description.length, t.name).toBeGreaterThan(10);
     const ids: string[] = [];
     const summaries: string[] = [];
@@ -214,7 +216,9 @@ describe("the API description", () => {
       const statuses = Object.keys(op.responses);
       expect(statuses.length, key).toBeGreaterThan(0);
       for (const status of statuses) expect(status, key).toMatch(/^[1-5][0-9][0-9]$/);
-      expect(statuses.includes("401"), `${key}: 401`).toBe(!PUBLIC.includes(key));
+      // An admin operation answers everyone who is not an admin as if it did not exist: 404, never 401.
+      expect(statuses.includes("401"), `${key}: 401`).toBe(!PUBLIC.includes(key) && !ADMIN_ONLY.includes(key));
+      if (ADMIN_ONLY.includes(key)) expect(statuses, key).toContain("404");
       for (const [status, res] of Object.entries(op.responses as Json)) {
         const r = (res.$ref ? resolve(doc, res.$ref) : res) as Json;
         expect(typeof r?.description, `${key} ${status} needs a description`).toBe("string");
@@ -243,6 +247,8 @@ describe("the API description", () => {
       "End one of the account's sessions",
       "Sign out",
       "Sign out everywhere",
+      "List every account's storage use",
+      "Set a workspace's storage allowance",
       "Whether the server is up",
     ]);
   });
@@ -301,12 +307,15 @@ describe("the API description", () => {
     // The session cookie is the second way to call, beside the token.
     expect(doc.components.securitySchemes).toEqual({ token: { type: "http", scheme: "bearer" }, session: { type: "apiKey", in: "cookie", name: "__Host-dp_session" } });
     const keys = operations(doc).map((o) => o.key);
-    for (const key of [...PUBLIC, ...SESSION_ONLY]) expect(keys, key).toContain(key);
+    for (const key of [...PUBLIC, ...SESSION_ONLY, ...ADMIN_ONLY]) expect(keys, key).toContain(key);
     for (const { key, op } of operations(doc)) {
-      const want = PUBLIC.includes(key) ? [] : SESSION_ONLY.includes(key) ? [{ session: [] }] : [{ token: [] }, { session: [] }];
+      const sessionOnly = SESSION_ONLY.includes(key) || ADMIN_ONLY.includes(key);
+      const want = PUBLIC.includes(key) ? [] : sessionOnly ? [{ session: [] }] : [{ token: [] }, { session: [] }];
       expect(op.security, key).toEqual(want);
       // An operation a session may call says that the documentation page cannot try it with one.
-      if (SESSION_ONLY.includes(key)) expect(op.description, key).toContain("cannot be tried from the documentation page");
+      if (sessionOnly) expect(op.description, key).toContain("cannot be tried from the documentation page");
+      // Every admin operation is tagged Admin, and only those are.
+      expect(op.tags[0] === "Admin", key).toBe(ADMIN_ONLY.includes(key));
     }
     // The description itself is served to anyone, without a credential.
     const { deps } = await makeDeps();

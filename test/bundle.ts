@@ -114,6 +114,7 @@ export function routeOf(path: string): string {
     .split("?")[0]
     .replace(/tour_[0-9a-f]{24}/g, ":id")
     .replace(/up_[0-9a-f]{24}/g, ":id")
+    .replace(/ws_[0-9a-f]{24}/g, ":id")
     .replace(/st_[0-9a-f]{24}/g, ":step_id")
     .replace(/\/steps\/[^/]+$/, "/steps/:n")
     .replace(/^\/p\/.+/, "/p/:name")

@@ -181,6 +181,7 @@ export const CODE_MEANINGS: Readonly<Record<string, string>> = {
   mixed_credentials: "The request carried both a token and a session. Send one.",
   link_invalid: "The sign-in link has expired or was already used; ask for a new one.",
   rate_limited: "Too many sign-in requests from this network. The retry-after header says how long to wait.",
+  bad_allowance: "The storage allowance must be a whole number of bytes from 0 to 9007199254740991, or null for the site's default.",
   internal: "The server failed; nothing about the failure is given.",
   misconfigured: "On Cloudflare, the two addresses in the settings cannot be used together.",
 };
