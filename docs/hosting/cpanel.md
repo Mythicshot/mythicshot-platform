@@ -259,7 +259,7 @@ The update refuses to start when it does not know the address, because it could 
 
 Before an update that changes the database, you can try it first on a copy of your own data, on your own computer.
 
-The rehearsal starts the version you run today and the new version on that computer only, one after the other, on a copy of your backup. It checks that the new version shows your token the same tours, pages and pictures, keeps every file and every row, and that the version you run today still works on the changed database, which is your way back.
+The rehearsal starts the version you run today and the new version on that computer only, one after the other, on a copy of your backup. It checks that the new version shows your token the same tours, pages and pictures, keeps every file and every row, and that the version you run today still works on the changed database, which is your way back. [The command's reference](../rehearse-upgrade.md) lists every check and setting.
 
 > [!WARNING]
 > The backup folder holds real data: the owner's email, the token hashes, every image, and the settings file with the setup code and any mailbox password. Keep the copy on your computer as private as the backup itself, and delete it when you are done. The rehearsal copies only `db.sqlite`, `drafts` and `public` into a scratch folder, removes that folder at the end, and never reads the settings file.
