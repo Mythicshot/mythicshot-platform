@@ -2176,23 +2176,33 @@ test_admin_with_real_node_hands_the_command_the_settings() {
   rm "$T/bin/node"
   command -v node >/dev/null 2>&1 || skip "no real node on this system"
   admin_install
-  # A stand-in command in the real startup file's place of it: it says what it was given.
+  # A stand-in command, with the real one's exports, behind the real startup file: it says what it was given.
   cat >"$APP/dist/node/admin.js" <<'EOF'
-export async function main(argv) {
+export const ADMIN_SETTINGS = ["DATA_DIR", "SETUP_CODE", "SMTP_PASSWORD", "APP_HOST", "RECOVERY_LINKS"];
+export function isRecoveryOn(v) { return typeof v === "string" && v.trim().toLowerCase() === "on"; }
+export async function main(argv, opts) {
   console.log("argv=" + JSON.stringify(argv));
   console.log("DATA_DIR=" + process.env.DATA_DIR);
   console.log("SETUP_CODE is " + (process.env.SETUP_CODE ? "set" : "not set"));
   console.log("SMTP_PASSWORD is " + (process.env.SMTP_PASSWORD ? "set" : "not set"));
+  console.log("APP_HOST is " + (process.env.APP_HOST ? "set" : "not set"));
+  console.log("gate=" + (opts && opts.recoveryLinks === true ? "on" : "off"));
   process.exitCode = 3;
 }
 EOF
-  cpanel "" admin first-admin --email 'you@example.com' --username 'a b'
+  # A setting exported in the shell reaches the command neither as a setting nor as the gate.
+  APP_HOST=other.example.com RECOVERY_LINKS=on cpanel "" admin first-admin --email 'you@example.com' --username 'a b'
   expect "the command's exit code comes back (stderr: $(cat "$ERR"))" test "$RC" = 3
   expect "the arguments arrive unchanged" has "$OUT" 'argv=["first-admin","--email","you@example.com","--username","a b"]'
   expect "with the data folder from the settings file" grep -qxF "DATA_DIR=$DATA" "$OUT"
   expect "and every other setting, as the app gets them" has "$OUT" "SMTP_PASSWORD is set"
   expect "the setup code too" has "$OUT" "SETUP_CODE is set"
+  expect "but not a host exported in the shell" has "$OUT" "APP_HOST is not set"
+  expect "and the gate stays closed without the line in the file" has "$OUT" "gate=off"
   expect "no secret is shown" secrets_not_shown
+  printf 'RECOVERY_LINKS=on\n' >>"$SETTINGS"
+  cpanel "" admin --email 'you@example.com'
+  expect "the file's line opens the gate" has "$OUT" "gate=on"
 }
 
 # ---------------------------------------------------------------- run
