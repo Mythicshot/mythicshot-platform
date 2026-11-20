@@ -222,6 +222,7 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
 .accounts .t .tag { margin-left: 6px; font-weight: 400; }
 .accounts .d { color: var(--muted); font-size: 0.85rem; }
 .accounts td.used .tag { margin-left: 6px; }
+.accounts td.joined { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .accounts .mini { min-width: 80px; }
 .accounts .mini i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent); }
 .accounts .mini.over i { background: var(--warn-bar); }

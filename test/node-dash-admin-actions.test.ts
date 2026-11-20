@@ -375,6 +375,17 @@ describe("the invites: Resend and Cancel", () => {
     button(invRows(gone)[0], "Resend").click();
     await gone.settle();
     expect(gone.$("invites-message").textContent).toBe(GONE);
+    // A full list (100 rows) may have pushed it off the end: not proof that it is gone, so the general sentence.
+    const hundred = Array.from({ length: 100 }, (_, i) => invite("inv_" + i.toString(16).padStart(24, "0"), `p${i}@example.com`, NOW - i));
+    const full = await opened(standard({ "GET /api/v1/admin/invites": [inviteList([MARA]), inviteList(hundred)], [RESEND]: "network" }));
+    button(invRows(full)[0], "Resend").click();
+    await full.settle();
+    expect([full.$("invites-message").textContent, full.$("invites-note").shown]).toEqual([FAILED, false]);
+    // A list that cannot be read cannot say so either.
+    const blind = await opened(standard({ "GET /api/v1/admin/invites": [inviteList([MARA]), "network"], [RESEND]: "network" }));
+    button(invRows(blind)[0], "Resend").click();
+    await blind.settle();
+    expect(blind.$("invites-message").textContent).toBe(FAILED);
   });
 
   it("Cancel asks mockup 2's question first; Keep it, Escape and the backdrop send nothing; Cancel invite cancels and the list is read again", async () => {
@@ -687,7 +698,7 @@ describe("deleting an account", () => {
   const withoutRook = list([MOCKUP[0]]);
   const deletes = (tab: Tab) => of(tab, "DELETE", `/api/v1/admin/accounts/${U4}`);
 
-  async function openDelete(extra: Record<string, Answer | Answer[]> = {}): Promise<Tab> {
+  async function openDelete(extra: NonNullable<Parameters<typeof standard>[0]> = {}): Promise<Tab> {
     const tab = await opened(standard({ "GET /api/v1/admin/accounts": withRook, [REMOVAL]: { status: 200, json: counts }, ...extra }));
     choose(rows(tab)[1], "Delete");
     await tab.settle();
@@ -702,6 +713,8 @@ describe("deleting an account", () => {
     const facts = tab.$("delete-facts").children.filter((c): c is FakeElement => c instanceof FakeElement).map((e) => e.textContent);
     expect(facts).toEqual(["Tours", "1", "Images and GIFs", "4", "Connected computers", "2", "Storage freed", "18 MB"]);
     expect(tab.doc.activeElement).toBe(tab.$("delete-input"));
+    // The field starts empty, with the name to type shown muted in it.
+    expect([tab.$("delete-input").value, tab.$("delete-input").getAttribute("placeholder")]).toEqual(["", "rook"]);
     const go = tab.$("delete-go");
     for (const text of ["", "roo", "Rook", "rook ", " rook", "rook@example.com", "rooк"]) {
       type(tab, text, "delete-input");
@@ -875,6 +888,82 @@ describe("deleting an account", () => {
     await tab.settle();
     expect([tab.$("delete-ask").shown, tab.$("delete-input").value, tab.$("delete-go").disabled]).toEqual([true, "", true]);
     expect(deletes(tab)).toEqual([]);
+  });
+
+  it("a name confirmed on this page is used again only while the list just read marks the row as being deleted; otherwise it asks with an empty field", async () => {
+    const ACTIVE_TESS = { ...TESS };
+    const tab = await opened(
+      standard({
+        // Read on load; after the interruption (being deleted); after Tess is disabled, a list that no longer marks rook as being deleted.
+        "GET /api/v1/admin/accounts": [list([MOCKUP[0], ACTIVE_TESS, ROOK]), list([MOCKUP[0], ACTIVE_TESS, deletingRook]), list([MOCKUP[0], { ...TESS, status: "disabled" }, ROOK])],
+        [REMOVAL]: { status: 200, json: counts },
+        [DELETE]: [progress(1, 9), "network", "network", "network"],
+        [`POST /api/v1/admin/accounts/${U2}/disable`]: { status: 204 },
+      }),
+    );
+    choose(rows(tab)[2], "Delete");
+    await tab.settle();
+    type(tab, "rook", "delete-input");
+    tab.$("delete-go").click();
+    await drain(tab);
+    expect(rowOf(rows(tab)[2]).tags).toEqual(["Deleting"]);
+    tab.$("delete-keep").click();
+    // Something else reads the list again; it shows rook as disabled but no longer being deleted.
+    choose(rows(tab)[1], "Disable");
+    tab.$("disable-go").click();
+    await tab.settle();
+    expect([rowOf(rows(tab)[2]).tags, rowOf(rows(tab)[2]).menu]).toEqual([["Disabled"], ["Set allowance", "Enable", "Delete"]]);
+    choose(rows(tab)[2], "Delete");
+    await tab.settle();
+    // The name was confirmed here, but the list does not say the delete is under way: it asks again.
+    expect([tab.$("delete-ask").shown, tab.$("delete-progress").shown, tab.$("delete-input").value, tab.$("delete-go").disabled]).toEqual([true, false, "", true]);
+    expect(deletes(tab)).toHaveLength(4);
+  });
+
+  it("leaving the page stops a running delete: no send after the page is hidden, and on return the question shows the interruption and goes on only when pressed", async () => {
+    // Left during a pause.
+    const paused = await openDelete({ "GET /api/v1/admin/accounts": [withRook, list([MOCKUP[0], deletingRook]), list([MOCKUP[0], deletingRook]), withoutRook], [DELETE]: [progress(1, 10), progress(5, 10), DELETED] });
+    type(paused, "rook", "delete-input");
+    paused.$("delete-go").click();
+    await paused.settle();
+    expect(paused.pendingDelays()).toEqual([300]);
+    paused.pagehide();
+    paused.tick();
+    await drain(paused);
+    expect(deletes(paused)).toHaveLength(1);
+    expect([paused.$("delete-dialog").shown, paused.$("delete-ask").shown, paused.$("delete-message").textContent, paused.$("delete-input").value]).toEqual([true, true, FAILED, "rook"]);
+    expect(rowOf(rows(paused)[1]).tags).toEqual(["Deleting"]);
+    // Back on the page, the admin carries on deliberately.
+    paused.$("delete-go").click();
+    await drain(paused);
+    expect(deletes(paused)).toHaveLength(3);
+    expect(noteOf(paused, "admin-note")?.[0]).toBe("rook was deleted.");
+
+    // Left while a send is on its way: its answer is shown, but nothing is sent after it.
+    const held: ((a: Answer) => void)[] = [];
+    const flying = await openDelete({
+      "GET /api/v1/admin/accounts": [withRook, list([MOCKUP[0], deletingRook])],
+      [DELETE]: () => new Promise<Answer>((r) => held.push(r)),
+    });
+    type(flying, "rook", "delete-input");
+    flying.$("delete-go").click();
+    await flying.settle();
+    flying.pagehide();
+    held[0](progress(3, 10));
+    await drain(flying);
+    expect(deletes(flying)).toHaveLength(1);
+    expect([flying.$("delete-ask").shown, flying.$("delete-message").textContent]).toEqual([true, FAILED]);
+
+    // Left after a lost answer, during its pause: no retry.
+    const lost = await openDelete({ "GET /api/v1/admin/accounts": [withRook, list([MOCKUP[0], ROOK])], [DELETE]: "network" });
+    type(lost, "rook", "delete-input");
+    lost.$("delete-go").click();
+    await lost.settle();
+    expect(lost.pendingDelays()).toEqual([1000]);
+    lost.pagehide();
+    await drain(lost);
+    expect(deletes(lost)).toHaveLength(1);
+    expect(lost.$("delete-message").textContent).toBe(FAILED);
   });
 
   it("a name refused as not matching is forgotten, so opening Delete again asks for it", async () => {

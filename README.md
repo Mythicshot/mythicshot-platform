@@ -352,7 +352,7 @@ The dashboard is the set of pages a signed-in person uses on the app address (or
 
 ### What the admin sees
 
-The Admin page shows one line for the whole site (the number of accounts, what all workspaces use together, and the standard allowance) and one row per account: its username, email address, status and whether it is the admin, its workspace's name, its number of tours, the bytes it uses and its allowance. It never shows a tour's title, link, pictures or anything else in a workspace, and it has no way into one: the admin's own session reaches other workspaces only through these figures. The page says so itself: "You see totals only. What is in another person's workspace is never shown here."
+The Admin page shows one line for the whole site (the number of accounts, what all workspaces use together, and the standard allowance) and one row per account: its username, email address, status and whether it is the admin, its workspace's name, its number of tours, the bytes it uses, its allowance and the day it joined. It never shows a tour's title, link, pictures or anything else in a workspace, and it has no way into one: the admin's own session reaches other workspaces only through these figures. The page says so itself: "You see totals only. What is in another person's workspace is never shown here."
 
 ### Allowances
 

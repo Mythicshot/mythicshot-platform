@@ -39,6 +39,8 @@ export type Tab = {
   /** Runs every timer set so far, and returns their delays. */
   tick: () => number[];
   pendingDelays: () => number[];
+  /** The browser leaves the page (the window's pagehide event). */
+  pagehide: () => void;
   violations: string[];
 };
 
@@ -80,7 +82,9 @@ export function openAdmin(respond: Responder): Tab {
     timers.push({ fn, ms: Number(ms) });
     return timers.length;
   };
-  const context: Record<string, unknown> = { document: doc, location, fetch, setTimeout };
+  const onWindow: Record<string, (() => void)[]> = {};
+  const addEventListener = (type: string, fn: () => void) => (onWindow[type] ??= []).push(fn);
+  const context: Record<string, unknown> = { document: doc, location, fetch, setTimeout, addEventListener };
   for (const name of ["localStorage", "sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "window", "self", "top", "parent", "opener", "open", "postMessage", "setInterval", "console", "alert", "confirm", "prompt", "history", "navigator"]) {
     Object.defineProperty(context, name, {
       get() {
@@ -117,6 +121,9 @@ export function openAdmin(respond: Responder): Tab {
       return now.map((t) => t.ms);
     },
     pendingDelays: () => timers.map((t) => t.ms),
+    pagehide: () => {
+      for (const fn of onWindow.pagehide ?? []) fn();
+    },
     violations,
   };
   opened.push(tab);
@@ -193,9 +200,9 @@ export function account(id: string, ws: string, over: Record<string, unknown>) {
 
 /** The three accounts of mockup 9. */
 export const MOCKUP = [
-  account(U1, W1, { username: "solex", email: "you@example.com", admin: true, workspace_name: "Cowfee Raid Tools", tours: 12, used_bytes: 1_288_490_189 }),
-  account(U2, W2, { username: "mara", email: "mara@example.com", workspace_name: "Harbor Studio", tours: 31, used_bytes: 5_690_831_667 }),
-  account(U3, W3, { username: "bram", email: "bram@example.com", workspace_name: "Bram's demos", tours: 2, used_bytes: 96 * MB, storage_allowance_bytes: 20 * GB }),
+  account(U1, W1, { username: "solex", email: "you@example.com", admin: true, workspace_name: "Cowfee Raid Tools", tours: 12, used_bytes: 1_288_490_189, created_at: Date.UTC(2026, 10, 17, 12) }),
+  account(U2, W2, { username: "mara", email: "mara@example.com", workspace_name: "Harbor Studio", tours: 31, used_bytes: 5_690_831_667, created_at: Date.UTC(2026, 10, 18, 12) }),
+  account(U3, W3, { username: "bram", email: "bram@example.com", workspace_name: "Bram's demos", tours: 2, used_bytes: 96 * MB, storage_allowance_bytes: 20 * GB, created_at: Date.UTC(2026, 10, 19, 12) }),
 ];
 export const MOCKUP_USED = 1_288_490_189 + 5_690_831_667 + 96 * MB;
 export const list = (accounts: unknown[], next: string | null = null): Answer => ({ status: 200, json: { accounts, next } });
@@ -232,7 +239,7 @@ export const of = (tab: Tab, method: string, path: string) => tab.fetched.filter
 
 /** What one row shows, cell by cell. */
 export function rowOf(row: FakeElement) {
-  const [who, ws, tours, bar, used, allowance] = cells(row);
+  const [who, ws, tours, bar, used, allowance, joined] = cells(row);
   const mini = bar.all().find((e) => e.className.startsWith("mini"));
   return {
     name: who.all().find((e) => e.className === "name")!.textContent,
@@ -244,6 +251,7 @@ export function rowOf(row: FakeElement) {
     used: used.textContent,
     over: used.all().filter((e) => e.className === "tag warn").map((e) => e.textContent),
     allowance: allowance.textContent,
+    joined: joined.textContent,
     button: more(row).textContent,
     menu: entries(row),
   };

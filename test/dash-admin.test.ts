@@ -84,6 +84,7 @@ const ADMIN_WORDING = [
   "Share",
   "Used",
   "Allowance",
+  "Joined",
   "Actions",
   "Show more",
   "You see totals only. What is in another person's workspace is never shown here.",
@@ -170,7 +171,7 @@ const ADMIN_TEXT: Record<string, string> = {
   ranOut: "Ran out ",
   resend: "Resend",
   cancel: "Cancel",
-  // Proposed in the brief (mockup 2's caption), pinned here.
+  // Proposed wording, not in the mockup (its caption only describes Resend), pinned here.
   resentBefore: "A new invite is on its way to ",
   resentAfter: ". The earlier link no longer works.",
   // Proposed: a resend whose answer was lost, when the list then shows new dates; and an invite that is gone.
@@ -217,6 +218,10 @@ const ADMIN_TEXT: Record<string, string> = {
   sharedWorkspace: "Another account belongs to this workspace, so it cannot be deleted.",
   lastAdminDelete: "This is the last admin, so it cannot be deleted.",
   ownDelete: "You cannot delete your own account.",
+  // Proposed in the review: the loop reached its call limit.
+  tooLong: "This is taking longer than expected. Open Delete again to carry on.",
+  // The invites set's mockup 1: the day the account was made.
+  joined: "Joined",
 };
 
 /** The strings with a space in the script that are not words for a person: class names and lists of ids. */
@@ -335,7 +340,9 @@ describe("the Admin page and its script", () => {
     expect(T.invitedBefore + "mara@example.com" + T.invitedMiddle + "27 Nov 2026" + T.invitedAfter).toBe("An invite is on its way to mara@example.com. The link works once and until 27 Nov 2026.");
     expect(T.ranOut + "19 Nov").toBe("Ran out 19 Nov");
     expect(T.cancelBefore + "mara@example.com" + T.cancelAfter).toBe("Cancel the invite to mara@example.com?");
+    // Proposed wording (not in the mockups), put together from its parts.
     expect(T.resentBefore + "mara@example.com" + T.resentAfter).toBe("A new invite is on its way to mara@example.com. The earlier link no longer works.");
+    // Mockups 3 and 4 again.
     expect(T.disableBefore + "tess" + T.quoteAfter).toBe('Disable "tess"?');
     expect(T.fromNowOn + "tess" + T.disableMiddle + "3" + T.manyTours + T.disableEnd).toBe(
       "From now on tess cannot sign in, Mythicshot on their computers cannot publish, and their 3 tours and every image and clip they shared stop being available to anyone. Nothing is deleted: enabling the account brings everything back.",
@@ -437,10 +444,19 @@ describe("the Admin page and its script", () => {
     for (const line of [
       "var MAX_MISSES = 3;",
       "var MAX_ROUNDS = 5000;",
-      "return rounds < MAX_ROUNDS ? pause(PAUSE_MS).then(send) : finish(null, false);",
-      "if (again && rounds < MAX_ROUNDS) {",
-      "if (misses < MAX_MISSES) return pause(MISS_PAUSES_MS[misses - 1]).then(send);",
+      "return rounds < MAX_ROUNDS ? pause(PAUSE_MS).then(sendUnlessLeft) : finish(null, false, true);",
+      "if (again && rounds >= MAX_ROUNDS) return finish(res, false, true);",
+      "if (misses < MAX_MISSES) return pause(MISS_PAUSES_MS[misses - 1]).then(sendUnlessLeft);",
+      // Reaching the call limit ends with its own sentence.
+      "deleteQ.say(tooLong ? TEXT.tooLong : refusalOf(\"delete\", res));",
+      // Leaving the page stops the loop: checked before every send and after every pause.
+      'addEventListener("pagehide", function () { pageLeft = true; });',
+      "if (pageLeft) return finish(null, false, false);",
+      "return pageLeft ? finish(null, false, false) : send();",
     ]) expect(ADMIN_JS, line).toContain(line);
+    expect(ADMIN_TEXT.tooLong).toBe("This is taking longer than expected. Open Delete again to carry on.");
+    // The one listener on the window, and nothing else of it.
+    expect(ADMIN_JS.match(/\baddEventListener\("pagehide"/g)).toHaveLength(1);
     // No other page serves, loads or names the Admin page's script.
     for (const p of DASH_PAGES.filter((x) => x.path !== "/admin")) {
       expect(p.html, p.path).not.toContain("/dash/admin.js");
@@ -492,7 +508,7 @@ describe("the Admin page and its script", () => {
     const typed = doc.getElementById("delete-input")!;
     expect([typed.getAttribute("type"), typed.getAttribute("autocomplete"), typed.getAttribute("autocapitalize"), typed.getAttribute("spellcheck")]).toEqual(["text", "off", "off", "false"]);
     // The empty headers have names a screen reader reads and the eye does not see.
-    expect(all.filter((e) => e.tagName === "th").map((th) => th.textContent)).toEqual(["Address", "Sent", "Works until", "Actions", "Account", "Workspace", "Tours", "Share", "Used", "Allowance", "Actions"]);
+    expect(all.filter((e) => e.tagName === "th").map((th) => th.textContent)).toEqual(["Address", "Sent", "Works until", "Actions", "Account", "Workspace", "Tours", "Share", "Used", "Allowance", "Joined", "Actions"]);
     for (const name of ["Share", "Actions", "Email address"]) for (const e of all.filter((x) => (x.tagName === "span" || x.tagName === "label") && x.textContent === name)) expect(e.className, name).toBe("vh");
     expect(all.filter((e) => e.tagName === "label").map((l) => l.getAttribute("for"))).toEqual(["invite-email", "allow-input", "delete-input"]);
     // Every element the script looks up by id is on the page.

@@ -226,9 +226,9 @@ describe("the Admin page for the admin", () => {
     expect(tab.$("tab-admin").hidden).toBe(false);
     expect(tab.$("admin-summary").textContent).toBe("3 accounts · 6.6 GB used in all · standard allowance 5 GB");
     expect(rows(tab).map(rowOf)).toEqual([
-      { name: "solex", tags: ["Admin"], email: "you@example.com", workspace: "Cowfee Raid Tools", tours: "12", bar: { cls: "mini", width: "24%" }, used: "1.2 GB", over: [], allowance: "5 GB", button: "More", menu: ["Set allowance"] },
-      { name: "mara", tags: [], email: "mara@example.com", workspace: "Harbor Studio", tours: "31", bar: { cls: "mini over", width: "100%" }, used: "5.3 GBOver", over: ["Over"], allowance: "5 GB", button: "More", menu: ["Set allowance", "Disable"] },
-      { name: "bram", tags: [], email: "bram@example.com", workspace: "Bram's demos", tours: "2", bar: { cls: "mini", width: "1%" }, used: "96 MB", over: [], allowance: "20 GB", button: "More", menu: ["Set allowance", "Disable"] },
+      { name: "solex", tags: ["Admin"], email: "you@example.com", workspace: "Cowfee Raid Tools", tours: "12", bar: { cls: "mini", width: "24%" }, used: "1.2 GB", over: [], allowance: "5 GB", joined: "17 Nov 2026", button: "More", menu: ["Set allowance"] },
+      { name: "mara", tags: [], email: "mara@example.com", workspace: "Harbor Studio", tours: "31", bar: { cls: "mini over", width: "100%" }, used: "5.3 GBOver", over: ["Over"], allowance: "5 GB", joined: "18 Nov 2026", button: "More", menu: ["Set allowance", "Disable"] },
+      { name: "bram", tags: [], email: "bram@example.com", workspace: "Bram's demos", tours: "2", bar: { cls: "mini", width: "1%" }, used: "96 MB", over: [], allowance: "20 GB", joined: "19 Nov 2026", button: "More", menu: ["Set allowance", "Disable"] },
     ]);
     expect(tab.shows()).toEqual([
       "Mythicshot",
@@ -255,7 +255,7 @@ describe("the Admin page for the admin", () => {
     for (const [i, row] of rows(tab).entries()) {
       expect(more(row).getAttribute("aria-describedby")).toBe(`account-${i}`);
       expect(more(row).getAttribute("type")).toBe("button");
-      expect(cells(row).map((c) => c.getAttribute("data-label"))).toEqual([null, null, "Tours", null, "Used", "Allowance", null]);
+      expect(cells(row).map((c) => c.getAttribute("data-label"))).toEqual([null, null, "Tours", null, "Used", "Allowance", "Joined", null]);
     }
     expect(tab.$("allow-dialog").hidden).toBe(true);
   });

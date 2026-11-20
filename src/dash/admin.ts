@@ -88,7 +88,7 @@ const ADMIN_MAIN = `  <section id="admin" aria-labelledby="h-page" hidden>
       <p class="note" id="admin-note" role="status" aria-live="polite" hidden></p>
       <p class="message" id="admin-message" role="status" aria-live="polite" hidden></p>
       <table class="accounts">
-        <thead><tr><th scope="col">Account</th><th scope="col">Workspace</th><th scope="col" class="n">Tours</th><th scope="col" class="bar"><span class="vh">Share</span></th><th scope="col" class="n">Used</th><th scope="col" class="n">Allowance</th><th scope="col"><span class="vh">Actions</span></th></tr></thead>
+        <thead><tr><th scope="col">Account</th><th scope="col">Workspace</th><th scope="col" class="n">Tours</th><th scope="col" class="bar"><span class="vh">Share</span></th><th scope="col" class="n">Used</th><th scope="col" class="n">Allowance</th><th scope="col" class="joined">Joined</th><th scope="col"><span class="vh">Actions</span></th></tr></thead>
         <tbody id="admin-rows"></tbody>
       </table>
     </div>
@@ -294,6 +294,8 @@ export const ADMIN_JS = `(function () {
     sharedWorkspace: "Another account belongs to this workspace, so it cannot be deleted.",
     lastAdminDelete: "This is the last admin, so it cannot be deleted.",
     ownDelete: "You cannot delete your own account.",
+    tooLong: "This is taking longer than expected. Open Delete again to carry on.",
+    joined: "Joined",
   };
   var ACCOUNTS = "/api/v1/admin/accounts";
   var WORKSPACES = "/api/v1/admin/workspaces/";
@@ -349,6 +351,9 @@ ${SIZE_JS}
   // The name a delete was confirmed with, by account id, kept for the life of the page so an
   // interrupted delete can be finished: the API wants it on every call.
   var confirmed = {};
+  // The page was left (pagehide): a delete running stops before its next send and after its
+  // next pause, so a page restored from the back/forward cache never carries on by itself.
+  var pageLeft = false;
   // A change is running (a send, a resend, a cancel, a disable, an enable, a delete, or the
   // read before the delete question): one at a time, and nothing else opens meanwhile.
   var working = false;
@@ -715,6 +720,8 @@ ${SIZE_JS}
     if (over) used.appendChild(el("span", "tag warn", TEXT.over));
     tr.appendChild(used);
     tr.appendChild(labelled(el("td", "n allowance", limit !== null ? Dash.formatBytes(limit) : TEXT.none), TEXT.allowance));
+    // The day the account was made, with the year, as the invites set's mockup 1 shows it.
+    tr.appendChild(labelled(el("td", "joined", Dash.dateOf(a.created_at, true)), TEXT.joined));
 
     var cell = el("td", "acts-cell");
     var acts = el("div", "acts");
@@ -1110,7 +1117,8 @@ ${SIZE_JS}
         if (r === false) return;
         var now = gotInvites(r) ? inviteById(r.list, v.id) : null;
         if (status === 200 && inviteOk(res.data)) note("invites-note", [TEXT.resentBefore, res.data.email, TEXT.resentAfter]);
-        else if (status === 404 || (res === null && gotInvites(r) && now === null)) sayIn($("invites-message"), TEXT.inviteGone);
+        // A 404 says it is gone; with no answer, only the whole list (fewer than MAX_LISTED) can say so.
+        else if (status === 404 || (res === null && gotInvites(r) && r.complete && now === null)) sayIn($("invites-message"), TEXT.inviteGone);
         else if (res === null && now !== null && now.created_at !== before) note("invites-note", ["", now.email, TEXT.lostResendAfter], true);
         else if (status === 502 && code === "mail_failed") sayIn($("invites-message"), TEXT.mailFailed);
         else if (status === 409 && code === "has_account") sayIn($("invites-message"), TEXT.hasAccount);
@@ -1326,9 +1334,13 @@ ${SIZE_JS}
         var d = res.data;
         // What the API compares the confirmation with: the username, or the email address without one.
         var expected = d.username !== null ? d.username : d.email;
-        openDelete({ id: a.id, ws: ws, expected: expected, label: d.username !== null && d.username !== "" ? d.username : d.email, named: d.username !== null }, d);
-        // Started from this page before: the API takes the same name again, so it goes on without asking.
-        if (removing !== null && a.deleting === true && confirmed[a.id] === expected) runDelete();
+        // Started from this page before: only when the list just read marks the row as being
+        // deleted, and the name was confirmed on this page, is the name filled in and the delete
+        // carried on without asking (the API takes the same name again). Otherwise it asks.
+        var listed = accountById(a.id);
+        var resume = listed !== null && listed.deleting === true && confirmed[a.id] === expected;
+        openDelete({ id: a.id, ws: ws, expected: expected, label: d.username !== null && d.username !== "" ? d.username : d.email, named: d.username !== null }, d, resume);
+        if (removing !== null && resume) runDelete();
         return;
       }
       if (res !== null && res.status === 404) {
@@ -1347,11 +1359,13 @@ ${SIZE_JS}
     Dash.api("GET", ACCOUNTS + "/" + encodeURIComponent(a.id) + "/removal").then(settle, function () { return settle(null); });
   }
 
-  function openDelete(r, d) {
+  function openDelete(r, d, resume) {
     if (anyOpen() || gone) return;
     removing = r;
     var input = $("delete-input");
-    input.value = confirmed[r.id] === r.expected ? r.expected : "";
+    input.value = resume === true ? r.expected : "";
+    // The name to type, shown muted in the empty field.
+    input.setAttribute("placeholder", r.expected);
     $("delete-label").textContent = r.named === false ? TEXT.typeEmail : TEXT.typeUsername;
     if (d !== null) showRemoval(d);
     deleteView(false, null);
@@ -1377,11 +1391,19 @@ ${SIZE_JS}
     deleteQ.busy(true, "delete-go");
     deleteView(true, null);
     $("delete-title").focus();
+    // Pressed by the admin: a stop from leaving the page earlier is over.
+    pageLeft = false;
     var path = ACCOUNTS + "/" + encodeURIComponent(r.id);
     var rounds = 0;
     var misses = 0;
+    // After a pause, the page may have been left meanwhile: then the loop stops there.
+    function sendUnlessLeft() {
+      return pageLeft ? finish(null, false, false) : send();
+    }
     function send() {
       if (gone) return Promise.resolve();
+      // The page was left (and may come back from the back/forward cache): nothing more is sent by itself.
+      if (pageLeft) return finish(null, false, false);
       rounds++;
       return Dash.api("DELETE", path, { username: r.expected }).then(step, function () { return step(null); });
     }
@@ -1393,19 +1415,21 @@ ${SIZE_JS}
         confirmed[r.id] = r.expected;
         misses = 0;
         deleteView(true, res.data);
-        return rounds < MAX_ROUNDS ? pause(PAUSE_MS).then(send) : finish(null, false);
+        return rounds < MAX_ROUNDS ? pause(PAUSE_MS).then(sendUnlessLeft) : finish(null, false, true);
       }
-      if (res !== null && res.status === 200) return finish(res, true);
+      if (res !== null && res.status === 200) return finish(res, true, false);
       var again = res === null || (res.status === 500 && Dash.errorOf(res) === "cleanup_pending");
-      if (again && rounds < MAX_ROUNDS) {
+      if (again && rounds >= MAX_ROUNDS) return finish(res, false, true);
+      if (again) {
         misses++;
-        if (misses < MAX_MISSES) return pause(MISS_PAUSES_MS[misses - 1]).then(send);
+        if (misses < MAX_MISSES) return pause(MISS_PAUSES_MS[misses - 1]).then(sendUnlessLeft);
       }
-      return finish(res, false);
+      return finish(res, false, false);
     }
     // However it ended, the list is read again: the account is deleted when the answer said
-    // so, or when the list no longer holds it (after a 404 or a lost answer).
-    function finish(res, deleted) {
+    // so, or when the list no longer holds it (after a 404 or a lost answer). tooLong: the
+    // loop reached its call limit, which has a sentence of its own.
+    function finish(res, deleted, tooLong) {
       return read().then(function (got) {
         if (got === false || gone) return;
         var now = got === true ? accountById(r.id) : null;
@@ -1423,7 +1447,7 @@ ${SIZE_JS}
         }
         // Interrupted or refused: back to the question, which says so; pressing Delete account goes on.
         deleteView(false, null);
-        deleteQ.say(refusalOf("delete", res));
+        deleteQ.say(tooLong ? TEXT.tooLong : refusalOf("delete", res));
         syncDelete();
         if ($("delete-go").disabled) $("delete-input").focus();
         else $("delete-go").focus();
@@ -1433,6 +1457,8 @@ ${SIZE_JS}
   }
 
   function startPage() {
+    // The page's own window: leaving the page stops a delete that is running.
+    addEventListener("pagehide", function () { pageLeft = true; });
     $("admin-more").addEventListener("click", more);
     $("allow-cancel").addEventListener("click", function () { question.dismiss(); });
     $("allow-save").addEventListener("click", save);
