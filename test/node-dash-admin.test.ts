@@ -372,6 +372,13 @@ describe("the Admin page for the admin", () => {
     expect(b).toMatchObject({ bar: { cls: "mini over", width: "100%" }, used: "10 bytesOver", allowance: "0 bytes" });
   });
 
+  it("tags a disabled account Disabled", async () => {
+    const off = account(U2, W2, { username: "gone", status: "disabled" });
+    const tab = openAdmin(standard({ "GET /api/v1/admin/accounts": list([MOCKUP[0], off]) }));
+    await tab.settle();
+    expect(rows(tab).map((r) => rowOf(r).tags)).toEqual([["Admin"], ["Disabled"]]);
+  });
+
   it("shows usernames, emails and workspace names holding markup as text", async () => {
     const evil = account(U1, W1, { username: "<img src=x onerror=alert(1)>", email: '"<b>"@example.com', workspace_name: "</td><script>x</script>" });
     const tab = openAdmin(standard({ "GET /api/v1/admin/accounts": list([evil]) }));
@@ -408,7 +415,7 @@ describe("the Admin page for the admin", () => {
     await tab.settle();
     tab.$("admin-more").click();
     await tab.settle();
-    expect(tab.$("admin-message").textContent).toBe(TOO_MANY);
+    expect([tab.$("admin-message").textContent, tab.$("admin-message").hidden]).toEqual([TOO_MANY, false]);
     expect([tab.$("admin-more").shown, tab.$("admin-more").disabled]).toEqual([true, false]);
     expect(rows(tab)).toHaveLength(3);
 
@@ -453,9 +460,10 @@ describe("setting an allowance", () => {
     expect(tab.$("allow-input").value).toBe("");
     expect(tab.$("allow-hint").textContent).toBe("Write a size such as 500 MB or 10 GB. Leave it empty to use the standard allowance of 5 GB.");
     expect(tab.doc.activeElement).toBe(tab.$("allow-input"));
-    // The page behind is inert while it is open: the bar, and everything in the page but the question.
+    // The page behind is inert and hidden from screen readers while it is open: the bar and the admin screen.
     const behind = tab.doc.body.all().filter((e) => e.hasAttribute("inert"));
-    expect(behind.map((e) => e.id || e.tagName).sort()).toEqual(["admin", "dash-load", "header", "missing", "noscript"].sort());
+    expect(behind.map((e) => e.id)).toEqual(["dash-top", "admin"]);
+    for (const e of behind) expect(e.getAttribute("aria-hidden"), e.id).toBe("true");
     expect(tab.$("allow-dialog").hasAttribute("inert")).toBe(false);
     // Empty is the standard allowance, which is below what this workspace uses: the warning, with the standard number.
     type(tab, "10 GB");
@@ -478,7 +486,7 @@ describe("setting an allowance", () => {
     tab.$("allow-cancel").click();
     expect(tab.$("allow-dialog").hidden).toBe(true);
     expect(tab.doc.activeElement).toBe(opener);
-    expect(tab.doc.body.all().filter((e) => e.hasAttribute("inert"))).toEqual([]);
+    expect(tab.doc.body.all().filter((e) => e.hasAttribute("inert") || e.hasAttribute("aria-hidden") && ["dash-top", "admin"].includes(e.id))).toEqual([]);
     expect(tab.fetched.filter((f) => f.method !== "GET")).toEqual([]);
   });
 
@@ -524,6 +532,11 @@ describe("setting an allowance", () => {
     key(tab.$("allow-input"), "Escape");
     tab.$("allow-dialog").click();
     expect(tab.$("allow-dialog").hidden).toBe(false);
+    // Tab and Shift+Tab keep the focus in the question, on its title, while the buttons are disabled.
+    expect(key(tab.$("allow-input"), "Tab").defaultPrevented).toBe(true);
+    expect(tab.doc.activeElement).toBe(tab.$("allow-title"));
+    expect(key(tab.$("allow-title"), "Tab", true).defaultPrevented).toBe(true);
+    expect(tab.doc.activeElement).toBe(tab.$("allow-title"));
     await tab.settle();
     const sent = tab.fetched.filter((f) => f.method === "PATCH");
     expect(sent.map((f) => [f.path, f.headers["X-Csrf-Token"], f.headers["content-type"], f.body])).toEqual([[`/api/v1/admin/workspaces/${W2}`, CSRF, "application/json", `{"storage_allowance_bytes":${10 * GB}}`]]);
@@ -534,7 +547,29 @@ describe("setting an allowance", () => {
     expect(rowOf(rows(tab)[1])).toMatchObject({ used: "5.3 GB", over: [], allowance: "10 GB", bar: { cls: "mini", width: "53%" } });
     expect(tab.doc.activeElement).toBe(setButton(rows(tab)[1]));
     expect([save.textContent, save.disabled, tab.$("allow-cancel").disabled]).toEqual(["Save", false, false]);
-    expect(tab.doc.body.all().filter((e) => e.hasAttribute("inert"))).toEqual([]);
+    expect(tab.doc.body.all().filter((e) => e.hasAttribute("inert") || e.hasAttribute("aria-hidden") && ["dash-top", "admin"].includes(e.id))).toEqual([]);
+  });
+
+  it("a save that worked but whose list cannot be read again says so and keeps the numbers shown", async () => {
+    for (const failure of [{ status: 500, json: { error: "internal" } }, "network"] as Answer[]) {
+      const tab = openAdmin(
+        standard({
+          "GET /api/v1/admin/accounts": [list(MOCKUP), failure],
+          [`PATCH /api/v1/admin/workspaces/${W2}`]: { status: 200, json: { workspace_id: W2, allowance_bytes: 10 * GB, storage_allowance_bytes: 10 * GB, used_bytes: 5_690_831_667, over: false } },
+        }),
+      );
+      await tab.settle();
+      const before = rows(tab).map(rowOf);
+      setButton(rows(tab)[1]).click();
+      type(tab, "10 GB");
+      tab.$("allow-save").click();
+      await tab.settle();
+      expect(tab.$("allow-dialog").hidden).toBe(true);
+      expect([tab.$("admin-message").textContent, tab.$("admin-message").hidden]).toEqual(["The change was made, but the list could not be loaded again. Reload the page to see it.", false]);
+      expect(rows(tab).map(rowOf)).toEqual(before);
+      expect(tab.$("admin-summary").textContent).toBe("3 accounts · 6.6 GB used in all · standard allowance 5 GB");
+      expect(tab.doc.activeElement).toBe(setButton(rows(tab)[1]));
+    }
   });
 
   it("an empty field sends null, which puts the workspace back on the standard allowance", async () => {
@@ -557,13 +592,14 @@ describe("setting an allowance", () => {
       tab.$("allow-save").click();
       await tab.settle();
       expect(tab.$("allow-message").textContent, text).toBe("Write a size such as 500 MB or 10 GB.");
+      expect(tab.$("allow-message").hidden, text).toBe(false);
       expect(tab.$("allow-input").getAttribute("aria-invalid"), text).toBe("true");
       expect(tab.doc.activeElement).toBe(tab.$("allow-input"));
     }
     expect(tab.fetched.filter((f) => f.method !== "GET")).toEqual([]);
     // Typing again clears the complaint.
     type(tab, "1 GB");
-    expect([tab.$("allow-message").textContent, tab.$("allow-input").getAttribute("aria-invalid")]).toEqual(["", null]);
+    expect([tab.$("allow-message").textContent, tab.$("allow-message").hidden, tab.$("allow-input").getAttribute("aria-invalid")]).toEqual(["", true, null]);
   });
 
   it("a save that fails says so with the approved sentences, keeps the question open, gives the buttons back and reads the list again", async () => {

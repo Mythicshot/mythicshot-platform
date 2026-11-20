@@ -26,7 +26,7 @@ import { dashHtml } from "./shell.ts";
 const ADMIN_MAIN = `  <section id="admin" aria-labelledby="h-page" hidden>
     <h1 id="h-page" tabindex="-1">Accounts</h1>
     <p class="sub" id="admin-summary"></p>
-    <p class="message" id="admin-message" role="status" aria-live="polite"></p>
+    <p class="message" id="admin-message" role="status" aria-live="polite" hidden></p>
     <div class="card">
       <table class="accounts">
         <thead><tr><th scope="col">Account</th><th scope="col">Workspace</th><th scope="col" class="n">Tours</th><th scope="col" class="bar"></th><th scope="col" class="n">Used</th><th scope="col" class="n">Allowance</th><th scope="col"></th></tr></thead>
@@ -48,7 +48,7 @@ const ADMIN_MAIN = `  <section id="admin" aria-labelledby="h-page" hidden>
       <input class="field" id="allow-input" type="text" autocomplete="off" spellcheck="false" aria-describedby="allow-hint allow-warn allow-message">
       <p class="hint" id="allow-hint"></p>
       <p class="warn-box" id="allow-warn" hidden></p>
-      <p class="message" id="allow-message" role="status" aria-live="polite"></p>
+      <p class="message" id="allow-message" role="status" aria-live="polite" hidden></p>
       <div class="two">
         <button type="button" class="btn quiet" id="allow-cancel">Cancel</button>
         <button type="button" class="btn" id="allow-save">Save</button>
@@ -118,11 +118,15 @@ export const ADMIN_JS = `(function () {
     saveAnyway: "Save anyway",
     saving: "Saving…",
     notFound: "Page not found",
+    disabled: "Disabled",
+    notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
   };
   var ACCOUNTS = "/api/v1/admin/accounts";
   var WORKSPACES = "/api/v1/admin/workspaces/";
   var USER_ID = /^usr_[0-9a-f]{24}$/;
   var WORKSPACE_ID = /^ws_[0-9a-f]{24}$/;
+  // What the page behind the question is, made inert while it is open.
+  var BEHIND = ["dash-top", "admin"];
 ${SIZE_JS}
   var $ = function (id) { return document.getElementById(id); };
   // The standard allowance from the summary, null when there is none.
@@ -146,8 +150,14 @@ ${SIZE_JS}
     return e;
   }
 
+  // A message line is hidden while it has nothing to say.
+  function sayIn(line, text) {
+    line.textContent = text;
+    line.hidden = text === "";
+  }
+
   function say(text) {
-    $("admin-message").textContent = text;
+    sayIn($("admin-message"), text);
   }
 
   // ---- A missing page, for anyone but the admin ----
@@ -250,6 +260,7 @@ ${SIZE_JS}
     t.setAttribute("id", nameId);
     t.appendChild(el("span", "name", named ? a.username : email));
     if (a.admin === true) t.appendChild(el("span", "tag", TEXT.admin));
+    if (a.status === "disabled") t.appendChild(el("span", "tag", TEXT.disabled));
     who.appendChild(t);
     if (named && email !== "") who.appendChild(el("div", "d", email));
     tr.appendChild(who);
@@ -345,21 +356,20 @@ ${SIZE_JS}
     return sizeOf(text) === own ? text : String(own);
   }
 
-  // Everything in the page but the question is inert while it is open.
+  // While the question is open, the bar and the admin screen behind it are inert and hidden
+  // from screen readers.
   function setInert(on) {
-    var dialog = $("allow-dialog");
-    var top = document.body.children;
-    for (var i = 0; i < top.length; i++) {
-      var c = top[i];
-      if (!c.tagName) continue;
-      var inner = c.tagName.toLowerCase() === "main" ? c.children : [c];
-      for (var j = 0; j < inner.length; j++) {
-        var e = inner[j];
-        if (!e.tagName || e === dialog) continue;
-        if (on) e.setAttribute("inert", "");
-        else e.removeAttribute("inert");
+    BEHIND.forEach(function (id) {
+      var e = $(id);
+      if (e === null) return;
+      if (on) {
+        e.setAttribute("inert", "");
+        e.setAttribute("aria-hidden", "true");
+      } else {
+        e.removeAttribute("inert");
+        e.removeAttribute("aria-hidden");
       }
-    }
+    });
   }
 
   // The warning instead of the hint, and Save anyway, when the allowance asked for is below
@@ -378,7 +388,7 @@ ${SIZE_JS}
 
   function complain(text) {
     var input = $("allow-input");
-    $("allow-message").textContent = text;
+    sayIn($("allow-message"), text);
     if (text !== "") input.setAttribute("aria-invalid", "true");
     else input.removeAttribute("aria-invalid");
   }
@@ -453,6 +463,7 @@ ${SIZE_JS}
     }
     var id = asking.ws;
     complain("");
+    say("");
     busy(true);
     Dash.api("PATCH", WORKSPACES + encodeURIComponent(id), { storage_allowance_bytes: v }).then(function (res) {
       if (res.status === 401) { working = false; Dash.signedOut(); return; }
@@ -461,8 +472,8 @@ ${SIZE_JS}
       close();
       return read(Math.max(1, pages)).then(function (r) {
         if (r === false) return;
-        // The allowance is set; when the list cannot be read again, the page says so.
-        if (r !== true) say(Dash.failure(r));
+        // The allowance is set; when the list cannot be read again, the page says so and keeps what it shows.
+        say(r === true ? "" : TEXT.notReloaded);
         focusRow(id);
       });
     }, function () {
@@ -484,11 +495,13 @@ ${SIZE_JS}
       if (ev.target === dialog) close();
     });
     // While the question is open, Escape anywhere closes it, and Tab and Shift+Tab go round
-    // its controls, even when the focus got out of it.
+    // its controls, even when the focus got out of it. While a save runs, Escape does
+    // nothing and Tab keeps the focus on the question's title.
     document.addEventListener("keydown", function (ev) {
       if (asking === null) return;
       if (ev.key === "Escape") { ev.preventDefault(); close(); return; }
       if (ev.key !== "Tab") return;
+      if (working) { ev.preventDefault(); $("allow-title").focus(); return; }
       var list = [$("allow-input"), $("allow-cancel"), $("allow-save")].filter(function (c) { return !c.disabled; });
       var at = list.indexOf(document.activeElement);
       if (at === -1) { ev.preventDefault(); list[ev.shiftKey ? list.length - 1 : 0].focus(); }

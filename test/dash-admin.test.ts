@@ -103,6 +103,8 @@ const ADMIN_TEXT: Record<string, string> = {
   saveAnyway: "Save anyway",
   saving: "Saving…",
   notFound: "Page not found",
+  disabled: "Disabled",
+  notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
 };
 
 /** The strings with a space in the script that are not words for a person: class names. */
@@ -263,6 +265,12 @@ describe("the Admin page and its script", () => {
     // Nothing is stored, no cookie is touched, and leaving the page goes only to /signin, through the shared script.
     const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "setTimeout(", "document.referrer", "navigator."];
     for (const api of forbidden) expect(ADMIN_JS, api).not.toContain(api);
+    // No other page serves, loads or names the Admin page's script.
+    for (const p of DASH_PAGES.filter((x) => x.path !== "/admin")) {
+      expect(p.html, p.path).not.toContain("/dash/admin.js");
+      expect(p.script.body, p.path).not.toContain("admin.js");
+    }
+    expect(DASH_JS).not.toContain("admin.js");
     // The one link in the page leads back to Tours.
     const links = new FakeDocument(ADMIN_HTML).body.all().filter((e) => e.tagName === "a" && e.parent?.tagName !== "nav");
     expect(links.map((a) => [a.getAttribute("href"), a.textContent])).toEqual([["/tours", "Back to Tours"]]);
@@ -283,6 +291,10 @@ describe("the Admin page and its script", () => {
     const messages = all.filter((e) => /\b(?:message|load)\b/.test(e.className) && e.parent?.tagName !== "noscript");
     expect(messages.map((m) => m.id).sort()).toEqual(["admin-message", "allow-message", "dash-load"]);
     for (const m of messages) expect([m.getAttribute("role"), m.getAttribute("aria-live")], `#${m.id}`).toEqual(["status", "polite"]);
+    // A message line takes no room until it has a message.
+    for (const m of messages.filter((e) => e.id !== "dash-load")) expect(m.hidden, `#${m.id}`).toBe(true);
+    // The page behind the question, made inert while it is open: the bar and the admin screen.
+    expect(ADMIN_JS).toContain('var BEHIND = ["dash-top", "admin"];');
     for (const h of all.filter((e) => e.tagName === "h1" || e.tagName === "h2")) expect(h.getAttribute("tabindex"), `#${h.id}`).toBe("-1");
     const dialog = all.find((e) => e.getAttribute("role") === "dialog")!;
     expect([dialog.getAttribute("aria-modal"), dialog.getAttribute("aria-labelledby"), dialog.getAttribute("aria-describedby")]).toEqual(["true", "allow-title", "allow-uses"]);
@@ -297,8 +309,8 @@ describe("the Admin page and its script", () => {
     // The Admin page's own styles, after the shared ones: the small bar, the warning, and blocks on a phone.
     const own = DASH_CSS.slice(DASH_CSS.indexOf("/* The Admin page. */"));
     expect(DASH_CSS.indexOf("/* The Admin page. */")).toBeGreaterThan(DASH_CSS.indexOf("/* The Tours page. */"));
-    expect(own).toContain(".mini { height: 6px;");
-    expect(own).toContain(".mini.over i { background: var(--warn-bar); }");
+    expect(own).toContain(".accounts .mini { min-width: 80px; }");
+    expect(own).toContain(".accounts .mini.over i { background: var(--warn-bar); }");
     expect(own).toContain(".warn-box { background: var(--warn-bg); color: var(--warn-text);");
     const phone = [...own.matchAll(/@media \(max-width: 720px\) \{\n([\s\S]*?)\n\}/g)].map((m) => m[1]).join("\n");
     expect(phone).toContain(".accounts, .accounts tbody, .accounts tr, .accounts td { display: block; }");
