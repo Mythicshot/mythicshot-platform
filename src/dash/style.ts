@@ -188,4 +188,37 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
 @media (max-width: 720px) {
   .largest .mini-cell { display: none; }
 }
+
+/* The Admin page. */
+.accounts { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+.accounts th { text-align: left; font-size: 0.76rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 0 10px 8px 0; white-space: nowrap; }
+.accounts td { padding: 11px 10px 11px 0; border-top: 1px solid var(--line); vertical-align: middle; }
+.accounts .n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.accounts .bar { width: 16%; }
+.accounts .t { font-weight: 600; }
+.accounts .t .tag { margin-left: 6px; font-weight: 400; }
+.accounts .d { color: var(--muted); font-size: 0.85rem; }
+.accounts td.used .tag { margin-left: 6px; }
+.accounts .mini { min-width: 80px; }
+.accounts .mini i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent); }
+.accounts .mini.over i { background: var(--warn-bar); }
+.show-more { margin: 0 0 14px; }
+.dialog label { display: block; font-weight: 600; font-size: 0.9rem; margin: 12px 0 6px; }
+.field { width: 100%; min-height: 40px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--field); color: var(--text); font: inherit; }
+.field:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.field[aria-invalid="true"] { border-color: var(--error); }
+.warn-box { background: var(--warn-bg); color: var(--warn-text); border-radius: 10px; padding: 10px 12px; font-size: 0.9rem; margin: 12px 0 0; }
+.dialog .message { margin: 8px 0 0; }
+@media (max-width: 720px) {
+  .accounts, .accounts tbody, .accounts tr, .accounts td { display: block; }
+  .accounts thead { display: none; }
+  .accounts tr { padding: 12px 0; border-top: 1px solid var(--line); }
+  .accounts tr:first-child { border-top: 0; padding-top: 0; }
+  .accounts tr:last-child { padding-bottom: 0; }
+  .accounts td { padding: 2px 0; border-top: 0; }
+  .accounts .n { text-align: left; }
+  .accounts .bar { width: auto; padding: 6px 0; }
+  .accounts td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 6.5em; color: var(--muted); font-size: 0.85rem; }
+  .accounts .acts-cell { padding-top: 8px; }
+}
 `;
