@@ -138,7 +138,12 @@ function notHere(): Response {
   return new Response('{"error":"not_found"}', { status: 404, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
-/** From the most open rule to the strictest. Only the strictest of a request's rules may redirect: see the gate. */
+/**
+ * From the most open rule to the strictest. Only the strictest of a request's rules may
+ * redirect: see the gate. `media` ranks strictest and never redirects, so a media route
+ * matched together with a redirect rule answers 404 on the address that rule would
+ * redirect from (without the img address, the app address) instead of redirecting.
+ */
 const STRICTNESS: readonly HostRule[] = ["any", "both", "tours-redirect", "app-redirect", "tours", "app", "media"];
 
 /**

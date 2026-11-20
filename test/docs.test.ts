@@ -1270,7 +1270,9 @@ describe("two addresses in the docs", () => {
   });
 
   it("every part about two addresses says it has never been run on real hosting", () => {
-    expect(readme).toMatch(/^> \[!warning\] Never run on real hosting\n> Nothing about two addresses has been run on real hosting yet/m);
+    expect(readme).toMatch(/^> \[!warning\] Not tried on real hosting\n> Nothing about two addresses has been run on real hosting yet/m);
+    expect(readme).toMatch(/^> \[!warning\] Not tried on real hosting\n> The third address has not been run on real hosting either/m);
+    expect(readme).not.toContain("Never run on real hosting");
     expect(docker).toMatch(/^\*\*Unconfirmed:\*\* nothing in this section has been run on a real server or against a real tunnel/m);
     expect(cloudflare).toMatch(/^\*\*Unconfirmed:\*\* nothing in this section has been run on a real Cloudflare account/m);
   });

@@ -212,7 +212,7 @@ By default the platform serves one address and checks no host name: it answers t
 
 With two addresses the platform knows two host names and the role of each: the tours address, such as `tours.example.com`, where visitors open tours, and the app address, such as `app.example.com`. Two settings turn it on, `TOURS_HOST` and `APP_HOST`, each a host name without `https://` and without a path. Set both for two addresses, or neither for one.
 
-> [!warning] Never run on real hosting
+> [!warning] Not tried on real hosting
 > Nothing about two addresses has been run on real hosting yet: it is checked by this repository's tests only, so turn it on only after a backup and when the site may be down for a while.
 
 ### What answers where
@@ -247,7 +247,7 @@ Beside the two addresses an install can add a third, the img address, such as `i
 
 The img address answers shared images and clips and `/healthz` and nothing else: every other path there, the token API, the session, the sign-in pages and the dashboard included, answers `404` with `{"error":"not_found"}`, and nothing redirects to it or from it. No session cookie is taken or set there, and no token is taken there either. Asked on it, `/healthz` prints `{"ok":true,"address":"img"}`. This version has no image or clip route yet, so today the img address answers `/healthz` only.
 
-> [!warning] Never run on real hosting
+> [!warning] Not tried on real hosting
 > The third address has not been run on real hosting either: it is checked by this repository's tests only.
 
 ### A pair that cannot be used
