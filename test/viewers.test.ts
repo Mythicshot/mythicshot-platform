@@ -12,7 +12,7 @@ import { setClientAddress } from "../src/client.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { viewerLink, viewerLinkOrigin, viewerMail } from "../src/mail.ts";
 import type { Config, Db, Deps } from "../src/ports.ts";
-import { LIMITS_SIGNIN, LIMITS_VIEWER, SITE_KEY, recipientKey, viewerPairKey } from "../src/rate.ts";
+import { LIMITS_SIGNIN, LIMITS_VIEWER, SITE_KEY, recipientKey, viewerPairKey, viewerWorkspaceKey } from "../src/rate.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { PAD_BUCKET } from "../src/signin.ts";
 import {
@@ -73,15 +73,22 @@ afterEach(() => {
 /**
  * The gate the parallel task will register, as a stand-in: one read for every question,
  * whatever it answers, that finds a published tour of a workspace with no disabled account,
- * and then a list held here. A tour not in `lists` is public.
+ * and then a list held here. A tour not in `lists` is public. A yes carries the workspace's
+ * id as its key (the real gate may derive any opaque key).
  */
 function gateOf(lists: Record<string, string[]>): ViewerGate {
   return {
     async mayRequest(deps, slug, email) {
-      const row = await deps.db.first<{ slug: string }>(`SELECT t.slug FROM tour t WHERE t.slug = ? AND t.status = 'published' AND ${noDisabledAccount("t.workspace_id")}`, [slug]);
-      return row !== null && (lists[row.slug] ?? []).includes(email);
+      const row = await deps.db.first<{ slug: string; workspace_id: string }>(`SELECT t.slug, t.workspace_id FROM tour t WHERE t.slug = ? AND t.status = 'published' AND ${noDisabledAccount("t.workspace_id")}`, [slug]);
+      return row !== null && (lists[row.slug] ?? []).includes(email) ? { allowed: true, workspaceKey: row.workspace_id } : { allowed: false };
     },
   };
+}
+
+/** Sets a counter of this hour to `n`, as that many hits would have. */
+async function fillCounter(deps: Deps, bucket: string, key: string, n: number, windowMs = 3_600_000): Promise<void> {
+  const now = deps.now();
+  await deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?) ON CONFLICT (bucket, key, window_start) DO UPDATE SET count = excluded.count", [bucket, key, now - (now % windowMs), n]);
 }
 
 async function addTour(deps: Deps, workspaceId: string, slug: string, status: "published" | "draft" = "published"): Promise<void> {
@@ -206,19 +213,23 @@ const countOf = async (deps: Deps, table: string) => (await deps.db.first<{ n: n
 const counter = async (deps: Deps, bucket: string, key: string) =>
   (await deps.db.first<{ n: number }>("SELECT coalesce(sum(count), 0) AS n FROM rate_counter WHERE bucket = ? AND key = ?", [bucket, key]))!.n;
 
-/** What every link request awaits before its answer (no known network): three counts, the gate's one read, the mail cap, the two sweeps. */
-const AWAITED = ["first", "first", "first", "first", "first", "batch", "run"];
+/** What every link request awaits before its answer (no known network): three counts, the gate's one read, the two mail caps, the two sweeps. */
+const AWAITED = ["first", "first", "first", "first", "first", "first", "batch", "run"];
 /** What the job after the answer does: one write, then one batch. */
 const JOB = ["run", "batch"];
 
 describe("asking for a viewer link", () => {
   it("answers the same, after the same database calls, for every tour and address; mail goes out only to a listed address of a restricted tour", async () => {
-    const { deps, mail, settle } = await site();
+    const { deps, mail, settle, owner } = await site();
     const statements: string[] = [];
     const kinds = recordKinds(deps, statements);
     const app = answered([kinds, statements]);
+    const lines = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ownersKey = await viewerWorkspaceKey(owner.workspaceId);
 
-    const cases: [string, unknown, unknown][] = [
+    const cases: [string, unknown, unknown, ((d: Deps) => Promise<void>)?][] = [
+      ["the listed address, with the tour's workspace's hour used up", LISTED, SLUGS.restricted, (d) => fillCounter(d, LIMITS_VIEWER.mailWorkspace.bucket, ownersKey, LIMITS_VIEWER.mailWorkspace.most)],
+      ["the listed address, with the site's backstop reached", LISTED, SLUGS.restricted, (d) => fillCounter(d, LIMITS_VIEWER.mailSite.bucket, SITE_KEY, LIMITS_VIEWER.mailSite.most)],
       ["an unknown slug", LISTED, SLUGS.none],
       ["a public tour", LISTED, SLUGS.open],
       ["a restricted tour that does not list the address", OTHER, SLUGS.restricted],
@@ -231,9 +242,10 @@ describe("asking for a viewer link", () => {
       ["the listed address of a restricted tour", LISTED, SLUGS.restricted],
     ];
     const answers: Record<string, { seen: ReturnType<typeof seen>; before: string[]; after: string[] }> = {};
-    for (const [what, email, slug] of cases) {
-      // Each case starts with no count, so no limit stands between it and the one that mails.
+    for (const [what, email, slug, prepare] of cases) {
+      // Each case starts with no count, so no limit stands between it and the one that mails, but the one it sets itself.
       await deps.db.run("DELETE FROM rate_counter");
+      await prepare?.(deps);
       kinds.length = 0;
       statements.length = 0;
       const r = await ask(deps, email, slug, { app });
@@ -247,8 +259,9 @@ describe("asking for a viewer link", () => {
     expect(sent.before).toEqual(AWAITED);
     expect(sent.after).toEqual(JOB);
     for (const [what] of cases) expect(answers[what], what).toEqual(sent);
-    // Only the one case was mailed, and only it stored a code.
+    // Only the one case was mailed, and only it stored a code. The two full caps each said so in one line of the log alone.
     expect(mail.sent.map((m) => m.to)).toEqual([LISTED]);
+    expect(lines.mock.calls.map((c) => c[0])).toEqual([VIEWER_LINES.hour, VIEWER_LINES.hour]);
     expect(await countOf(deps, "viewer_code")).toBe(1);
     expect(await deps.db.all("SELECT email, slug FROM viewer_code")).toEqual([{ email: LISTED, slug: SLUGS.restricted }]);
   });
@@ -320,31 +333,78 @@ describe("asking for a viewer link", () => {
     expect(lines.mock.calls.map((c) => c[0])).toEqual([VIEWER_LINES.recipient]);
   });
 
-  it("the viewer mail cap and the sign-in mail cap are independent", async () => {
-    const { deps, mail, owner, clock } = await site();
-    const now = clock.now;
-    const fill = (bucket: string, n: number, windowMs: number) =>
-      deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?) ON CONFLICT (bucket, key, window_start) DO UPDATE SET count = excluded.count", [bucket, SITE_KEY, now - (now % windowMs), n]);
+  it("the viewer mail caps and the sign-in mail cap are independent", async () => {
+    const { deps, mail, owner } = await site();
+    const fill = (bucket: string, n: number) => fillCounter(deps, bucket, SITE_KEY, n);
     const lines = vi.spyOn(console, "error").mockImplementation(() => {});
     // Sign-in's hour used up: a viewer link still goes.
-    await fill(LIMITS_SIGNIN.mailSite.bucket, LIMITS_SIGNIN.mailSite.most, LIMITS_SIGNIN.mailSite.windowMs);
+    await fill(LIMITS_SIGNIN.mailSite.bucket, LIMITS_SIGNIN.mailSite.most);
     await ask(deps, LISTED, SLUGS.restricted);
     expect(mail.sent.map((m) => m.subject)).toEqual(["Your link to a Mythicshot tour"]);
     await post(deps, "/api/v1/signin/request", { email: owner.email }, { origin: APP });
     expect(mail.sent).toHaveLength(1);
-    // The viewer hour used up: no viewer link; sign-in, with its hour back, still goes.
+    // The viewer backstop reached: no viewer link; sign-in, with its hour back, still goes.
     await deps.db.run("DELETE FROM rate_counter WHERE bucket = ?", [LIMITS_SIGNIN.mailSite.bucket]);
-    await fill(LIMITS_VIEWER.mailSite.bucket, LIMITS_VIEWER.mailSite.most, LIMITS_VIEWER.mailSite.windowMs);
+    await fill(LIMITS_VIEWER.mailSite.bucket, LIMITS_VIEWER.mailSite.most);
     expect((await ask(deps, LISTED, SLUGS.second)).status).toBe(202);
     expect(mail.sent).toHaveLength(1);
     await post(deps, "/api/v1/signin/request", { email: owner.email }, { origin: APP });
     expect(mail.sent.map((m) => m.subject)).toEqual(["Your link to a Mythicshot tour", "Your Mythicshot sign-in link"]);
     expect(lines.mock.calls.map((c) => c[0])).toContain(VIEWER_LINES.hour);
-    // A request that sends nothing never spends the viewer cap.
+    // A request that sends nothing never spends either viewer cap.
     expect(await counter(deps, LIMITS_VIEWER.mailSite.bucket, SITE_KEY)).toBe(LIMITS_VIEWER.mailSite.most + 1);
-    await deps.db.run("DELETE FROM rate_counter WHERE bucket = ?", [LIMITS_VIEWER.mailSite.bucket]);
+    await deps.db.run("DELETE FROM rate_counter WHERE bucket IN (?, ?)", [LIMITS_VIEWER.mailSite.bucket, LIMITS_VIEWER.mailWorkspace.bucket]);
     for (const slug of [SLUGS.open, SLUGS.none, SLUGS.disabled]) await ask(deps, LISTED, slug);
     expect(await counter(deps, LIMITS_VIEWER.mailSite.bucket, SITE_KEY)).toBe(0);
+    expect(await deps.db.all("SELECT key FROM rate_counter WHERE bucket = ? AND key != 'site_quiet'", [LIMITS_VIEWER.mailWorkspace.bucket])).toEqual([]);
+  });
+
+  it("each workspace's tours have their own hour of viewer mails: one that is full stops no other", async () => {
+    const { deps, mail, owner, settle } = await site();
+    const other = await seedAccount(deps, { username: "other" });
+    await addTour(deps, other.workspaceId, "othertourz");
+    useViewerGate(gateOf({ [SLUGS.restricted]: [LISTED], othertourz: [OTHER] }));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await fillCounter(deps, LIMITS_VIEWER.mailWorkspace.bucket, await viewerWorkspaceKey(owner.workspaceId), LIMITS_VIEWER.mailWorkspace.most);
+    expect((await ask(deps, LISTED, SLUGS.restricted)).status).toBe(202);
+    expect((await ask(deps, OTHER, "othertourz")).status).toBe(202);
+    await settle();
+    expect(mail.sent.map((m) => m.to)).toEqual([OTHER]);
+    // The other workspace's mail was counted under its own key; the full one only counted the request it refused.
+    expect(await counter(deps, LIMITS_VIEWER.mailWorkspace.bucket, await viewerWorkspaceKey(other.workspaceId))).toBe(1);
+    expect(await counter(deps, LIMITS_VIEWER.mailWorkspace.bucket, await viewerWorkspaceKey(owner.workspaceId))).toBe(LIMITS_VIEWER.mailWorkspace.most + 1);
+    // The thirty-first mail of one workspace in an hour is not sent; the next hour it is.
+    const many = await seedAccount(deps, { username: "many" });
+    const slugs = Array.from({ length: LIMITS_VIEWER.mailWorkspace.most + 1 }, (_, i) => "many" + "abcdefghijklmnopqrstuvwxyz234567"[i].repeat(6));
+    for (const slug of slugs) await addTour(deps, many.workspaceId, slug);
+    const readers = slugs.map((_, i) => `reader${i}@example.com`);
+    useViewerGate(gateOf(Object.fromEntries(slugs.map((s, i) => [s, [readers[i]]]))));
+    for (const [i, slug] of slugs.entries()) await ask(deps, readers[i], slug);
+    await settle();
+    expect(mail.sent.filter((m) => m.to.startsWith("reader")).map((m) => m.to)).toEqual(readers.slice(0, LIMITS_VIEWER.mailWorkspace.most));
+  });
+
+  it("a workspace's owner learns nothing about another workspace's list from whether their own mails still go", async () => {
+    // The attack: fill the count one short with links to your own addresses on your own tour, ask
+    // for a link for the victim on someone else's tour, then see whether your next own mail arrives.
+    const run = async (victimListed: boolean) => {
+      const { deps, mail, owner, settle } = await site();
+      const attacker = await seedAccount(deps, { username: "mallory" });
+      await addTour(deps, attacker.workspaceId, "mallorysss");
+      const own = Array.from({ length: LIMITS_VIEWER.mailWorkspace.most }, (_, i) => `mallory${i}@example.com`);
+      useViewerGate(gateOf({ mallorysss: own, [SLUGS.restricted]: victimListed ? [LISTED] : [] }));
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      for (const address of own.slice(0, -1)) await ask(deps, address, "mallorysss");
+      const victim = await ask(deps, LISTED, SLUGS.restricted);
+      const last = await ask(deps, own[own.length - 1], "mallorysss");
+      await settle();
+      expect(await counter(deps, LIMITS_VIEWER.mailWorkspace.bucket, await viewerWorkspaceKey(owner.workspaceId))).toBe(victimListed ? 1 : 0);
+      return { victim: seen(victim), last: seen(last), mine: mail.sent.filter((m) => m.to.startsWith("mallory")).map((m) => m.to) };
+    };
+    const listed = await run(true);
+    const unlisted = await run(false);
+    expect(listed).toEqual(unlisted);
+    expect(listed.mine).toHaveLength(LIMITS_VIEWER.mailWorkspace.most);
   });
 
   it("the mail has the approved words, and its link is on the configured tours address whatever the request says", async () => {
@@ -389,9 +449,9 @@ describe("asking for a viewer link", () => {
     useViewerGate(null);
     const kinds = recordKinds(deps);
     expect((await ask(deps, LISTED, SLUGS.restricted, { app: answered([kinds]) })).status).toBe(202);
-    expect(split(kinds).before).toEqual(["first", "first", "first", "first", "batch", "run"]);
+    expect(split(kinds).before).toEqual(["first", "first", "first", "first", "first", "batch", "run"]);
     expect(mail.sent).toEqual([]);
-    expect(await NO_VIEWER_GATE.mayRequest(deps, SLUGS.restricted, LISTED)).toBe(false);
+    expect(await NO_VIEWER_GATE.mayRequest(deps, SLUGS.restricted, LISTED)).toEqual({ allowed: false });
   });
 
   it("another origin, a form, a token or a body that is not an object is refused before anything is counted", async () => {
@@ -680,10 +740,10 @@ describe("the viewer session", () => {
 
   it("the routes make no more database calls than this", async () => {
     const { deps, mail } = await site();
-    // Asking: three counts, the gate's read, the cap, two sweeps; the job's two and the mail; with a known network one more.
-    expect((await ask(deps, LISTED, SLUGS.restricted)).calls).toBe(10);
-    expect((await ask(deps, LISTED, SLUGS.second, { app: from("203.0.113.50") })).calls).toBe(11);
-    expect((await ask(deps, OTHER, SLUGS.second)).calls).toBe(9);
+    // Asking: three counts, the gate's read, the two caps, two sweeps; the job's two and the mail; with a known network one more.
+    expect((await ask(deps, LISTED, SLUGS.restricted)).calls).toBe(11);
+    expect((await ask(deps, LISTED, SLUGS.second, { app: from("203.0.113.50") })).calls).toBe(12);
+    expect((await ask(deps, OTHER, SLUGS.second)).calls).toBe(10);
     const code = codeIn(mail.sent[0].text);
     // Looking up: one read (and the network's count when it is known). Completing: one read and one batch.
     expect((await check(deps, code)).calls).toBe(1);

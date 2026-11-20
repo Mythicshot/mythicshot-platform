@@ -965,7 +965,9 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const { deps, mail } = await makeDeps({ hosts: { tours: "tours.example.com", app: "app.example.com" } });
     const api = client(deps);
     // A stand-in for the tour's own setting: one read for every question, and one tour shared with one address.
-    useViewerGate({ mayRequest: async (d, slug, email) => (await d.db.first("SELECT 1 AS x")) !== null && slug === "restricted" && email === "mara@example.com" });
+    useViewerGate({
+      mayRequest: async (d, slug, email) => ((await d.db.first("SELECT 1 AS x")) !== null && slug === "restricted" && email === "mara@example.com" ? { allowed: true, workspaceKey: "ws-one" } : { allowed: false }),
+    });
     const TOURS = "https://tours.example.com";
     const page = { "content-type": JSON_TYPE, origin: TOURS };
     const network = (address: string) => (d: Deps) => ({ fetch: (req: Request) => (setClientAddress(req, address), createApp(d).fetch(req)) });

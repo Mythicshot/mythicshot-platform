@@ -63,7 +63,7 @@ import { onRole, type HostRole } from "./hosts.ts";
 import { apiError, json, noContent } from "./http.ts";
 import { NO_MAIL, viewerLink, viewerLinkOrigin, viewerMail } from "./mail.ts";
 import { deferOf, isNotNullViolation, mailOf, type Deps } from "./ports.ts";
-import { LIMITS_VIEWER, SITE_KEY, SITE_QUIET_KEY, hitLimit, recipientKey, sweepCounters, viewerPairKey } from "./rate.ts";
+import { LIMITS_VIEWER, SITE_KEY, SITE_QUIET_KEY, hitLimit, recipientKey, sweepCounters, viewerPairKey, viewerWorkspaceKey } from "./rate.ts";
 import { SWEEP_PAGE, cookieValues, sameOriginChange } from "./sessions.ts";
 import { MAIL_REASONS, afterTheAnswer, networkLimit, ownJsonBody, padStatement, withHeader } from "./signin.ts";
 
@@ -113,7 +113,7 @@ export const VIEWER_SAYS = {
 /** The fixed log lines of asking for a viewer link. None holds an address, a slug, a code or a count. */
 export const VIEWER_LINES = {
   recipient: "viewer: an address asked for more viewer links than its limit; none was sent",
-  hour: "viewer: the hourly limit of viewer mails was reached; none was sent",
+  hour: "viewer: an hourly limit of viewer mails was reached; none was sent",
   notMade: "viewer: a viewer link could not be made; none was sent",
   mailFailed: "mail: a viewer mail could not be sent",
 } as const;
@@ -121,17 +121,21 @@ export const VIEWER_LINES = {
 // ---- The gate ----
 
 /**
- * The one question this module asks about a tour. `mayRequest` answers true only when `slug`
- * names a published tour of a workspace with no disabled account, that tour is restricted to
- * a list of addresses, and `email` may view it. It is asked for every request that reaches
- * that point, with "" for a slug or an address that is malformed (true is then never right),
- * and must make the same database calls whatever it answers, so the request's answer cannot be
- * timed: one read is the expected shape.
+ * The one question this module asks about a tour. `mayRequest` allows only when `slug` names a
+ * published tour of a workspace with no disabled account, that tour is restricted to a list of
+ * addresses, and `email` may view it. A yes carries `workspaceKey`, an opaque key for the tour's
+ * workspace that the gate derives (a digest of the workspace id, say): this module never sees a
+ * workspace id, and counts the workspace's viewer mails under it. It is asked for every request
+ * that reaches that point, with "" for a slug or an address that is malformed (a yes is then
+ * never right), and must make the same database calls whatever it answers, so the request's
+ * answer cannot be timed: one read is the expected shape.
  */
-export type ViewerGate = { mayRequest(deps: Deps, slug: string, email: string): Promise<boolean> };
+export type ViewerGate = {
+  mayRequest(deps: Deps, slug: string, email: string): Promise<{ allowed: false } | { allowed: true; workspaceKey: string }>;
+};
 
 /** The gate before any is registered: no address may ask for any tour, and it asks the database nothing. */
-export const NO_VIEWER_GATE: ViewerGate = { mayRequest: async () => false };
+export const NO_VIEWER_GATE: ViewerGate = { mayRequest: async () => ({ allowed: false }) };
 
 let gate: ViewerGate = NO_VIEWER_GATE;
 
@@ -307,8 +311,9 @@ export function viewerRoutes(app: Hono, deps: Deps): void {
    * Before the answer, the same database calls for every such request, in this order: with a
    * known network its count; the address's two counts and the count for the address and the
    * tour (under the address "" when it is malformed); the gate's question; the count of the
-   * site's viewer mails (under the quiet key when nothing will be sent); the two sweeps. Then
-   * one job for every request, which waits until the answer is out (linkJob).
+   * tour's workspace's viewer mails and the site's backstop (each under the quiet key when
+   * nothing will be sent); the two sweeps. Then one job for every request, which waits until the
+   * answer is out (linkJob). Neither cap says to the requester that it was reached.
    */
   app.post("/api/v1/view/request", async (c) => {
     const req = c.req.raw;
@@ -327,14 +332,20 @@ export function viewerRoutes(app: Hono, deps: Deps): void {
     const pair = await hitLimit(deps, LIMITS_VIEWER.linkPair, await viewerPairKey(email ?? "", slug));
 
     // The one question about the tour, asked for every request. Nothing of the answer depends on it.
-    const allowed = await gate.mayRequest(deps, slug, email ?? "");
+    const answer = await gate.mayRequest(deps, slug, email ?? "");
+    const workspace = answer.allowed === true && typeof answer.workspaceKey === "string" && answer.workspaceKey !== "" ? answer.workspaceKey : null;
+    // The digest is made for every request, so a yes costs no time a no does not.
+    const workspaceCounter = await viewerWorkspaceKey(workspace ?? "none");
     // The link's address comes from the settings alone, never from this request.
     const origin = viewerLinkOrigin(deps.config);
     const overRecipient = quarter.over || day.over || pair.over;
-    const wanted = email !== null && slug !== "" && allowed === true && origin !== null && mailOf(deps) !== NO_MAIL && !overRecipient;
+    const wanted = email !== null && slug !== "" && workspace !== null && origin !== null && mailOf(deps) !== NO_MAIL && !overRecipient;
 
-    // The cap counts only mails about to be sent; any other request makes the same call under the quiet key.
-    const cap = await hitLimit(deps, LIMITS_VIEWER.mailSite, wanted ? SITE_KEY : SITE_QUIET_KEY);
+    // The caps count only a mail about to be sent; any other request makes the same calls under the quiet key.
+    // The workspace's own cap first: a workspace's owner can fill no count but their own.
+    const ownCap = await hitLimit(deps, LIMITS_VIEWER.mailWorkspace, wanted ? workspaceCounter : SITE_QUIET_KEY);
+    const backstop = await hitLimit(deps, LIMITS_VIEWER.mailSite, wanted && !ownCap.over ? SITE_KEY : SITE_QUIET_KEY);
+    const cap = { over: ownCap.over || backstop.over };
 
     await sweepViewers(deps);
     await sweepCounters(deps);

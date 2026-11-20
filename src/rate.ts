@@ -179,8 +179,14 @@ export const LIMITS_CONNECT_MAIL = {
  * null; over: 429), per address (`recipientKey`, over a quarter hour and a day) and per address
  * and tour (`viewerPairKey`). Over any of the last three: the usual answer and nothing sent. The
  * address's own two limits hold however many tours or networks ask, so one mailbox gets at most
- * that many viewer links. The viewer mail has a cap of its own for the whole site, counted under
- * SITE_KEY only for a mail about to be sent, else under SITE_QUIET_KEY, as sign-in's is.
+ * that many viewer links.
+ *
+ * The viewer mail is capped per workspace of the tour, keyed by `viewerWorkspaceKey` of the
+ * opaque key the gate gives for a yes: a workspace's owner can fill only their own workspace's
+ * count, so whether their own mails still go says nothing about another workspace's tours or
+ * lists. A far higher backstop for the whole site, under SITE_KEY, only stops a bug from sending
+ * without end. Each is counted under its real key only for a mail about to be sent, else under
+ * SITE_QUIET_KEY, so every request makes the same two calls.
  *
  * Looking a code up and completing it come from a browser that is not signed in, so they are
  * counted together per network, as trying a sign-in code is. A code is 160 random bits; the
@@ -190,13 +196,15 @@ export const LIMITS_VIEWER = {
   /** Link requests for one address, keyed by `recipientKey`. */
   linkRecipient: { bucket: "view_recipient", windowMs: 900_000, most: 3 },
   /** The same key, over a day. */
-  linkRecipientDay: { bucket: "view_recipient_day", windowMs: 86_400_000, most: 10 },
+  linkRecipientDay: { bucket: "view_recipient_day", windowMs: 86_400_000, most: 5 },
   /** Link requests for one address and one tour, keyed by `viewerPairKey`: asking for one tour again and again stops sooner. */
   linkPair: { bucket: "view_pair", windowMs: 900_000, most: 2 },
   /** Link requests from one network, keyed by `networkKey`. Over: 429. */
   linkNetwork: { bucket: "view_network", windowMs: 900_000, most: 10 },
-  /** Viewer mails from the whole site in an hour: a cap of its own, below sign-in's. */
-  mailSite: { bucket: "view_mail_site", windowMs: 3_600_000, most: 60 },
+  /** Viewer mails for the tours of one workspace in an hour, keyed by `viewerWorkspaceKey`. */
+  mailWorkspace: { bucket: "view_mail_workspace", windowMs: 3_600_000, most: 30 },
+  /** Viewer mails from the whole site in an hour: a backstop far above what workspaces send, apart from sign-in's cap. */
+  mailSite: { bucket: "view_mail_site", windowMs: 3_600_000, most: 1000 },
   /** Code look-ups and completions from one network, keyed by `networkKey`. Over: 429. */
   codeNetwork: { bucket: "view_code_network", windowMs: 900_000, most: 20 },
 } as const satisfies Record<string, Limit>;
@@ -210,6 +218,17 @@ export async function viewerPairKey(email: string, slug: string): Promise<string
   if (typeof email !== "string") throw new Error("bad email");
   if (typeof slug !== "string") throw new Error("bad slug");
   return sha256Hex("rate viewer pair\n" + email.trim().toLowerCase() + "\n" + slug);
+}
+
+/**
+ * The key one workspace's viewer mails are counted under: 64 hex characters, the digest of a
+ * fixed prefix and the opaque key the viewer gate gave for the tour's workspace, so the counter
+ * row names no workspace and any key the gate gives fits. Rejects with "bad key" for anything
+ * that is not text of at least one character.
+ */
+export async function viewerWorkspaceKey(gateKey: string): Promise<string> {
+  if (typeof gateKey !== "string" || gateKey === "") throw new Error("bad key");
+  return sha256Hex("rate viewer workspace\n" + gateKey);
 }
 
 /** The key of a counter that counts for the whole site. */
