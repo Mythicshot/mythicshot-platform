@@ -257,7 +257,13 @@ describe("migrations, usage, pages and tokens", () => {
       upload: { columns: ["id", "workspace_id", "closing_at", "reserved_bytes"], rows: [["u1", WS, null, 7], ["u2", WS, 5, 1000], ["u3", "ws_other", null, 3]] },
     };
     const sum = usageFromRows(db, WS);
-    expect(sum).toEqual({ pictures: 30, logos: 100, uploads: 7, used: 137, tours: 2 });
+    expect(sum).toEqual({ pictures: 30, logos: 100, uploads: 7, media: 0, used: 137, tours: 2 });
+    // Shared items that are not closing count in used_bytes, with their previews.
+    const withItems: DbSnapshot = {
+      ...db,
+      media: { columns: ["id", "workspace_id", "state", "bytes", "preview_bytes"], rows: [["m1", WS, "online", 50, 5], ["m2", WS, "uploading", 20, null], ["m3", WS, "closing", 999, 9], ["m4", "ws_other", "online", 7, null]] },
+    };
+    expect(usageFromRows(withItems, WS)).toEqual({ pictures: 30, logos: 100, uploads: 7, media: 75, used: 212, tours: 2 });
     const good = answer(200, JSON.stringify({ used_bytes: 137, allowance_bytes: null, over: false, tours: 2, counted: { pictures: 30, logos: 100, uploads_in_progress: 7 } }));
     expect(usageProblems(good, sum)).toEqual([]);
     const off = answer(200, JSON.stringify({ used_bytes: 136, allowance_bytes: null, over: false, tours: 2, counted: { pictures: 29, logos: 100, uploads_in_progress: 7 } }));

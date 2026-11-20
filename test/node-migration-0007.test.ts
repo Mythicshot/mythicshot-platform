@@ -89,9 +89,17 @@ describe("migration 0007 on an existing install", () => {
       ]);
 
       // Usage of what was there before: the steps, and nothing for the old logo or the old upload.
+      // Today's usage also counts shared items, so it needs the table of migration 0010, which
+      // is applied here on its own (it touches nothing this migration made). A real install
+      // runs today's build only after every migration: the Node server migrates before it
+      // serves, and the Cloudflare update migrates before it deploys.
+      const mediaOnly = join(root, "media");
+      await mkdir(mediaOnly);
+      await copyFile(join(MIGRATIONS_DIR, "0010_media.sql"), join(mediaOnly, "0010_media.sql"));
+      expect(await migrate(db, mediaOnly)).toEqual(["0010_media.sql"]);
       const deps: Deps = { db, drafts: null as never, pub: null as never, config: { publicImageBase: "", setupCode: null }, now: () => NOW };
-      expect(await usageOf(deps, "ws_1")).toEqual({ pictures: 3300, logos: 0, uploads: 0, used: 3300, allowance: null, over: false, tours: 2 });
-      expect(await usageOf(deps, "ws_2")).toEqual({ pictures: 77_000, logos: 0, uploads: 0, used: 77_000, allowance: null, over: false, tours: 1 });
+      expect(await usageOf(deps, "ws_1")).toEqual({ pictures: 3300, logos: 0, uploads: 0, media: 0, used: 3300, allowance: null, over: false, tours: 2 });
+      expect(await usageOf(deps, "ws_2")).toEqual({ pictures: 77_000, logos: 0, uploads: 0, media: 0, used: 77_000, allowance: null, over: false, tours: 1 });
 
       // The statements 0.1.7 runs still work on the migrated database: it names none of the new columns.
       await db.run("INSERT INTO workspace (id, name, created_at) VALUES ('ws_3', 'Later', 3)");
