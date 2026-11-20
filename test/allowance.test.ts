@@ -163,7 +163,7 @@ describe("an upload against the allowance", () => {
   });
 
   it('the sentence is under 200 characters and reads after "Could not start the upload: "', async () => {
-    const usage = (used: number, allowance: number): Usage => ({ pictures: used, logos: 0, uploads: 0, used, allowance, over: used > allowance, tours: 1 });
+    const usage = (used: number, allowance: number): Usage => ({ pictures: used, logos: 0, uploads: 0, media: 0, used, allowance, over: used > allowance, tours: 1 });
     const MAX = Number.MAX_SAFE_INTEGER;
     // The longest sizes there are: four digits of bytes or KB, and the largest allowance in GB.
     const cases: [Usage, number][] = [
@@ -203,7 +203,7 @@ describe("an upload against the allowance", () => {
   });
 
   it("the sentence never shows the room left as large as the room needed: the need rounds up, what is left rounds down", async () => {
-    const usage = (used: number, allowance: number): Usage => ({ pictures: used, logos: 0, uploads: 0, used, allowance, over: used > allowance, tours: 1 });
+    const usage = (used: number, allowance: number): Usage => ({ pictures: used, logos: 0, uploads: 0, media: 0, used, allowance, over: used > allowance, tours: 1 });
     const detailOf = async (used: number, allowance: number, needed: number) => ((await storageFull(usage(used, allowance), needed).json()) as Json).detail as string;
     // 3,250,000 needed and 3,230,000 left would both read 3.1 MB to the nearest tenth.
     expect(await detailOf(7_255_760, 10_485_760, 3_250_000)).toContain("this tour needs 3.1 MB of room, but the workspace has 3 MB left of its 10 MB allowance.");

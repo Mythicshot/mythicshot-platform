@@ -87,6 +87,15 @@ export const LIMITS_EMAIL_CHANGE = {
   mailSite: { bucket: "email_mail_site", windowMs: 3_600_000, most: 30 },
 } as const satisfies Record<string, Limit>;
 
+/**
+ * The limits on shared items (src/media.ts). Starting an item, per workspace, keyed by
+ * `workspaceKey`; every start that passes the checks of its body is counted, also one the
+ * storage allowance then refuses. Over: 429 with retry-after.
+ */
+export const LIMITS_MEDIA = {
+  create: { bucket: "media_create", windowMs: 3_600_000, most: 60 },
+} as const satisfies Record<string, Limit>;
+
 /** The key of a counter that counts for the whole site. */
 export const SITE_KEY = "site";
 
@@ -140,6 +149,16 @@ export async function recipientKey(email: string): Promise<string> {
 export async function accountKey(userId: string): Promise<string> {
   if (typeof userId !== "string" || userId === "") throw new Error("bad account");
   return sha256Hex("rate account\n" + userId);
+}
+
+/**
+ * The key a workspace is counted under: 64 hex characters, the digest of a fixed prefix and
+ * the workspace's id, so a counter row names no workspace by its id. Rejects with "bad
+ * workspace" for anything that is not text.
+ */
+export async function workspaceKey(workspaceId: string): Promise<string> {
+  if (typeof workspaceId !== "string" || workspaceId === "") throw new Error("bad workspace");
+  return sha256Hex("rate workspace\n" + workspaceId);
 }
 
 /**

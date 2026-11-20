@@ -8,13 +8,17 @@
 //   its age. An upload can be committed until it is swept, so it holds its room until
 //   then; otherwise one that outlived the day could land on top of a newer one, past the
 //   allowance.
+// - every shared item that is not closing (src/media.ts): the bytes its create declared,
+//   reserved from that create on, and the size of its preview once one is being stored.
+//   An item that is being deleted or was swept is closing, and stops counting at once.
 // Not counted: published copies (no size is recorded for them), pictures a replace took
 // out and files of a deleted tour that still wait to be cleaned up, uploads that are
 // closing, and upload_step.bytes (the reservation already holds the declared bytes). Two
 // steps that reuse one stored picture count twice.
 //
-// Nothing here deletes anything. The one refusal is made by the statement that creates an
-// upload (src/uploads.ts), built from USED_SQL and ALLOWANCE_OF_SQL; this file words its
+// Nothing here deletes anything. The refusals are made by the statements that create an
+// upload (src/uploads.ts) or an item (src/media.ts), or claim an item's preview, built
+// from USED_SQL and ALLOWANCE_OF_SQL; this file words their
 // answer (storageFull) and serves a workspace its own numbers (GET /api/v1/usage)
 // and its largest tours (GET /api/v1/usage/largest).
 //
@@ -48,12 +52,13 @@ export function allowanceFromSetting(raw: string | undefined): { ok: true; bytes
   return { ok: true, bytes };
 }
 
-// The three sums, each a scalar subquery over the row `p`, which holds the workspace id
+// The four sums, each a scalar subquery over the row `p`, which holds the workspace id
 // as p.ws. Both USED_SQL and usageOf are built from these, so the number a create is held
 // against is the number shown.
 const PICTURES = "(SELECT coalesce(sum(s.bytes), 0) FROM tour t JOIN step s ON s.tour_id = t.id WHERE t.workspace_id = p.ws)";
 const LOGOS = "(SELECT coalesce(sum(t.logo_bytes), 0) FROM tour t WHERE t.workspace_id = p.ws)";
 const UPLOADS = "(SELECT coalesce(sum(u.reserved_bytes), 0) FROM upload u WHERE u.workspace_id = p.ws AND u.closing_at IS NULL)";
+const MEDIA = "(SELECT coalesce(sum(m.bytes + coalesce(m.preview_bytes, 0)), 0) FROM media m WHERE m.workspace_id = p.ws AND m.state <> 'closing')";
 const TOURS = "(SELECT count(*) FROM tour t WHERE t.workspace_id = p.ws)";
 
 /**
@@ -72,19 +77,19 @@ export const LARGEST_TOURS = 10;
 const PARAMS = "(SELECT ? AS ws) p";
 
 /**
- * The three sums and the tour count as the columns `pictures`, `logos`, `uploads` and
- * `tours`, for a SELECT whose FROM has a row `p` that holds the workspace id as p.ws. It
+ * The four sums and the tour count as the columns `pictures`, `logos`, `uploads`, `media`
+ * and `tours`, for a SELECT whose FROM has a row `p` that holds the workspace id as p.ws. It
  * takes no parameter. usageOf reads one workspace's numbers with it, and the admin's list
  * of accounts reads every workspace's with it (src/admin-api.ts), so the two can never
  * disagree.
  */
-export const USAGE_COLUMNS = `${PICTURES} AS pictures, ${LOGOS} AS logos, ${UPLOADS} AS uploads, ${TOURS} AS tours`;
+export const USAGE_COLUMNS = `${PICTURES} AS pictures, ${LOGOS} AS logos, ${UPLOADS} AS uploads, ${MEDIA} AS media, ${TOURS} AS tours`;
 
 /**
  * The bytes a workspace uses, as a scalar subquery for use inside another statement. It
  * takes one parameter: the workspace id. It is 0, never null, for a workspace with nothing.
  */
-export const USED_SQL = `(SELECT ${PICTURES} + ${LOGOS} + ${UPLOADS} FROM ${PARAMS})`;
+export const USED_SQL = `(SELECT ${PICTURES} + ${LOGOS} + ${UPLOADS} + ${MEDIA} FROM ${PARAMS})`;
 
 /**
  * The allowance of the row of `workspace` in scope: its own number, else the one
@@ -110,23 +115,23 @@ export function allowanceParams(deps: Deps, workspaceId: string): Value[] {
 }
 
 /**
- * `used` is pictures + logos + uploads. `allowance` is null when there is no limit, and
+ * `used` is pictures + logos + uploads + media. `allowance` is null when there is no limit, and
  * `over` is true only when there is one and more than it is used: exactly the allowance
  * is not over it.
  */
-export type Usage = { pictures: number; logos: number; uploads: number; used: number; allowance: number | null; over: boolean; tours: number };
+export type Usage = { pictures: number; logos: number; uploads: number; media: number; used: number; allowance: number | null; over: boolean; tours: number };
 
 /** The numbers a row read with USAGE_COLUMNS and the allowance hold, as a Usage. usageOf and the admin's list both make theirs here. */
-export function usageFromRow(row: { pictures: number; logos: number; uploads: number; tours: number; allowance: number | null }): Usage {
-  const { pictures, logos, uploads, tours, allowance } = row;
-  const used = pictures + logos + uploads;
-  return { pictures, logos, uploads, used, allowance, over: allowance !== null && used > allowance, tours };
+export function usageFromRow(row: { pictures: number; logos: number; uploads: number; media: number; tours: number; allowance: number | null }): Usage {
+  const { pictures, logos, uploads, media, tours, allowance } = row;
+  const used = pictures + logos + uploads + media;
+  return { pictures, logos, uploads, media, used, allowance, over: allowance !== null && used > allowance, tours };
 }
 
 /** The usage of one workspace and the allowance it is held against, in one database call. */
 export async function usageOf(deps: Deps, workspaceId: string): Promise<Usage> {
   const site = deps.config.storageAllowanceBytes ?? null;
-  const row = await deps.db.first<{ pictures: number; logos: number; uploads: number; tours: number; allowance: number | null }>(
+  const row = await deps.db.first<{ pictures: number; logos: number; uploads: number; media: number; tours: number; allowance: number | null }>(
     `SELECT ${USAGE_COLUMNS},
             coalesce((SELECT ${ALLOWANCE_SQL} FROM workspace WHERE workspace.id = p.ws), ?) AS allowance
        FROM ${PARAMS}`,
@@ -137,6 +142,9 @@ export async function usageOf(deps: Deps, workspaceId: string): Promise<Usage> {
   return usageFromRow(row!);
 }
 
+/** What a storage-full answer is about: a tour's upload, a shared image, a shared clip, or an item's preview picture. */
+export type StorageFullOf = "tour" | "image" | "clip" | "preview";
+
 /**
  * The answer to a create that would take the workspace over its allowance: 413 with the
  * code storage_full, the three numbers in bytes, and one sentence a client can show as it
@@ -145,12 +153,20 @@ export async function usageOf(deps: Deps, workspaceId: string): Promise<Usage> {
  * are it stays under 200 characters. It says how much the upload needs (for a replace:
  * how much the chapter grows), how much of the allowance is left, that nothing was
  * uploaded, and what makes room. The site itself never deletes anything to make room.
+ *
+ * `of` names what needs the room: a tour by default (that sentence is unchanged since it
+ * was first written), "this image" or "this GIF" for a shared item of either kind (a clip
+ * is a GIF or an MP4; people call both a GIF), "this preview" for an item's preview.
  */
-export function storageFull(u: Usage, needed: number): Response {
+export function storageFull(u: Usage, needed: number, of: StorageFullOf = "tour"): Response {
   const allowance = u.allowance ?? 0;
   const left = Math.max(0, allowance - u.used);
   const sizes = roomSizes(needed, left);
-  const detail = `this tour needs ${sizes.needed} of room, but the workspace has ${sizes.left} left of its ${formatBytes(allowance)} allowance. Nothing was uploaded. Delete tours you no longer need, or ask the site's admin for more room`;
+  const room = `needs ${sizes.needed} of room, but the workspace has ${sizes.left} left of its ${formatBytes(allowance)} allowance. Nothing was uploaded.`;
+  const detail =
+    of === "tour"
+      ? `this tour ${room} Delete tours you no longer need, or ask the site's admin for more room`
+      : `this ${of === "image" ? "image" : of === "clip" ? "GIF" : "preview"} ${room} Delete what you no longer need, or ask the site's admin for more room`;
   return json(413, { error: "storage_full", detail, used_bytes: u.used, allowance_bytes: allowance, needed_bytes: needed });
 }
 

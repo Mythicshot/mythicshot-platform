@@ -85,7 +85,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
     if (auth instanceof Response) return auth;
     const row = await deps.db.first<{ accounts: number; used: number }>(
       `SELECT (SELECT count(*) FROM user) AS accounts,
-              (SELECT coalesce(sum(w.pictures + w.logos + w.uploads), 0) FROM (SELECT ${USAGE_COLUMNS} FROM (SELECT id AS ws FROM workspace) p) w) AS used`,
+              (SELECT coalesce(sum(w.pictures + w.logos + w.uploads + w.media), 0) FROM (SELECT ${USAGE_COLUMNS} FROM (SELECT id AS ws FROM workspace) p) w) AS used`,
     );
     return json(200, { accounts: row?.accounts ?? 0, used_bytes: row?.used ?? 0, standard_allowance_bytes: deps.config.storageAllowanceBytes ?? null });
   });
@@ -117,6 +117,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       pictures: number;
       logos: number;
       uploads: number;
+      media: number;
       tours: number;
     };
     // One read. The page of accounts is chosen first, one more than a page to tell whether
