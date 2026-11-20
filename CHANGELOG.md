@@ -2,6 +2,39 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.18 (2026-11-19)
+
+- Guides for switching mail on, accounts and signing in, the dashboard, changing an email address, and what to do when mail does not arrive or someone is locked out.
+- When the mail thread cannot start, the log says so in one clear line.
+- An update on Cloudflare keeps the `INVITE_CONTACT` setting.
+
+## 0.1.17 (2026-11-19)
+
+- Dashboard, Admin page: the admin sees every account with its workspace's name and storage use, and can set one workspace's storage allowance. The admin never sees anyone's tours or content, and nobody else sees this page.
+- A warning before saving an allowance of 0, or one at or below what the workspace already uses.
+
+## 0.1.16 (2026-11-19)
+
+- Dashboard, Account page: your details and the browsers you are signed in on, with sign out for one or for all.
+- Changing your email address: the new address gets a link, and the address changes only when you confirm it while signed in. The old address gets a notice.
+- The answer is the same whether or not the new address already belongs to an account.
+- On a site without mail, the admin can change an account's address with a command on the server, while `RECOVERY_LINKS=on` is set.
+- After signing in you land on the Tours page.
+
+## 0.1.15 (2026-11-19)
+
+- Dashboard, Storage page: how much room the workspace uses of its allowance, what takes the room, and the largest tours with a way to delete them.
+
+## 0.1.14 (2026-11-19)
+
+- Dashboard: signed-in people get a bar across the top and a Tours page, with each tour's link to copy, its status and size, and publish, unpublish and delete.
+- The list is read again after any change that did not finish, so it never shows a tour that is already gone or offline.
+
+## 0.1.13 (2026-11-19)
+
+- The tour list gives each tour's size. Two new requests give a workspace's ten largest tours and, for the admin, the totals for the whole site.
+- Sizes are written one way everywhere. The storage-full message rounds the room needed up and the room left down, so the two never read the same.
+
 ## 0.1.12 (2026-11-19)
 
 - Sign-in pages on the app address: enter an email address, get a link, press one button to sign in. There is no password.
