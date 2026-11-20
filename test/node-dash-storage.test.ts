@@ -260,10 +260,12 @@ describe("the Storage page", () => {
     expect(tab.$("storage-counts").shown).toBe(true);
   });
 
-  it("writes one of each in the singular, and leaves out a count of images or GIFs that is 0, as mockup 6 does", async () => {
+  it("writes one of each in the singular, and leaves out a count that is 0 (never \"· 0 tours\" beside images or GIFs), but says \"0 tours\" for a workspace with nothing", async () => {
     for (const [n, text] of [
       [{ images: 1, gifs: 1, tours: 1 }, "2 MB used · 1 image · 1 GIF · 1 tour"],
-      [{ images: 2, gifs: 0, tours: 0 }, "2 MB used · 2 images · 0 tours"],
+      [{ images: 2, gifs: 0, tours: 0 }, "2 MB used · 2 images"],
+      [{ images: 0, gifs: 1, tours: 0 }, "2 MB used · 1 GIF"],
+      [{ images: 0, gifs: 0, tours: 0 }, "2 MB used · 0 tours"],
       [{ images: 0, gifs: 3, tours: 1 }, "2 MB used · 3 GIFs · 1 tour"],
       [{ images: 0, gifs: 0, tours: 5 }, "2 MB used · 5 tours"],
     ] as const) {
@@ -285,7 +287,7 @@ describe("the Storage page", () => {
   it("items take the workspace over as tours do", async () => {
     const tab = openStorage(standard({ "GET /api/v1/usage": usage({ pictures: 0, logos: 0, uploads: 0, imageBytes: 3 * GB, gifBytes: 3 * GB, allowance: 5 * GB, tours: 0, images: 4, gifs: 2 }) }));
     await tab.settle();
-    expect(line(tab)).toBe("6 GB of 5 GB used · 4 images · 2 GIFs · 0 tours");
+    expect(line(tab)).toBe("6 GB of 5 GB used · 4 images · 2 GIFs");
     expect([tab.$("storage-bar").className, tab.$("storage-over").shown]).toEqual(["meter over", true]);
     expect(room(tab)).toEqual(["0 bytes", "3 GB", "3 GB", "0 bytes", "0 bytes"]);
   });
@@ -757,6 +759,61 @@ describe("deleting an image or a GIF from the Storage page", () => {
     await blind.settle();
     expect([blind.$("delete-dialog").shown, blind.$("delete-message").textContent]).toEqual([true, FAILED]);
     expect(rows(blind).map(titleOf)).toEqual(M5_TOURS.map((t) => t.title));
+  });
+
+  it("once a send answered cleanup_pending the item is deleted: a later 429, 500 or lost answer still counts as done", async () => {
+    const pending = { status: 500, json: { error: "cleanup_pending" } };
+    for (const later of [{ status: 429, json: { error: "rate_limited" } }, { status: 500, json: { error: "internal" } }, "network", { status: 409, json: { error: "other" } }] as const) {
+      for (const answers of [[pending, later], [pending, pending, later]]) {
+        const tab = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: answers as Answer[], "GET /api/v1/usage": [usage(M5), afterGif], "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
+        await tab.settle();
+        deleteOf(rows(tab)[GIF_ROW]).click();
+        tab.$("delete-go").click();
+        for (let i = 0; i < 3; i++) {
+          await tab.settle();
+          tab.tick();
+        }
+        await tab.settle();
+        const what = JSON.stringify(answers);
+        expect(deletes(tab), what).toHaveLength(answers.length);
+        expect(tab.$("delete-dialog").shown, what).toBe(false);
+        expect([tab.$("delete-message").hidden, tab.$("storage-message").hidden], what).toEqual([true, true]);
+        expect(rows(tab).map(titleOf), what).toEqual(["Full onboarding, long cut", "Timeline rehearsal walkthrough"]);
+        expect(tab.doc.activeElement, what).toBe(tab.$("h-page"));
+      }
+    }
+    // Even when the list read again still shows it (the server lists no closing item, but a page can be stale): the delete is done, the page shows the list as read.
+    const stale = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: [pending, "network"] }));
+    await stale.settle();
+    deleteOf(rows(stale)[GIF_ROW]).click();
+    stale.$("delete-go").click();
+    for (let i = 0; i < 3; i++) {
+      await stale.settle();
+      stale.tick();
+    }
+    await stale.settle();
+    expect([stale.$("delete-dialog").shown, stale.$("delete-message").hidden]).toEqual([false, true]);
+  });
+
+  it("a lost answer with a full list: an entry of the same size is put in order by id, as the server orders the list", async () => {
+    const SIZE = 96 * MB;
+    const same = (id: string, i: number): Entry => ({ kind: id.startsWith("tour_") ? "tour" : "image", id, title: `Same ${i}`, bytes: SIZE });
+    const bigger = Array.from({ length: 9 }, (_, i): Entry => ({ kind: "tour", id: "tour_" + String(i).padStart(24, "0"), title: `Big ${i}`, bytes: GB + i }));
+    // The last entry has the item's size and an id after the item's ("tour_" > "med_"): the item, were it there, would be listed before it, so it is gone.
+    const later = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", "GET /api/v1/usage/largest": [largest(M5_TOURS), largest([...bigger, same(T3, 0)])] }));
+    await later.settle();
+    deleteOf(rows(later)[GIF_ROW]).click();
+    later.$("delete-go").click();
+    await later.settle();
+    expect(later.$("delete-dialog").shown).toBe(false);
+    expect(later.$("delete-message").hidden).toBe(true);
+    // The last entry has the item's size and an id before the item's: the item could be just past the list, so it cannot tell, and it is a failure.
+    const earlier = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", "GET /api/v1/usage/largest": [largest(M5_TOURS), largest([...bigger, same("med_" + "0".repeat(24), 1)])] }));
+    await earlier.settle();
+    deleteOf(rows(earlier)[GIF_ROW]).click();
+    earlier.$("delete-go").click();
+    await earlier.settle();
+    expect([earlier.$("delete-dialog").shown, earlier.$("delete-message").textContent]).toEqual([true, FAILED]);
   });
 
   it("an item already gone (404) counts as deleted", async () => {

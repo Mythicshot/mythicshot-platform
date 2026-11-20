@@ -1,7 +1,8 @@
 // The Storage page of the dashboard, /storage, as in the approved mockups 5 and 6: the
 // workspace's name, the allowance bar with the line "<used> of <allowance> used · N images ·
-// N GIFs · N tours" (no bar, only the total, when no allowance is set; a count of images or
-// GIFs is left out while it is 0, as mockup 6 shows a workspace with tours only), the
+// N GIFs · N tours" (no bar, only the total, when no allowance is set; a count that is 0 is
+// left out, as mockup 6 shows a workspace with tours only, but "0 tours" stays when the
+// workspace has nothing at all), the
 // over-allowance warning, what takes the room (the pictures in tours, GIFs, images, logos,
 // uploads in progress, as GET /api/v1/usage counts them), and the largest things of every
 // kind (the `largest` list of GET /api/v1/usage/largest), each marked Tour, Image or GIF,
@@ -234,7 +235,8 @@ export const STORAGE_JS = `(function () {
     var parts = [Dash.formatBytes(u.used_bytes) + (limit !== null ? TEXT.of + Dash.formatBytes(limit) : "") + TEXT.used];
     if (u.images > 0) parts.push(counted(u.images, TEXT.oneImage, TEXT.images));
     if (u.gifs > 0) parts.push(counted(u.gifs, TEXT.oneGif, TEXT.gifs));
-    parts.push(counted(u.tours, TEXT.oneTour, TEXT.tours));
+    // A count of tours that is 0 is left out too beside images or GIFs; with nothing at all the line says "0 tours".
+    if (u.tours > 0 || parts.length === 1) parts.push(counted(u.tours, TEXT.oneTour, TEXT.tours));
     $("storage-total").textContent = parts.join(TEXT.dot);
     var bar = $("storage-bar");
     bar.hidden = limit === null;
@@ -318,26 +320,42 @@ export const STORAGE_JS = `(function () {
   }
 
   // Sends an item's delete, again after a pause while its files are not all removed yet, at most ITEM_ROUNDS times; the last answer.
+  // Once a send has answered cleanup_pending the item is deleted: a later send that ends in
+  // anything but 204 or 404 (429, another 500, no answer) changes nothing of that, and that
+  // cleanup_pending answer is the last answer.
   function runItem(id) {
     var rounds = 0;
+    var pending = null;
     function next() {
       rounds++;
-      return Dash.api("DELETE", "/api/v1/media/" + encodeURIComponent(id)).then(function (res) {
-        return leftovers(res) && rounds < ITEM_ROUNDS ? pause(PAUSES_MS[rounds - 1]).then(next) : res;
-      });
+      return Dash.api("DELETE", "/api/v1/media/" + encodeURIComponent(id)).then(
+        function (res) {
+          if (leftovers(res)) {
+            pending = res;
+            return rounds < ITEM_ROUNDS ? pause(PAUSES_MS[rounds - 1]).then(next) : res;
+          }
+          return pending !== null && res.status !== 204 && res.status !== 404 ? pending : res;
+        },
+        function (err) {
+          if (pending !== null) return pending;
+          throw err;
+        },
+      );
     }
     return next();
   }
 
   // After a delete whose answer was lost, whether the list read again shows the item gone: it
-  // is not listed although it would still fit (the list is not full, or holds a smaller entry).
+  // is not listed although it would still fit: the list is not full, or holds an entry the
+  // server orders after it (smaller, or of the same size with a later id).
   function goneFromList(e) {
-    var smaller = false;
+    var after = false;
     for (var i = 0; i < listed.length; i++) {
-      if (listed[i].id === e.id) return false;
-      if (listed[i].bytes < e.bytes) smaller = true;
+      var x = listed[i];
+      if (x.id === e.id) return false;
+      if (x.bytes < e.bytes || (x.bytes === e.bytes && x.id > e.id)) after = true;
     }
-    return listed.length < LARGEST || smaller;
+    return listed.length < LARGEST || after;
   }
 
   function leftovers(res) {
