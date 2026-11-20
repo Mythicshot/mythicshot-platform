@@ -276,7 +276,9 @@ describe("the Storage page", () => {
     expect(STORAGE_JS).not.toMatch(/\bfetch\(/);
     expect(STORAGE_JS).not.toMatch(/csrf/i);
     const requests = [...STORAGE_JS.matchAll(/\bapi\("([A-Z]+)", ("[^"]*")/g)].map((m) => `${m[1]} ${m[2]}`);
-    expect(requests.sort()).toEqual(['DELETE "/api/v1/media/"', 'DELETE "/api/v1/tours/"', 'GET "/api/v1/usage"', 'GET "/api/v1/usage/largest"']);
+    expect(requests.sort()).toEqual(['DELETE "/api/v1/media/"', 'DELETE "/api/v1/tours/"', 'GET "/api/v1/media/"', 'GET "/api/v1/usage"', 'GET "/api/v1/usage/largest"']);
+    // The item itself, asked only after an image's or a GIF's delete got no answer: its id matched ITEM_ID and is escaped.
+    expect(STORAGE_JS).toContain('Dash.api("GET", "/api/v1/media/" + encodeURIComponent(id))');
     expect(STORAGE_JS).toContain('Dash.api("DELETE", "/api/v1/tours/" + encodeURIComponent(id))');
     expect(STORAGE_JS).toContain('Dash.api("DELETE", "/api/v1/media/" + encodeURIComponent(id))');
     const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer", "navigator"];

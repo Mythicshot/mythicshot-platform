@@ -691,9 +691,16 @@ describe("deleting an item", () => {
       expect(still.doc.activeElement, state).toBe(still.$("delete-go"));
     }
 
-    // The item cannot be asked either (no answer, or an answer that is not a 404): nothing says it
-    // is gone, so the failure stands, though the list read again no longer has it.
-    for (const asked of ["network", { status: 500, json: { error: "internal" } }, { status: 429, json: { error: "rate_limited" } }] as Answer[]) {
+    // The item cannot be asked either (no answer, a 404 that is not the API's own not_found, as
+    // from a proxy, or another answer): nothing says it is gone, so the failure stands, though the
+    // list read again no longer has it. A 429 is told with its own sentence.
+    for (const [asked, text] of [
+      ["network", FAILED],
+      [{ status: 404, json: null }, FAILED],
+      [{ status: 404, json: { error: "gone" } }, FAILED],
+      [{ status: 500, json: { error: "internal" } }, FAILED],
+      [{ status: 429, json: { error: "rate_limited" } }, TOO_MANY],
+    ] as [Answer, string][]) {
       const what = JSON.stringify(asked);
       const unknown = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [ITEM_M1]: asked, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
       await unknown.settle();
@@ -701,7 +708,7 @@ describe("deleting an item", () => {
       unknown.$("delete-go").click();
       await unknown.settle();
       expect(unknown.$("delete-dialog").hidden, what).toBe(false);
-      expect(unknown.$("delete-message").textContent, what).toBe(FAILED);
+      expect(unknown.$("delete-message").textContent, what).toBe(text);
       expect(rows(unknown), what).toHaveLength(2);
       expect(unknown.doc.activeElement, what).toBe(unknown.$("delete-go"));
     }
