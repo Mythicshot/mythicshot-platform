@@ -24,8 +24,9 @@
 //   are never printed and never written anywhere.
 //
 // Each build is the real Node entry, started as a child process on 127.0.0.1 and a free
-// port with only the settings above (no mail, no setup code). Requests carry the Host
-// header the mode needs, and go nowhere but 127.0.0.1.
+// port with only the settings above and CLIENT_ADDRESS_HEADER (no mail, no setup code), as
+// behind a proxy (PROXY_SETTINGS). Requests carry the Host header the mode needs and the
+// proxy's header with a documentation address, and go nowhere but 127.0.0.1.
 //
 // What is checked, in order: the old build on the copy (health, then per token the tour
 // list, the usage when the build has it, the workspace, every listed tour's public page and
@@ -125,6 +126,18 @@ export function buildModes(asked: Mode, old: { version: string; knowsImg: boolea
 }
 
 const LOOPBACK = "127.0.0.1";
+
+/**
+ * The rehearsal stands in for a site behind a proxy, as every install is (cPanel, the
+ * container behind its tunnel): every build runs with the setting that names the header the
+ * proxy writes the visitor's address in, and every request carries that header with one
+ * fixed documentation address (RFC 5737), so a build sees a known client address as it does
+ * in production. Without it, a build from 0.1.26 on sees requests from 127.0.0.1 and writes
+ * its one line that a proxy hides every visitor's address. A build before the setting came
+ * (0.1.7 and 0.1.8 read neither the setting nor any forwarded header) ignores both.
+ */
+export const PROXY_SETTINGS: Readonly<Record<string, string>> = { CLIENT_ADDRESS_HEADER: "X-Forwarded-For" };
+export const CLIENT_ADDRESS = "203.0.113.7";
 const TOKEN = /^dp_[0-9a-f]{40}$/;
 /** The accounts migration, whose tables and backfill are checked when the update applies it. */
 export const ACCOUNTS_MIGRATION = "0008_accounts.sql";
@@ -203,7 +216,7 @@ export function spawnBuild(build: string, dataDir: string, mode: Mode, workDir: 
   const entry = join(build, "dist", "node", "entry.js");
   const child = spawn(process.execPath, ["--import", preloadIn(workDir), entry], {
     cwd: build,
-    env: childEnv({ ...modeSettings(mode), ...extra, DATA_DIR: dataDir, PORT: String(port) }),
+    env: childEnv({ ...PROXY_SETTINGS, ...modeSettings(mode), ...extra, DATA_DIR: dataDir, PORT: String(port) }),
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -264,6 +277,60 @@ export async function waitReady(r: Running, hosts: string[], roles: (string | nu
   throw new Error("the build did not answer its health check in time");
 }
 
+/**
+ * The error lines a build may write that the report repeats word for word: the app's own
+ * fixed lines, none of which holds a value. Any other line could hold data (an id, a reason
+ * from a mail server), so it is named by its length only.
+ */
+export const KNOWN_ERROR_LINES: readonly string[] = [
+  "client address: requests come from a private or local address, which is how a proxy in front of the app looks; set CLIENT_ADDRESS_HEADER to the header your proxy writes the visitor's address in, or the limits per network (signing in, connecting the app) cannot tell visitors apart",
+  "client address: unknown, because CLIENT_ADDRESS_HEADER is not a usable header name. The site runs; no request is counted by its network address.",
+  "background: work after an answer failed",
+  "page: a published snapshot is malformed; answering 404",
+  "share: an online item's part is missing or has the wrong length; answering 404",
+  "media: could not remove loose files of an item; a later send, commit or sweep removes them",
+  "media: could not remove replaced files; a later send, commit or sweep removes them",
+  "media: could not remove an object that was not stored; the item's delete or sweep removes it",
+  "media: could not remove replaced files of a finished item; the sweep removes them",
+  "sweep: could not look for unfinished items; will retry later",
+  "sweep: could not look for abandoned uploads; will retry later",
+  "delete: could not remove some files of a deleted item; the next delete call retries",
+  "delete: could not remove some files of a deleted tour; the next delete call retries",
+  "publish: could not remove old public images; will retry later",
+  "replace: could not remove replaced pictures; will retry later",
+];
+
+/** One line per distinct error line, in the order first seen: a known one word for word, any other by its length only. */
+export function errorLineProblems(lines: string[]): string[] {
+  const out: string[] = [];
+  for (const line of [...new Set(lines)]) {
+    out.push(KNOWN_ERROR_LINES.includes(line) ? `a known message: ${line}` : `an error line that is not one of the known messages (${line.length} ${line.length === 1 ? "character" : "characters"})`);
+  }
+  return out;
+}
+
+export type PairStart = { spread: number; startProblems: string[]; errors: string[]; answers: Recorded[] | null; ports: number[] };
+
+/**
+ * Two new builds started at the same moment on one data folder: both must start and answer
+ * health on every address with its role; then the site is recorded from the first, both are
+ * stopped, and every line either wrote to its error output is given back.
+ */
+export async function startPair(build: string, dataDir: string, mode: Mode, workDir: string, tokens: string[], extra: Record<string, string> = {}): Promise<PairStart> {
+  const ports = [await freePort(), await freePort()];
+  const pair = ports.map((p) => spawnBuild(build, dataDir, mode, workDir, p, extra));
+  const spread = Math.abs(pair[1].startedAt - pair[0].startedAt);
+  const ready = await Promise.allSettled(pair.map((r) => waitReady(r, healthHosts(mode), healthRoles(mode))));
+  let answers: Recorded[] | null = null;
+  try {
+    if (ready.every((x) => x.status === "fulfilled")) answers = await recordSite(pair[0].port, mode, tokens);
+  } finally {
+    await Promise.all(pair.map((r) => stopBuild(r)));
+  }
+  const startProblems = ready.flatMap((x, i) => (x.status === "rejected" ? [`process ${i + 1}: ${x.reason instanceof Error ? x.reason.message : "did not start"}`] : []));
+  return { spread, startProblems, errors: pair.flatMap((r) => r.err), answers, ports };
+}
+
 /** Stops a build: SIGTERM (on Windows the process is ended at once), then a kill if it does not exit. */
 export async function stopBuild(r: Running): Promise<void> {
   if (r.child.exitCode !== null || r.child.signalCode !== null) return;
@@ -276,7 +343,7 @@ export async function stopBuild(r: Running): Promise<void> {
 /** One request to 127.0.0.1 with the given Host header, read whole. */
 export function fetchAnswer(port: number, method: string, path: string, host: string, opts: { token?: string; body?: string | Uint8Array; headers?: Record<string, string> } = {}): Promise<Answer> {
   return new Promise((done, fail) => {
-    const headers: Record<string, string> = { host, ...opts.headers };
+    const headers: Record<string, string> = { host, "x-forwarded-for": CLIENT_ADDRESS, ...opts.headers };
     if (opts.token !== undefined) headers.authorization = "Bearer " + opts.token;
     if (opts.body !== undefined) headers["content-length"] = String(Buffer.byteLength(opts.body));
     const req = httpRequest({ host: LOOPBACK, port, method, path, headers, agent: false, setHost: false }, (res) => {
@@ -668,16 +735,9 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     // --- two new builds at the same moment on a fresh copy of the old data
     const race = join(work, "race");
     copyData(args.data, race);
-    const ports = [await freePort(), await freePort()];
-    const pair = ports.map((p) => spawnBuild(newBuild.dir, race, modes.next, work, p));
-    const spread = Math.abs(pair[1].startedAt - pair[0].startedAt);
-    const hosts = healthHosts(modes.next);
-    const ready = await Promise.allSettled(pair.map((r) => waitReady(r, hosts, healthRoles(modes.next))));
-    const raceAnswers = ready.every((x) => x.status === "fulfilled") ? await recordSite(pair[0].port, modes.next, tokens) : null;
-    await Promise.all(pair.map((r) => stopBuild(r)));
-    const startProblems = ready.flatMap((x, i) => (x.status === "rejected" ? [`process ${i + 1}: ${x.reason instanceof Error ? x.reason.message : "did not start"}`] : []));
-    const errorLines = pair.reduce((n, r) => n + r.err.length, 0);
-    report.check(startProblems.length === 0 && errorLines === 0, `two new builds started ${spread} ms apart on a fresh copy: both answer health, ${errorLines} error lines`, startProblems);
+    const { spread, startProblems, errors, answers: raceAnswers } = await startPair(newBuild.dir, race, modes.next, work, tokens);
+    // Each distinct line the two wrote is named once: a known message word for word, any other by its length.
+    report.check(startProblems.length === 0 && errors.length === 0, `two new builds started ${spread} ms apart on a fresh copy: both answer health, ${errors.length} error lines`, [...startProblems, ...errorLineProblems(errors)]);
     const raced = readDb(join(race, "db.sqlite"));
     const raceMigrations = migrationProblems(raced.migrations, newBuild.migrations);
     report.check(raceMigrations.length === 0 && raced.integrity === "ok" && raced.foreignKeyProblems === 0, `two new builds: each migration applied once (${plural(raced.migrations.length, "record")}), integrity ok, no foreign key problems`, [
