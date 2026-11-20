@@ -51,7 +51,7 @@
 // Keys are random and never reused, so a retired key past its grace can be deleted by any
 // request at any time. Nothing is ever found by listing the store.
 import type { Hono } from "hono";
-import { noDisabledAccount } from "./accounts.ts";
+import { beforeAccountsToo, noDisabledAccount } from "./accounts.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
@@ -791,12 +791,15 @@ export function publishRoutes(app: Hono, deps: Deps): void {
     const key = "p/" + name;
     // One call, as before the accounts could be disabled: the condition on the tour's
     // workspace is part of the same statement, through the tour row each name already has.
-    const live = await deps.db.first(
-      `SELECT 1 AS x FROM snapshot_object o JOIN tour t ON t.id = o.tour_id WHERE o.image_key = ? AND ${noDisabledAccount("t.workspace_id")}
-       UNION ALL SELECT 1 AS x FROM public_object o JOIN tour t ON t.id = o.tour_id
-                  WHERE o.image_key = ? AND o.state = 'retired' AND o.delete_after > ? AND ${noDisabledAccount("t.workspace_id")} LIMIT 1`,
-      [key, key, deps.now()],
-    );
+    const lookup = (condition: string) =>
+      deps.db.first(
+        `SELECT 1 AS x FROM snapshot_object o JOIN tour t ON t.id = o.tour_id WHERE o.image_key = ?${condition}
+         UNION ALL SELECT 1 AS x FROM public_object o JOIN tour t ON t.id = o.tour_id
+                    WHERE o.image_key = ? AND o.state = 'retired' AND o.delete_after > ?${condition} LIMIT 1`,
+        [key, key, deps.now()],
+      );
+    // A database the accounts migration has not reached has no account to be disabled.
+    const live = await beforeAccountsToo(() => lookup(` AND ${noDisabledAccount("t.workspace_id")}`), () => lookup(""));
     if (live === null) return missing();
     const file = await deps.pub.get(key);
     if (file === null) return missing();

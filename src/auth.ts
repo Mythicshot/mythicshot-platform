@@ -3,6 +3,7 @@
 //
 // `requireAuth` is the only way a route learns its caller. It takes one credential, a
 // token or a session cookie, and resolves it to exactly one workspace.
+import { isBeforeAccounts } from "./accounts.ts";
 import { onRole, type HostRole } from "./hosts.ts";
 import { json } from "./http.ts";
 import type { Deps } from "./ports.ts";
@@ -196,24 +197,6 @@ const TOKEN_LOOKUP =
   TOKEN_LOOKUP_BEFORE_ACCOUNTS +
   " AND NOT EXISTS (SELECT 1 FROM user u WHERE u.status = 'disabled'" +
   " AND (u.workspace_id = api_token.workspace_id OR u.id IN (SELECT m.user_id FROM membership m WHERE m.workspace_id = api_token.workspace_id)))";
-
-/**
- * True when `err` is the database's report that the status column or the membership
- * table the lookup names does not exist. The exact texts, which the tests take from each
- * target's own database:
- * - Node (node:sqlite): `no such table: membership` and `no such column: u.status`,
- *   the whole message;
- * - Workers (D1): `D1_ERROR: no such table: membership: SQLITE_ERROR` and
- *   `D1_ERROR: no such column: u.status at offset <n>: SQLITE_ERROR`.
- * The name must end where the text does, at a colon or at ` at offset`, so no longer
- * name matches, and no other failure (a lock, a missing api_token table) is this one.
- */
-function isBeforeAccounts(err: unknown): boolean {
-  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
-    if (/(?:^|: )no such (?:table: membership|column: u\.status)(?:$|:| at offset )/.test(e.message)) return true;
-  }
-  return false;
-}
 
 async function tokenAuth(header: string, deps: Deps, touch: boolean): Promise<Auth | Response> {
   const sp = header.indexOf(" ");

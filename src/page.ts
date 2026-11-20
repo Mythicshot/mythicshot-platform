@@ -19,7 +19,7 @@
 // public page only when it is added here on purpose. A part of the wrong type makes the
 // whole snapshot malformed, which answers the same 404 as an unknown slug.
 import type { Hono } from "hono";
-import { noDisabledAccount } from "./accounts.ts";
+import { beforeAccountsToo, noDisabledAccount } from "./accounts.ts";
 import type { Autoplay, Box, Card, EndCard, Link, Note, Point, Theme, Zoom } from "./manifest.ts";
 import { PLAYER_CSS, PLAYER_CSS_ETAG, PLAYER_CSS_PATH, PLAYER_JS, PLAYER_JS_ETAG, PLAYER_JS_PATH } from "./player/assets.ts";
 import type { Deps } from "./ports.ts";
@@ -177,7 +177,8 @@ const SLUG = /^[a-z2-7]{10}$/;
  * The one lookup of the page. A tour of a workspace with a disabled account is not found,
  * in this same statement, so it costs no call more and answers exactly as an unknown slug.
  */
-const PAGE_SQL = `SELECT s.data FROM snapshot s JOIN tour t ON t.id = s.tour_id WHERE t.slug = ? AND t.status = 'published' AND ${noDisabledAccount("t.workspace_id")}`;
+const PAGE_SQL_BEFORE_ACCOUNTS = "SELECT s.data FROM snapshot s JOIN tour t ON t.id = s.tour_id WHERE t.slug = ? AND t.status = 'published'";
+const PAGE_SQL = `${PAGE_SQL_BEFORE_ACCOUNTS} AND ${noDisabledAccount("t.workspace_id")}`;
 
 const HTML_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 
@@ -354,7 +355,11 @@ export function pageRoutes(app: Hono, deps: Deps): void {
   app.get("/t/:slug", async (c) => {
     const base = deps.config.publicImageBase;
     const raw = c.req.param("slug");
-    const row = await deps.db.first<{ data: string }>(PAGE_SQL, [SLUG.test(raw) ? raw : ""]);
+    const slug = SLUG.test(raw) ? raw : "";
+    const row = await beforeAccountsToo(
+      () => deps.db.first<{ data: string }>(PAGE_SQL, [slug]),
+      () => deps.db.first<{ data: string }>(PAGE_SQL_BEFORE_ACCOUNTS, [slug]),
+    );
     if (row === null) return notFoundPage(base);
     let tour: PageTour;
     try {
