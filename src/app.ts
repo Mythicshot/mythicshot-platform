@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { accessRoutes } from "./access.ts";
 import { accountRemovalRoutes } from "./account-removal.ts";
 import { adminRoutes } from "./admin-api.ts";
 import { connectRoutes } from "./connect.ts";
@@ -41,6 +42,7 @@ export function createApp(deps: Deps): Hono {
   uploadRoutes(app, deps);
   mediaRoutes(app, deps);
   tourRoutes(app, deps);
+  accessRoutes(app, deps);
   usageRoutes(app, deps);
   signinRoutes(app, deps);
   emailChangeRoutes(app, deps);

@@ -99,6 +99,13 @@ export function removeTourStatements(ws: string, id: string, now: number): Stmt[
     sql: `INSERT OR IGNORE INTO deleted_object (tour_id, store, image_key) SELECT ?, '${store}', ${from} AND ${live}`,
     params: [id, id, id, ws],
   });
+  // A live picture's store is told by its key (src/publish.ts, storeOfKey): `p/` in the
+  // public store, a restricted tour's `v/` in the private one.
+  const liveStore = (column: string) => `CASE WHEN substr(${column}, 1, 2) = 'p/' THEN 'public' ELSE 'drafts' END`;
+  const recordLive = (from: string): Stmt => ({
+    sql: `INSERT OR IGNORE INTO deleted_object (tour_id, store, image_key) SELECT ?, ${liveStore("o.image_key")}, ${from} AND ${live}`,
+    params: [id, id, id, ws],
+  });
   const remove = (table: string, where: string): Stmt => ({ sql: `DELETE FROM ${table} WHERE ${where} AND ${live}`, params: [id, id, ws] });
   return [
     {
@@ -114,15 +121,20 @@ export function removeTourStatements(ws: string, id: string, now: number): Stmt[
     record("drafts", "u.logo_key FROM upload u WHERE u.tour_id = ? AND u.logo_key IS NOT NULL"),
     // And the pictures a chapter replace took out of the tour that are still in the store.
     record("drafts", "r.image_key FROM replaced_object r WHERE r.tour_id = ?"),
-    // Public files: the live snapshot's, and those a publish replaced, retired or left pending.
-    record("public", "o.image_key FROM snapshot_object o WHERE o.tour_id = ?"),
-    record("public", "o.image_key FROM public_object o WHERE o.tour_id = ?"),
+    // Live files: the live snapshot's, and those a publish or an access switch replaced,
+    // retired or left pending, each in its own store.
+    recordLive("o.image_key FROM snapshot_object o WHERE o.tour_id = ?"),
+    recordLive("o.image_key FROM public_object o WHERE o.tour_id = ?"),
     { sql: `UPDATE tour_deletion SET total = (SELECT count(*) FROM deleted_object WHERE tour_id = ?) WHERE tour_id = ? AND ${live}`, params: [id, id, id, ws] },
     // The rows, children before parents (foreign keys never cascade). Removing the snapshot
     // and the object rows is what stops the page and the images being served.
     remove("snapshot_object", "tour_id = ?"),
     remove("snapshot", "tour_id = ?"),
     remove("public_object", "tour_id = ?"),
+    // Its viewing list and a switch of its live pictures in progress (whose request, if one
+    // is still running, finds its rows gone and deletes what it wrote).
+    remove("tour_viewer", "tour_id = ?"),
+    remove("access_switch", "tour_id = ?"),
     remove("upload_step", "upload_id IN (SELECT id FROM upload WHERE tour_id = ?)"),
     remove("upload", "tour_id = ?"),
     remove("replaced_object", "tour_id = ?"),
@@ -193,8 +205,11 @@ export function tourRoutes(app: Hono, deps: Deps): void {
     // extra call for it.
     // bytes is the tour's size as the usage counts storage (TOUR_BYTES_SQL in src/usage.ts),
     // read in this same statement too.
-    const rows = await deps.db.all<{ id: string; title: string; status: "draft" | "published"; slug: string; chapters: number; steps: number; bytes: number; updated_at: number; published_at: number | null; draft_version: number; live_version: number | null }>(
-      `SELECT t.id, t.title, t.status, t.slug,
+    // access is the tour's viewing setting and viewers the count of addresses on its list
+    // (src/access.ts), never the addresses themselves: both in this same statement.
+    const rows = await deps.db.all<{ id: string; title: string; status: "draft" | "published"; slug: string; chapters: number; steps: number; bytes: number; updated_at: number; published_at: number | null; draft_version: number; live_version: number | null; access: "public" | "people" | "me"; viewers: number }>(
+      `SELECT t.id, t.title, t.status, t.slug, t.access,
+              (SELECT count(*) FROM tour_viewer v WHERE v.tour_id = t.id) AS viewers,
               (SELECT count(*) FROM chapter c WHERE c.tour_id = t.id) AS chapters,
               (SELECT count(*) FROM step s WHERE s.tour_id = t.id) AS steps,
               ${TOUR_BYTES_SQL} AS bytes,
@@ -224,6 +239,8 @@ export function tourRoutes(app: Hono, deps: Deps): void {
       updated_at: t.updated_at,
       published_at: t.status === "published" ? t.published_at : null,
       unpublished_changes: t.status === "published" && (t.live_version === null || t.live_version < t.draft_version),
+      access: t.access,
+      viewers: t.viewers,
     }));
     return json(200, { tours });
   });

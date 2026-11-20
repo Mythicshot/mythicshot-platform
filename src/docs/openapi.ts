@@ -9,6 +9,7 @@
 //
 // It names no host: `servers` is "/", so a tool resolves every path against the address
 // it fetched the description from. The one example carries a placeholder address.
+import { ACCESS_BODY_BYTES, MAX_VIEWERS } from "../access.ts";
 import { ADMIN_PAGE, MAX_ALLOWANCE_BYTES } from "../admin-api.ts";
 import { PAGE_CACHE } from "../page.ts";
 import { LIMITS } from "../manifest.ts";
@@ -160,6 +161,13 @@ const text = (maxLength: number, description: string, minLength = 0): Schema => 
 const percent = (description: string): Schema => ({ type: "number", minimum: 0, maximum: 100, description });
 const colour = (description: string): Schema => ({ type: "string", pattern: "^#[0-9A-Fa-f]{6}$", description });
 const whole = (description: string, minimum = 0): Schema => ({ type: "integer", minimum, description });
+/** A tour's viewing setting, in the tour list, the publish answers and the access requests. */
+const ACCESS_FIELD: Schema = {
+  type: "string",
+  enum: ["public", "people", "me"],
+  description: "Who may view the tour: public (anyone with the link), people (the addresses on its list, and you) or me (you alone). A restricted tour's page and pictures are never served publicly.",
+};
+const VIEWERS_FIELD: Schema = whole(`How many addresses the tour's list holds (at most ${MAX_VIEWERS}). The addresses themselves are given by GET /api/v1/tours/{id}/access alone.`);
 
 /** The token or the session cookie, either one. */
 const TOKEN = [{ token: [] }, { session: [] }] as [{ token: [] }, { session: [] }];
@@ -280,12 +288,14 @@ function schemas(): Record<string, Schema> {
       "A delete that has more to do. Send the same request again.",
     ),
     PublishInProgress: object(
-      ["status", "publish_id", "done", "total"],
+      ["status", "publish_id", "done", "total", "access", "viewers"],
       {
         status: inProgress,
         publish_id: { type: "string", pattern: "^pub_[0-9a-f]{24}$", description: "Send it back in the next publish request to continue this publish." },
         done: whole("Images copied so far."),
         total: whole("Images to copy in all."),
+        access: ACCESS_FIELD,
+        viewers: VIEWERS_FIELD,
       },
       "A publish that has more images to copy.",
     ),
@@ -295,7 +305,7 @@ function schemas(): Record<string, Schema> {
       "The tour is unpublished, but some of its public images are still to be removed. Send the same request again.",
     ),
     Tour: object(
-      ["id", "title", "status", "slug", "url", "chapters", "steps", "bytes", "updated_at", "published_at", "unpublished_changes"],
+      ["id", "title", "status", "slug", "url", "chapters", "steps", "bytes", "updated_at", "published_at", "unpublished_changes", "access", "viewers"],
       {
         id: { type: "string", pattern: "^tour_[0-9a-f]{24}$" },
         title: { type: "string" },
@@ -312,6 +322,8 @@ function schemas(): Record<string, Schema> {
           description:
             "true when the tour is published and its draft holds a chapter upload or update that is not on the public page yet, so publishing it again would change what visitors see; also when the server cannot tell, which happens only for some tours last published before version 0.1.4. false for a draft, and for a published tour whose page is up to date. A rename is live at once and never sets it.",
         },
+        access: ACCESS_FIELD,
+        viewers: VIEWERS_FIELD,
       },
     ),
     TourList: object(["tours"], { tours: { type: "array", items: ref("Tour"), description: "Most recently changed first." } }),
@@ -320,9 +332,42 @@ function schemas(): Record<string, Schema> {
     Deleted: object(["deleted"], { deleted: { type: "boolean", const: true } }, "Nothing of the tour is left."),
     PublishBody: input([], { publish_id: { type: ["string", "null"], pattern: "^pub_[0-9a-f]{24}$", description: "The publish_id of the previous answer, to continue that publish." } }),
     Published: object(
-      ["slug", "url", "steps"],
-      { slug: { type: "string" }, url: { type: "string", description: "The tour's link as a path, /t/<slug>, to put after the server address." }, steps: whole("How many steps the published version has.") },
+      ["slug", "url", "steps", "access", "viewers"],
+      {
+        slug: { type: "string" },
+        url: { type: "string", description: "The tour's link as a path, /t/<slug>, to put after the server address." },
+        steps: whole("How many steps the published version has."),
+        access: ACCESS_FIELD,
+        viewers: VIEWERS_FIELD,
+      },
       "The new version is live.",
+    ),
+    TourAccess: object(
+      ["access", "viewers", "limit", "can_restrict", "switching"],
+      {
+        access: ACCESS_FIELD,
+        viewers: { type: "array", maxItems: MAX_VIEWERS, items: { type: "string" }, description: "The addresses on the tour's list, in order, as the server wrote them (trimmed, lowercase). Kept when the setting is not people." },
+        limit: { type: "integer", const: MAX_VIEWERS, description: "The most addresses the list may hold." },
+        can_restrict: { type: "boolean", description: "Whether this site can send mail, which people and me need: false means the tour cannot be made restricted here (one that is stays so)." },
+        switching: orNull(object(["done", "total"], { done: whole("Pictures moved so far."), total: whole("Pictures to move in all.") }, "A move of the live pictures in progress.")),
+      },
+      "Who may view the tour.",
+    ),
+    AccessBody: input(
+      ["access"],
+      {
+        access: ACCESS_FIELD,
+        viewers: {
+          type: ["array", "null"],
+          items: { type: "string", maxLength: 254 },
+          description: `The whole new list, replacing the old one; absent or null leaves the list as it is. Duplicates (after trimming and lowercasing) count once; at most ${MAX_VIEWERS} addresses.`,
+        },
+      },
+    ),
+    AccessSwitching: object(
+      ["status", "done", "total"],
+      { status: { type: "string", const: "switching" }, done: whole("Pictures moved so far."), total: whole("Pictures to move in all.") },
+      "The live pictures are moving between the stores. Send the same request again.",
     ),
     Me: object(
       ["workspace", "version"],
@@ -914,12 +959,55 @@ function paths(): OpenApiDoc["paths"] {
           "401": UNAUTHORIZED,
           "404": noTour,
           "409": refusal(
-            "publish_cancelled: that publish was stopped before it finished (the tour was unpublished, the publish failed or was abandoned, or a fresh start replaced it); publish again to start over. publish_busy: another publish of the tour is starting at this moment, or its draft changed while this one was starting; nothing was written, try again.",
+            "publish_cancelled: that publish was stopped before it finished (the tour was unpublished, the publish failed or was abandoned, a fresh start replaced it, or who may view the tour was changed between public and restricted); publish again to start over. publish_busy: another publish of the tour is starting at this moment, or its draft changed while this one was starting; nothing was written, try again. access_switching: the live pictures are moving because who may view the tour is being changed; finish that change (send it again until it answers 200), then publish.",
             "publish_cancelled",
             "publish_busy",
+            "access_switching",
           ),
           "413": refusal("The tour has too many steps or too much text to publish, or the request body is too long.", "too_large"),
           "500": refusal("The tour could not be published. What was published before is unchanged.", "publish_failed"),
+        },
+      },
+    },
+    "/api/v1/tours/{id}/access": {
+      get: {
+        tags: ["Tours"],
+        summary: "Who may view a tour",
+        description: `The tour's setting and its whole list of addresses, the most the list may hold, whether this site can make a tour restricted (it needs mail), and the progress of a move of the live pictures, if one is under way. While a published tour is being made public its setting stays restricted until the move is done.`,
+        operationId: "getTourAccess",
+        security: TOKEN,
+        parameters: [tourId],
+        responses: { "200": answer("Who may view the tour.", ref("TourAccess")), "401": UNAUTHORIZED, "404": noTour },
+      },
+      put: {
+        tags: ["Tours"],
+        summary: "Change who may view a tour",
+        description: `Sets public, people or me, and with viewers replaces the whole list (up to ${MAX_VIEWERS} addresses; you, the workspace's account, are always let in and need not be on it). Between people and me, for a change of the list, and for a tour that is not published, the change is made at once (a publish in progress is cancelled when the change is between public and the others; publish again). For a published tour between public and people or me, the pictures of the version that is live move to the other store: the answer is 202 while they move, and the same request is sent again until it answers 200. That never publishes the draft and keeps the link. Made restricted, the tour stops being public at the first request; made public, it becomes public only at the last. Nothing is mailed to anyone.`,
+        operationId: "setTourAccess",
+        security: TOKEN,
+        parameters: [tourId],
+        requestBody: { required: true, content: json(ref("AccessBody")) },
+        responses: {
+          "200": answer("Done: who may view the tour now.", ref("TourAccess")),
+          "202": answer("The live pictures are moving. Send the same request again.", ref("AccessSwitching")),
+          "400": refusal(
+            `bad_request: the body is not a JSON object, or viewers is not a list. bad_access: access is not public, people or me. bad_viewer: an entry of viewers is not an email address; the detail gives its position. too_many_viewers: more than ${MAX_VIEWERS} different addresses. Nothing was changed.`,
+            "bad_request",
+            "bad_access",
+            "bad_viewer",
+            "too_many_viewers",
+          ),
+          "401": UNAUTHORIZED,
+          "404": noTour,
+          "409": refusal(
+            "cannot_restrict: this site cannot send mail, so the tour cannot be made people or me. access_switching: a change to another setting is still moving the pictures; send that one again until it is done. switch_cancelled: the tour was unpublished or deleted while its pictures moved; send the request again. access_busy: the tour changed while the request was decided; send it again.",
+            "cannot_restrict",
+            "access_switching",
+            "switch_cancelled",
+            "access_busy",
+          ),
+          "413": refusal(`The request body is over ${n(ACCESS_BODY_BYTES)} bytes.`, "too_large"),
+          "500": refusal("The move could not go on just now. Send the same request again to continue it.", "access_failed"),
         },
       },
     },

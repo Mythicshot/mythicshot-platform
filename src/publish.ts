@@ -50,13 +50,26 @@
 //   another request on its own tour.
 // Keys are random and never reused, so a retired key past its grace can be deleted by any
 // request at any time. Nothing is ever found by listing the store.
+//
+// Who may view a tour (src/access.ts, migration 0014) decides where its live pictures go.
+// A public tour's are in the public store under `p/<32 hex>.<ext>`; a restricted tour's
+// (setting 'people' or 'me') are in the PRIVATE store under `v/<32 hex>.<ext>`, so a public
+// bucket domain can never serve them. The first letters of a key tell its store, here and
+// in every clean-up (storeOfKey). A publish takes the store from the tour's setting when it
+// starts; its job is recorded only while the setting still says that store and no move of
+// the live pictures between the stores (an access switch) is in progress, and its commit
+// takes effect only while every one of its keys is still of the store the setting says.
+// A change of setting across the two stores cancels a publish in progress (src/access.ts),
+// as unpublish does. While a switch is in progress a publish is refused (409
+// access_switching); unpublish cancels the switch. The public page and the picture route
+// serve a tour only while its setting is 'public'.
 import type { Hono } from "hono";
 import { beforeAccountsToo, noDisabledAccount } from "./accounts.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
 import { legacySettings, safeUrl, type Autoplay, type Box, type Card, type Cover, type EndCard, type Link, type Note, type Theme, type Zoom } from "./manifest.ts";
-import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
+import { isNotNullViolation, isUniqueViolation, type Deps, type FileStore, type Stmt } from "./ports.ts";
 
 export type SnapshotStep = {
   id: string;
@@ -96,6 +109,8 @@ export type Snapshot = {
 
 /** Published names are never reused, so a published file never changes. */
 export const PUBLIC_CACHE = "public, max-age=31536000, immutable";
+/** Stored with a restricted tour's live pictures in the private store; the route that serves them sets its own headers. */
+export const PRIVATE_CACHE = "private, no-store";
 /** How long a key a re-publish replaced keeps being served, when the config sets nothing else. */
 export const DEFAULT_RETIRED_GRACE_MS = 10 * 60 * 1000;
 /** A publish that has made no progress for this long is taken to be abandoned and is swept by a later request in the workspace. */
@@ -149,11 +164,11 @@ const PUBLIC_NAME = /^[0-9a-f]{32}\.(png|jpg)$/;
 /** The publish route's optional body: {"publish_id": "..."}. */
 const PUBLISH_BODY_BYTES = 1024;
 
-type ImageType = "png" | "jpg";
-const mime = (t: ImageType) => (t === "png" ? "image/png" : "image/jpeg");
-const typeOfKey = (key: string): ImageType => (key.endsWith(".png") ? "png" : "jpg");
+export type ImageType = "png" | "jpg";
+export const mime = (t: ImageType) => (t === "png" ? "image/png" : "image/jpeg");
+export const typeOfKey = (key: string): ImageType => (key.endsWith(".png") ? "png" : "jpg");
 
-function randomHex(bytes: number): string {
+export function randomHex(bytes: number): string {
   let s = "";
   for (const b of crypto.getRandomValues(new Uint8Array(bytes))) s += b.toString(16).padStart(2, "0");
   return s;
@@ -162,6 +177,27 @@ function randomHex(bytes: number): string {
 /** A new public key: 128 random bits, so it cannot be guessed and is never reused. */
 function publicKey(type: ImageType): string {
   return `p/${randomHex(16)}.${type}`;
+}
+
+/** A new live key for a picture of a public tour (public store, `p/`) or of a restricted one (private store, `v/`), equally random. */
+export function liveKey(type: ImageType, restricted: boolean): string {
+  return restricted ? `v/${randomHex(16)}.${type}` : publicKey(type);
+}
+
+/**
+ * The store a key lives in: `p/` keys in the public store, every other key (draft `u/`,
+ * restricted live `v/`, shared items' `m/`) in the private one.
+ */
+export function storeOfKey(deps: Deps, key: string): FileStore {
+  return key.startsWith("p/") ? deps.pub : deps.drafts;
+}
+
+/** Deletes keys of either store: one delete call for each store that has any of them. */
+export async function deleteKeys(deps: Deps, keys: string[]): Promise<void> {
+  const pub = keys.filter((k) => k.startsWith("p/"));
+  const priv = keys.filter((k) => !k.startsWith("p/"));
+  if (pub.length > 0) await deps.pub.delete(pub);
+  if (priv.length > 0) await deps.drafts.delete(priv);
 }
 
 const notFound = () => apiError(404, "not_found", "no such tour");
@@ -232,7 +268,7 @@ function cleanLink(v: unknown): Link | null {
   return { label: l.label, url };
 }
 
-type Copy = { from: string; to: string };
+export type Copy = { from: string; to: string };
 
 /** The snapshot's id for a draft chapter: one-way, so it says nothing about the upload behind the chapter. */
 async function publicChapterId(chapterId: string): Promise<string> {
@@ -242,8 +278,11 @@ async function publicChapterId(chapterId: string): Promise<string> {
   return "c_" + s;
 }
 
-/** Builds the snapshot and the copies it needs, choosing a fresh public key for each image. */
-export function buildSnapshot(rows: DraftRow[], chapterIds: Map<string, string>): { snapshot: Snapshot; copies: Copy[] } {
+/**
+ * Builds the snapshot and the copies it needs, choosing a fresh live key for each image:
+ * a public one, or for a restricted tour (`restricted`) a private one.
+ */
+export function buildSnapshot(rows: DraftRow[], chapterIds: Map<string, string>, restricted = false): { snapshot: Snapshot; copies: Copy[] } {
   const t = rows[0];
   const legacy = legacySettings();
   const copies: Copy[] = [];
@@ -256,7 +295,7 @@ export function buildSnapshot(rows: DraftRow[], chapterIds: Map<string, string>)
       ch = { id: chapterIds.get(r.c_id) as string, title: r.c_title, description: r.c_description, steps: [] };
       chapters.push(ch);
     }
-    const image = publicKey(r.image_type);
+    const image = liveKey(r.image_type, restricted);
     copies.push({ from: r.image_key, to: image });
     ch.steps.push({
       id: r.s_id,
@@ -278,7 +317,7 @@ export function buildSnapshot(rows: DraftRow[], chapterIds: Map<string, string>)
   if (storedCover !== null) {
     let logo: string | null = null;
     if (storedCover.logo && t.logo_key !== null && t.logo_type !== null) {
-      logo = publicKey(t.logo_type);
+      logo = liveKey(t.logo_type, restricted);
       copies.push({ from: t.logo_key, to: logo });
     }
     cover = { title: storedCover.title, body: storedCover.body, button: storedCover.button, logo };
@@ -317,7 +356,7 @@ function utf8Length(s: string): number {
 }
 
 /** Runs `jobs` with at most `limit` in flight. Stops starting new ones after a failure, waits for those running, then throws. */
-async function runLimited(jobs: (() => Promise<void>)[], limit: number): Promise<void> {
+export async function runLimited(jobs: (() => Promise<void>)[], limit: number): Promise<void> {
   let next = 0;
   let failure: { err: unknown } | null = null;
   const worker = async () => {
@@ -334,14 +373,20 @@ async function runLimited(jobs: (() => Promise<void>)[], limit: number): Promise
   if (failure !== null) throw (failure as { err: unknown }).err;
 }
 
-async function copyOne(deps: Deps, c: Copy): Promise<void> {
-  const file = await deps.drafts.get(c.from);
-  if (file === null) throw new Error("a draft image is missing");
+/**
+ * Copies one picture: read from the store its source key is in and written to the store
+ * its target key is in (storeOfKey). A publish copies from draft keys; an access switch
+ * from a live key to its new name in the other store (src/access.ts).
+ */
+export async function copyOne(deps: Deps, c: Copy): Promise<void> {
+  const file = await storeOfKey(deps, c.from).get(c.from);
+  if (file === null) throw new Error("a source image is missing");
   const bytes = new Uint8Array(await new Response(file.body).arrayBuffer());
-  await deps.pub.put(c.to, bytes, { contentType: mime(typeOfKey(c.to)), cacheControl: PUBLIC_CACHE });
+  const cacheControl = c.to.startsWith("p/") ? PUBLIC_CACHE : PRIVATE_CACHE;
+  await storeOfKey(deps, c.to).put(c.to, bytes, { contentType: mime(typeOfKey(c.to)), cacheControl });
 }
 
-const keyList = (keys: string[]) => JSON.stringify(keys);
+export const keyList = (keys: string[]) => JSON.stringify(keys);
 
 const graceOf = (deps: Deps) => deps.config.retiredGraceMs ?? DEFAULT_RETIRED_GRACE_MS;
 
@@ -355,7 +400,7 @@ const WORKSPACE_TOURS = "SELECT id FROM tour WHERE workspace_id = ?";
  * `tourId` names. They are referenced by nothing live and no longer served, so this is
  * safe at any time and from any number of requests at once.
  */
-async function clearDuePage(deps: Deps, workspaceId: string, tourId: string | null, otherTours: number): Promise<{ any: boolean; more: boolean }> {
+export async function clearDuePage(deps: Deps, workspaceId: string, tourId: string | null, otherTours: number): Promise<{ any: boolean; more: boolean }> {
   const now = deps.now();
   const own = tourId ?? "";
   const rows = await deps.db.all<{ image_key: string; tour_id: string }>(
@@ -372,7 +417,8 @@ async function clearDuePage(deps: Deps, workspaceId: string, tourId: string | nu
   if (rows.length === 0) return { any: false, more: false };
   const page = rows.slice(0, DUE_PAGE);
   const keys = page.map((r) => r.image_key);
-  await deps.pub.delete(keys);
+  // A restricted tour's keys are in the private store: each key is deleted from its own.
+  await deleteKeys(deps, keys);
   await deps.db.run(
     `DELETE FROM public_object WHERE state = 'retired' AND delete_after <= ? AND image_key IN (SELECT value FROM json_each(?)) AND tour_id IN (${WORKSPACE_TOURS})`,
     [now, keyList(keys), workspaceId],
@@ -383,11 +429,14 @@ async function clearDuePage(deps: Deps, workspaceId: string, tourId: string | nu
 /**
  * Retires the pending rows of a workspace's abandoned publishes. Parameters: now, the
  * workspace, the stale moment twice. Reached through the workspace's tours and the
- * public_object_tour_pending index, so it never scans other workspaces' rows.
+ * public_object_tour_pending index, so it never scans other workspaces' rows. The pending
+ * rows of an access switch (src/access.ts) belong to no publish and are never taken for an
+ * abandoned one: a switch stays until it is finished, or cancelled by unpublish or delete.
  */
 export const RETIRE_ABANDONED_SQL = `UPDATE public_object SET state = 'retired', delete_after = ?
    WHERE tour_id IN (${WORKSPACE_TOURS}) AND state = 'pending' AND created_at < ?
-     AND NOT EXISTS (SELECT 1 FROM publish_job j WHERE j.publish_id = public_object.publish_id AND j.touched_at >= ?)`;
+     AND NOT EXISTS (SELECT 1 FROM publish_job j WHERE j.publish_id = public_object.publish_id AND j.touched_at >= ?)
+     AND NOT EXISTS (SELECT 1 FROM access_switch w WHERE w.switch_id = public_object.publish_id)`;
 /** Drops a workspace's jobs that are stale or have no pending rows left. Parameters: the workspace, the stale moment. */
 export const DROP_ABANDONED_JOBS_SQL = `DELETE FROM publish_job WHERE tour_id IN (${WORKSPACE_TOURS})
     AND (touched_at < ? OR NOT EXISTS (SELECT 1 FROM public_object o WHERE o.publish_id = publish_job.publish_id AND o.state = 'pending'))`;
@@ -444,7 +493,7 @@ async function stopPublish(deps: Deps, tourId: string, publishId: string, writte
     if (row?.live === publishId) return "live";
     const recorded = parse<string[]>(row?.keys ?? "[]") ?? [];
     const keys = [...new Set([...recorded, ...written])];
-    if (keys.length > 0) await deps.pub.delete(keys);
+    await deleteKeys(deps, keys);
     if (recorded.length > 0) {
       await deps.db.run(
         "DELETE FROM public_object WHERE publish_id = ? AND tour_id = ? AND state = 'retired' AND source_key IS NOT NULL AND image_key IN (SELECT value FROM json_each(?))",
@@ -459,8 +508,11 @@ async function stopPublish(deps: Deps, tourId: string, publishId: string, writte
 
 /**
  * The commit, one batch. The snapshot insert fails (NOT NULL on data) unless the job still
- * exists, every one of its rows is still pending and copied (or copied by this call), and
- * the tour is still this workspace's; then the whole batch rolls back.
+ * exists, every one of its rows is still pending and copied (or copied by this call), the
+ * tour is still this workspace's, no access switch of it is in progress, and every key of
+ * the job is of the store the tour's setting says (`p/` for a public tour, else not), so a
+ * change of setting since the job started never puts pictures live in the wrong store.
+ * Otherwise the whole batch rolls back.
  */
 function commitStatements(auth: Auth, tourId: string, publishId: string, justCopied: string[], now: number, graceMs: number): Stmt[] {
   return [
@@ -473,7 +525,11 @@ function commitStatements(auth: Auth, tourId: string, publishId: string, justCop
                            AND (SELECT count(*) FROM public_object o
                                  WHERE o.publish_id = ? AND o.state = 'pending' AND o.tour_id = ?
                                    AND (o.copied = 1 OR o.image_key IN (SELECT value FROM json_each(?)))) = j.total
-                           AND EXISTS (SELECT 1 FROM tour WHERE id = ? AND workspace_id = ?)),
+                           AND EXISTS (SELECT 1 FROM tour WHERE id = ? AND workspace_id = ?)
+                           AND NOT EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = j.tour_id)
+                           AND NOT EXISTS (SELECT 1 FROM public_object o JOIN tour t ON t.id = o.tour_id
+                                            WHERE o.publish_id = j.publish_id AND o.state = 'pending'
+                                              AND (substr(o.image_key, 1, 2) = 'p/') <> (t.access = 'public'))),
                     ?, ?, (SELECT steps FROM publish_job WHERE publish_id = ?), (SELECT draft_version FROM publish_job WHERE publish_id = ?))
             ON CONFLICT (tour_id) DO UPDATE SET data = excluded.data, published_at = excluded.published_at, publish_id = excluded.publish_id, steps = excluded.steps,
                                                 draft_version = excluded.draft_version`,
@@ -497,6 +553,11 @@ function commitStatements(auth: Auth, tourId: string, publishId: string, justCop
 type TourState = {
   id: string;
   slug: string;
+  access: "public" | "people" | "me";
+  /** How many addresses the tour's list holds. */
+  viewers: number;
+  /** 1 while an access switch of the tour is in progress. */
+  switching: number;
   draft_version: number;
   job_id: string | null;
   job_total: number | null;
@@ -507,7 +568,9 @@ type TourState = {
 };
 
 const TOUR_STATE_SQL = `
-  SELECT t.id, t.slug, t.draft_version, j.publish_id AS job_id, j.total AS job_total, j.steps AS job_steps, j.draft_version AS job_version,
+  SELECT t.id, t.slug, t.access, (SELECT count(*) FROM tour_viewer v WHERE v.tour_id = t.id) AS viewers,
+         EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = t.id) AS switching,
+         t.draft_version, j.publish_id AS job_id, j.total AS job_total, j.steps AS job_steps, j.draft_version AS job_version,
          s.publish_id AS live_id, s.steps AS live_steps
     FROM tour t LEFT JOIN publish_job j ON j.tour_id = t.id LEFT JOIN snapshot s ON s.tour_id = t.id
    WHERE t.id = ? AND t.workspace_id = ?`;
@@ -521,8 +584,14 @@ const publishStopped = () =>
   apiError(409, "publish_cancelled", "this publish was stopped before it finished (the tour was unpublished, or the publish failed or was abandoned); publish again to start over");
 const publishBusy = () => apiError(409, "publish_busy", "another publish of this tour is starting at this moment; try again");
 const draftMoved = () => apiError(409, "publish_busy", "the tour's draft changed while this publish was starting; try again");
-const done = (slug: string, steps: number) => json(200, { slug, url: `/t/${slug}`, steps });
-const inProgress = (publishId: string, doneCount: number, total: number) => json(202, { status: "in_progress", publish_id: publishId, done: doneCount, total });
+const accessSwitching = () =>
+  apiError(409, "access_switching", "who may view this tour is being changed; send that change again until it is done, then publish");
+/** Added to both answers: the tour's setting, and how many addresses its list holds. */
+type Shown = { access: TourState["access"]; viewers: number };
+const shown = (t: TourState): Shown => ({ access: t.access, viewers: t.viewers });
+const done = (slug: string, steps: number, s: Shown) => json(200, { slug, url: `/t/${slug}`, steps, access: s.access, viewers: s.viewers });
+const inProgress = (publishId: string, doneCount: number, total: number, s: Shown) =>
+  json(202, { status: "in_progress", publish_id: publishId, done: doneCount, total, access: s.access, viewers: s.viewers });
 
 /** The publish route's body: nothing, or {"publish_id": "pub_..."} to continue that publish. */
 async function readPublishBody(req: Request): Promise<{ publishId: string | null } | Response> {
@@ -556,13 +625,13 @@ type Started = { kind: "started"; publishId: string; total: number; steps: numbe
  * "changed", so no publish ever starts on pictures that may be gone. The caller then
  * starts once more from the draft as it is now. Two calls: the read and the batch.
  */
-async function startPublish(deps: Deps, auth: Auth, tourId: string): Promise<Started> {
+async function startPublish(deps: Deps, auth: Auth, tourId: string, restricted: boolean): Promise<Started> {
   const rows = await deps.db.all<DraftRow>(DRAFT_SQL, [tourId, auth.workspaceId, MAX_PUBLISH_STEPS + 1]);
   if (rows.length === 0) return { kind: "answer", res: apiError(400, "empty_tour", "a tour with no steps cannot be published") };
   if (rows.length > MAX_PUBLISH_STEPS) return { kind: "answer", res: apiError(413, "too_large", `a tour of more than ${MAX_PUBLISH_STEPS} steps cannot be published`) };
   const chapterIds = new Map<string, string>();
   for (const r of rows) if (!chapterIds.has(r.c_id)) chapterIds.set(r.c_id, await publicChapterId(r.c_id));
-  const { snapshot, copies } = buildSnapshot(rows, chapterIds);
+  const { snapshot, copies } = buildSnapshot(rows, chapterIds, restricted);
   const data = JSON.stringify(snapshot);
   if (utf8Length(data) > MAX_SNAPSHOT_BYTES) return { kind: "answer", res: apiError(413, "too_large", "the tour is too large to publish") };
 
@@ -577,8 +646,11 @@ async function startPublish(deps: Deps, auth: Auth, tourId: string): Promise<Sta
         // of a draft whose pictures a replace has since removed.
         // The title is taken from the tour row here, not from the draft read above, so a
         // rename that landed in between (it found no job to update) is not lost.
+        // And only while the tour's setting still says the store these keys are for and no
+        // access switch of it is in progress (src/access.ts).
         sql: `INSERT INTO publish_job (tour_id, publish_id, data, steps, total, draft_version, created_at, touched_at)
-              VALUES ((SELECT id FROM tour WHERE id = ? AND workspace_id = ? AND draft_version = ?), ?,
+              VALUES ((SELECT id FROM tour WHERE id = ? AND workspace_id = ? AND draft_version = ? AND access ${restricted ? "<>" : "="} 'public'
+                         AND NOT EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = tour.id)), ?,
                       json_set(?, '$.title', (SELECT title FROM tour WHERE id = ? AND workspace_id = ?)), ?, ?, ?, ?, ?)`,
         params: [tourId, auth.workspaceId, rows[0].draft_version, publishId, data, tourId, auth.workspaceId, rows.length, copies.length, rows[0].draft_version, now, now],
       },
@@ -591,14 +663,14 @@ async function startPublish(deps: Deps, auth: Auth, tourId: string): Promise<Sta
     ]);
   } catch (err) {
     if (isUniqueViolation(err)) return { kind: "joined" };
-    if (isNotNullViolation(err)) return { kind: "changed" }; // deleted, or its draft changed, since the draft was read
+    if (isNotNullViolation(err)) return { kind: "changed" }; // deleted, its draft or setting changed, or a switch began, since the draft was read
     throw err;
   }
   return { kind: "started", publishId, total: copies.length, steps: rows.length, copies };
 }
 
 /** The next `limit` images of a publish still to copy, and how many are left in all. */
-async function nextBatch(deps: Deps, tourId: string, publishId: string, limit: number): Promise<{ batch: Copy[]; left: number }> {
+export async function nextBatch(deps: Deps, tourId: string, publishId: string, limit: number): Promise<{ batch: Copy[]; left: number }> {
   const rows = await deps.db.all<{ image_key: string; source_key: string; left: number }>(
     `SELECT image_key, source_key,
             (SELECT count(*) FROM public_object WHERE publish_id = ? AND tour_id = ? AND state = 'pending' AND copied = 0) AS left
@@ -638,8 +710,12 @@ export function publishRoutes(app: Hono, deps: Deps): void {
 
     const asked = body.publishId;
     // A publish that went live answers the same however often it is asked.
-    if (asked !== null && tour.live_id === asked) return done(tour.slug, tour.live_steps ?? 0);
+    const s = shown(tour);
+    if (asked !== null && tour.live_id === asked) return done(tour.slug, tour.live_steps ?? 0, s);
     if (asked !== null && tour.job_id !== asked) return publishStopped();
+    // A switch of the live pictures between the stores must finish first (it cancelled any
+    // publish when it began, so there is no job to drive).
+    if (tour.switching === 1) return accessSwitching();
     // A fresh start finding a publish built from an older draft stops it and starts again
     // from the current draft; a call naming that publish keeps driving it.
     if (asked === null && tour.job_id !== null && (tour.job_version ?? 0) < tour.draft_version) {
@@ -658,14 +734,18 @@ export function publishRoutes(app: Hono, deps: Deps): void {
       steps = tour.job_steps ?? 0;
       ({ batch, left } = await nextBatch(d, tour.id, publishId, room()));
     } else {
-      let started = await startPublish(d, auth, tour.id);
+      let started = await startPublish(d, auth, tour.id, tour.access !== "public");
       if (started.kind === "changed") {
         // The tour is gone, or its draft moved on while the publish was starting (an upload
-        // or a chapter replace committed). Nothing was written. If the tour is still there,
-        // read the draft again and start once more, in this same request, so the client
-        // gets its publish of the newer draft; only losing a second time answers 409.
-        if ((await tourState(d, auth, tour.id)) === null) return notFound();
-        started = await startPublish(d, auth, tour.id);
+        // or a chapter replace committed), or its setting changed or a switch began. Nothing
+        // was written. If the tour is still there, read it again and start once more, in this
+        // same request and in the store its setting says now, so the client gets its publish
+        // of the newer draft; only losing a second time answers 409.
+        const again = await tourState(d, auth, tour.id);
+        if (again === null) return notFound();
+        if (again.switching === 1) return accessSwitching();
+        Object.assign(s, shown(again));
+        started = await startPublish(d, auth, tour.id, again.access !== "public");
         if (started.kind === "changed") return (await tourState(d, auth, tour.id)) === null ? notFound() : draftMoved();
       }
       if (started.kind === "answer") return started.res;
@@ -689,7 +769,7 @@ export function publishRoutes(app: Hono, deps: Deps): void {
     try {
       await runLimited(batch.map((x) => () => copyOne(d, x)), COPIES_IN_FLIGHT);
     } catch {
-      return (await stopPublish(d, tour.id, publishId, written)) === "live" ? done(tour.slug, steps) : publishFailed();
+      return (await stopPublish(d, tour.id, publishId, written)) === "live" ? done(tour.slug, steps, s) : publishFailed();
     }
 
     if (batch.length < left) {
@@ -702,9 +782,9 @@ export function publishRoutes(app: Hono, deps: Deps): void {
         [publishId, tour.id, keyList(written)],
       );
       if (touched.changes !== 1 || marked.changes !== batch.length) {
-        return (await stopPublish(d, tour.id, publishId, written)) === "live" ? done(tour.slug, steps) : publishStopped();
+        return (await stopPublish(d, tour.id, publishId, written)) === "live" ? done(tour.slug, steps, s) : publishStopped();
       }
-      return inProgress(publishId, total - left + batch.length, total);
+      return inProgress(publishId, total - left + batch.length, total, s);
     }
 
     try {
@@ -734,7 +814,7 @@ export function publishRoutes(app: Hono, deps: Deps): void {
     } catch {
       console.error(`publish: could not remove the previous public images of ${tour.id}; will retry later`);
     }
-    return done(tour.slug, steps);
+    return done(tour.slug, steps, s);
   });
 
   app.post("/api/v1/tours/:id/unpublish", async (c) => {
@@ -755,6 +835,9 @@ export function publishRoutes(app: Hono, deps: Deps): void {
       // A publish in progress is cancelled: its rows are retired and its job dropped, so it can never commit.
       { sql: `UPDATE public_object SET state = 'retired', delete_after = ? WHERE state = 'pending' AND tour_id IN (${owned})`, params: [now, tour.id, ws] },
       { sql: `DELETE FROM publish_job WHERE tour_id IN (${owned})`, params: [tour.id, ws] },
+      // So is a switch of the live pictures between the stores (src/access.ts): its pending
+      // rows were retired just above, and a request of it still running deletes what it wrote.
+      { sql: `DELETE FROM access_switch WHERE tour_id IN (${owned})`, params: [tour.id, ws] },
       {
         sql: `INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, delete_after)
               SELECT image_key, tour_id, ?, 'retired', ?, ? FROM snapshot_object WHERE tour_id IN (${owned})`,
@@ -798,8 +881,11 @@ export function publishRoutes(app: Hono, deps: Deps): void {
                     WHERE o.image_key = ? AND o.state = 'retired' AND o.delete_after > ?${condition} LIMIT 1`,
         [key, key, deps.now()],
       );
-    // A database the accounts migration has not reached has no account to be disabled.
-    const live = await beforeAccountsToo(() => lookup(` AND ${noDisabledAccount("t.workspace_id")}`), () => lookup(""));
+    // A database the accounts migration has not reached has no account to be disabled (nor
+    // a tour that is restricted, which came later still). A restricted tour, or one becoming
+    // restricted, answers as an unknown name, its retired names inside their grace too: its
+    // pictures are served only by the app's own check (src/access.ts).
+    const live = await beforeAccountsToo(() => lookup(` AND t.access = 'public' AND ${noDisabledAccount("t.workspace_id")}`), () => lookup(""));
     if (live === null) return missing();
     const file = await deps.pub.get(key);
     if (file === null) return missing();

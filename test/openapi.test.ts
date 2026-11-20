@@ -243,6 +243,8 @@ describe("the API description", () => {
       "Rename a tour",
       "Delete a tour, in steps",
       "Publish a tour, in steps",
+      "Who may view a tour",
+      "Change who may view a tour",
       "Unpublish a tour",
       "Get a draft step's image",
       "Start an upload",
@@ -418,7 +420,7 @@ describe("the API description", () => {
 
   it("the tour list's items carry the fields the list answers, unpublished_changes included", () => {
     const tour = (openapi().components.schemas as Json).Tour;
-    const fields = ["id", "title", "status", "slug", "url", "chapters", "steps", "bytes", "updated_at", "published_at", "unpublished_changes"];
+    const fields = ["id", "title", "status", "slug", "url", "chapters", "steps", "bytes", "updated_at", "published_at", "unpublished_changes", "access", "viewers"];
     expect(Object.keys(tour.properties)).toEqual(fields);
     expect(tour.required).toEqual(fields);
     expect(tour.additionalProperties).toBe(false);

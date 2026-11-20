@@ -116,8 +116,8 @@ describe("the tour list", { timeout: 60_000 }, () => {
     // A tour's size: its steps' pictures, and its logo (1000 bytes, recorded at commit).
     const bytesOf = (m: Json) => (m.steps as Json[]).reduce((n, st) => n + (st.bytes as number), 0);
     expect(await list(deps, a.token)).toEqual([
-      { id: live.tour_id, title: "Send an invoice", status: "published", slug: await slugOf(live.tour_id), url: published.json.url, chapters: 1, steps: 3, bytes: bytesOf(v3) + 1000, updated_at: T0 + 1000, published_at: T0 + 2000, unpublished_changes: false },
-      { id: draft.tour_id, title: "Send an invoice", status: "draft", slug: await slugOf(draft.tour_id), url: null, chapters: 1, steps: 3, bytes: bytesOf(v2), updated_at: T0, published_at: null, unpublished_changes: false },
+      { id: live.tour_id, title: "Send an invoice", status: "published", slug: await slugOf(live.tour_id), url: published.json.url, chapters: 1, steps: 3, bytes: bytesOf(v3) + 1000, updated_at: T0 + 1000, published_at: T0 + 2000, unpublished_changes: false, access: "public", viewers: 0 },
+      { id: draft.tour_id, title: "Send an invoice", status: "draft", slug: await slugOf(draft.tour_id), url: null, chapters: 1, steps: 3, bytes: bytesOf(v2), updated_at: T0, published_at: null, unpublished_changes: false, access: "public", viewers: 0 },
     ]);
     expect(published.json.url).toBe(`/t/${await slugOf(live.tour_id)}`);
     // Unpublished again: a draft, with no link.

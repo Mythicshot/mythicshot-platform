@@ -7,6 +7,7 @@ import { parseUsername } from "../src/usernames.ts";
 const ACCOUNT_TABLES = ["audit", "membership", "rate_counter", "session", "signin_code", "signin_method"];
 
 const TABLES = [
+  "access_switch",
   "account_removal",
   "api_token",
   "audit",
@@ -32,6 +33,7 @@ const TABLES = [
   "step",
   "tour",
   "tour_deletion",
+  "tour_viewer",
   "upload",
   "upload_step",
   "user",

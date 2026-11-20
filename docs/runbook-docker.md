@@ -1148,6 +1148,7 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `account_disabled` | The admin disabled an account; the account is the admin, the subject the disabled account |
 | `account_enabled` | The admin enabled a disabled account again; the account is the admin, the subject the enabled account |
 | `account_deleted` | The admin's delete of a disabled account finished: the account, its workspace and everything in it are gone. The account is the admin who sent the last delete request, the workspace and the subject are the deleted workspace's and account's ids. Nothing else of the person is recorded, and the rows recorded about the account before stay |
+| `tour_access_changed` | Who may view a tour changed, or its list of addresses did; the subject is the tour, the account is the one signed in (none when a token made the change), and the detail holds the settings and the list's sizes, such as `{"from":"public","to":"people","viewers_before":0,"viewers":3,"by":"session"}`. Made public from a published tour, it is written when the move of its pictures finishes. No address is recorded |
 
 ## Troubleshooting by symptom
 

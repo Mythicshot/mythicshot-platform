@@ -98,6 +98,8 @@ const ROWS: Record<string, Row> = {
   "DELETE /api/v1/tours/:id": api("DELETE", `/api/v1/tours/${TOUR}`),
   "GET /api/v1/tours/:id/steps/:step_id/image": api("GET", `/api/v1/tours/${TOUR}/steps/${STEP}/image`),
   "POST /api/v1/tours/:id/publish": api("POST", `/api/v1/tours/${TOUR}/publish`),
+  "GET /api/v1/tours/:id/access": api("GET", `/api/v1/tours/${TOUR}/access`),
+  "PUT /api/v1/tours/:id/access": api("PUT", `/api/v1/tours/${TOUR}/access`),
   "POST /api/v1/tours/:id/unpublish": api("POST", `/api/v1/tours/${TOUR}/unpublish`),
   // Signing in and the session: on the app address only. Asking for a link answers 200
   // for any well-formed address; a code nobody was given is the one refusal; the rest
@@ -327,7 +329,7 @@ describe("the host-routing matrix", () => {
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
     // 15, and the eight routes of shared items.
-    expect(API_KEYS.length).toBe(23);
+    expect(API_KEYS.length).toBe(25);
     expect(WIZARD_KEYS.length).toBe(5);
     // The shared items' routes are the media routes, and the img address has them and health alone.
     expect(MEDIA_KEYS.length).toBe(8);
