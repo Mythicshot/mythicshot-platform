@@ -740,13 +740,13 @@ const FIREFOX = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefo
 /** A tab's fetch to the real app on the app address, as a browser sends it there, with a session cookie. */
 function browser(deps: Deps, cookie: string): Responder {
   const app = createApp(deps);
-  return async (req) => {
+  return async (req): Promise<Answer> => {
     const headers: Record<string, string> = { ...req.headers, "user-agent": FIREFOX, cookie };
     if (req.method !== "GET" && req.method !== "HEAD") Object.assign(headers, { origin: APP, "sec-fetch-site": "same-origin" });
     const res = await app.fetch(new Request(APP + req.path, { method: req.method, headers, body: req.body === undefined ? undefined : JSON.stringify(req.body) }));
     const text = await res.text();
     const retry = res.headers.get("retry-after");
-    return { status: res.status, json: text === "" ? undefined : JSON.parse(text), headers: retry === null ? {} : { "retry-after": retry } };
+    return { status: res.status, json: text === "" ? undefined : JSON.parse(text), headers: retry === null ? {} : ({ "retry-after": retry } as Record<string, string>) };
   };
 }
 
