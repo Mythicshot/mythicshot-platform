@@ -7,10 +7,15 @@
 //
 // What this leaves unproven, for docs/dashboard-browser-check.md: real layout at phone
 // width, focus rings, `inert` as a browser applies it, and a screen reader.
+import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
+import { createApp } from "../src/app.ts";
+import type { Deps } from "../src/ports.ts";
+import { SESSION_COOKIE } from "../src/sessions.ts";
+import { INVITE_HTML, INVITE_JS } from "../src/signin/accept.ts";
 import { send } from "./bundle.ts";
-import { FakeElement } from "./pages-dom.ts";
+import { FakeDocument, FakeElement } from "./pages-dom.ts";
 import {
   APP,
   CSRF,
@@ -1042,5 +1047,162 @@ describe("invites and account actions against the real app", () => {
     expect(noteOf(tab, "admin-note")?.[0]).toBe("realmember was deleted.");
     const audit = await deps.db.all<{ event: string }>("SELECT event FROM audit WHERE event LIKE 'account_%' ORDER BY rowid");
     expect(audit.map((a) => a.event)).toEqual(["account_disabled", "account_enabled", "account_disabled", "account_deleted"]);
+  });
+});
+
+// ---- The whole feature, through the real routes and the real pages ----
+
+/**
+ * The invitee's browser: the invite page's own script run as a browser runs it on the app
+ * address, with a cookie jar, so the session that accepting sets is the one later requests carry.
+ */
+function inviteeBrowser(deps: Deps) {
+  const app = createApp(deps);
+  const jar = { cookie: null as string | null };
+  const ask = async (method: string, path: string, init: { headers?: Record<string, string>; body?: string } = {}) => {
+    const headers: Record<string, string> = { ...init.headers, "user-agent": FIREFOX };
+    if (method !== "GET" && method !== "HEAD") Object.assign(headers, { origin: APP, "sec-fetch-site": "same-origin" });
+    if (jar.cookie !== null) headers.cookie = jar.cookie;
+    const res = await app.fetch(new Request(APP + path, { method, headers, body: init.body }));
+    for (const c of res.headers.getSetCookie()) jar.cookie = /Max-Age=0/.test(c) ? null : c.split(";")[0];
+    return res;
+  };
+  function open(url: string) {
+    const doc = new FakeDocument(INVITE_HTML);
+    let current = new URL(url);
+    let left: string | null = null;
+    const pending: Promise<unknown>[] = [];
+    const location = {
+      get hash() {
+        return current.hash;
+      },
+      get pathname() {
+        return current.pathname;
+      },
+      get search() {
+        return current.search;
+      },
+      replace(path: string) {
+        left = path;
+      },
+      assign(path: string) {
+        left = path;
+      },
+    };
+    const history = {
+      replaceState(_s: unknown, _t: string, next: string) {
+        current = new URL(next, current);
+      },
+    };
+    const fetch = (path: string, init: Record<string, unknown> = {}) => {
+      const p = ask(String(init.method ?? "GET"), path, { headers: init.headers as Record<string, string>, body: init.body as string | undefined });
+      pending.push(p.catch(() => {}));
+      return p;
+    };
+    vm.runInContext(INVITE_JS, vm.createContext({ document: doc, location, history, fetch }), { filename: "invite.js" });
+    const $ = (id: string) => doc.root.all().find((e) => e.id === id)!;
+    return {
+      $,
+      url: () => current.href,
+      left: () => left,
+      async settle() {
+        for (let i = 0; i < 30; i++) {
+          await Promise.race([Promise.all(pending), new Promise((r) => globalThis.setTimeout(r, 1))]);
+          await new Promise((r) => setImmediate(r));
+        }
+      },
+    };
+  }
+  return { jar, ask, open };
+}
+
+describe("the whole feature, through the real routes and pages", () => {
+  it("invite from the Admin page, accept on the invite page, then disable, enable, disable and delete the new account from the Admin page; its address can be invited again", async () => {
+    const made = await makeDeps({ hosts: { tours: "tours.example.com", app: "app.example.com" }, storageAllowanceBytes: STANDARD });
+    const { deps, mail } = made;
+    const admin = await seedAccount(deps, { admin: true, username: "realadmin" });
+    const adminBrowser = browser(deps, await sessionOf(deps, admin.userId));
+
+    // The admin's page sends the invite.
+    const page = openAdmin(adminBrowser.respond);
+    await page.settle();
+    expect(rows(page).map((r) => rowOf(r).name)).toEqual(["realadmin"]);
+    type(page, "mara@example.com", "invite-email");
+    page.$("invite-go").click();
+    await page.settle();
+    await made.settle();
+    expect(noteOf(page, "invite-note")?.[0]).toMatch(/^An invite is on its way to mara@example\.com\. The link works once and until /);
+    expect(invRows(page).map((r) => invOf(r).address)).toEqual(["mara@example.com"]);
+    const sent = mail.sent.filter((m) => m.to === "mara@example.com");
+    expect(sent).toHaveLength(1);
+    const link = /https:\/\/app\.example\.com\/invite#dpi_[0-9a-f]{40}/.exec(sent[0].text)![0];
+
+    // The invitee opens the mailed link in their own browser and accepts through the page's own script.
+    const invitee = inviteeBrowser(deps);
+    const accept = invitee.open(link);
+    await accept.settle();
+    expect(accept.url()).toBe(`${APP}/invite`);
+    expect(accept.$("invite-email").textContent).toBe("mara@example.com");
+    accept.$("username").value = "mara";
+    accept.$("username").dispatch("input");
+    accept.$("choose-button").click();
+    await accept.settle();
+    expect(accept.left()).toBe("/connections");
+    expect(invitee.jar.cookie).toMatch(new RegExp(`^${SESSION_COOKIE}=dps_[0-9a-f]{64}$`));
+    expect((await invitee.ask("GET", "/api/v1/session")).status).toBe(200);
+    const mara = await deps.db.first<{ id: string }>("SELECT id FROM user WHERE email = ?", ["mara@example.com"]);
+    expect(mara).not.toBeNull();
+
+    // The admin's page, loaded again, lists the new account, and the invite is gone.
+    const tab = openAdmin(adminBrowser.respond);
+    await tab.settle();
+    expect(rows(tab).map((r) => [rowOf(r).name, rowOf(r).tags, rowOf(r).workspace, rowOf(r).menu])).toEqual([
+      ["realadmin", ["Admin"], "Account", ["Set allowance"]],
+      ["mara", [], "mara", ["Set allowance", "Disable"]],
+    ]);
+    expect(tab.$("invites-empty").shown).toBe(true);
+    const before = rowOf(rows(tab)[1]);
+
+    // Disable: the new account's session is refused from then on.
+    choose(rows(tab)[1], "Disable");
+    tab.$("disable-go").click();
+    await tab.settle();
+    expect(rowOf(rows(tab)[1]).tags).toEqual(["Disabled"]);
+    expect((await invitee.ask("GET", "/api/v1/session")).status).toBe(401);
+    expect((await invitee.ask("GET", "/api/v1/tokens")).status).toBe(401);
+
+    // Enable: the row is as it was.
+    choose(rows(tab)[1], "Enable");
+    await tab.settle();
+    expect(rowOf(rows(tab)[1])).toEqual(before);
+    expect(await deps.db.first("SELECT status FROM user WHERE id = ?", [mara!.id])).toEqual({ status: "active" });
+
+    // Disable again, then delete with the username typed, to the end.
+    choose(rows(tab)[1], "Disable");
+    tab.$("disable-go").click();
+    await tab.settle();
+    choose(rows(tab)[1], "Delete");
+    await tab.settle();
+    expect(tab.$("delete-title").textContent).toBe('Delete "mara" for good?');
+    expect(tab.$("delete-go").disabled).toBe(true);
+    type(tab, "mara", "delete-input");
+    tab.$("delete-go").click();
+    await drain(tab);
+    expect(tab.$("delete-dialog").hidden).toBe(true);
+    expect(noteOf(tab, "admin-note")?.[0]).toBe("mara was deleted.");
+    expect(rows(tab).map((r) => rowOf(r).name)).toEqual(["realadmin"]);
+    expect(tab.$("admin-summary").textContent).toMatch(/^1 account · /);
+    expect(await deps.db.first("SELECT id FROM user WHERE id = ?", [mara!.id])).toBeNull();
+
+    // The address can be invited again, from the same page.
+    type(tab, "mara@example.com", "invite-email");
+    tab.$("invite-go").click();
+    await tab.settle();
+    await made.settle();
+    expect(noteOf(tab, "invite-note")?.[0]).toMatch(/^An invite is on its way to mara@example\.com\./);
+    expect(invRows(tab).map((r) => invOf(r).address)).toEqual(["mara@example.com"]);
+    expect(mail.sent.filter((m) => m.to === "mara@example.com")).toHaveLength(2);
+    const audit = await deps.db.all<{ event: string }>("SELECT event FROM audit WHERE event LIKE 'account_%' OR event LIKE 'invite_%' ORDER BY rowid");
+    expect(audit.map((a) => a.event)).toEqual(["invite_sent", "invite_accepted", "account_disabled", "account_enabled", "account_disabled", "account_deleted", "invite_sent"]);
   });
 });
