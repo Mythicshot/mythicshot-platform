@@ -396,7 +396,7 @@ export const OWNED: Readonly<Record<string, string>> = {
   tour_deletion: "workspace_id = ?",
   deleted_object: "tour_id IN (SELECT tour_id FROM tour_deletion WHERE workspace_id = ?)",
   media: "workspace_id = ?",
-  media_part: "media_id IN (SELECT id FROM media WHERE workspace_id = ?)",
+  media_object: "media_id IN (SELECT id FROM media WHERE workspace_id = ?)",
 };
 
 /** Tables whose rows belong to no workspace, each with the reason. */

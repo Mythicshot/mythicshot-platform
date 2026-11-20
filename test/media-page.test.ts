@@ -7,7 +7,7 @@ import { makeDeps, seedAccount, seedWorkspace } from "#harness";
 import { newId, newLinkId } from "../src/auth.ts";
 import { SUBREQUEST_BUDGET } from "../src/budget.ts";
 import type { Hosts } from "../src/hosts.ts";
-import { PART_BYTES } from "../src/media.ts";
+import { PART_BYTES, onlineItemFiles } from "../src/media.ts";
 import { SHARE_CSS, SHARE_JS } from "../src/media-assets.ts";
 import { SHARE_NOT_FOUND_HTML, shareDate, shareDuration } from "../src/media-page.ts";
 import type { Deps } from "../src/ports.ts";
@@ -38,7 +38,15 @@ type ItemSpec = {
 
 type Seeded = { id: string; link: string; file: Uint8Array };
 
-/** An item written straight into the database and the private store, as the API leaves an item: rows, one object per part, the preview. */
+/** A claim token, as the API makes one: 24 hex characters. */
+const claim = () => newId("med").slice(4);
+
+/**
+ * An item written straight into the database and the private store, as the API leaves an
+ * item: its row, one current claim row and object per part (`m/<id>/part-NNN.<claim>`), and
+ * the preview under its own claim (`m/<id>/preview.<claim>.png`). Also a stale claim of part
+ * 0 that is not current, whose object holds other bytes: it must never be served.
+ */
 async function seedItem(deps: Deps, workspaceId: string, spec: ItemSpec): Promise<Seeded> {
   const id = newId("med");
   const link = newLinkId();
@@ -47,19 +55,27 @@ async function seedItem(deps: Deps, workspaceId: string, spec: ItemSpec): Promis
   const state = spec.state ?? "online";
   const created = spec.createdAt ?? ONLINE_AT - 60_000;
   await deps.db.run(
-    `INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, duration_ms, title, state, preview_type, preview_bytes, preview_stored_at, created_at, online_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id, workspaceId, link, spec.kind, spec.content_type, bytes, parts, spec.width, spec.height, spec.kind === "clip" ? (spec.duration_ms ?? 12_000) : null,
-      spec.title ?? null, state, spec.preview ? "png" : null, spec.preview ? spec.preview.length : null, spec.preview ? created : null, created, state === "online" ? ONLINE_AT : null,
-    ],
+    `INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, duration_ms, title, state, created_at, online_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, workspaceId, link, spec.kind, spec.content_type, bytes, parts, spec.width, spec.height, spec.kind === "clip" ? (spec.duration_ms ?? 12_000) : null, spec.title ?? null, state, created, state === "online" ? ONLINE_AT : null],
   );
   for (let n = 0; n < parts; n++) {
     const part = spec.file.subarray(n * PART_BYTES, Math.min(bytes, (n + 1) * PART_BYTES));
-    await deps.db.run("INSERT INTO media_part (media_id, n, bytes, claim, stored_at) VALUES (?, ?, ?, NULL, ?)", [id, n, part.length, created]);
-    await deps.drafts.put(`m/${id}/part-${String(n).padStart(3, "0")}`, part, { contentType: spec.content_type, cacheControl: "no-store" });
+    const c = claim();
+    await deps.db.run("INSERT INTO media_object (media_id, claim, n, ext, bytes, claimed_at, stored_at, current) VALUES (?, ?, ?, NULL, ?, ?, ?, 1)", [id, c, n, part.length, created, created]);
+    await deps.drafts.put(`m/${id}/part-${String(n).padStart(3, "0")}.${c}`, part, { contentType: spec.content_type, cacheControl: "no-store" });
+    if (n === 0) {
+      const stale = claim();
+      const other = new Uint8Array(part.length).fill(0xee);
+      await deps.db.run("INSERT INTO media_object (media_id, claim, n, ext, bytes, claimed_at, stored_at, current) VALUES (?, ?, 0, NULL, ?, ?, ?, 0)", [id, stale, part.length, created, created]);
+      await deps.drafts.put(`m/${id}/part-000.${stale}`, other, { contentType: "text/html", cacheControl: "no-store" });
+    }
   }
-  if (spec.preview) await deps.drafts.put(`m/${id}/preview.png`, spec.preview, { contentType: "image/png", cacheControl: "no-store" });
+  if (spec.preview) {
+    const c = claim();
+    await deps.db.run("INSERT INTO media_object (media_id, claim, n, ext, bytes, claimed_at, stored_at, current) VALUES (?, ?, -1, 'png', ?, ?, ?, 1)", [id, c, spec.preview.length, created, created]);
+    await deps.drafts.put(`m/${id}/preview.${c}.png`, spec.preview, { contentType: "text/html", cacheControl: "no-store" });
+  }
   return { id, link, file: spec.file };
 }
 
@@ -115,7 +131,7 @@ describe("the page of an image", () => {
     const r = await get(deps, `/i/${item.link}`);
     expect(r.status, r.text).toBe(200);
     expectPageHeaders(r, "public, max-age=60");
-    expect(r.calls).toBe(1);
+    expect(r.calls).toBe(2);
     const t = r.text;
     expect(t).toContain(`<header class="top"><span class="brand">Mythicshot</span><span class="who">Shared image</span></header>`);
     expect(t).toContain("<title>Loot window, settings tab</title>");
@@ -270,13 +286,13 @@ describe("the file", () => {
     expect(r.headers.get("content-length")).toBe(String(item.file.length));
     expect(r.headers.get("content-disposition")).toBe(`inline; filename="${item.link}.png"`);
     expect(r.bytes).toEqual(item.file);
-    expect(r.calls).toBe(2);
+    expect(r.calls).toBe(3);
     const etag = r.headers.get("etag")!;
     const cached = await get(deps, `/i/${item.link}.png`, { "if-none-match": etag });
-    expect([cached.status, cached.bytes.length, cached.calls, cached.headers.get("etag")]).toEqual([304, 0, 1, etag]);
+    expect([cached.status, cached.bytes.length, cached.calls, cached.headers.get("etag")]).toEqual([304, 0, 2, etag]);
     // HEAD: the headers, no body, and no part read.
     const h = await head(deps, `/i/${item.link}.png`);
-    expect([h.status, h.bytes.length, h.calls, h.headers.get("content-length"), h.headers.get("content-type")]).toEqual([200, 0, 1, String(item.file.length), "image/png"]);
+    expect([h.status, h.bytes.length, h.calls, h.headers.get("content-length"), h.headers.get("content-type")]).toEqual([200, 0, 2, String(item.file.length), "image/png"]);
   });
 
   it("Download is the same file as an attachment named from the link id and the extension alone", SLOW, async () => {
@@ -325,7 +341,7 @@ describe("the file", () => {
     expect(r.headers.get("cache-control")).toBe("public, max-age=3600");
     expect(r.headers.get("content-disposition")).toBe(`inline; filename="${item.link}-preview.png"`);
     const cached = await get(deps, `/r/${item.link}/preview`, { "if-none-match": r.headers.get("etag")! });
-    expect([cached.status, cached.calls]).toEqual([304, 1]);
+    expect([cached.status, cached.calls]).toEqual([304, 2]);
   });
 });
 
@@ -363,7 +379,7 @@ describe("Range", () => {
       expect(r.headers.get("content-length"), range).toBe(String(last - first + 1));
       expect(r.bytes.length, range).toBe(last - first + 1);
       expect(r.bytes, range).toEqual(item.file.subarray(first, last + 1));
-      expect(r.calls, range).toBe(1 + parts);
+      expect(r.calls, range).toBe(2 + parts);
     }
   });
 
@@ -373,7 +389,7 @@ describe("Range", () => {
     const path = `/r/${item.link}.mp4`;
     for (const range of [`bytes=${SIZE}-`, `bytes=${SIZE}-${SIZE + 5}`, `bytes=${SIZE * 3}-`, "bytes=-0"]) {
       const r = await get(deps, path, { range });
-      expect([r.status, r.headers.get("content-range"), r.bytes.length, r.calls], range).toEqual([416, `bytes */${SIZE}`, 0, 1]);
+      expect([r.status, r.headers.get("content-range"), r.bytes.length, r.calls], range).toEqual([416, `bytes */${SIZE}`, 0, 2]);
       expect(r.headers.get("content-type"), range).toBe("video/mp4");
       expect(r.headers.get("content-security-policy"), range).toBe(FILE_CSP);
     }
@@ -387,7 +403,7 @@ describe("Range", () => {
     expect((await get(deps, path, { range: "bytes=0-9", "if-range": etag })).status).toBe(206);
     // HEAD with a range: the 206 headers and no part read.
     const h = await head(deps, path, { range: "bytes=10-19" });
-    expect([h.status, h.headers.get("content-range"), h.headers.get("content-length"), h.calls]).toEqual([206, `bytes 10-19/${SIZE}`, "10", 1]);
+    expect([h.status, h.headers.get("content-range"), h.headers.get("content-length"), h.calls]).toEqual([206, `bytes 10-19/${SIZE}`, "10", 2]);
   });
 
   it("the largest clip, 27 parts, streams whole within the call budget, and its last range reads one part", SLOW, async () => {
@@ -399,16 +415,16 @@ describe("Range", () => {
     expect(r.bytes.length).toBe(bytes);
     for (let n = 0; n < 27; n++) expect(r.bytes[n * PART_BYTES + 100], `part ${n}`).toBe(n + 1);
     expect(r.bytes.subarray(0, 32)).toEqual(item.file.subarray(0, 32));
-    expect(r.calls).toBe(28);
+    expect(r.calls).toBe(29);
     expect(r.calls).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
     const tail = await get(deps, `/r/${item.link}.mp4`, { range: "bytes=-500" });
-    expect([tail.status, tail.calls, tail.bytes.every((b) => b === 27)]).toEqual([206, 2, true]);
+    expect([tail.status, tail.calls, tail.bytes.every((b) => b === 27)]).toEqual([206, 3, true]);
   });
 
   it("an online item whose part has gone from the store is the 404 page, not a short file", SLOW, async () => {
     const { deps, a } = await world();
     const item = await seedItem(deps, a.workspaceId, IMAGE());
-    await deps.drafts.delete([`m/${item.id}/part-000`]);
+    await deps.drafts.delete((await onlineItemFiles(deps, item.link))!.parts);
     const r = await get(deps, `/i/${item.link}.png`);
     expect([r.status, r.text]).toEqual([404, SHARE_NOT_FOUND_HTML]);
   });
@@ -424,7 +440,7 @@ describe("a link that does not work", () => {
     const closing = await seedItem(deps, a.workspaceId, { ...IMAGE(), state: "closing" });
     const deleted = await seedItem(deps, a.workspaceId, IMAGE());
     await deps.db.batch([
-      { sql: "DELETE FROM media_part WHERE media_id = ?", params: [deleted.id] },
+      { sql: "DELETE FROM media_object WHERE media_id = ?", params: [deleted.id] },
       { sql: "DELETE FROM media WHERE id = ?", params: [deleted.id] },
     ]);
     const off = await seedAccount(deps);
@@ -439,7 +455,7 @@ describe("a link that does not work", () => {
     expect(reference.text).toContain(
       `<main class="gone"><h1>This link no longer works</h1><p>The image or clip it pointed to was deleted, or the link is not complete. Ask whoever sent it to you for a new one.</p></main>`,
     );
-    expect(reference.calls).toBe(1);
+    expect(reference.calls).toBe(2);
 
     const paths: string[] = [];
     for (const item of [uploading, stale, closing, deleted]) paths.push(`/i/${item.link}`, `/i/${item.link}.png`, `/i/${item.link}/download`, `/i/${item.link}/preview`);
@@ -456,7 +472,7 @@ describe("a link that does not work", () => {
     for (const path of paths) {
       const r = await get(deps, path);
       expect(seen(r), path).toEqual(seen(reference));
-      expect(r.calls, path).toBe(1);
+      expect(r.calls, path).toBe(2);
       // With a validator and a range it is the same 404.
       expect(seen(await get(deps, path, { "if-none-match": "*", range: "bytes=0-0" })), path).toEqual(seen(reference));
       const h = await head(deps, path);

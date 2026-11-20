@@ -172,7 +172,7 @@ export const CODE_MEANINGS: Readonly<Record<string, string>> = {
   publish_busy: "A publish of the tour is in progress or just starting; try again.",
   publish_cancelled: "That publish was stopped before it finished; publish again to start over.",
   too_many_uploads: "The workspace has its number of open uploads; finish or cancel one. The retry-after header says how long to wait.",
-  too_many_items: "The workspace started as many shared items as it may in an hour. The retry-after header says how long to wait.",
+  too_many_items: "The workspace started, or sent parts or previews of, as many shared items as it may in an hour. The retry-after header says how long to wait.",
   bad_part: "A part of a shared item does not have the length it must have.",
   bad_media: "Part 0 of a shared item is not a file of the declared type, or its width and height differ from the declared ones.",
   already_online: "The shared item is finished; its parts and preview cannot change any more.",

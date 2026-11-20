@@ -11,6 +11,7 @@ import { NodeDb } from "./db.ts";
 import { NodeFileStore } from "./files.ts";
 import type { ClosableMailer } from "./mail-thread.ts";
 import { migrate } from "./migrate.ts";
+import { mediaLimitsProblem } from "../limits.ts";
 import { stopSequence } from "./stop.ts";
 
 // src/node/entry.ts and dist/node/entry.js both sit two folders below the repo root.
@@ -36,6 +37,9 @@ async function main(): Promise<void> {
   // Read before anything is created or opened: a pair of addresses that cannot be used
   // stops the start here, with its one line and nothing else.
   const config = configFromEnv(process.env);
+  // Limits of shared items that would need more parts than an item may have stop the start too.
+  const mediaProblem = mediaLimitsProblem(config);
+  if (mediaProblem !== null) throw new Error(mediaProblem);
   // Mail and the client address never stop the start. A mail block that cannot be used
   // leaves mail off, and a header name that cannot be used leaves every address unknown;
   // each says so in one fixed line that holds no value. The mail server is not contacted

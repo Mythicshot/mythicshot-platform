@@ -1,4 +1,5 @@
 import { createApp } from "../app.ts";
+import { mediaLimitsProblem } from "../limits.ts";
 import { withBudget } from "../budget.ts";
 import { setClientAddress } from "../client.ts";
 import { HOST_ROLES, hostSettingsFrom, normaliseHost, resolveHosts, settingOf, type Hosts, type HostsResult } from "../hosts.ts";
@@ -147,6 +148,13 @@ export default {
     setClientAddress(request, request.headers.get("cf-connecting-ip"));
     // Each request gets its own metered ports, so one that goes over the call budget is logged.
     const defers = typeof (ctx as { waitUntil?: unknown } | undefined)?.waitUntil === "function" ? ctx : undefined;
-    return withBudget(depsFromEnv(env, hosts.hosts, allowance.bytes, defers), request.method, async (deps) => createApp(deps).fetch(request, env, ctx));
+    const deps = depsFromEnv(env, hosts.hosts, allowance.bytes, defers);
+    // And limits of shared items that would need more parts than an item may have.
+    const media = mediaLimitsProblem(deps.config);
+    if (media !== null) {
+      console.error(media);
+      return misconfigured();
+    }
+    return withBudget(deps, request.method, async (metered) => createApp(metered).fetch(request, env, ctx));
   },
 } satisfies ExportedHandler<WorkerEnv>;

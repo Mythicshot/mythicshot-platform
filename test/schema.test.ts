@@ -13,7 +13,7 @@ const TABLES = [
   "deleted_object",
   "email_change",
   "media",
-  "media_part",
+  "media_object",
   "membership",
   "public_object",
   "publish_job",
@@ -714,21 +714,24 @@ describe("schema", () => {
   it("an item and its parts are strict, cascade nothing, and take only the shapes the routes write", async () => {
     const { deps } = await makeDeps();
     const { workspaceId } = await seedWorkspace(deps, "A");
-    for (const name of ["media", "media_part"]) {
+    for (const name of ["media", "media_object"]) {
       const t = (await appTables(deps)).find((x) => x.name === name);
       expect(t?.sql, name).toMatch(/\)\s*STRICT$/);
       expect(t?.sql, name).not.toMatch(/cascade|set null|set default/i);
     }
     const indexes = await deps.db.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'media' AND sql IS NOT NULL ORDER BY name");
     expect(indexes.map((i) => i.name)).toEqual(["media_list", "media_state"]);
+    const objectIndexes = await deps.db.all<{ name: string; sql: string }>("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'media_object' AND sql IS NOT NULL ORDER BY name");
+    expect(objectIndexes.map((i) => i.name)).toEqual(["media_object_current"]);
+    expect(objectIndexes[0].sql).toMatch(/^CREATE UNIQUE INDEX .* WHERE current = 1$/);
     let n = 0;
-    type Cols = Partial<Record<"id" | "ws" | "link" | "kind" | "type" | "bytes" | "parts" | "width" | "height" | "duration" | "title" | "state" | "ptype" | "pbytes" | "pclaim" | "pstored", string | number | null>>;
+    type Cols = Partial<Record<"id" | "ws" | "link" | "kind" | "type" | "bytes" | "parts" | "width" | "height" | "duration" | "title" | "state", string | number | null>>;
     const item = (c: Cols = {}, titleSql = "?") => {
       n += 1;
-      const v = { id: "med_" + n.toString(16).padStart(24, "0"), ws: workspaceId, link: "a".repeat(19) + "abcdefghijklmnopqrstuvwxyz234567"[n % 32], kind: "image", type: "image/png", bytes: 10, parts: 1, width: 1, height: 1, duration: null, title: null, state: "uploading", ptype: null, pbytes: null, pclaim: null, pstored: null, ...c };
+      const v = { id: "med_" + n.toString(16).padStart(24, "0"), ws: workspaceId, link: "a".repeat(19) + "abcdefghijklmnopqrstuvwxyz234567"[n % 32], kind: "image", type: "image/png", bytes: 10, parts: 1, width: 1, height: 1, duration: null, title: null, state: "uploading", ...c };
       return deps.db.run(
-        `INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, duration_ms, title, state, preview_type, preview_bytes, preview_claim, preview_stored_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${titleSql}, ?, ?, ?, ?, ?, 1)`,
-        [v.id, v.ws, v.link, v.kind, v.type, v.bytes, v.parts, v.width, v.height, v.duration, v.title, v.state, v.ptype, v.pbytes, v.pclaim, v.pstored],
+        `INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, duration_ms, title, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${titleSql}, ?, 1)`,
+        [v.id, v.ws, v.link, v.kind, v.type, v.bytes, v.parts, v.width, v.height, v.duration, v.title, v.state],
       );
     };
     const reset = () => deps.db.run("DELETE FROM media");
@@ -741,8 +744,6 @@ describe("schema", () => {
       { title: "é".repeat(120) },
       { state: "online" },
       { state: "closing" },
-      { ptype: "png", pbytes: 100000, pclaim: "0".repeat(24) },
-      { ptype: "jpg", pbytes: 1, pstored: 5 },
     ];
     for (const c of good) {
       await item(c);
@@ -774,31 +775,52 @@ describe("schema", () => {
       { title: "" },
       { title: "x".repeat(481) },
       { state: "deleted" },
-      { ptype: "gif", pbytes: 1 },
-      { ptype: "png" },
-      { pbytes: 10 },
-      { ptype: "png", pbytes: 100001 },
-      { ptype: "png", pbytes: 1, pclaim: "0".repeat(23) },
-      { ptype: "png", pbytes: 1, pclaim: "G".repeat(24) },
-      { pstored: 5 },
     ];
     for (const c of bad) expect(await item(c).then(() => "stored", () => "refused"), JSON.stringify(c)).toBe("refused");
     await rejection(item({}, "'a' || char(0) || 'b'"));
     await rejection(deps.db.run("INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, state, created_at) VALUES (? || char(0) || 'x', ?, ?, 'image', 'image/png', 1, 1, 1, 1, 'uploading', 1)", ["med_" + "0".repeat(24), workspaceId, "b".repeat(20)]));
     expect(await count(deps, "media")).toBe(0);
 
-    // A link id is unique; a part needs its item, has one row per number, and is claimed or stored, never both or neither.
+    // A link id is unique. An object row needs its item and has a claim of its own; it is a
+    // part (n from 0, no type) or the preview (n = -1, png or jpg); it is current only once
+    // stored, and at most one claim per part and preview is current.
     await item({ id: "med_" + "1".repeat(24), link: "c".repeat(20) });
     expect(isUniqueViolation(await rejection(item({ link: "c".repeat(20) })))).toBe(true);
-    const part = (cols: { media?: string; n?: number; bytes?: number; claim?: string | null; stored?: number | null }) =>
-      deps.db.run("INSERT INTO media_part (media_id, n, bytes, claim, stored_at) VALUES (?, ?, ?, ?, ?)", [cols.media ?? "med_" + "1".repeat(24), cols.n ?? 0, cols.bytes ?? 1, cols.claim === undefined ? null : cols.claim, cols.stored === undefined ? 1 : cols.stored]);
-    await part({ n: 0, bytes: 2_000_000 });
-    await part({ n: 998, claim: "a".repeat(24), stored: null });
-    expect(isUniqueViolation(await rejection(part({ n: 0 })))).toBe(true);
-    for (const c of [{ media: "med_" + "2".repeat(24) }, { n: -1 }, { n: 999 }, { n: 1, bytes: 0 }, { n: 1, bytes: 2_000_001 }, { n: 1, claim: null, stored: null }, { n: 1, claim: "a".repeat(24), stored: 1 }, { n: 1, claim: "a".repeat(25), stored: null }]) {
-      await rejection(part(c));
+    let k = 0;
+    const object = (cols: { media?: string; claim?: string; n?: number; ext?: string | null; bytes?: number; stored?: number | null; current?: number }) => {
+      k += 1;
+      return deps.db.run("INSERT INTO media_object (media_id, claim, n, ext, bytes, claimed_at, stored_at, current) VALUES (?, ?, ?, ?, ?, 1, ?, ?)", [
+        cols.media ?? "med_" + "1".repeat(24), cols.claim ?? k.toString(16).padStart(24, "0"), cols.n ?? 0, cols.ext === undefined ? null : cols.ext, cols.bytes ?? 1, cols.stored === undefined ? null : cols.stored, cols.current ?? 0,
+      ]);
+    };
+    await object({ n: 0, bytes: 2_000_000, stored: 5, current: 1 });
+    await object({ n: 0 });
+    await object({ n: 0, stored: 6 });
+    await object({ n: 998 });
+    await object({ n: -1, ext: "png", bytes: 100_000, stored: 7, current: 1 });
+    await object({ n: -1, ext: "jpg" });
+    expect(isUniqueViolation(await rejection(object({ n: 0, stored: 8, current: 1 })))).toBe(true);
+    expect(isUniqueViolation(await rejection(object({ n: -1, ext: "jpg", stored: 8, current: 1 })))).toBe(true);
+    expect(isUniqueViolation(await rejection(object({ claim: "1".padStart(24, "0") })))).toBe(true);
+    for (const c of [
+      { media: "med_" + "2".repeat(24) },
+      { n: -2 },
+      { n: 999 },
+      { n: 1, bytes: 0 },
+      { n: 1, bytes: 2_000_001 },
+      { n: -1, ext: "png", bytes: 100_001 },
+      { n: -1 },
+      { n: -1, ext: "gif" },
+      { n: 1, ext: "png" },
+      { n: 1, current: 1 },
+      { n: 1, current: 2, stored: 1 },
+      { n: 1, claim: "a".repeat(23) },
+      { n: 1, claim: "A".repeat(24) },
+    ]) {
+      expect(await object(c).then(() => "stored", () => "refused"), JSON.stringify(c)).toBe("refused");
     }
-    expect(await count(deps, "media_part")).toBe(2);
+    await rejection(deps.db.run("INSERT INTO media_object (media_id, claim, n, bytes, claimed_at) VALUES (?, ? || char(0) || 'x', 1, 1, 1)", ["med_" + "1".repeat(24), "a".repeat(22)]));
+    expect(await count(deps, "media_object")).toBe(6);
     // An item with parts cannot be deleted out from under them.
     await rejection(deps.db.run("DELETE FROM media WHERE id = ?", ["med_" + "1".repeat(24)]));
   });

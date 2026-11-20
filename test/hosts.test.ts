@@ -174,7 +174,7 @@ const DOCS_PAGE_KEY = "GET /docs";
 const DOCS_FILE_KEYS = KEYS.filter((k) => k.startsWith("GET /docs/"));
 /** Shared items' pages, files and previews, and the pages' two files. */
 const MEDIA_KEYS = KEYS.filter((k) => /^GET \/(?:i|r|s)\//.test(k));
-/** The media routes that look an item up: one database call each. */
+/** The media routes that look an item up: two database calls each (onlineItemFiles). */
 const ITEM_KEYS = MEDIA_KEYS.filter((k) => !k.startsWith("GET /s/"));
 
 function sendRow(deps: Deps, row: Row, origin: string): Promise<Call> {
@@ -445,7 +445,7 @@ describe("the host-routing matrix", () => {
     for (const key of ITEM_KEYS) {
       expect(answers[key].headers.get("content-type"), key).toBe("text/html; charset=utf-8");
       expect(answers[key].text, key).toContain("This link no longer works");
-      expect(answers[key].calls, key).toBe(1);
+      expect(answers[key].calls, key).toBe(2);
     }
     for (const key of KEYS) {
       if (key === "GET /healthz" || MEDIA_KEYS.includes(key)) continue;
@@ -454,7 +454,7 @@ describe("the host-routing matrix", () => {
     }
     expect(answers["GET /healthz"].text).toBe('{"ok":true,"address":"img"}');
     expect(answers["GET /healthz"].headers.get("content-type")).toBe("application/json");
-    expect(calls() - before).toBe(1 + ITEM_KEYS.length);
+    expect(calls() - before).toBe(1 + 2 * ITEM_KEYS.length);
     // Its name matches in capitals, with a trailing dot and with a default port; another port is unknown.
     for (const origin of ["https://IMG.Example.com", "https://img.example.com.", "http://img.example.com:80"]) {
       expect((await send(deps, "GET", "/healthz", { origin })).text, origin).toBe('{"ok":true,"address":"img"}');
