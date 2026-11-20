@@ -600,6 +600,55 @@ describe("confirming an email change", () => {
     expect(await countOf(deps, "audit WHERE event = 'email_changed'")).toBe(1);
   });
 
+  /** Deps whose database runs `between` right after the confirm's one read, before its batch. Returns the database it wrapped. */
+  function betweenReadAndBatch(deps: Deps, between: (db: Db) => Promise<unknown>): Db {
+    const db = deps.db;
+    deps.db = {
+      ...db,
+      all: (sql, params) => db.all(sql, params),
+      first: async (sql, params) => {
+        const row = await db.first(sql, params);
+        if (sql.includes("FROM email_change e")) await between(db);
+        return row as never;
+      },
+      run: (sql, params) => db.run(sql, params),
+      batch: (stmts) => db.batch(stmts),
+    };
+    return db;
+  }
+
+  it("a code used or replaced between the read and the batch changes nothing: the one refusal, no notice, no record", async () => {
+    for (const what of ["used", "replaced"] as const) {
+      const { deps, mail, a } = await site();
+      const s = await signIn(deps, a.userId);
+      const code = await askedCode(deps, mail, s, NEW);
+      betweenReadAndBatch(deps, (db) =>
+        what === "used"
+          ? db.run("UPDATE email_change SET used_at = ? WHERE user_id = ?", [NOW, a.userId])
+          : db.run("UPDATE email_change SET code_hash = ?, new_email = ? WHERE user_id = ?", ["f".repeat(64), "other@example.com", a.userId]),
+      );
+      const r = await confirm(deps, s, code);
+      expect(seen(r), what).toEqual({ status: 400, headers: API_HEADERS, body: BAD_CODE });
+      expect(mail.sent.map((m) => m.to), what).toEqual([NEW]);
+      expect(await emailOf(deps, a.userId), what).toBe(a.email);
+      expect(await countOf(deps, "audit WHERE event = 'email_changed'"), what).toBe(0);
+    }
+  });
+
+  it("success is reported only when the account's row was changed: an account gone between the read and the batch is refused", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const code = await askedCode(deps, mail, s, NEW);
+    const db = betweenReadAndBatch(deps, async (raw) => {
+      for (const table of ["email_change", "signin_code", "session", "signin_method", "membership"]) await raw.run(`DELETE FROM ${table} WHERE user_id = ?`, [a.userId]);
+      await raw.run("DELETE FROM user WHERE id = ?", [a.userId]);
+    });
+    expect(await confirmEmailChange(deps, a.userId, code)).toBeNull();
+    deps.db = db;
+    expect(await countOf(deps, "audit WHERE event = 'email_changed'")).toBe(0);
+    expect(mail.sent.map((m) => m.to)).toEqual([NEW]);
+  });
+
   it("the batch decides: a change read as usable but taken before the batch runs is refused on both targets", async () => {
     const { deps, mail, a, b } = await site();
     const sa = await signIn(deps, a.userId);

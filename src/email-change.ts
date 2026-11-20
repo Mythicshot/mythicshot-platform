@@ -161,12 +161,14 @@ export type ConfirmedChange = { userId: string; workspaceId: string; oldEmail: s
  *
  * One read, then one batch that decides:
  * 1. the account's address becomes the change's new one, read inside the statement, and
- *    only while the change is unused and unexpired; for any other the value is NULL, which
- *    the column refuses, and the whole batch is undone. An address another account has is
- *    refused by the unique index, and the whole batch is undone;
- * 2. the change is marked used;
- * 3. the account's open sign-in codes are spent: they were mailed to the old address;
- * 4. the audit row, with ids only.
+ *    only while the change is unused and unexpired; for any other change, or an account
+ *    that is gone, no row is changed. An address another account has is refused by the
+ *    unique index, and the whole batch is undone;
+ * 2. the audit row, with ids only, which is also the batch's guard: unless statement 1
+ *    changed exactly one row it fails, and the whole batch is undone, so success is never
+ *    reported (nor a notice sent) for a change that was not made;
+ * 3. the change is marked used;
+ * 4. the account's open sign-in codes are spent: they were mailed to the old address.
  */
 export async function confirmEmailChange(deps: Deps, userId: string, code: string): Promise<ConfirmedChange | null> {
   if (typeof code !== "string" || !EMAIL_CODE_PATTERN.test(code)) return null;
@@ -183,14 +185,17 @@ export async function confirmEmailChange(deps: Deps, userId: string, code: strin
   );
   if (found === null) return null;
   try {
+    const usable = "FROM email_change e WHERE e.code_hash = ? AND e.user_id = ? AND e.used_at IS NULL AND e.created_at > ?";
     await deps.db.batch([
       {
-        sql: "UPDATE user SET email = (SELECT e.new_email FROM email_change e WHERE e.code_hash = ? AND e.user_id = ? AND e.used_at IS NULL AND e.created_at > ?) WHERE id = ?",
-        params: [hash, userId, since, userId],
+        sql: `UPDATE user SET email = (SELECT e.new_email ${usable}) WHERE id = ? AND EXISTS (SELECT 1 ${usable})`,
+        params: [hash, userId, since, userId, hash, userId, since],
       },
+      // Right after the change it judges: unless exactly one account row was changed, this
+      // fails and the whole batch is undone.
+      auditStatement(deps, { event: "email_changed", userId, workspaceId: found.workspace_id, subject: userId }, { onlyAfterOneChange: true }),
       { sql: "UPDATE email_change SET used_at = ? WHERE code_hash = ? AND user_id = ?", params: [now, hash, userId] },
       { sql: "UPDATE signin_code SET used_at = ? WHERE user_id = ? AND used_at IS NULL", params: [now, userId] },
-      auditStatement(deps, { event: "email_changed", userId, workspaceId: found.workspace_id, subject: userId }),
     ]);
   } catch (err) {
     if (isUniqueViolation(err)) {

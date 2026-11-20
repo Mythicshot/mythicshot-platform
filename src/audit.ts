@@ -116,7 +116,9 @@ function newAuditId(): string {
 /**
  * The statement that records one event, for the caller to run in the same batch as the
  * action itself, so the record and the action are written together or not at all.
- * Nothing is written by calling this. The time is `deps.now()`.
+ * Nothing is written by calling this. The time is `deps.now()`. With `onlyAfterOneChange`,
+ * the row also guards the batch: placed right after another statement, it fails (and so
+ * undoes the batch) unless that statement changed exactly one row.
  *
  * Throws `Error("audit: unknown event")` for an event outside `AUDIT_EVENTS`, and
  * `Error("audit: a value that must not be recorded")` when:
@@ -134,14 +136,21 @@ function newAuditId(): string {
  * repeats the value. The JSON of the largest detail is under 1000 bytes, the most the
  * table takes.
  */
-export function auditStatement(deps: Deps, e: AuditEntry): Stmt {
+export function auditStatement(deps: Deps, e: AuditEntry, opts: { onlyAfterOneChange?: boolean } = {}): Stmt {
   if (typeof e.event !== "string" || !(AUDIT_EVENTS as readonly string[]).includes(e.event)) throw new Error("audit: unknown event");
   const userId = idField(e.userId);
   const workspaceId = idField(e.workspaceId);
   const subject = idField(e.subject);
   const detail = detailText(e.detail);
   return {
-    sql: "INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    // With onlyAfterOneChange the row is the guard of a batch: it must come right after the
+    // statement it judges, and unless that statement changed exactly one row its time is
+    // NULL, which the column refuses, so the whole batch is undone. changes() is the count
+    // of the last statement that finished on the connection, on both targets.
+    sql:
+      opts.onlyAfterOneChange === true
+        ? "INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES (?, CASE WHEN changes() = 1 THEN ? END, ?, ?, ?, ?, ?)"
+        : "INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
     params: [newAuditId(), deps.now(), e.event, userId, workspaceId, subject, detail],
   };
 }
