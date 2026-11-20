@@ -90,6 +90,20 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "POST /api/v1/account/email": "app",
   "POST /api/v1/account/email/confirm": "app",
 
+  // Connecting the desktop app (src/connect.ts). The app has no credential yet and talks to
+  // whichever address it was set up with (an install from before this had only the tours
+  // address to give it), so its two requests answer on both. Typing the short code takes a
+  // session, so that part lives where the cookie does.
+  "POST /api/v1/connect/start": "both",
+  "POST /api/v1/connect/token": "both",
+  "GET /api/v1/connect/requests/:code": "app",
+  "POST /api/v1/connect/confirm": "app",
+  "POST /api/v1/connect/refuse": "app",
+  // The workspace's tokens (src/tokens.ts) take a session alone, so they live where the cookie does.
+  "GET /api/v1/tokens": "app",
+  "PATCH /api/v1/tokens/:id": "app",
+  "DELETE /api/v1/tokens/:id": "app",
+
   // The site admin's routes: they take an admin's session alone, so they answer only where
   // the session cookie lives.
   "GET /api/v1/admin/summary": "app",

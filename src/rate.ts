@@ -15,7 +15,7 @@
 // There is no site-wide cap on tries of a sign-in code from callers whose network is
 // unknown. A code is 160 random bits, so such a cap would add nothing against guessing,
 // and anyone could use it up and stop every sign-in. Tries are limited per network only.
-import type { Deps } from "./ports.ts";
+import type { Deps, Stmt } from "./ports.ts";
 
 export type Limit = {
   /** The name the counter is stored under. Two limits never share one. */
@@ -97,6 +97,34 @@ export const LIMITS_MEDIA = {
   create: { bucket: "media_create", windowMs: 3_600_000, most: 60 },
   part: { bucket: "media_part", windowMs: 3_600_000, most: 2000 },
   preview: { bucket: "media_preview", windowMs: 3_600_000, most: 240 },
+} as const satisfies Record<string, Limit>;
+
+/**
+ * The limits on connecting the desktop app (src/connect.ts).
+ *
+ * Asking for a pair of codes and asking for the token come from a client that is not signed
+ * in, so they are counted per network, keyed by `networkKey`; a caller whose network is not
+ * known has no count of its own, as in LIMITS_SIGNIN (its open requests are capped instead).
+ *
+ * A short code is typed by a signed-in person, and every lookup, confirm or refusal that
+ * finds no open request is a wrong try. Wrong tries are counted per account, keyed by
+ * `accountKey`, and per network: each try is counted before anything is looked up, and the
+ * count is given back when the code was right (`refundStatement`), so a right code never
+ * uses up the limit. An account's count is its own: no other account can fill it. Over: 429
+ * for the rest of the window. The network's limit is four accounts' worth, so it takes
+ * several accounts on one network, not one, to fill it.
+ */
+export const LIMITS_CONNECT = {
+  /** Requests for a pair of codes from one network. */
+  startNetwork: { bucket: "connect_start", windowMs: 900_000, most: 10 },
+  /** The same key, over a day. */
+  startNetworkDay: { bucket: "connect_start_day", windowMs: 86_400_000, most: 40 },
+  /** Asks for the token from one network: a device asks every 5 seconds for at most 10 minutes, 120 times; this is three devices' worth. */
+  pollNetwork: { bucket: "connect_poll", windowMs: 900_000, most: 360 },
+  /** Wrong short codes of one account. */
+  wrongAccount: { bucket: "connect_wrong_account", windowMs: 600_000, most: 5 },
+  /** Wrong short codes from one network, all accounts together. */
+  wrongNetwork: { bucket: "connect_wrong_network", windowMs: 600_000, most: 20 },
 } as const satisfies Record<string, Limit>;
 
 /** The key of a counter that counts for the whole site. */
@@ -350,6 +378,33 @@ export async function hitLimit(deps: Deps, limit: Limit, key: string): Promise<{
   const now = deps.now();
   const n = await count(deps, limit.bucket, key, limit.windowMs, now);
   return { over: over(n, limit.most), retryAfterSeconds: Math.ceil((limit.windowMs - (now % limit.windowMs)) / 1000) };
+}
+
+/** A hit that can be given back: the window it was counted in, so a refund lands in that window even after the next has begun. */
+export type CountedHit = { over: boolean; retryAfterSeconds: number; bucket: string; key: string; windowStart: number };
+
+/**
+ * As `hitLimit`, and also says which counter row the hit went to, for `refundStatement`.
+ * One database call.
+ */
+export async function hitLimitRefundable(deps: Deps, limit: Limit, key: string): Promise<CountedHit> {
+  if (!Number.isSafeInteger(limit.most) || limit.most < 0) throw new Error("bad limit");
+  const now = deps.now();
+  const n = await count(deps, limit.bucket, key, limit.windowMs, now);
+  return { over: over(n, limit.most), retryAfterSeconds: Math.ceil((limit.windowMs - (now % limit.windowMs)) / 1000), bucket: limit.bucket, key, windowStart: now - (now % limit.windowMs) };
+}
+
+/**
+ * The statement that gives one hit back, for a caller to run in a batch of its own work:
+ * the counter the hit went to, in the window it was counted in, goes down by one, never
+ * below zero. Only for a hit this request made: a count is only ever given back by the
+ * request that added it, so no request can lower another's.
+ */
+export function refundStatement(hit: CountedHit): Stmt {
+  return {
+    sql: "UPDATE rate_counter SET count = count - 1 WHERE bucket = ? AND key = ? AND window_start = ? AND count > 0",
+    params: [hit.bucket, hit.key, hit.windowStart],
+  };
 }
 
 /**

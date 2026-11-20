@@ -22,6 +22,11 @@ export const AUDIT_EVENTS = [
   "email_change_requested",
   "email_changed",
   "email_changed_on_server",
+  "connection_confirmed",
+  "connection_refused",
+  "connection_collected",
+  "token_renamed",
+  "token_revoked",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 
@@ -31,7 +36,7 @@ export type AuditEntry = {
   userId?: string | null;
   /** The id of the workspace it happened in. */
   workspaceId?: string | null;
-  /** The id of what was acted on: a session, an account or a workspace. */
+  /** The id of what was acted on: a session, an account, a workspace, a token or a connect request. */
   subject?: string | null;
   /**
    * A flat record of at most 8 entries. A value is a whole number, null (such as an
@@ -51,8 +56,8 @@ const ROW_ID = /^[a-z]{2,4}_[0-9a-f]{24}$/;
 /** A detail key or text value: a lowercase letter, then at most 39 lowercase letters, digits and underscores. */
 const WORD = /^[a-z][a-z0-9_]{0,39}$/;
 
-/** The prefix of a token (`dp_`), a sign-in code (`dpl_`), an email-change code (`dpe_`) or a session secret (`dps_`) with hex after it: a word can be most of one. */
-const SECRET_PREFIX = /dp[lse]?_[0-9a-f]{8}/;
+/** The prefix of a token (`dp_`), a sign-in code (`dpl_`), an email-change code (`dpe_`), a device code (`dpd_`) or a session secret (`dps_`) with hex after it: a word can be most of one. */
+const SECRET_PREFIX = /dp[lsed]?_[0-9a-f]{8}/;
 
 /** 32 or more hex characters in a row: a digest, or the random part of a secret. */
 const LONG_HEX = /[0-9a-f]{32}/;

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { adminRoutes } from "./admin-api.ts";
+import { connectRoutes } from "./connect.ts";
 import { dashRoutes } from "./dash/routes.ts";
 import { docsRoutes } from "./docs/page.ts";
 import { emailChangeRoutes } from "./email-change.ts";
@@ -13,6 +14,7 @@ import { pageRoutesForAccounts } from "./pages.ts";
 import { publishRoutes } from "./publish.ts";
 import { setupRoutes } from "./setup.ts";
 import { signinRoutes } from "./signin.ts";
+import { tokenRoutes } from "./tokens.ts";
 import { tourRoutes } from "./tours.ts";
 import { uploadRoutes } from "./uploads.ts";
 import { usageRoutes } from "./usage.ts";
@@ -40,6 +42,8 @@ export function createApp(deps: Deps): Hono {
   usageRoutes(app, deps);
   signinRoutes(app, deps);
   emailChangeRoutes(app, deps);
+  connectRoutes(app, deps);
+  tokenRoutes(app, deps);
   adminRoutes(app, deps);
   pageRoutesForAccounts(app, deps);
   dashRoutes(app);
