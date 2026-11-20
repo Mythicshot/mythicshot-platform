@@ -8,6 +8,9 @@ import { clone, fixtures, send, stepImage, uploadTour, type Json } from "./bundl
 const v2 = fixtures.v2 as Json;
 const v3 = fixtures.v3 as Json;
 
+/** The bytes of a manifest's steps, as the upload declared and stored them. */
+const bytesOf = (m: Json) => (m.steps as Json[]).reduce((n, st) => n + (st.bytes as number), 0);
+
 async function firstStep(deps: Deps, chapterId: string): Promise<Json> {
   return (await deps.db.first<Json>("SELECT * FROM step WHERE chapter_id = ? ORDER BY position LIMIT 1", [chapterId]))!;
 }
@@ -36,8 +39,8 @@ describe("tour list", () => {
     const slug = async (id: string) => (await deps.db.first<{ slug: string }>("SELECT slug FROM tour WHERE id = ?", [id]))!.slug;
     expect(r.json).toEqual({
       tours: [
-        { id: older.tour_id, title: "Send an invoice", status: "draft", slug: await slug(older.tour_id), url: null, chapters: 2, steps: 4, updated_at: 1_800_000_003_000, published_at: null, unpublished_changes: false },
-        { id: newer.tour_id, title: "Short one", status: "draft", slug: await slug(newer.tour_id), url: null, chapters: 1, steps: 1, updated_at: 1_800_000_001_000, published_at: null, unpublished_changes: false },
+        { id: older.tour_id, title: "Send an invoice", status: "draft", slug: await slug(older.tour_id), url: null, chapters: 2, steps: 4, bytes: bytesOf(v2) + bytesOf(short), updated_at: 1_800_000_003_000, published_at: null, unpublished_changes: false },
+        { id: newer.tour_id, title: "Short one", status: "draft", slug: await slug(newer.tour_id), url: null, chapters: 1, steps: 1, bytes: bytesOf(short), updated_at: 1_800_000_001_000, published_at: null, unpublished_changes: false },
       ],
     });
     // The fields the desktop app's picker has always read are all still there.
@@ -87,6 +90,56 @@ describe("tour list", () => {
     // Every entry carries the field as a boolean, and B sees only its own tour, which is behind.
     for (const v of Object.values(await flags())) expect(typeof v).toBe("boolean");
     expect(await flags(b.token)).toEqual({ [other.tour_id]: true });
+  });
+
+  it("each tour carries its size, its steps' pictures and its logo, and the sizes add up to the usage's pictures and logos", async () => {
+    const { deps } = await makeDeps({ retiredGraceMs: 0 });
+    const a = await seedWorkspace(deps, "A");
+    const b = await seedWorkspace(deps, "B");
+    // A tour with a logo (its commit records 1000 bytes for it) and a second chapter, a
+    // published tour, and an open upload, which holds room but is no tour yet.
+    const withLogo = await uploadTour(deps, a.token, v3);
+    await uploadTour(deps, a.token, v2, { kind: "chapter", tour_id: withLogo.tour_id }, 1);
+    const plain = await uploadTour(deps, a.token, v2, { kind: "new" }, 2);
+    expect((await send(deps, "POST", `/api/v1/tours/${plain.tour_id}/publish`, { token: a.token })).status).toBe(200);
+    const open = await send(deps, "POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: v2, target: { kind: "new" } }), headers: { "content-type": "application/json" } });
+    expect(open.status, open.text).toBe(201);
+    // Another workspace's tour never enters A's sizes.
+    await uploadTour(deps, b.token, v3);
+
+    const tours = (await send(deps, "GET", "/api/v1/tours", { token: a.token })).json.tours as Json[];
+    const size = Object.fromEntries(tours.map((t) => [t.id, t.bytes]));
+    expect(size).toEqual({ [withLogo.tour_id]: bytesOf(v3) + 1000 + bytesOf(v2), [plain.tour_id]: bytesOf(v2) });
+    for (const t of tours) expect(Number.isSafeInteger(t.bytes) && t.bytes >= 0, String(t.bytes)).toBe(true);
+    // The sum over the workspace's tours is exactly the usage's pictures plus logos; the
+    // usage's used_bytes is that plus the room open uploads hold.
+    const usage = (await send(deps, "GET", "/api/v1/usage", { token: a.token })).json;
+    const total = tours.reduce((n, t) => n + (t.bytes as number), 0);
+    expect(total).toBe(usage.counted.pictures + usage.counted.logos);
+    expect(usage.used_bytes).toBe(total + usage.counted.uploads_in_progress);
+    expect(usage.counted.uploads_in_progress).toBe(bytesOf(v2));
+    // A logo stored before its size was recorded counts as nothing, in the tour and in the usage alike.
+    await deps.db.run("UPDATE tour SET logo_bytes = NULL WHERE id = ?", [withLogo.tour_id]);
+    const after = (await send(deps, "GET", "/api/v1/tours", { token: a.token })).json.tours as Json[];
+    expect(after.find((t) => t.id === withLogo.tour_id)!.bytes).toBe(bytesOf(v3) + bytesOf(v2));
+    const usageAfter = (await send(deps, "GET", "/api/v1/usage", { token: a.token })).json;
+    expect(after.reduce((n, t) => n + (t.bytes as number), 0)).toBe(usageAfter.counted.pictures + usageAfter.counted.logos);
+  });
+
+  it("the list makes as many database calls for many tours as for one", async () => {
+    const { deps, calls } = await makeDeps();
+    const a = await seedWorkspace(deps, "A");
+    await uploadTour(deps, a.token, v2);
+    const callsFor = async () => {
+      const before = calls();
+      expect((await send(deps, "GET", "/api/v1/tours", { token: a.token })).status).toBe(200);
+      return calls() - before;
+    };
+    await callsFor();
+    const one = await callsFor();
+    for (let i = 1; i <= 4; i++) await uploadTour(deps, a.token, v2, { kind: "new" }, i);
+    expect((await send(deps, "GET", "/api/v1/tours", { token: a.token })).json.tours).toHaveLength(5);
+    expect(await callsFor()).toBe(one);
   });
 
   it("an empty workspace lists no tours", async () => {

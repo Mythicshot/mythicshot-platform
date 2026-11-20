@@ -61,6 +61,7 @@ const ROWS: Record<string, Row> = {
   "DELETE /api/v1/uploads/:id": api("DELETE", `/api/v1/uploads/${UPLOAD}`),
   "GET /api/v1/me": api("GET", "/api/v1/me"),
   "GET /api/v1/usage": api("GET", "/api/v1/usage"),
+  "GET /api/v1/usage/largest": api("GET", "/api/v1/usage/largest"),
   "GET /api/v1/tours": api("GET", "/api/v1/tours"),
   "PATCH /api/v1/tours/:id": api("PATCH", `/api/v1/tours/${TOUR}`),
   "DELETE /api/v1/tours/:id": api("DELETE", `/api/v1/tours/${TOUR}`),
@@ -79,6 +80,7 @@ const ROWS: Record<string, Row> = {
   "POST /api/v1/signout/everywhere": session("POST", "/api/v1/signout/everywhere", 401),
   // The site admin's routes: on the app address only, and nobody here is an admin.
   "GET /api/v1/admin/accounts": admin("GET", "/api/v1/admin/accounts"),
+  "GET /api/v1/admin/summary": admin("GET", "/api/v1/admin/summary"),
   "PATCH /api/v1/admin/workspaces/:id": admin("PATCH", `/api/v1/admin/workspaces/${WORKSPACE}`, { storage_allowance_bytes: 1 }),
   // The sign-in pages and their two files: on the app address only, like the session they lead to.
   "GET /signin": page("/signin"),
@@ -212,10 +214,10 @@ describe("the host-routing matrix", () => {
     for (const key of PAGE_KEYS) expect(HOST_RULES[key], key).toBe("app");
     expect(PAGE_KEYS.length).toBe(5);
     expect(SESSION_KEYS.length).toBe(7);
-    expect(ADMIN_KEYS.length).toBe(2);
+    expect(ADMIN_KEYS.length).toBe(3);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
-    expect(API_KEYS.length).toBe(14);
+    expect(API_KEYS.length).toBe(15);
     expect(WIZARD_KEYS.length).toBe(5);
   });
 

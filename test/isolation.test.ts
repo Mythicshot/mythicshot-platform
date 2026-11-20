@@ -183,6 +183,7 @@ const BODY_IDS: Record<string, Entry> = {
 const LISTS: Record<string, { path: string; holds: string; only?: "token" | "session" }> = {
   "GET /api/v1/me": { path: "/api/v1/me", holds: "the caller's workspace name" },
   "GET /api/v1/usage": { path: "/api/v1/usage", holds: "the caller's workspace's usage and allowance" },
+  "GET /api/v1/usage/largest": { path: "/api/v1/usage/largest", holds: "the ten largest tours of the caller's workspace, with their sizes" },
   "GET /api/v1/tours": { path: "/api/v1/tours", holds: "the caller's workspace's tours" },
   "GET /api/v1/setup/connected": { path: "/api/v1/setup/connected", holds: "whether the caller's own token was used", only: "token" },
   "GET /api/v1/session": { path: "/api/v1/session", holds: "the caller's account, workspace, session and anti-forgery value", only: "session" },
@@ -258,6 +259,11 @@ const ADMIN: Record<string, { reason: string; request: (w: World) => Sample; fie
     reason: "the admin's overview of how each account uses its storage: counts and the allowance, nothing of any tour",
     request: () => ({ method: "GET", path: "/api/v1/admin/accounts" }),
     fields: ["accounts", "next", ...ACCOUNT_FIELDS.map((f) => `accounts[].${f}`)],
+  },
+  "GET /api/v1/admin/summary": {
+    reason: "the admin's summary line: how many accounts there are, the bytes they use in all and the site's standard allowance; three numbers, nothing of any workspace",
+    request: () => ({ method: "GET", path: "/api/v1/admin/summary" }),
+    fields: ["accounts", "used_bytes", "standard_allowance_bytes"],
   },
   "PATCH /api/v1/admin/workspaces/:id": {
     reason: "the admin sets or clears one workspace's storage allowance, by the workspace's id; it answers the numbers only",
@@ -702,6 +708,10 @@ describe("one workspace against another", () => {
     // A token and a session of one workspace see the same tours and the same usage.
     expect(first.b["GET /api/v1/tours by session"]).toEqual(first.b["GET /api/v1/tours by token"]);
     expect(first.b["GET /api/v1/usage by session"]).toEqual(first.b["GET /api/v1/usage by token"]);
+    expect(first.b["GET /api/v1/usage/largest by session"]).toEqual(first.b["GET /api/v1/usage/largest by token"]);
+    // The largest tours are the workspace's own, every one of them here (it has fewer than ten).
+    const largestA = JSON.parse(first.a["GET /api/v1/usage/largest by session"].body).tours as Json[];
+    expect(largestA.map((t) => t.id).sort()).toEqual([w.a.ids.published.tour, w.a.ids.draft.tour, w.a.ids.publishing.tour].sort());
 
     // The numbers of a workspace are its own rows' and nobody else's.
     const usage = async (side: Side) => {
