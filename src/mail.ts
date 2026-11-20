@@ -143,15 +143,34 @@ const MAIL_NAME_MAX = 60;
 // the line and paragraph separators: anything that could end a line or hide in one.
 const NOT_IN_A_LINE = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
 
+// Every quotation mark that could close the quoted name: the ASCII double quote, Unicode's
+// opening and closing quotation punctuation (Pi, Pf), the low quotation marks (which are Ps),
+// and the marks that look like a double quote or an apostrophe (fullwidth forms, double
+// primes, modifier letters, ditto marks, quotation ornaments).
+const QUOTE_LIKE = /["\p{Pi}\p{Pf}\u201a\u201e\u2e42\uff02\uff07\u2033\u2036\u02ba\u02dd\u02ee\u3003\u301d\u301e\u301f\u275d\u275e]/gu;
+
+/** The at sign and its fullwidth and small forms: any of them could start an address a client links. */
+const AT_SIGNS = /[@\uff20\ufe6b]/gu;
+
 /**
  * A device name as it may stand inside the quotes of one line of a mail. The API takes only
  * names without such characters, but this does not rely on it: each character that could
  * break or hide in a line becomes U+FFFD, so the name stays on its line and nothing of it is
- * lost from sight, and a name longer than MAIL_NAME_MAX characters is cut there and marked
- * "…". An empty name, or one that is not text, is "(no name)".
+ * lost from sight. The name is also made inert, so it can neither pass for the site's own
+ * words nor become a link: every quotation mark becomes an apostrophe, so the name cannot
+ * close its quotes; `://` becomes `:/ /`, `www.` becomes `www .` and an at sign becomes
+ * ` at `, so no mail client links an address or a mail address in it. Only then is a name
+ * longer than MAIL_NAME_MAX characters cut there and marked "…". An empty name, or one that
+ * is not text, is "(no name)". This is for the mail alone: the dashboard shows a name as it is.
  */
 function lineName(name: unknown): string {
-  const chars = [...(typeof name === "string" ? name : "").replace(NOT_IN_A_LINE, "\ufffd").trim()];
+  const inert = (typeof name === "string" ? name : "")
+    .replace(NOT_IN_A_LINE, "\ufffd")
+    .replace(QUOTE_LIKE, "'")
+    .replace(/:\/\//g, ":/ /")
+    .replace(/(www)\./gi, "$1 .")
+    .replace(AT_SIGNS, " at ");
+  const chars = [...inert.trim()];
   if (chars.length === 0) return "(no name)";
   return chars.length > MAIL_NAME_MAX ? chars.slice(0, MAIL_NAME_MAX).join("") + "…" : chars.join("");
 }

@@ -150,11 +150,40 @@ describe("the mail's text", () => {
       // At most 60 characters of the name, and a mark when it was cut.
       expect([...first![1]].length).toBeLessThanOrEqual(61);
     }
-    expect(connectedMail("ada@example.com", "Laptop\r\nBcc: victim@example.com", NOW, APP).text.split("\n")[0]).toContain('"Laptop\ufffd\ufffdBcc: victim@example.com"');
+    expect(connectedMail("ada@example.com", "Laptop\r\nBcc: victim@example.com", NOW, APP).text.split("\n")[0]).toContain('"Laptop\ufffd\ufffdBcc: victim at example.com"');
     expect(connectedMail("ada@example.com", "x".repeat(61), NOW, APP).text.split("\n")[0]).toContain(`"${"x".repeat(60)}…"`);
     expect(connectedMail("ada@example.com", "😀".repeat(60), NOW, APP).text.split("\n")[0]).toContain(`"${"😀".repeat(60)}"`);
     // A name that is empty, or not text, is still a line of its own.
     for (const name of ["", "   ", null, 5]) expect(connectedMail("ada@example.com", name as string, NOW, APP).text.split("\n")[0], String(name)).toContain('the computer "(no name)" was connected');
+  });
+  it("makes the name inert: it cannot close its quotes, and no mail client can link anything in it", () => {
+    /** The name as the mail shows it, between the sentence's own two quotes. */
+    const shown = (name: string) => {
+      const line = connectedMail("ada@example.com", name, NOW, APP).text.split("\n")[0];
+      const m = /^Mythicshot on the computer "(.*)" was connected to your account on 15 Jan 2027 at 08:00 UTC\. It can publish, change and delete everything in your workspace\.$/.exec(line);
+      expect(m, name).not.toBeNull();
+      // The sentence's own two quotes are the only double quotes on the line.
+      expect(line.split('"').length, name).toBe(3);
+      return m![1];
+    };
+    const example = shown('x" was removed. Click https://evil.example to keep "y');
+    expect(example).toBe("x' was removed. Click https:/ /evil.example to keep 'y");
+    for (const name of ['x" was removed. Click https://evil.example to keep "y', "Visit www.evil.example now", "WWW.Evil.Example", "mail me@evil.example", "ftp://a and http://b", "me\uff20evil.example or me\ufe6bevil.example"]) {
+      const text = shown(name);
+      expect(text, name).not.toContain("://");
+      expect(text.toLowerCase(), name).not.toContain("www.");
+      expect(text, name).not.toMatch(/[@\uff20\ufe6b]/);
+    }
+    expect(shown("Visit www.evil.example now")).toBe("Visit www .evil.example now");
+    expect(shown("mail me@evil.example")).toBe("mail me at evil.example");
+    // Every quotation mark that could close the quotes becomes an apostrophe.
+    const quotes = ['"', "\u201c", "\u201d", "\u201e", "\u201f", "\u2018", "\u2019", "\u00ab", "\u00bb", "\u2039", "\u203a", "\u2e02", "\uff02", "\uff07", "\u2033", "\u2036", "\u02ba", "\u02dd", "\u02ee", "\u3003", "\u301d", "\u301e", "\u301f", "\u275d", "\u275e"];
+    for (const q of quotes) expect(shown(`a${q}b`), q).toBe("a'b");
+    // Ordinary names are shown as they are.
+    for (const name of ["ALEX-DESKTOP", "Mara's laptop", "Work laptop", "Büro-PC 2", "Lenovo T14 (home)"]) expect(shown(name)).toBe(name);
+    // The cut at 60 characters comes after the replacements.
+    expect(shown("@".repeat(30))).toBe(" at ".repeat(30).trim().slice(0, 60) + "…");
+    expect([...shown("a@".repeat(30))].length).toBe(61);
   });
 });
 
