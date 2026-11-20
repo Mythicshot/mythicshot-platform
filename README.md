@@ -333,10 +333,12 @@ Nobody can be invited in this version, and the sign-in page says "Mythicshot is 
 
 ## The dashboard
 
-The dashboard is the set of pages a signed-in person uses on the app address (or the one address). `/` sends a signed-in browser to the Tours page and anyone else to the sign-in page. Tours are recorded, edited and renamed in Mythicshot; the dashboard lists them, shares them, publishes and unpublishes them, and deletes them.
+The dashboard is the set of pages a signed-in person uses on the app address (or the one address). `/` sends a signed-in browser to the Tours page and anyone else to the sign-in page. Tours are recorded, edited and renamed in Mythicshot; the dashboard lists them, shares them, publishes and unpublishes them, and deletes them. Images and GIFs are shared from Mythicshot too; the dashboard lists them, shares their links and deletes them.
 
 | Page | What it does |
 |---|---|
+| Images, `/images` | Lists the workspace's shared images, newest first, each with its preview, size, width and height, type and the day it was shared. "Copy link", "Open" and "Delete"; "Show more" past the first 50. Delete asks first and cannot be undone; the copy on the computer is not touched |
+| GIFs, `/gifs` | The same for shared clips (GIFs and MP4s), with each clip's length in seconds |
 | Tours, `/tours` | Lists the workspace's tours, most recently changed first, each with its steps, size, the day it changed and whether it is published or has changes waiting. "Copy link" and "Open" for a published tour; "Publish", "Publish changes", "Unpublish" and "Delete". Delete asks first and cannot be undone; the recording on the computer is not touched |
 | Storage, `/storage` | What the workspace uses: against its allowance with a bar when it has one, what takes the room (tours, logos, uploads in progress), and its largest tours with "Delete". A workspace over its allowance sees a warning |
 | Account, `/account` | The username, the email address and the workspace; where the account is signed in, with the sign-outs of [Sessions](#sessions); and, on a site whose mail is on, changing the email address (see [Changing an email address](#changing-an-email-address)). The username cannot be changed in this version |

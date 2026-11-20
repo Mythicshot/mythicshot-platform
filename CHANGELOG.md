@@ -2,6 +2,12 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.23 (2026-11-20)
+
+- Dashboard, Images and GIFs pages: the workspace's shared images and clips, newest first, each with a small preview, its size, the day it was shared and its link. "Copy link", "Open" and "Delete", and "Show more" past the first 50.
+- Delete asks first, and the list is read again afterwards so it always shows what is true.
+- The bar now reads Images, GIFs, Tours, Storage, Account and Admin. Signing in still lands on Tours.
+
 ## 0.1.21 (2026-11-20)
 
 - A shared image or clip has its own page at its link: the picture as large as it fits, or the clip playing in a loop without sound, with its title, size and date, "Open full size" or "Open file", and "Download". The page never says who shared it.
