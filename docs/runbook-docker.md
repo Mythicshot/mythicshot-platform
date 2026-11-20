@@ -436,6 +436,9 @@ docker compose exec app node dist/node/admin.js signin-link --email you@example.
 
 Then remove the `RECOVERY_LINKS=on` line from `.env` with `nano .env` and run `docker compose up -d --force-recreate --wait app` again.
 
+> [!WARNING]
+> Removing `RECOVERY_LINKS=on` from `.env` is not enough: the gate stays open until the app container is recreated with `--force-recreate`, because the command reads the environment the app started with.
+
 The line must be in `.env` and the container recreated: the command reads the setting from the app's own process in the container, so passing it to `docker compose exec` with `-e` does not work. Whoever can run Docker commands on the server controls the site anyway, so this setting is about not leaving a door open, not about stopping the server's owner.
 
 The recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the server: whoever can change `.env` or the data folder can change the site directly.
@@ -1057,9 +1060,10 @@ Go through these in order, and stop at the first one that explains it.
 1. Run `docker compose exec app node dist/node/admin.js mail-check`. `Mail is off.` means mail was never switched on. `Mail is off because` names the line of `.env` to put right, or says that no address for links is set. Fix `.env` and recreate the container.
 2. Check that the site has an admin and that the address is the account's: links go only to an active account, on a site with an admin. The dashboard's Admin page lists every account's address.
 3. Read `docker compose logs app` around the time of the request. `signin: an address asked for more sign-in links than its limit; none was sent` means the address asked more than 3 times in 15 minutes or 10 times that day. `signin: the hourly limit of sign-in mails was reached; none was sent` means the site sent 100 sign-in mails that hour. Both end by themselves.
-4. `mail: a sign-in mail could not be sent` with a word in brackets means the mail server did not take the mail. `auth` is the user or the password; `connect`, `tls` or `timeout` is the host name, the port, or a firewall between the server and the mail server; `refused` is the mail server turning the mail down, or the mail waiting too long behind others. `mail: the mail thread could not start` means the part of the app that sends mail did not start, so nothing reached the mail server at all: rebuild and load the image again as in [step 8](#8-update).
-5. Send a test mail with `--send-to`, as in step 4 of [Mail](#mail). If it is handed over and still does not arrive, look in the spam folder, and check the sender domain's records, as in [Mail records](../README.md#mail-records) in the README.
-6. Meanwhile, the person can sign in with a recovery link, as in the next section.
+4. `mail: a sign-in mail could not be sent` with a word in brackets means the mail was not handed over. `auth` is the user or the password. `connect`, `tls` or `timeout` is the host name, the port, or a firewall between the server and the mail server; for `tls`, the mail server's certificate must match the name in `SMTP_HOST`. `refused` is the mail server turning the mail down or breaking off the conversation, and also a mail the app's mail thread could not take: 16 mails were already waiting, it waited 30 seconds, or the thread stopped while it was on its way. `failed` is any other failure. The email-change mails write the same words, in `mail: an email-change mail could not be sent` and `mail: an email-change notice could not be sent`.
+5. `mail: the mail thread could not start` means the part of the app that sends mail did not start, so nothing reached the mail server at all. The reason in brackets says what to do: `it stopped before it was ready` means the thread's file is missing or broken, so rebuild and load the image again as in [step 8](#8-update); `it was started 5 times in the last minute` means the thread keeps stopping, so read the log lines before it for the first failure; `it could not be made` means Node.js could not make a thread at all, which points at the server running out of memory or threads.
+6. Send a test mail with `--send-to`, as in step 4 of [Mail](#mail). If it is handed over and still does not arrive, look in the spam folder, and check the sender domain's records, as in [Mail records](../README.md#mail-records) in the README.
+7. Meanwhile, the person can sign in with a recovery link, as in the next section.
 
 ### Someone is locked out
 
@@ -1073,6 +1077,9 @@ A person's sessions end only from their own Account page; there is no command fo
 ### An account's address is wrong
 
 A signed-in person changes their own address on the Account page while mail is on. When mail is off, or they cannot sign in, the server command changes it directly. It works only while `.env` holds `RECOVERY_LINKS=on`, exactly like a recovery link: add the line with `nano .env`, recreate the container, run the command, then remove the line and recreate the container again.
+
+> [!WARNING]
+> Removing `RECOVERY_LINKS=on` from `.env` is not enough: the gate stays open until the app container is recreated with `--force-recreate`, because the command reads the environment the app started with.
 
 ```sh
 docker compose exec app node dist/node/admin.js change-email --username yourname --email new@example.com
@@ -1090,6 +1097,9 @@ Nothing is deleted or taken offline: the workspace's tours keep playing, and onl
 1. The person deletes tours they no longer need, on the dashboard's Tours or Storage page. The room is free at once.
 2. The admin raises that workspace's allowance with "Set allowance" on the Admin page, or empties it to go back to the standard allowance.
 3. To change the standard allowance of every workspace, change or remove the `STORAGE_ALLOWANCE_BYTES` line in `.env` and recreate the container.
+
+> [!WARNING]
+> A `STORAGE_ALLOWANCE_BYTES` value that is not whole digits stops the app from starting, so the site cannot be reached until the line is corrected or removed and the container recreated.
 
 An upload that was started and never finished holds its room until it is removed, which happens once it is more than 24 hours old and the workspace starts another upload.
 
@@ -1160,6 +1170,9 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `the platform running here is older than two addresses` | The app image is from before two addresses, or the `Host` header is changed on the way | See [The check of both addresses](#the-check-of-both-addresses). |
 | `the platform does not see it as its` tours or app address | An address reaches the platform under the other name | See [The check of both addresses](#the-check-of-both-addresses). |
 | With two addresses, `/setup` on the app address shows `{"error":"not_found"}` | The setup wizard is on the tours address only | Open `https://tours.example.com/setup`. |
+| The log says `email: the hourly limit of email-change mails was reached; no email-change link was sent` | The site mailed 30 email-change links in this hour | Nothing to fix: the next hour sends again. The person asks for the change again then. |
+| The log says `email: an email-change link could not be made; none was sent` | Writing the change to the database failed, so no link was mailed | Read the log lines around it for the database's trouble, then let the person ask again. |
+| The log says `email: mail is off, so no notice of an email change was sent` | Mail was switched off between the request and the confirm, so the old address was not told | Switch mail on again ([Mail](#mail)); tell the account's owner yourself if it matters. |
 
 ## Pages this runbook relies on
 

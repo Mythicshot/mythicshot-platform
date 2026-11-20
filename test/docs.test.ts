@@ -25,6 +25,15 @@ import mailTs from "../src/mail.ts?raw";
 import accountTs from "../src/dash/account.ts?raw";
 import accountEmailTs from "../src/dash/account-email.ts?raw";
 import dashAdminTs from "../src/dash/admin.ts?raw";
+import dashStorageTs from "../src/dash/storage.ts?raw";
+import emailChangeTs from "../src/email-change.ts?raw";
+import signinPageTs from "../src/signin/page.ts?raw";
+import smtpTs from "../src/node/smtp.ts?raw";
+import usageTs from "../src/usage.ts?raw";
+import { AUDIT_EVENTS } from "../src/audit.ts";
+import { EMAIL_CHANGE_LINES, EMAIL_CHANGE_MS } from "../src/email-change.ts";
+import { LIMITS_EMAIL_CHANGE, LIMITS_SIGNIN } from "../src/rate.ts";
+import { SESSION_MS, SIGNIN_CODE_MS } from "../src/sessions.ts";
 
 const DOCS = import.meta.glob(["../README.md", "../LICENSE", "../docs/*.md"], {
   query: "?raw",
@@ -531,6 +540,116 @@ describe("the sentences the guides quote from the server command and the log", (
   it("the README says the mail thread does not take the app's NODE_OPTIONS, as the code makes it", () => {
     expect(mailThreadTs).toContain("env: {}, execArgv: []");
     expect(docs[README]).toMatch(/started with an empty environment and none of the app's Node\.js options, so a `NODE_OPTIONS` value given to the app/);
+  });
+});
+
+describe("the numbers and the remaining sentences the guides state are the code's", () => {
+  const cpanel = linkable["docs/hosting/cpanel.md"];
+  const WORDS: Record<number, string> = { 5: "five" };
+  const minutes = (ms: number) => ms / 60_000;
+
+  it("the sign-in limits and lifetimes", () => {
+    expect([LIMITS_SIGNIN.linkRecipient.most, minutes(LIMITS_SIGNIN.linkRecipient.windowMs), LIMITS_SIGNIN.linkRecipientDay.most, LIMITS_SIGNIN.linkRecipientDay.windowMs]).toEqual([3, 15, 10, 86_400_000]);
+    expect(docs[README]).toContain(`Each address gets at most ${LIMITS_SIGNIN.linkRecipient.most} links in ${minutes(LIMITS_SIGNIN.linkRecipient.windowMs)} minutes and ${LIMITS_SIGNIN.linkRecipientDay.most} a day`);
+    expect(docs[README]).toContain(`One network may ask ${LIMITS_SIGNIN.linkNetwork.most} times in ${minutes(LIMITS_SIGNIN.linkNetwork.windowMs)} minutes`);
+    expect(LIMITS_SIGNIN.mailSite.windowMs).toBe(3_600_000);
+    expect(docs[README]).toContain(`The whole site sends at most ${LIMITS_SIGNIN.mailSite.most} sign-in mails an hour.`);
+    expect(docs[README]).toContain(`(${LIMITS_SIGNIN.linkRecipient.most} in ${minutes(LIMITS_SIGNIN.linkRecipient.windowMs)} minutes, ${LIMITS_SIGNIN.linkRecipientDay.most} a day)`);
+    expect(docs[DOCKER]).toContain(`An address gets ${LIMITS_SIGNIN.linkRecipient.most} links in ${minutes(LIMITS_SIGNIN.linkRecipient.windowMs)} minutes and ${LIMITS_SIGNIN.linkRecipientDay.most} a day`);
+    expect(docs[DOCKER]).toContain(`the site sent ${LIMITS_SIGNIN.mailSite.most} sign-in mails that hour`);
+    expect(minutes(SIGNIN_CODE_MS)).toBe(15);
+    expect(minutes(EMAIL_CHANGE_MS)).toBe(15);
+    expect(docs[README]).toContain(`A link works once and for ${minutes(SIGNIN_CODE_MS)} minutes.`);
+    expect(docs[README]).toContain(`A sign-in link and an email-change link each work once and for ${minutes(EMAIL_CHANGE_MS)} minutes.`);
+    expect(SESSION_MS / 86_400_000).toBe(30);
+    expect(docs[README]).toContain(`A session ends ${SESSION_MS / 86_400_000} days after it was last used`);
+  });
+
+  it("the email-change limits table", () => {
+    const L = LIMITS_EMAIL_CHANGE;
+    const row = (what: string, per: string, a: { most: number; windowMs: number }, day?: { most: number; windowMs: number }) => {
+      expect(day === undefined || day.windowMs === 86_400_000).toBe(true);
+      return `| ${what} | ${per} | ${a.most} in ${minutes(a.windowMs)} minutes${day === undefined ? "" : `, ${day.most} a day`} |`;
+    };
+    for (const line of [
+      row("Change requests", "Account", L.requestAccount, L.requestAccountDay),
+      row("Change requests for the same new address", "Account and address", L.requestPair, L.requestPairDay),
+      row("Change requests for one address", "Address, from all accounts together", L.requestRecipient, L.requestRecipientDay),
+      row("Tries of a link's code", "Account", L.confirmAccount),
+      `| Email-change mails | The whole site | ${L.mailSite.most} an hour, apart from the ${LIMITS_SIGNIN.mailSite.most} sign-in mails |`,
+    ]) expect(docs[README], line).toContain(line);
+    expect(L.mailSite.windowMs).toBe(3_600_000);
+    expect(docs[README]).toContain(`the site's ${L.mailSite.most} email-change mails an hour`);
+    expect(docs[DOCKER]).toContain(`The site mailed ${L.mailSite.most} email-change links in this hour`);
+    expect(cpanel).toContain(`The site mailed ${L.mailSite.most} email-change links in this hour`);
+  });
+
+  it("the audit command's rows, and the event table, are the code's", () => {
+    expect(adminTs).toContain("const DEFAULT_AUDIT_ROWS = 20;");
+    expect(adminTs).toContain("const MAX_AUDIT_ROWS = 1000;");
+    expect(docs[DOCKER]).toContain("20 without `--last`, and at most 1000");
+    const part = docs[DOCKER].slice(docs[DOCKER].indexOf("### Read the audit record"), docs[DOCKER].indexOf("## Troubleshooting by symptom"));
+    const events = [...part.matchAll(/^\| `([a-z_]+)` \|/gm)].map((m) => m[1]);
+    expect([...events].sort()).toEqual([...AUDIT_EVENTS].sort());
+  });
+
+  it("the mail thread's queue, wait and restart limit", () => {
+    expect(mailThreadTs).toContain("export const MAIL_QUEUE_MAX = 16;");
+    expect(mailThreadTs).toContain("export const MAIL_WORKER_STARTS_PER_MINUTE = 5;");
+    expect(mailThreadTs).toContain("export const MAIL_QUEUE_WAIT_MS = SMTP_LIMITS.totalMs;");
+    expect(smtpTs).toContain("totalMs: 30_000");
+    expect(docs[README]).toContain("up to 16 more wait their turn");
+    expect(docs[README]).toContain("one that has waited 30 seconds");
+    expect(docs[README]).toContain(`at most ${WORDS[5]} times a minute`);
+    expect(docs[DOCKER]).toContain("16 mails were already waiting, it waited 30 seconds");
+    expect(cpanel).toContain("16 mails were already waiting in the app, one waited 30 seconds");
+    for (const reason of ["it could not be made", "it was started 5 times in the last minute", "it stopped before it was ready"]) {
+      expect(mailThreadTs, reason).toMatch(new RegExp(`(notMade|tooOften|notReady): .${reason.replace("5", "\\$\\{MAIL_WORKER_STARTS_PER_MINUTE\\}")}.`));
+      for (const doc of [docs[README], docs[DOCKER], cpanel]) expect(doc, reason).toContain(`\`${reason}\``);
+    }
+  });
+
+  it("the remaining quoted sentences", () => {
+    expect(signinPageTs).toContain('If <span class="address" id="sent-to"></span> has an account, a sign-in link is on its way.');
+    expect(docs[README]).toContain('("If <address> has an account, a sign-in link is on its way.")');
+    for (const said of ["You see how much each workspace uses, never what is in it.", 'askTitle: "Storage allowance for "']) expect(dashAdminTs, said).toContain(said);
+    expect(docs[README]).toContain('"You see how much each workspace uses, never what is in it."');
+    expect(docs[README]).toContain('in the question "Storage allowance for" and the workspace');
+    const over = "You are over your storage allowance. New uploads are refused until you delete tours or get more room.";
+    expect(dashStorageTs).toContain(over);
+    expect(docs[README]).toContain(`"${over}"`);
+    expect(adminTs).toContain('"  change-email --username <name> --email <address>"');
+    expect(docs[README]).toContain("`change-email --username <name> --email <address>`");
+    for (const line of Object.values(EMAIL_CHANGE_LINES)) {
+      expect(emailChangeTs).toContain(line);
+      expect(docs[DOCKER], line).toContain(`\`${line}\``);
+    }
+    for (const prefix of ["mail: an email-change mail could not be sent", "mail: an email-change notice could not be sent"]) {
+      expect(emailChangeTs).toContain(`\`${prefix} (\${reasonOf(err)})\``);
+      expect(docs[DOCKER], prefix).toContain(`\`${prefix}\``);
+      expect(cpanel, prefix).toContain(`\`${prefix}\``);
+    }
+    expect(mailTs).toContain("`The email address of your ${name} account`");
+    expect(docs[README]).toContain("`The email address of your Mythicshot account was changed to …`");
+  });
+
+  it("the other refusals of the admin command the README quotes are its own", () => {
+    for (const said of [
+      "The database is from an older version. Update the site first.",
+      "The database is busy. Try again in a moment.",
+      "There is no database in the data folder yet. Start the site once, then run this again.",
+      "DATA_DIR is not set, so the site's data is not known. Nothing was changed.",
+      "The command stopped on an unexpected error.",
+      "No address for sign-in links is set, so the link is shown without one. Set APP_HOST and TOURS_HOST, or SITE_HOST.",
+      "Open your site's address followed by:",
+      "That is not an email address.",
+    ]) {
+      expect(adminTs, said).toContain(said);
+      expect(docs[README], said).toContain(`\`${said}\``);
+    }
+    expect(usageTs).toContain('"STORAGE_ALLOWANCE_BYTES is not a number of bytes. Write digits only, such as 1073741824, or leave it out for no limit."');
+    expect(docs[README]).toContain("`STORAGE_ALLOWANCE_BYTES is not a number of bytes. Write digits only, such as 1073741824, or leave it out for no limit.`");
+    expect(docs[README]).toContain("`TOURS_HOST is set but APP_HOST is not. Set both for two addresses, or neither for one.`");
   });
 });
 
