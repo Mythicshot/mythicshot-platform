@@ -73,7 +73,6 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   // to the app address alone, so none of them answers on the tours address.
   "GET /signin": "app",
   "GET /signin/link": "app",
-  "GET /account": "app",
   "GET /signin/signin.css": "app",
   "GET /signin/signin.js": "app",
 
@@ -89,6 +88,10 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /dash/storage.js": "app",
   "GET /admin": "app",
   "GET /dash/admin.js": "app",
+  "GET /account": "app",
+  "GET /dash/account.js": "app",
+  "GET /account/email": "app",
+  "GET /dash/account-email.js": "app",
 
   // Tour pages, their pictures and the player's files.
   "GET /p/:name": "tours-redirect",

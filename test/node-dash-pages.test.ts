@@ -755,6 +755,11 @@ describe("the Tours page", () => {
     // Escape does nothing while it runs.
     key(go, "Escape");
     expect(tab.$("delete-dialog").hidden).toBe(false);
+    // Tab and Shift+Tab never try the disabled buttons: the focus stays on the question's title.
+    expect(key(go, "Tab").defaultPrevented).toBe(true);
+    expect(tab.doc.activeElement).toBe(tab.$("delete-title"));
+    expect(key(tab.$("delete-title"), "Tab", true).defaultPrevented).toBe(true);
+    expect(tab.doc.activeElement).toBe(tab.$("delete-title"));
     await tab.settle();
     expect(tab.fetched.filter((f) => f.method === "DELETE").map((f) => [f.path, f.headers["X-Csrf-Token"], f.body])).toEqual([
       [`/api/v1/tours/${T2}`, CSRF, undefined],

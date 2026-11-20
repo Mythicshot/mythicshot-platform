@@ -89,48 +89,6 @@ export const LINK_HTML = `<!doctype html>
 </html>
 `;
 
-export const ACCOUNT_HTML = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<meta name="referrer" content="no-referrer">
-<title>Mythicshot</title>
-<link rel="stylesheet" href="/signin/signin.css">
-<script src="/signin/signin.js" defer></script>
-</head>
-<body data-page="account">
-<main class="card">
-  <p class="brand">Mythicshot</p>
-  <noscript><p class="message">This page needs JavaScript.</p></noscript>
-
-  <section id="account" aria-labelledby="h-account" hidden>
-    <h1 id="h-account" tabindex="-1">Signed in</h1>
-    <p class="lead" id="account-email"></p>
-
-    <h2 class="label" id="h-storage">Storage</h2>
-    <div class="bar" id="usage-bar" aria-hidden="true"><div class="fill" id="usage-fill"></div></div>
-    <p class="usage" id="usage-text"></p>
-    <p class="over" id="usage-over" hidden>You are over your storage allowance. New uploads are refused until you delete tours or get more room.</p>
-    <p class="hint">Tours and their pictures count. Deleting a tour frees its space within a few minutes.</p>
-
-    <h2 class="label" id="h-where" tabindex="-1">Where you are signed in</h2>
-    <ul class="sessions" id="sessions" aria-labelledby="h-where"></ul>
-
-    <p class="message" id="account-message" role="status" aria-live="polite"></p>
-    <div class="actions">
-      <button type="button" class="secondary" id="signout">Sign out</button>
-      <button type="button" class="secondary" id="signout-everywhere">Sign out everywhere</button>
-    </div>
-    <p class="small">Tours are managed from Mythicshot for now. A dashboard is coming to this page.</p>
-  </section>
-  <p class="message" id="load-message" role="status" aria-live="polite"></p>
-</main>
-</body>
-</html>
-`;
-
 export const SIGNIN_CSS = `:root {
   color-scheme: light dark;
   --bg: #f3f1ec;
@@ -229,37 +187,11 @@ button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft); 
 button.primary { background: var(--accent); color: var(--accent-text); }
 button.primary:hover:not(:disabled) { opacity: 0.9; }
 button.wide { width: 100%; }
-button.secondary { background: transparent; color: var(--text); border-color: var(--line); }
-button.secondary:hover:not(:disabled) { background: var(--bg); }
-button.link {
-  flex: none;
-  padding: 0 4px;
-  background: transparent;
-  color: var(--accent);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 button[aria-busy="true"] { cursor: progress; }
 a { color: var(--accent); text-underline-offset: 2px; }
 a:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; border-radius: 4px; }
 .small { margin: 18px 0 0; color: var(--muted); font-size: 0.9rem; }
-.label { margin: 22px 0 8px; font-size: 0.9rem; font-weight: 600; }
-.lead + .label { margin-top: 0; }
-.bar { height: 8px; margin: 0 0 8px; border-radius: 8px; background: var(--line); overflow: hidden; }
-.bar .fill { width: 0; height: 100%; border-radius: inherit; background: var(--accent); }
-.bar[data-over="true"] .fill { background: var(--warn); }
-.usage { margin: 0 0 4px; font-weight: 500; }
-.over { margin: 0 0 4px; color: var(--warn); font-size: 0.9rem; font-weight: 600; }
-.hint { margin: 0; color: var(--muted); font-size: 0.875rem; }
-.sessions { list-style: none; margin: 0 0 12px; padding: 0; border: 1px solid var(--line); border-radius: 10px; }
-.session { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; min-height: 60px; }
-.session + .session { border-top: 1px solid var(--line); }
-.info { display: flex; flex-direction: column; min-width: 0; }
-.tag { display: inline-block; margin-right: 8px; padding: 0 8px; border-radius: 999px; background: var(--ok-bg); color: var(--ok-text); font-size: 0.8rem; font-weight: 600; }
-.when { color: var(--muted); font-size: 0.875rem; }
-.actions { display: flex; flex-wrap: wrap; gap: 12px; }
-.actions button { flex: 1 1 auto; }
 @media (prefers-reduced-motion: reduce) {
   button { transition: none; }
 }
@@ -280,39 +212,21 @@ export const SIGNIN_JS = `(function () {
     badEmail: "That does not look like an email address.",
     tooMany: "Too many requests. Wait a few minutes and try again.",
     failed: "Something went wrong. Try again in a moment.",
-    notEnded: "That session could not be ended. Reload the page.",
     sending: "Sending…",
     signingIn: "Signing in…",
-    signingOut: "Signing out…",
-    signedIn: "Signed in",
-    signedInAs: "Signed in as ",
-    of: " of ",
-    used: " used",
-    dot: " · ",
-    oneTour: "1 tour",
-    tours: " tours",
-    thisBrowser: "This browser",
-    since: "since ",
-    lastUsed: "last used ",
-    signOut: "Sign out",
-    oneByte: "1 byte",
-    bytes: " bytes",
   };
-  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
   var $ = function (id) { return document.getElementById(id); };
 
   // Every request goes through here: to this site only, with the session the browser
-  // keeps for this address, no referrer, and a JSON body labelled as JSON. A change made
-  // with a session carries the anti-forgery value from GET /api/v1/session.
-  function call(method, path, body, csrf) {
+  // keeps for this address, no referrer, and a JSON body labelled as JSON.
+  function call(method, path, body) {
     var headers = {};
     var init = { method: method, headers: headers, credentials: "same-origin", cache: "no-store", redirect: "error", referrerPolicy: "no-referrer" };
     if (body !== undefined) {
       headers["content-type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    if (csrf !== undefined) headers["X-Csrf-Token"] = csrf;
     return fetch(path, init).then(function (r) {
       return r.text().then(function (t) {
         var data = null;
@@ -343,30 +257,6 @@ export const SIGNIN_JS = `(function () {
     }
   }
 
-  // Sizes as the owner chose them: 1024 to the next unit, as the server counts, at most
-  // one decimal and no trailing .0 (1.2 GB, 5 GB, 512 KB). The server's formatBytes
-  // (src/usage.ts) writes them the same way; this script cannot import it, so both are
-  // held to the one table in test/sizes.ts.
-  function formatBytes(n) {
-    if (n < 1024) return n === 1 ? TEXT.oneByte : n + TEXT.bytes;
-    var units = ["KB", "MB", "GB"];
-    var value = n;
-    for (var i = 0; i < units.length; i++) {
-      value /= 1024;
-      var rounded = Math.round(value * 10) / 10;
-      if (rounded < 1024 || i === units.length - 1) return String(rounded) + " " + units[i];
-    }
-    return n + TEXT.bytes;
-  }
-
-  // Day and short month, with the year when it is not this year.
-  function dateOf(ms) {
-    if (typeof ms !== "number" || !isFinite(ms)) return "";
-    var d = new Date(ms);
-    var text = d.getDate() + " " + MONTHS[d.getMonth()];
-    return d.getFullYear() === new Date().getFullYear() ? text : text + " " + d.getFullYear();
-  }
-
   function looksLikeEmail(v) {
     if (v.length === 0 || v.length > 254 || /\\s/.test(v)) return false;
     var parts = v.split("@");
@@ -393,9 +283,9 @@ export const SIGNIN_JS = `(function () {
     }
 
     input.focus();
-    // Someone who is signed in already belongs on the account page.
+    // Someone who is signed in already belongs on the dashboard, which starts at the Tours page.
     call("GET", "/api/v1/session").then(function (res) {
-      if (res.status === 200) location.replace("/account");
+      if (res.status === 200) location.replace("/tours");
     }, function () { /* the form stays */ });
 
     $("ask-form").addEventListener("submit", function (ev) {
@@ -464,7 +354,7 @@ export const SIGNIN_JS = `(function () {
       call("POST", "/api/v1/signin/complete", { code: code }).then(function (res) {
         if (res.status === 200) {
           code = "";
-          location.replace("/account");
+          location.replace("/tours");
           return;
         }
         busy(btn, false);
@@ -480,170 +370,9 @@ export const SIGNIN_JS = `(function () {
     });
   }
 
-  // The account: who, the storage, where the account is signed in, and the two sign-outs.
-  // A visitor who is not signed in is sent to the sign-in page.
-  function accountPage() {
-    var csrf = "";
-    var current = "";
-    var message = $("account-message");
-
-    function signedOut() {
-      location.replace("/signin");
-    }
-    function notRead() {
-      return false;
-    }
-
-    function showUsage(res) {
-      if (res.status === 401) return "out";
-      var u = res.data;
-      if (res.status !== 200 || u === null || typeof u.used_bytes !== "number" || typeof u.tours !== "number") return false;
-      var limit = typeof u.allowance_bytes === "number" ? u.allowance_bytes : null;
-      var line = formatBytes(u.used_bytes);
-      if (limit !== null) line += TEXT.of + formatBytes(limit);
-      line += TEXT.used + TEXT.dot + (u.tours === 1 ? TEXT.oneTour : u.tours + TEXT.tours);
-      say($("usage-text"), line);
-      var bar = $("usage-bar");
-      var over = limit !== null && u.over === true;
-      $("usage-over").hidden = !over;
-      if (limit === null) {
-        bar.hidden = true;
-        return true;
-      }
-      var share = over ? 100 : limit > 0 ? Math.min(100, (u.used_bytes / limit) * 100) : 0;
-      $("usage-fill").style.width = Math.round(share * 100) / 100 + "%";
-      if (over) bar.setAttribute("data-over", "true");
-      else bar.removeAttribute("data-over");
-      bar.hidden = false;
-      return true;
-    }
-
-    function row(s, i) {
-      var li = document.createElement("li");
-      li.className = "session";
-      var info = document.createElement("div");
-      info.className = "info";
-      var what = document.createElement("span");
-      what.className = "what";
-      if (s.current === true) {
-        var tag = document.createElement("span");
-        tag.className = "tag";
-        say(tag, TEXT.thisBrowser);
-        what.appendChild(tag);
-      }
-      var name = document.createElement("span");
-      name.setAttribute("id", "session-" + i);
-      say(name, String(s.label));
-      what.appendChild(name);
-      var when = document.createElement("span");
-      when.className = "when";
-      say(when, s.current === true ? TEXT.since + dateOf(s.created_at) : TEXT.lastUsed + dateOf(s.last_used_at));
-      info.appendChild(what);
-      info.appendChild(when);
-      li.appendChild(info);
-      if (s.current !== true) {
-        var end = document.createElement("button");
-        end.type = "button";
-        end.className = "link";
-        end.setAttribute("aria-describedby", "session-" + i);
-        say(end, TEXT.signOut);
-        end.addEventListener("click", function () { endSession(String(s.id), li, end); });
-        li.appendChild(end);
-      }
-      return li;
-    }
-
-    function showSessions(res) {
-      if (res.status === 401) return "out";
-      if (res.status !== 200 || res.data === null || !Array.isArray(res.data.sessions)) return false;
-      var list = $("sessions");
-      for (var i = 0; i < res.data.sessions.length; i++) list.appendChild(row(res.data.sessions[i], i));
-      return true;
-    }
-
-    // Ending one session from the list. Ending this browser's own is a sign-out.
-    function endSession(id, li, btn) {
-      if (btn.disabled) return;
-      say(message, "");
-      busy(btn, true, TEXT.signingOut);
-      call("DELETE", "/api/v1/sessions/" + encodeURIComponent(id), undefined, csrf).then(function (res) {
-        if (res.status === 401 || (res.status === 204 && id === current)) { signedOut(); return; }
-        if (res.status === 204) {
-          li.remove();
-          $("h-where").focus();
-          return;
-        }
-        busy(btn, false);
-        say(message, TEXT.notEnded);
-      }, function () {
-        busy(btn, false);
-        say(message, TEXT.notEnded);
-      });
-    }
-
-    // What a sign-out button does while its request runs, and after.
-    function leaving(btn, other) {
-      say(message, "");
-      busy(btn, true, TEXT.signingOut);
-      other.disabled = true;
-      function back() {
-        busy(btn, false);
-        other.disabled = false;
-        say(message, TEXT.failed);
-        btn.focus();
-      }
-      return {
-        ok: function (res) {
-          if (res.status === 204 || res.status === 401) { signedOut(); return; }
-          back();
-        },
-        fail: back,
-      };
-    }
-
-    $("signout").addEventListener("click", function () {
-      if ($("signout").disabled) return;
-      var done = leaving($("signout"), $("signout-everywhere"));
-      call("POST", "/api/v1/signout", undefined, csrf).then(done.ok, done.fail);
-    });
-    $("signout-everywhere").addEventListener("click", function () {
-      if ($("signout-everywhere").disabled) return;
-      var done = leaving($("signout-everywhere"), $("signout"));
-      call("POST", "/api/v1/signout/everywhere", undefined, csrf).then(done.ok, done.fail);
-    });
-
-    call("GET", "/api/v1/session").then(function (res) {
-      if (res.status === 401) { signedOut(); return; }
-      if (res.status !== 200 || res.data === null || typeof res.data !== "object") { say($("load-message"), TEXT.failed); return; }
-      if (typeof res.data.csrf !== "string" || res.data.account === null || typeof res.data.account !== "object" || res.data.session === null || typeof res.data.session !== "object") {
-        say($("load-message"), TEXT.failed);
-        return;
-      }
-      csrf = res.data.csrf;
-      current = String(res.data.session.id);
-      // The title stays the site's name until someone is known to be signed in.
-      document.title = TEXT.signedIn;
-      var who = res.data.account;
-      say($("h-account"), typeof who.username === "string" && who.username !== "" ? TEXT.signedInAs + who.username : TEXT.signedIn);
-      say($("account-email"), typeof who.email === "string" ? who.email : "");
-      return Promise.all([
-        call("GET", "/api/v1/usage").then(showUsage, notRead),
-        call("GET", "/api/v1/sessions").then(showSessions, notRead),
-      ]).then(function (shown) {
-        if (shown[0] === "out" || shown[1] === "out") { signedOut(); return; }
-        if (shown[0] !== true || shown[1] !== true) say(message, TEXT.failed);
-        $("load-message").hidden = true;
-        $("account").hidden = false;
-      });
-    }).then(null, function () {
-      say($("load-message"), TEXT.failed);
-    });
-  }
-
   var page = document.body.getAttribute("data-page");
   if (page === "link") linkPage(codeOf(fragment));
   else if (page === "signin") signinPage();
-  else if (page === "account") accountPage();
   fragment = "";
 })();
 `;

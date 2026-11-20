@@ -390,7 +390,7 @@ describe("the STORAGE_ALLOWANCE_BYTES setting", () => {
 
 describe("how sizes are written", () => {
   it("sizes read as the pages write them: 1024 to a unit, at most one decimal, no trailing .0", () => {
-    // The one table the account page's script is held to as well (test/sizes.ts).
+    // The one table the dashboard's script is held to as well (test/sizes.ts).
     for (const [n, text] of SIZE_TABLE) expect(formatBytes(n), String(n)).toBe(text);
     // No size it could be given is negative or not a number; if one were, it reads as nothing.
     for (const n of [-1, -1024, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) expect(formatBytes(n), String(n)).toBe("0 bytes");

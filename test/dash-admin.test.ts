@@ -63,8 +63,11 @@ const ADMIN_WORDING = [
   "Account",
   "Workspace",
   "Tours",
+  // Proposed: the names a screen reader gives the bar's column and the buttons' column; the eye does not see them.
+  "Share",
   "Used",
   "Allowance",
+  "Actions",
   "Show more",
   "You see how much each workspace uses, never what is in it. Inviting people comes in a later phase.",
   "Page not found",
@@ -98,6 +101,10 @@ const ADMIN_TEXT: Record<string, string> = {
   hintNone: " Leave it empty for no allowance.",
   warnBefore: "That is less than this workspace uses. Nothing is deleted, but its new uploads are refused until it is under ",
   warnAfter: ".",
+  // Proposed (review follow-up): an allowance exactly what is used, and an allowance of 0.
+  warnEqualBefore: "That is exactly what this workspace uses. Nothing is deleted, but its new uploads are refused until it is under ",
+  zeroStandard: "An allowance of 0 refuses every upload from this workspace. Leave the field empty for the standard allowance.",
+  zeroNone: "An allowance of 0 refuses every upload from this workspace. Leave the field empty for no allowance.",
   badSize: "Write a size such as 500 MB or 10 GB.",
   save: "Save",
   saveAnyway: "Save anyway",
@@ -108,7 +115,7 @@ const ADMIN_TEXT: Record<string, string> = {
 };
 
 /** The strings with a space in the script that are not words for a person: class names. */
-const CLASS_NAMES = ["btn sm quiet", "tag warn", "n tours", "n used", "n allowance", "mini over"];
+const CLASS_NAMES = ["btn sm quiet", "tag warn", "n tours", "n used", "n allowance", "mini over", "allow-warn allow-message", "allow-hint allow-message"];
 
 /** A script's TEXT object, read from the script's own text. */
 function scriptText(js: string): Record<string, string> {
@@ -281,7 +288,9 @@ describe("the Admin page and its script", () => {
     expect(SIZE_JS).toContain("var SIZE = /^([0-9]+)(?:\\.([0-9]+))?\\s*(b|bytes?|kb|mb|gb)?$/i;");
     expect(SIZE_JS).toContain('var UNITS = { b: 1, byte: 1, bytes: 1, kb: 1024, mb: 1048576, gb: 1073741824 };');
     expect(SIZE_JS).toContain("var MAX_BYTES = 9007199254740991;");
-    expect(SIZE_JS).toContain("Math.round(");
+    // Rounded exactly, on whole numbers: no floating point anywhere (review follow-up B6).
+    expect(SIZE_JS).toContain("BigInt(");
+    expect(SIZE_JS).not.toMatch(/Math\.round|parseFloat|Number\(m\[/);
   });
 
   it("the page is usable with the keyboard and a screen reader, and its table becomes blocks on a phone", () => {
@@ -299,7 +308,10 @@ describe("the Admin page and its script", () => {
     const dialog = all.find((e) => e.getAttribute("role") === "dialog")!;
     expect([dialog.getAttribute("aria-modal"), dialog.getAttribute("aria-labelledby"), dialog.getAttribute("aria-describedby")]).toEqual(["true", "allow-title", "allow-uses"]);
     const input = doc.getElementById("allow-input")!;
-    expect([input.tagName, input.getAttribute("type"), input.getAttribute("autocomplete"), input.getAttribute("spellcheck"), input.getAttribute("aria-describedby")]).toEqual(["input", "text", "off", "false", "allow-hint allow-warn allow-message"]);
+    expect([input.tagName, input.getAttribute("type"), input.getAttribute("autocomplete"), input.getAttribute("spellcheck"), input.getAttribute("aria-describedby")]).toEqual(["input", "text", "off", "false", "allow-hint allow-message"]);
+    // The empty headers have names a screen reader reads and the eye does not see.
+    expect(all.filter((e) => e.tagName === "th").map((th) => th.textContent)).toEqual(["Account", "Workspace", "Tours", "Share", "Used", "Allowance", "Actions"]);
+    for (const name of ["Share", "Actions"]) expect(all.find((e) => e.tagName === "span" && e.textContent === name)!.className, name).toBe("vh");
     expect(all.find((e) => e.tagName === "label")!.getAttribute("for")).toBe("allow-input");
     // Every element the script looks up by id is on the page.
     const ids = new Set(all.map((e) => e.id));

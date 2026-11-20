@@ -5,6 +5,7 @@ import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
+import { DASH_LINK_PAGES, DASH_PAGES } from "../src/dash/routes.ts";
 import { HOST_RULES, hostGate, type HostRule } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
@@ -102,6 +103,9 @@ const ROWS: Record<string, Row> = {
   "GET /dash/storage.js": page("/dash/storage.js"),
   "GET /admin": page("/admin"),
   "GET /dash/admin.js": page("/dash/admin.js"),
+  "GET /dash/account.js": page("/dash/account.js"),
+  "GET /account/email": page("/account/email"),
+  "GET /dash/account-email.js": page("/dash/account-email.js"),
   "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421 },
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { method: "GET", path: "/player.js", one: 200, tours: 200, app: 404, unknown: 421 },
   "GET /t/:slug": { method: "GET", path: "/t/no-such-tour", one: 404, tours: 404, app: 308, unknown: 421 },
@@ -123,10 +127,10 @@ const ADMIN_KEYS = KEYS.filter((k) => k.includes(" /api/v1/admin/"));
 /** The token API: everything under /api/v1/ but the description files, which need no token, the session's own routes and the admin's. */
 const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k) && !SESSION_KEYS.includes(k) && !ADMIN_KEYS.includes(k));
 const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
-/** The sign-in pages and their stylesheet and script. */
+/** The sign-in pages and their stylesheet and script, and the dashboard's account pages (/account, /account/email). */
 const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account)(?:\/|$)/.test(k));
-/** The dashboard's pages and their files (src/dash/), and the address that sends a browser on to them. */
-const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:tours|storage|admin$|dash\/)/.test(k));
+/** The dashboard's other pages and every file under /dash/ (src/dash/). */
+const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:tours|storage|admin|dash\/[a-z][a-z-]*\.(?:js|css))$/.test(k));
 const ROOT_KEY = "GET /";
 const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
 const DOCS_PAGE_KEY = "GET /docs";
@@ -231,8 +235,11 @@ describe("the host-routing matrix", () => {
     for (const key of PAGE_KEYS) expect(HOST_RULES[key], key).toBe("app");
     for (const key of DASH_KEYS) expect(HOST_RULES[key], key).toBe("app");
     expect(HOST_RULES[ROOT_KEY]).toBe("app-redirect");
-    expect(PAGE_KEYS.length).toBe(5);
-    expect(DASH_KEYS.length).toBe(8);
+    expect(PAGE_KEYS.length).toBe(6);
+    expect(DASH_KEYS.length).toBe(10);
+    // Every dashboard page and its script is in one of the two lists, and nothing is in both.
+    for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES]) for (const key of [`GET ${p.path}`, `GET ${p.script.path}`]) expect([PAGE_KEYS.includes(key), DASH_KEYS.includes(key)].filter(Boolean), key).toEqual([true]);
+    for (const key of ["GET /dash/dash.css", "GET /dash/dash.js"]) expect(DASH_KEYS, key).toContain(key);
     expect(SESSION_KEYS.length).toBe(9);
     expect(ADMIN_KEYS.length).toBe(3);
     expect(DESCRIPTION_KEYS.length).toBe(2);

@@ -221,4 +221,18 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
   .accounts td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 6.5em; color: var(--muted); font-size: 0.85rem; }
   .accounts .acts-cell { padding-top: 8px; }
 }
+
+/* The Account page. */
+.row { display: flex; justify-content: space-between; align-items: center; gap: 6px 12px; flex-wrap: wrap; padding: 11px 0; border-top: 1px solid var(--line); font-size: 0.93rem; }
+.row:first-of-type { border-top: 0; }
+.row .r { color: var(--muted); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.row .tag { margin-right: 8px; }
+.sessions { list-style: none; margin: 0 0 8px; padding: 0; }
+.address { color: var(--text); font-weight: 600; }
+.field-label { display: block; font-weight: 600; font-size: 0.9rem; margin: 12px 0 6px; }
+.dialog .hint { margin: 6px 0 8px; }
+.lone { max-width: 440px; margin: 26px auto 0; }
+.lone h1 { font-size: 1.15rem; margin: 0 0 8px; }
+.lone .sub { margin: 0 0 8px; }
+.two a.btn { display: inline-flex; align-items: center; justify-content: center; }
 `;
