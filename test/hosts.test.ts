@@ -145,6 +145,9 @@ const ROWS: Record<string, Row> = {
   "GET /account": page("/account"),
   "GET /signin/signin.css": page("/signin/signin.css"),
   "GET /signin/signin.js": page("/signin/signin.js"),
+  // The page an invite's link opens and its script: on the app address only, like the session the accept makes.
+  "GET /invite": page("/invite"),
+  "GET /invite/invite.js": page("/invite/invite.js"),
   // The dashboard: on the app address only. GET / sends a browser on (to /signin, as no
   // cookie is sent here); the tours address sends it on to the app address first.
   "GET /": { method: "GET", path: "/", one: 302, tours: 308, app: 302, unknown: 421, img: 404 },
@@ -197,8 +200,8 @@ const ADMIN_KEYS = KEYS.filter((k) => k.includes(" /api/v1/admin/"));
 /** The token API: everything under /api/v1/ but the description files, which need no token, the session's own routes and the admin's. */
 const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k) && !SESSION_KEYS.includes(k) && !ADMIN_KEYS.includes(k) && !CONNECT_KEYS.includes(k));
 const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
-/** The sign-in pages and their stylesheet and script, and the dashboard's account pages (/account, /account/email). */
-const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account)(?:\/|$)/.test(k));
+/** The sign-in pages and their stylesheet and script, the invite page and its script, and the dashboard's account pages (/account, /account/email). */
+const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account|invite)(?:\/|$)/.test(k));
 /** The dashboard's other pages and every file under /dash/ (src/dash/). */
 const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:images|gifs|tours|storage|connections|admin|dash\/[a-z][a-z-]*\.(?:js|css))$/.test(k));
 const ROOT_KEY = "GET /";
@@ -313,7 +316,7 @@ describe("the host-routing matrix", () => {
     for (const key of PAGE_KEYS) expect(HOST_RULES[key], key).toBe("app");
     for (const key of DASH_KEYS) expect(HOST_RULES[key], key).toBe("app");
     expect(HOST_RULES[ROOT_KEY]).toBe("app-redirect");
-    expect(PAGE_KEYS.length).toBe(6);
+    expect(PAGE_KEYS.length).toBe(8);
     expect(DASH_KEYS.length).toBe(16);
     // Every dashboard page and its script is in one of the two lists, and nothing is in both.
     for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES]) for (const key of [`GET ${p.path}`, `GET ${p.script.path}`]) expect([PAGE_KEYS.includes(key), DASH_KEYS.includes(key)].filter(Boolean), key).toEqual([true]);

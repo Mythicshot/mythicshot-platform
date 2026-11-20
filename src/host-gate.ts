@@ -128,6 +128,10 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /signin/link": "app",
   "GET /signin/signin.css": "app",
   "GET /signin/signin.js": "app",
+  // The page an invite's link opens and its script: accepting signs the new account in, so
+  // they live where the session cookie does.
+  "GET /invite": "app",
+  "GET /invite/invite.js": "app",
 
   // The dashboard (src/dash/), on the app address where the session cookie lives. The
   // tours address sends / on to the app address, which then sends a person to /tours or
