@@ -39,11 +39,19 @@
 // token of the workspace while it has fewer than MAX_LISTED entries (src/tokens.ts answers
 // at most that many, newest first), so then a token not in it is gone; with MAX_LISTED
 // entries it may only have been pushed off the end, and the page says the disconnect failed.
+//
+// The welcome (invite mockup 7): the green note above the heading, "Welcome, <username>. …",
+// for a person whose account is new. Nothing in the address or the database says "new"; the
+// page decides from what the account holds: the first read of the list is empty (and whole),
+// and GET /api/v1/usage then says the workspace has no tours, images or GIFs. A usage answer
+// that fails, or any other doubt, shows no welcome. It goes away as soon as a read of the
+// list shows a computer, and the empty state under it stays as it is.
 import { DEVICE_NAME_MAX, USER_CODE_ALPHABET } from "../connect.ts";
 import { MAX_TOKENS_LISTED } from "../tokens.ts";
 import { dashHtml } from "./shell.ts";
 
 const CONNECTIONS_MAIN = `  <div id="connections-page">
+  <p class="note" id="connections-welcome" hidden></p>
   <h1 id="h-page" tabindex="-1">Connections</h1>
   <section id="connections" aria-labelledby="h-page" hidden>
     <p class="sub" id="connections-sub"></p>
@@ -149,8 +157,11 @@ export const CONNECTIONS_JS = String.raw`(function () {
     lostAnswer: "The answer was lost on the way. If the computer was connected, it shows in the list below within a few seconds; if not, press Sign in in Mythicshot again.",
     lostRefuse: "The answer was lost on the way. The code no longer works, so nothing can be connected with it.",
     notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
+    welcomeBefore: "Welcome, ",
+    welcomeAfter: ". Your workspace is ready. Connect Mythicshot on your computer to start sharing: open Workspace in Mythicshot, press Sign in, and type the code it shows below.",
   };
   var TOKENS = "/api/v1/tokens";
+  var USAGE = "/api/v1/usage";
   var LOOKUP = "/api/v1/connect/lookup";
   var CONFIRM = "/api/v1/connect/confirm";
   var REFUSE = "/api/v1/connect/refuse";
@@ -522,6 +533,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
     $("connections-list").hidden = list.length === 0;
     $("connections-hint").hidden = list.length === 0;
     $("connections-empty").hidden = list.length !== 0;
+    if (list.length !== 0) $("connections-welcome").hidden = true;
     if (had !== null) {
       var again = (had.which === "rename" ? renameOf : disconnectOf)[had.id];
       if (again !== undefined) again.focus();
@@ -733,6 +745,26 @@ export const CONNECTIONS_JS = String.raw`(function () {
     $("disconnect-go").addEventListener("click", runDisconnect);
   }
 
+  // ---- The welcome ----
+
+  // A new account: no computer (the first read of the list, empty and whole) and nothing in
+  // the workspace, by GET /api/v1/usage. Any failure or doubt shows no welcome.
+  function welcome(name, r) {
+    if (!got(r) || !r.complete || r.list.length !== 0) return;
+    Dash.api("GET", USAGE).then(function (res) {
+      var d = res.data;
+      if (res.status !== 200 || d === null || typeof d !== "object" || d.tours !== 0 || d.images !== 0 || d.gifs !== 0) return;
+      // A computer may have shown up meanwhile.
+      if (items.length !== 0) return;
+      var line = $("connections-welcome");
+      line.textContent = "";
+      line.appendChild(el("span", "", TEXT.welcomeBefore));
+      line.appendChild(el("span", "name", name));
+      line.appendChild(el("span", "", TEXT.welcomeAfter));
+      line.hidden = false;
+    }, function () { /* no welcome */ });
+  }
+
   startPage();
   Dash.start(function (who) {
     workspace = who.workspace;
@@ -741,6 +773,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
       if (r === false) return;
       if (!got(r)) $("dash-load").textContent = Dash.failure(r);
       $("connections").hidden = false;
+      if (who.named) welcome(who.username, r);
     });
   });
 })();

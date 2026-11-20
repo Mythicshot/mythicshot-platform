@@ -318,6 +318,79 @@ describe("the Connections page: the list", () => {
   });
 });
 
+const WELCOME = "Welcome, solex. Your workspace is ready. Connect Mythicshot on your computer to start sharing: open Workspace in Mythicshot, press Sign in, and type the code it shows below.";
+const usage = (over: Record<string, unknown> = {}): Answer => ({ status: 200, json: { used_bytes: 0, allowance_bytes: 1, over: false, tours: 0, images: 0, gifs: 0, counted: {}, ...over } });
+const named = (username: unknown): Answer => ({ status: 200, json: { ...(session as { json: Record<string, unknown> }).json, account: { id: "usr_1", username, email: "x@example.com", admin: false } } });
+
+describe("the Connections page: the welcome of a new account (invite mockup 7)", () => {
+  it("no computer and nothing in the workspace: the green note above the heading, with the username as text, and the empty state under it as it is", async () => {
+    const tab = openPage(standard({ "GET /api/v1/tokens": list([]), "GET /api/v1/usage": usage() }));
+    await tab.settle();
+    expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", "GET /api/v1/tokens", "GET /api/v1/usage"]);
+    const welcome = tab.$("connections-welcome");
+    expect([welcome.shown, welcome.className, welcome.textContent]).toEqual([true, "note", WELCOME]);
+    expect(tab.shows().slice(0, 4)).toEqual(["Mythicshot", "solex", WELCOME, "Connections"]);
+    expect(tab.shows().slice(-2)).toEqual(["No computers connected yet", "Install Mythicshot, open Workspace and press Sign in. Then type the code it shows into the box above."]);
+    // The username is its own bidi-isolated text node, never markup.
+    const markup = openPage(answers({ "GET /api/v1/session": named("<img src=x onerror=alert(1)>"), "GET /api/v1/tokens": list([]), "GET /api/v1/usage": usage() }));
+    await markup.settle();
+    const parts = markup.$("connections-welcome").children.map((c) => (c instanceof FakeElement ? [c.tagName, c.className, c.children.length, c.textContent] : ["#text"]));
+    expect(parts[1]).toEqual(["span", "name", 1, "<img src=x onerror=alert(1)>"]);
+    expect(markup.doc.root.all().filter((e) => e.tagName === "img")).toEqual([]);
+  });
+
+  it("no welcome when the workspace holds a tour, an image or a GIF, when usage cannot be read, or when the account has no username", async () => {
+    const cases: [string, Responder][] = [
+      ["a tour", standard({ "GET /api/v1/tokens": list([]), "GET /api/v1/usage": usage({ tours: 1 }) })],
+      ["an image", standard({ "GET /api/v1/tokens": list([]), "GET /api/v1/usage": usage({ images: 1 }) })],
+      ["a GIF", standard({ "GET /api/v1/tokens": list([]), "GET /api/v1/usage": usage({ gifs: 2 }) })],
+      ["usage 500", standard({ "GET /api/v1/tokens": list([]), "GET /api/v1/usage": { status: 500, json: { error: "internal" } } })],
+      ["usage lost", standard({ "GET /api/v1/tokens": list([]), "GET /api/v1/usage": "network" })],
+      ["usage odd", standard({ "GET /api/v1/tokens": list([]), "GET /api/v1/usage": { status: 200, json: { tours: "0", images: 0, gifs: 0 } } })],
+    ];
+    for (const [what, respond] of cases) {
+      const tab = openPage(respond);
+      await tab.settle();
+      expect([tab.$("connections-welcome").shown, tab.$("connections-empty").shown], what).toEqual([false, true]);
+    }
+    // No username: no welcome, and usage is not asked.
+    const nameless = openPage(answers({ "GET /api/v1/session": named(null), "GET /api/v1/tokens": list([]) }));
+    await nameless.settle();
+    expect([nameless.$("connections-welcome").shown, nameless.fetched.map((f) => f.path)]).toEqual([false, ["/api/v1/session", "/api/v1/tokens"]]);
+    // A computer connected already: no welcome, and usage is not asked.
+    const connected = openPage(standard());
+    await connected.settle();
+    expect([connected.$("connections-welcome").shown, of(connected, "GET", "/api/v1/usage")]).toEqual([false, []]);
+    // A list that cannot be read: no welcome either.
+    const unread = openPage(standard({ "GET /api/v1/tokens": { status: 503, json: { error: "unavailable" } } }));
+    await unread.settle();
+    expect([unread.$("connections-welcome").shown, of(unread, "GET", "/api/v1/usage")]).toEqual([false, []]);
+  });
+
+  it("goes away once a computer is connected", async () => {
+    const tab = openPage(
+      standard({
+        "GET /api/v1/tokens": [list([]), list([]), list([token(T4, "NEW-PC", { created_at: NOW, last_used_at: null })])],
+        "GET /api/v1/usage": usage(),
+        [LOOKUP]: found(),
+        "POST /api/v1/connect/confirm": DONE,
+      }),
+    );
+    await tab.settle();
+    expect(tab.$("connections-welcome").shown).toBe(true);
+    type(tab, "k7qm2hxd");
+    tab.$("connect-go").click();
+    await tab.settle();
+    tab.$("confirm-go").click();
+    await tab.settle();
+    expect(tab.$("connections-welcome").shown).toBe(true);
+    tab.tick();
+    await tab.settle();
+    expect(rows(tab).map((r) => nameOf(r).textContent)).toEqual(["NEW-PC"]);
+    expect([tab.$("connections-welcome").shown, tab.$("connections-empty").shown]).toEqual([false, false]);
+  });
+});
+
 describe("the Connections page: connecting with a code", () => {
   it("shows the code upper-cased and grouped as typed, and accepts any case, with or without the dash or spaces", async () => {
     const tab = openPage(standard());

@@ -75,6 +75,8 @@ export const UNDOCUMENTED_ROUTES: Readonly<Record<string, string>> = {
   "GET /account": "the dashboard's Account page, for people in a browser; it calls the session and email-change requests described here",
   "GET /signin/signin.css": "the sign-in pages' own stylesheet",
   "GET /signin/signin.js": "the sign-in pages' own script",
+  "GET /invite": "the page an invite's link opens, for people in a browser; it calls the invite check and accept requests described here",
+  "GET /invite/invite.js": "the invite page's own script",
   "GET /": "sends a browser on to the dashboard or the sign-in page; not part of the API",
   "GET /tours": "the dashboard's Tours page, for people in a browser; it calls the tour requests described here",
   "GET /dash/tours.js": "the Tours page's own script",
@@ -1271,7 +1273,7 @@ function paths(): OpenApiDoc["paths"] {
         requestBody: { required: true, content: json(ref("InviteAccept")) },
         responses: {
           "200": { ...answer("The account is made, and this browser is signed in to it.", ref("Ok")), headers: setCookie("The session cookie: host-only, Secure, HttpOnly and SameSite=Lax.") },
-          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token. bad_username: the username breaks the rule, or is one the site holds back.", "bad_request", "credentials_not_allowed", "bad_username"),
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token. bad_username: the username breaks the rule. reserved_username: the username is one the site holds back. An invite that cannot be used answers 404 whatever the username.", "bad_request", "credentials_not_allowed", "bad_username", "reserved_username"),
           "403": refusal("The request did not come from a page of this address.", "bad_origin"),
           "404": refusal("The invite cannot be used: unknown, already used, cancelled, replaced by a newer invite, or expired. They cannot be told apart.", "invite_invalid"),
           "409": refusal("signed_in: the browser is signed in; sign out first. has_account: the address has an account by now; sign in instead. username_taken: another account has the username; choose another. Nothing was made.", "signed_in", "has_account", "username_taken"),

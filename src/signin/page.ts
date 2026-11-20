@@ -153,9 +153,10 @@ h1 { font-size: 1.375rem; line-height: 1.3; font-weight: 650; margin: 0 0 8px; l
 h1:focus, h2:focus { outline: none; }
 .lead { margin: 0 0 22px; color: var(--muted); }
 .address { color: var(--text); font-weight: 600; }
+.address.invited { font-weight: 700; }
 .field { margin-bottom: 8px; }
 label { display: block; font-size: 0.9rem; font-weight: 600; margin: 0 0 6px; }
-input[type="email"] {
+input[type="email"], input[type="text"] {
   width: 100%;
   min-height: 44px;
   padding: 10px 12px;
@@ -165,12 +166,13 @@ input[type="email"] {
   color: var(--text);
   font: inherit;
 }
-input[type="email"]:focus-visible {
+input[type="email"]:focus-visible, input[type="text"]:focus-visible {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 input[aria-invalid="true"] { border-color: var(--error); }
+.hint { margin: 6px 0 4px; color: var(--muted); font-size: 0.9rem; }
 .message { min-height: 2.9em; margin: 0 0 8px; color: var(--error); font-size: 0.9rem; line-height: 1.45; }
 noscript .message { min-height: 0; }
 button {
