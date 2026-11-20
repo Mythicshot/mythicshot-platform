@@ -154,9 +154,16 @@ function openPage(which: Which, respond: Responder, opts: { origin?: string; cli
   return tab;
 }
 
-/** A responder from a table of "<METHOD> <path>" to answers (a list is answered in order, its last one repeated); anything else fails the test. */
+/** The usage when a test gives none: an answer the page cannot use, so the line is made from the list itself. */
+const NO_USAGE: Answer = { status: 503, json: { error: "unavailable" } };
+
+/**
+ * A responder from a table of "<METHOD> <path>" to answers (a list is answered in order, its
+ * last one repeated); anything else fails the test. GET /api/v1/usage answers NO_USAGE unless
+ * the table gives it.
+ */
 function answers(table: Record<string, Answer | Answer[]>): Responder {
-  const queues = new Map(Object.entries(table).map(([k, v]) => [k, Array.isArray(v) ? [...v] : [v]]));
+  const queues = new Map(Object.entries({ "GET /api/v1/usage": NO_USAGE, ...table }).map(([k, v]) => [k, Array.isArray(v) ? [...v] : [v]]));
   return (req) => {
     const q = queues.get(`${req.method} ${req.path}`);
     if (!q || q.length === 0) throw new Error(`unexpected request ${req.method} ${req.path}`);
@@ -267,7 +274,7 @@ describe("the Images page", () => {
     const tab = openPage("images", standard("images"));
     await tab.settle();
     expect(tab.left()).toBeNull();
-    expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", `GET ${IMAGES_LIST}`]);
+    expect(tab.fetched.map((f) => `${f.method} ${f.path}`).sort()).toEqual(["GET /api/v1/media?kind=image", "GET /api/v1/session", "GET /api/v1/usage"]);
     expect(line(tab)).toBe("3 images in Cowfee Raid Tools · 2.1 MB used");
     const r = rows(tab);
     expect(r.map((row) => titleOf(row).textContent)).toEqual(["Loot window, settings tab", "Timeline, boss two", "Untitled image"]);
@@ -417,7 +424,7 @@ describe("the GIFs page", () => {
   it("shows mockup 4: clips only, with the length in whole seconds, the play mark and the clip's own words", async () => {
     const tab = openPage("gifs", standard("gifs"));
     await tab.settle();
-    expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", `GET ${GIFS_LIST}`]);
+    expect(tab.fetched.map((f) => `${f.method} ${f.path}`).sort()).toEqual(["GET /api/v1/media?kind=clip", "GET /api/v1/session", "GET /api/v1/usage"]);
     expect(line(tab)).toBe("3 GIFs in Cowfee Raid Tools · 118.2 MB used");
     const r = rows(tab);
     expect(r.map((row) => [titleOf(row).textContent, details(row).wide, details(row).narrow])).toEqual([
@@ -820,6 +827,92 @@ async function share(deps: Deps, token: string, spec: { kind: "image" | "clip"; 
   return id;
 }
 
+describe("the line from the usage", () => {
+  /** A usage answer with these numbers for images and GIFs (the rest as the page does not read them). */
+  const usageOf = (n: { images?: number; gifs?: number; imageBytes?: number; gifBytes?: number }): Answer => ({
+    status: 200,
+    json: {
+      used_bytes: (n.imageBytes ?? 0) + (n.gifBytes ?? 0),
+      allowance_bytes: null,
+      over: false,
+      tours: 0,
+      images: n.images ?? 0,
+      gifs: n.gifs ?? 0,
+      counted: { pictures: 0, logos: 0, uploads_in_progress: 0, images: n.imageBytes ?? 0, gifs: n.gifBytes ?? 0 },
+    },
+  });
+  const CURSOR = "MTc2MzU1MzYwMDAwMC5tZWRfMjIy";
+
+  it("shows mockups 3 and 4 from the first load, with the whole count and size though the list has another page", async () => {
+    const images = openPage("images", standard("images", { "GET /api/v1/usage": usageOf({ images: 48, imageBytes: 64 * MB }), [`GET ${IMAGES_LIST}`]: list(MOCKUP_IMAGES.slice(0, 2), CURSOR) }));
+    await images.settle();
+    expect(line(images)).toBe("48 images in Cowfee Raid Tools · 64 MB used");
+    expect(images.$("media-more").shown).toBe(true);
+    const gifs = openPage("gifs", standard("gifs", { "GET /api/v1/usage": usageOf({ gifs: 9, gifBytes: 250 * MB, images: 3, imageBytes: MB }) }));
+    await gifs.settle();
+    expect(line(gifs)).toBe("9 GIFs in Cowfee Raid Tools · 250 MB used");
+    // The usage is read beside the list, once per read.
+    expect(gifs.fetched.filter((f) => f.path === "/api/v1/usage")).toHaveLength(1);
+  });
+
+  it("writes one in the singular and none as 0", async () => {
+    for (const [which, n, text] of [
+      ["images", { images: 1, imageBytes: 1_468_006 }, "1 image in Cowfee Raid Tools · 1.4 MB used"],
+      ["gifs", { gifs: 1, gifBytes: 18 * MB }, "1 GIF in Cowfee Raid Tools · 18 MB used"],
+      ["images", { images: 0, imageBytes: 0 }, "0 images in Cowfee Raid Tools · 0 bytes used"],
+    ] as const) {
+      const tab = openPage(which, standard(which, { "GET /api/v1/usage": usageOf(n) }));
+      await tab.settle();
+      expect(line(tab), text).toBe(text);
+    }
+  });
+
+  it("when the usage cannot be read, the line is made from the list as before, and no error is shown", async () => {
+    for (const usage of [{ status: 500, json: { error: "internal" } }, { status: 429, json: { error: "rate_limited" } }, "network", { status: 200, json: { images: "48" } }, { status: 200, json: { images: 4, counted: { images: -1 } } }] as Answer[]) {
+      const tab = openPage("images", standard("images", { "GET /api/v1/usage": usage, [`GET ${IMAGES_LIST}`]: list(MOCKUP_IMAGES.slice(0, 2), CURSOR) }));
+      await tab.settle();
+      const what = JSON.stringify(usage);
+      expect(line(tab), what).toBe("The newest 2 images in Cowfee Raid Tools");
+      expect([tab.$("dash-load").textContent, tab.$("media-message").hidden], what).toEqual(["", true]);
+      expect(rows(tab), what).toHaveLength(2);
+    }
+  });
+
+  it("is read again after a delete, and a usage that fails then falls back without an error", async () => {
+    const tab = openPage(
+      "images",
+      standard("images", {
+        [`DELETE /api/v1/media/${M2}`]: { status: 204 },
+        [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list([MOCKUP_IMAGES[0], MOCKUP_IMAGES[2]])],
+        "GET /api/v1/usage": [usageOf({ images: 48, imageBytes: 64 * MB }), usageOf({ images: 47, imageBytes: 63 * MB + 400 * KB })],
+      }),
+    );
+    await tab.settle();
+    expect(line(tab)).toBe("48 images in Cowfee Raid Tools · 64 MB used");
+    byText(rows(tab)[1], "Delete").click();
+    tab.$("delete-go").click();
+    await tab.settle();
+    expect(tab.fetched.filter((f) => f.path === "/api/v1/usage")).toHaveLength(2);
+    expect(line(tab)).toBe("47 images in Cowfee Raid Tools · 63.4 MB used");
+    expect(tab.$("media-message").hidden).toBe(true);
+
+    const fails = openPage(
+      "gifs",
+      standard("gifs", {
+        [`DELETE /api/v1/media/${M1}`]: { status: 204 },
+        [`GET ${GIFS_LIST}`]: [list(MOCKUP_GIFS), list(MOCKUP_GIFS.slice(1))],
+        "GET /api/v1/usage": [usageOf({ gifs: 9, gifBytes: 250 * MB }), { status: 500, json: { error: "internal" } }],
+      }),
+    );
+    await fails.settle();
+    byText(rows(fails)[0], "Delete").click();
+    fails.$("delete-go").click();
+    await fails.settle();
+    expect(line(fails)).toBe("2 GIFs in Cowfee Raid Tools · 100.2 MB used");
+    expect([fails.$("media-message").hidden, fails.$("delete-dialog").hidden]).toEqual([true, true]);
+  });
+});
+
 describe("the Images and GIFs pages against the real app", () => {
   it("list each kind on its own page with its link on the img address, load the preview with the session, and delete through the API", async () => {
     const { deps } = await makeDeps({ hosts: { tours: "tours.example.com", app: "app.example.com", img: "img.example.com" } });
@@ -839,7 +932,8 @@ describe("the Images and GIFs pages against the real app", () => {
     const images = openPage("images", browser(deps, cookie));
     await images.settle();
     expect(rows(images).map((row) => titleOf(row).textContent)).toEqual(['<b>Loot</b> & "co"']);
-    expect(line(images)).toBe("1 image in Account · 4.9 KB used");
+    // The line is the usage's: the image with its preview (5,000 + 300 bytes).
+    expect(line(images)).toBe("1 image in Account · 5.2 KB used");
     const row = rows(images)[0];
     const href = byText(row, "Open").getAttribute("href")!;
     expect(href).toMatch(/^https:\/\/img\.example\.com\/i\/[a-z0-9]+$/);

@@ -315,13 +315,17 @@ describe("the Images and GIFs pages", () => {
   it("keep to this site: every request through Dash.api, the routes they may call, and leaving only for /signin", () => {
     for (const p of PAGES) {
       expect(p.js, p.path).not.toMatch(/\bfetch\(|XMLHttpRequest|csrf/i);
-      // The list of the page's own kind, an item's delete, and its preview (the one address not asked through Dash.api: an <img>'s).
+      // The list of the page's own kind, an item's delete, the usage, and its preview (the one address not asked through Dash.api: an <img>'s).
       expect(p.js).toContain(`var KIND = ${JSON.stringify(p.api)};`);
       expect(p.js).toContain('var LIST = "/api/v1/media?kind=" + KIND;');
       expect(p.js).toContain('var ITEM = "/api/v1/media/";');
       expect(p.js).toContain('return Dash.api("GET", after === null ? LIST : LIST + "&cursor=" + encodeURIComponent(after));');
       expect(p.js).toContain('return Dash.api("DELETE", ITEM + encodeURIComponent(id)).then(');
-      expect(p.js.match(/Dash\.api\(/g), p.path).toHaveLength(2);
+      // And the usage, read beside the list for the line's count and size of this kind.
+      expect(p.js).toContain('var USAGE = "/api/v1/usage";');
+      expect(p.js).toContain('var TOTAL = KIND === "image" ? "images" : "gifs";');
+      expect(p.js).toContain('return Dash.api("GET", USAGE).then(');
+      expect(p.js.match(/Dash\.api\(/g), p.path).toHaveLength(3);
       expect(p.js).not.toContain(p.other === "clip" ? "kind=clip" : "kind=image");
       // The preview's address: the fixed path and the item's own id, which matched the API's exact shape.
       expect(p.js).toContain("var ITEM_ID = /^med_[0-9a-f]{24}$/;");
