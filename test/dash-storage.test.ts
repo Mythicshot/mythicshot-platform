@@ -215,7 +215,9 @@ describe("the Storage page", () => {
     const sentences = scriptStrings(STORAGE_JS).filter((t) => /[a-z]/i.test(t) && /\s/.test(t) && t !== "use strict");
     for (const t of sentences) expect(words.has(t) || CLASS_NAMES.includes(t), `a text outside TEXT: ${JSON.stringify(t)}`).toBe(true);
     // No images or GIFs on this page in this version: only the bar names them.
-    const main = STORAGE_HTML.slice(STORAGE_HTML.indexOf("</nav>"));
+    const navEnd = STORAGE_HTML.indexOf("</nav>");
+    expect(navEnd).toBeGreaterThanOrEqual(0);
+    const main = STORAGE_HTML.slice(navEnd);
     for (const word of ["Images", "GIFs", "image", "GIF", "/images", "/gifs"]) for (const text of [main, STORAGE_JS]) expect(text, word).not.toContain(word);
     for (const api of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "createContextualFragment", "DOMParser", "srcdoc", "confirm(", "alert(", "prompt("]) expect(STORAGE_JS, api).not.toContain(api);
   });

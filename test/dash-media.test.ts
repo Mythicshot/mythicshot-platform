@@ -332,8 +332,9 @@ describe("the Images and GIFs pages", () => {
       for (const api of forbidden) expect(p.js, `${p.path} ${api}`).not.toContain(api);
       // The one use of the address is its origin, put before a link that is one path of this site.
       expect([...p.js.matchAll(/\blocation\b\s*(\.\s*[a-zA-Z]+)?/g)].map((m) => m[1])).toEqual([".origin"]);
-      // The one timer is the moment "Copied" shows; the one browser API beyond the page is the clipboard.
-      expect(p.js.match(/setTimeout\(/g), p.path).toHaveLength(1);
+      // Two timers: the moment "Copied" shows, and the pause before a delete is sent again. The one browser API beyond the page is the clipboard.
+      expect(p.js.match(/setTimeout\(/g), p.path).toHaveLength(2);
+      expect(p.js).toContain("var PAUSES_MS = [400, 1200];");
       expect([...p.js.matchAll(/navigator\.[a-zA-Z]+/g)].map((m) => m[0]), p.path).toEqual(["navigator.clipboard", "navigator.clipboard", "navigator.clipboard"]);
       expect(p.js).toContain("Dash.signedOut()");
     }

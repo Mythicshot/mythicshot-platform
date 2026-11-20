@@ -26,8 +26,11 @@
 // (which is then put after this page's own origin, as the Tours page does in one-address
 // mode). Anything else gives the row no Copy link and no Open.
 //
-// Delete asks first (Dash.question). While it answers 500 cleanup_pending it is sent again,
-// at most MAX_TRIES times in all; 204, and 404 (already gone), are done. However it ends
+// Delete asks first (Dash.question). While it answers 500 cleanup_pending (the item is
+// deleted; some of its files are not removed yet) it is sent again after a pause, at most
+// MAX_TRIES times in all. 204, 404 (already gone) and cleanup_pending are done, as on the
+// Tours page. When no answer came, the list read again decides: an item no longer listed
+// was deleted; one still listed (or a list that cannot be read) is a failure. However it ends
 // the list is read again (every page shown so far), so the page shows what is true; a
 // delete that worked whose list cannot be read again says so, as on the Tours page. The
 // list is read one request at a time: Show more does nothing while a read runs, and a read
@@ -159,6 +162,8 @@ ${text}
   var ITEM = "/api/v1/media/";
   // A delete is sent at most this many times in all while it answers 500 cleanup_pending.
   var MAX_TRIES = 3;
+  // The pauses before the second and the third send, so a moment's fault in the store does not use them all at once.
+  var PAUSES_MS = [400, 1200];
   // How long Copy link reads Copied.
   var COPIED_MS = 2000;
   // How many characters of the link's last part the row shows.
@@ -486,26 +491,37 @@ ${text}
     if (opened) asking = { it: it };
   }
 
-  // Whether the delete's files are still being removed: then it is sent again.
+  // Whether the item is deleted but some of its files are still being removed: then it is
+  // sent again, to finish the cleaning (a later request finishes it otherwise).
   function cleaning(res) {
     return res !== null && res.status === 500 && Dash.errorOf(res) === "cleanup_pending";
   }
 
-  // Sends the delete, again while it answers cleanup_pending, at most MAX_TRIES times; the last answer.
+  function pause(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
+  // Sends the delete, again after a pause while it answers cleanup_pending, at most MAX_TRIES times; the last answer.
   function run(id) {
     var tries = 0;
     function send() {
       tries++;
       return Dash.api("DELETE", ITEM + encodeURIComponent(id)).then(function (res) {
-        return cleaning(res) && tries < MAX_TRIES ? send() : res;
+        return cleaning(res) && tries < MAX_TRIES ? pause(PAUSES_MS[tries - 1]).then(send) : res;
       });
     }
     return send();
   }
 
-  // Whether the item is gone (null: no answer came): deleted now, or already gone.
+  // Whether the item is gone (null: no answer came): deleted now (with or without files
+  // left to remove), or already gone. The Tours page counts the same answers as done.
   function done(res) {
-    return res !== null && (res.status === 204 || res.status === 404);
+    return res !== null && (res.status === 204 || res.status === 404 || cleaning(res));
+  }
+
+  function listedNow(id) {
+    for (var i = 0; i < items.length; i++) if (items[i].id === id) return true;
+    return false;
   }
 
   function startPage() {
@@ -530,6 +546,11 @@ ${text}
           working = false;
           question.busy(false, "delete-go");
           rowsDisabled(false);
+          // No answer came: the list read again decides. An item no longer listed was deleted.
+          if (res === null && r === true && !listedNow(it.id)) {
+            ok = true;
+            question.close(false);
+          }
           if (ok) {
             say(r === true ? "" : TEXT.notReloaded);
             $("h-page").focus();

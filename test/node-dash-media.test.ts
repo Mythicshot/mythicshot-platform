@@ -53,6 +53,8 @@ type Tab = {
   shows: () => string[];
   settle: () => Promise<void>;
   tick: () => void;
+  /** The delay of every timer the script set, in order. */
+  delays: number[];
   clipboard: Clipboard;
   violations: string[];
 };
@@ -74,6 +76,7 @@ function openPage(which: Which, respond: Responder, opts: { origin?: string; cli
   const pending: Promise<unknown>[] = [];
   const violations: string[] = [];
   const timers: (() => void)[] = [];
+  const delays: number[] = [];
   const clipboard: Clipboard = { writes: [], answer: opts.clipboard ?? "ok" };
   const location = {
     get origin() {
@@ -106,8 +109,9 @@ function openPage(which: Which, respond: Responder, opts: { origin?: string; cli
       };
     },
   };
-  const setTimeout = (fn: () => void) => {
+  const setTimeout = (fn: () => void, ms?: number) => {
     timers.push(fn);
+    delays.push(Number(ms));
     return timers.length;
   };
   const context: Record<string, unknown> = { document: doc, location, fetch, navigator, setTimeout };
@@ -142,6 +146,7 @@ function openPage(which: Which, respond: Responder, opts: { origin?: string; cli
     tick: () => {
       for (const fn of timers.splice(0)) fn();
     },
+    delays,
     clipboard,
     violations,
   };
@@ -590,39 +595,92 @@ describe("deleting an item", () => {
     expect(line(last)).toBe("0 GIFs in Cowfee Raid Tools · 0 bytes used");
   });
 
-  it("sends the delete again while its files are still being removed, at most three times, then says it failed with the list as it is", async () => {
-    // Finished on the second try: done.
+  it("sends the delete again after a pause while its files are still being removed, at most three times; the item is deleted either way", async () => {
+    // Finished on the second try, after a pause of 400 ms.
     const second = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: [{ status: 500, json: { error: "cleanup_pending" } }, { status: 204 }], [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
     await second.settle();
     byText(rows(second)[0], "Delete").click();
     second.$("delete-go").click();
+    await second.settle();
+    // Nothing is sent again before the pause has passed.
+    expect(deletes(second)).toHaveLength(1);
+    expect(second.delays).toEqual([400]);
+    expect(second.$("delete-go").textContent).toBe("Deleting…");
+    second.tick();
     await second.settle();
     expect(deletes(second)).toHaveLength(2);
     expect(second.$("delete-dialog").hidden).toBe(true);
     expect(rows(second)).toHaveLength(2);
     expect(second.$("media-message").hidden).toBe(true);
 
-    // Never finished: three tries, then the question says so; the list is read again and
-    // shows what the server lists (the item no longer, as it is deleted and only its files wait).
-    const never = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: [{ status: 500, json: { error: "cleanup_pending" } }, { status: 500, json: { error: "cleanup_pending" } }, { status: 500, json: { error: "cleanup_pending" } }, { status: 204 }], [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
+    // Never finished: three sends, 400 ms and 1200 ms apart, and then it is done all the same: the
+    // server marked the item deleted before removing its files, which a later request finishes.
+    const never = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: { status: 500, json: { error: "cleanup_pending" } }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
     await never.settle();
     byText(rows(never)[0], "Delete").click();
     never.$("delete-go").click();
+    for (let i = 0; i < 4; i++) {
+      await never.settle();
+      never.tick();
+    }
     await never.settle();
     expect(deletes(never)).toHaveLength(3);
-    expect(never.$("delete-dialog").hidden).toBe(false);
-    expect(never.$("delete-message").textContent).toBe(FAILED);
+    expect(never.delays).toEqual([400, 1200]);
+    expect(never.$("delete-dialog").hidden).toBe(true);
+    expect(never.$("delete-message").hidden).toBe(true);
+    expect(never.$("media-message").hidden).toBe(true);
     expect(lists(never)).toHaveLength(2);
     expect(rows(never).map((row) => titleOf(row).textContent)).toEqual(["Timeline, boss two", "Untitled image"]);
-    expect([never.$("delete-go").disabled, never.$("delete-keep").disabled]).toEqual([false, false]);
     for (const b of rowButtons(never)) expect(b.disabled, b.textContent).toBe(false);
-    expect(never.doc.activeElement).toBe(never.$("delete-go"));
-    // Pressed again, the delete is sent again and finishes; the focus goes to the heading.
-    never.$("delete-go").click();
-    await never.settle();
-    expect(deletes(never)).toHaveLength(4);
-    expect(never.$("delete-dialog").hidden).toBe(true);
     expect(never.doc.activeElement).toBe(never.$("h-page"));
+  });
+
+  it("a delete whose answer is lost looks at the list read again: gone means done, still listed means it failed", async () => {
+    // The item is no longer listed: it was deleted, and the question closes as for a delete that answered.
+    const gone = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
+    await gone.settle();
+    byText(rows(gone)[0], "Delete").click();
+    gone.$("delete-go").click();
+    await gone.settle();
+    expect(deletes(gone)).toHaveLength(1);
+    expect(gone.$("delete-dialog").hidden).toBe(true);
+    expect([gone.$("delete-message").hidden, gone.$("media-message").hidden]).toEqual([true, true]);
+    expect(rows(gone)).toHaveLength(2);
+    for (const b of rowButtons(gone)) expect(b.disabled, b.textContent).toBe(false);
+    expect(gone.doc.activeElement).toBe(gone.$("h-page"));
+    // A lost answer after a cleanup_pending: the list decides too.
+    const later = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: [{ status: 500, json: { error: "cleanup_pending" } }, "network"], [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
+    await later.settle();
+    byText(rows(later)[0], "Delete").click();
+    later.$("delete-go").click();
+    await later.settle();
+    later.tick();
+    await later.settle();
+    expect(deletes(later)).toHaveLength(2);
+    expect(later.$("delete-dialog").hidden).toBe(true);
+    expect(rows(later)).toHaveLength(2);
+
+    // Still listed: the question stays open with the failure, its buttons back.
+    const still = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network" }));
+    await still.settle();
+    byText(rows(still)[0], "Delete").click();
+    still.$("delete-go").click();
+    await still.settle();
+    expect(still.$("delete-dialog").hidden).toBe(false);
+    expect([still.$("delete-message").textContent, still.$("delete-message").hidden]).toEqual([FAILED, false]);
+    expect(rows(still)).toHaveLength(3);
+    expect([still.$("delete-go").disabled, still.$("delete-keep").disabled]).toEqual([false, false]);
+    expect(still.doc.activeElement).toBe(still.$("delete-go"));
+
+    // The list cannot be read again either: nothing says the item is gone, so the failure stands.
+    const unknown = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), "network"] }));
+    await unknown.settle();
+    byText(rows(unknown)[0], "Delete").click();
+    unknown.$("delete-go").click();
+    await unknown.settle();
+    expect(unknown.$("delete-dialog").hidden).toBe(false);
+    expect(unknown.$("delete-message").textContent).toBe(FAILED);
+    expect(rows(unknown)).toHaveLength(3);
   });
 
   it("a delete that fails keeps the question open with the reason, reads the list again and gives every button back; one already gone counts as deleted", async () => {
