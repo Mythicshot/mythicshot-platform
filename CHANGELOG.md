@@ -2,6 +2,13 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.19 (2026-11-20)
+
+- Shared items, through the API: a workspace can share a single image (PNG or JPEG, up to 10 MB) or a short clip (GIF or MP4, up to 50 MB). An item is sent in parts of 2,000,000 bytes, with an optional preview picture, and is online once it is finished. It stays until it is deleted.
+- The first part is checked against the declared type, and for a PNG, JPEG or GIF against the declared width and height, from the file's own bytes.
+- Items count against the workspace's storage allowance from the moment they are started, together with tours and uploads. One that does not fit is refused before anything is sent.
+- A workspace starts at most 60 items an hour, and an item that is not finished is removed after a day.
+
 ## 0.1.18 (2026-11-19)
 
 - Guides for switching mail on, accounts and signing in, the dashboard, changing an email address, and what to do when mail does not arrive or someone is locked out.
