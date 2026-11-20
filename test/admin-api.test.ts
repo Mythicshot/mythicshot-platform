@@ -10,7 +10,7 @@
 // workspaces that each hold one of everything, the first one's account the site's admin.
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
-import { ADMIN_PAGE } from "../src/admin-api.ts";
+import { ADMIN_PAGE, decodeAccountCursor, encodeAccountCursor } from "../src/admin-api.ts";
 import { hashToken } from "../src/auth.ts";
 import type { Hosts } from "../src/hosts.ts";
 import type { Deps, Stmt } from "../src/ports.ts";
@@ -207,9 +207,10 @@ describe("the admin's list of accounts", () => {
       if (after === null) break;
     }
     expect(pages.map((p) => p.accounts.length)).toEqual([100, 100, 5]);
-    // `next` is the last account of a page that has more after it.
-    expect(pages[0].next).toBe(pages[0].accounts[99].id);
-    expect(pages[1].next).toBe(pages[1].accounts[99].id);
+    // `next` is the cursor of the last account of a page that has more after it: its creation time and id.
+    expect(pages[0].next).toBe(encodeAccountCursor(pages[0].accounts[99].created_at, pages[0].accounts[99].id));
+    expect(pages[1].next).toBe(encodeAccountCursor(pages[1].accounts[99].created_at, pages[1].accounts[99].id));
+    expect(decodeAccountCursor(pages[0].next)).toEqual({ createdAt: pages[0].accounts[99].created_at, id: pages[0].accounts[99].id });
     expect(pages[2].next).toBeNull();
     // Every account once, in the order they were made (the id breaks a tie).
     const listed = pages.flatMap((p) => p.accounts as Json[]);
@@ -217,13 +218,26 @@ describe("the admin's list of accounts", () => {
     const order = await deps.db.all<{ id: string }>("SELECT id FROM user ORDER BY created_at, id");
     expect(listed.map((a) => a.id)).toEqual(order.map((o) => o.id));
 
-    // A cursor that is not an account's id is refused; one that names nobody lists nobody.
-    for (const bad of ["x", "usr_123", "tour_0123456789abcdef01234567", "usr_0123456789ABCDEF01234567", `${admin.userId}&after=${admin.userId}`]) {
+    // Anything that is not such a cursor is refused, an account id alone (the cursor before 0.1.30) included.
+    for (const bad of ["x", "usr_123", admin.userId, "tour_0123456789abcdef01234567", "usr_0123456789ABCDEF01234567", `${admin.userId}&after=${admin.userId}`, btoa("1.usr_123"), btoa(`-1.${admin.userId}`)]) {
       const r = await ask(deps, "GET", `${ACCOUNTS}?after=${encodeURIComponent(bad)}`, { headers });
-      expect([r.status, r.json?.error], bad).toEqual([400, "bad_request"]);
+      expect([r.status, r.json?.error], bad).toEqual([400, "bad_cursor"]);
     }
-    const nobody = await ask(deps, "GET", `${ACCOUNTS}?after=usr_${"0".repeat(24)}`, { headers });
+    // A cursor past every account lists nobody.
+    const nobody = await ask(deps, "GET", `${ACCOUNTS}?after=${encodeAccountCursor(Number.MAX_SAFE_INTEGER, `usr_${"0".repeat(24)}`)}`, { headers });
     expect(nobody.json).toEqual({ accounts: [], next: null });
+
+    // The account a cursor was made from is deleted between two pages: the next page is the rest all the same.
+    const cursorAccount = pages[0].accounts[99].id as string;
+    const name = `gone-${cursorAccount.slice(4, 12)}`;
+    await deps.db.run("UPDATE user SET username = ? WHERE id = ?", [name, cursorAccount]);
+    expect((await ask(deps, "POST", `${ACCOUNTS}/${cursorAccount}/disable`, { headers })).status).toBe(204);
+    let gone = await ask(deps, "DELETE", `${ACCOUNTS}/${cursorAccount}`, { headers, json: { username: name } });
+    for (let i = 0; gone.status === 202 && i < 5; i++) gone = await ask(deps, "DELETE", `${ACCOUNTS}/${cursorAccount}`, { headers, json: { username: name } });
+    expect(gone.status, gone.text).toBe(200);
+    const rest = await ask(deps, "GET", `${ACCOUNTS}?after=${pages[0].next}`, { headers });
+    expect(rest.status, rest.text).toBe(200);
+    expect(rest.json.accounts.map((a: Json) => a.id)).toEqual(pages[1].accounts.map((a: Json) => a.id));
   });
 });
 

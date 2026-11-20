@@ -43,7 +43,28 @@ const MAX_BODY_BYTES = 1024;
 /** How often a change is tried when another change of the same workspace lands between its read and its write. */
 const SET_TRIES = 3;
 
-const USER_ID = /^usr_[0-9a-f]{24}$/;
+/**
+ * The list's cursor: the creation time and the id of the last account of a page, as
+ * base64url text, so the next page starts after those values whether or not that account
+ * still exists (it may have been deleted since, src/account-removal.ts). Opaque to a client.
+ */
+export function encodeAccountCursor(createdAt: number, id: string): string {
+  return btoa(`${createdAt}.${id}`).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** The time and id of a cursor encodeAccountCursor made, or null for anything else (an account id alone, as before 0.1.30, included). */
+export function decodeAccountCursor(cursor: string): { createdAt: number; id: string } | null {
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(cursor)) return null;
+  let text: string;
+  try {
+    text = atob(cursor.replace(/-/g, "+").replace(/_/g, "/"));
+  } catch {
+    return null;
+  }
+  const m = /^(0|[1-9][0-9]{0,15})\.(usr_[0-9a-f]{24})$/.exec(text);
+  if (m === null || !Number.isSafeInteger(Number(m[1]))) return null;
+  return { createdAt: Number(m[1]), id: m[2] };
+}
 const WORKSPACE_ID = /^ws_[0-9a-f]{24}$/;
 
 const NEEDS_BODY = 'the body must be JSON such as {"storage_allowance_bytes": 1073741824}, with nothing else in it';
@@ -92,16 +113,18 @@ export function adminRoutes(app: Hono, deps: Deps): void {
 
   /**
    * Every account, in the order they were made, ADMIN_PAGE at a time: who it is, its
-   * workspace's id and name, its tour count, its usage and its allowance. `?after=<account id>`
-   * starts after that account; `next` is the id to pass for the page after this one, or
-   * null when there is none. A cursor that is not an account id is refused; one that names
-   * no account lists nobody. It only reads.
+   * workspace's id and name, its tour count, its usage and its allowance. `?after=<cursor>`
+   * starts after the account the cursor was made from (encodeAccountCursor), by its creation
+   * time and id, so an account deleted since does not cut the list short; `next` is the
+   * cursor for the page after this one, or null when there is none. Anything that is not
+   * such a cursor is refused with 400 bad_cursor. It only reads.
    */
   app.get("/api/v1/admin/accounts", async (c) => {
     const auth = await requireAuth(c.req.raw, deps, { admin: true });
     if (auth instanceof Response) return auth;
-    const after = c.req.query("after") ?? null;
-    if (after !== null && !USER_ID.test(after)) return apiError(400, "bad_request", "after must be the id of an account, as next gives it");
+    const afterText = c.req.query("after") ?? null;
+    const after = afterText === null ? null : decodeAccountCursor(afterText);
+    if (afterText !== null && after === null) return apiError(400, "bad_cursor", "after must be the cursor next gave; start again without it");
 
     type Row = {
       id: string;
@@ -130,10 +153,8 @@ export function adminRoutes(app: Hono, deps: Deps): void {
     // membership only, as everywhere else; every account has one (the migration and the
     // start of the server give it one).
     //
-    // The cursor is found by looking the account up, so a cursor that names an account
-    // deleted since the previous page (src/account-removal.ts) lists nobody, and the list is
-    // cut short there: a page that deletes an account reads the list again from the start.
-    // A later version may page by the cursor's (created_at, id) values themselves.
+    // The page starts after the cursor's own (created_at, id) values, never by looking its
+    // account up, so a cursor whose account was deleted since still gives the rest.
     const rows = await deps.db.all<Row>(
       `SELECT p.id, p.username, p.email, p.status, p.is_admin, p.created_at, p.deleting, p.ws AS workspace_id, p.ws_name AS workspace_name, p.own, p.allowance, ${USAGE_COLUMNS}
          FROM (SELECT u.id, u.username, u.email, u.status, u.is_admin, u.created_at, m.workspace_id AS ws, workspace.name AS ws_name,
@@ -142,12 +163,12 @@ export function adminRoutes(app: Hono, deps: Deps): void {
                  FROM user u
                  JOIN membership m ON m.user_id = u.id
                  JOIN workspace ON workspace.id = m.workspace_id
-                WHERE ? IS NULL OR (u.created_at, u.id) > (SELECT a.created_at, a.id FROM user a WHERE a.id = ?)
+                WHERE ? IS NULL OR (u.created_at, u.id) > (?, ?)
                 ORDER BY u.created_at, u.id
                 LIMIT ?) p
         ORDER BY p.created_at, p.id`,
-      // In the order the placeholders stand in the text: the site's default, the cursor twice, the page.
-      [deps.config.storageAllowanceBytes ?? null, after, after, ADMIN_PAGE + 1],
+      // In the order the placeholders stand in the text: the site's default, the cursor (whether there is one, its time, its id), the page.
+      [deps.config.storageAllowanceBytes ?? null, after === null ? null : 1, after?.createdAt ?? null, after?.id ?? null, ADMIN_PAGE + 1],
     );
     const page = rows.slice(0, ADMIN_PAGE);
     const accounts = page.map((r) => ({
@@ -163,7 +184,8 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       ...numbers(usageFromRow(r)),
       storage_allowance_bytes: r.own,
     }));
-    return json(200, { accounts, next: rows.length > ADMIN_PAGE ? page[page.length - 1].id : null });
+    const last = page[page.length - 1];
+    return json(200, { accounts, next: rows.length > ADMIN_PAGE ? encodeAccountCursor(last.created_at, last.id) : null });
   });
 
   /**

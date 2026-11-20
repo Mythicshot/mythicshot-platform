@@ -190,8 +190,11 @@ ${SIZE_JS}
 
   // ---- Reading the list ----
 
+  // The list's cursor is opaque base64url text (src/admin-api.ts); anything else ends the paging.
+  var CURSOR = /^[A-Za-z0-9_-]{20,100}$/;
+
   function cursorOf(v) {
-    return typeof v === "string" && USER_ID.test(v) ? v : null;
+    return typeof v === "string" && CURSOR.test(v) ? v : null;
   }
 
   function listed(res) {

@@ -488,3 +488,77 @@ describe("after a delete", () => {
     expect((await send(deps, "GET", `/t/${newSlug()}`)).status).toBe(404);
   });
 });
+
+// ---- A workspace of more than one account ----
+
+describe("a workspace of more than one account", () => {
+  /** A member's workspace that a second account joins: its own membership moved there, as a team would have it. */
+  async function team() {
+    const { deps } = await makeDeps();
+    const admin = await seedAccount(deps, { admin: true });
+    const owner = await seedAccount(deps, { username: "rook" });
+    const second = await seedAccount(deps, { username: "tess" });
+    const s = await signInAs(deps, admin.userId);
+    const tour = await uploadTour(deps, owner.token, manifestOf([700, 701], "Shared tour"));
+    expect((await send(deps, "POST", `/api/v1/tours/${tour.tour_id}/publish`, { token: owner.token })).status).toBe(200);
+    await deps.db.run("UPDATE membership SET workspace_id = ? WHERE user_id = ?", [owner.workspaceId, second.userId]);
+    const slug = (await deps.db.first<{ slug: string }>("SELECT slug FROM tour WHERE id = ?", [tour.tour_id]))!.slug;
+    return { deps, admin, owner, second, s, tour, slug };
+  }
+
+  it("deleting one of its accounts is refused with shared_workspace, and nothing of anyone's is changed", SLOW, async () => {
+    const { deps, owner, second, s, slug } = await team();
+    const call = (method: string, path: string, json?: unknown) => send(deps, method, path, { headers: { ...page(s), ...(json === undefined ? {} : JSON_HEADERS) }, body: json === undefined ? undefined : JSON.stringify(json) });
+    for (const [target, name] of [[owner.userId, "rook"], [second.userId, "tess"]] as const) {
+      expect((await call("POST", account(target, "/disable"))).status).toBe(204);
+      const dump = async () => Object.fromEntries(await Promise.all(["user", "membership", "workspace", "tour", "step", "snapshot_object", "api_token", "account_removal", "tour_deletion"].map(async (t) => [t, await deps.db.all(`SELECT * FROM ${t}`)])));
+      const before = await dump();
+      const r = await call("DELETE", account(target), { username: name });
+      expect([r.status, r.json?.error], name).toEqual([409, "shared_workspace"]);
+      expect(await dump(), name).toEqual(before);
+      expect((await call("POST", account(target, "/enable"))).status).toBe(204);
+    }
+    // Both accounts enabled again: the workspace's tour and its page are as they were.
+    expect((await send(deps, "GET", `/t/${slug}`)).status).toBe(200);
+    expect((await send(deps, "GET", "/api/v1/tours", { token: owner.token })).json.tours).toHaveLength(1);
+  });
+
+  it("disabling one of its accounts hides the whole workspace, its links and its tokens, for every member: today's rule, to be revisited with teams", SLOW, async () => {
+    const { deps, owner, second, s, slug } = await team();
+    expect((await send(deps, "POST", account(second.userId, "/disable"), { headers: page(s) })).status).toBe(204);
+    expect((await send(deps, "GET", `/t/${slug}`)).status).toBe(404);
+    expect((await send(deps, "GET", "/api/v1/tours", { token: owner.token })).status).toBe(401);
+    expect((await send(deps, "POST", account(second.userId, "/enable"), { headers: page(s) })).status).toBe(204);
+    expect((await send(deps, "GET", `/t/${slug}`)).status).toBe(200);
+    expect((await send(deps, "GET", "/api/v1/tours", { token: owner.token })).status).toBe(200);
+  });
+});
+
+// ---- Invites (migration 0012, merged from another branch) ----
+
+describe("invites, where the table exists", () => {
+  it("a delete removes invites to the account's address and keeps the ones it sent, with no sender", SLOW, async () => {
+    const { deps } = await makeDeps();
+    const admin = await seedAccount(deps, { admin: true });
+    const member = await seedAccount(deps, { username: "rook" });
+    const s = await signInAs(deps, admin.userId);
+    // The shape this needs of the table: an address and the sender. A database with the real table keeps it.
+    await deps.db.run("CREATE TABLE IF NOT EXISTS invite (id TEXT PRIMARY KEY NOT NULL, email TEXT NOT NULL, invited_by TEXT REFERENCES user (id)) STRICT");
+    await deps.db.run("INSERT INTO invite (id, email, invited_by) VALUES ('inv_1', ?, ?)", [member.email, admin.userId]);
+    await deps.db.run("INSERT INTO invite (id, email, invited_by) VALUES ('inv_2', 'friend@example.com', ?)", [member.userId]);
+    await deps.db.run("INSERT INTO invite (id, email, invited_by) VALUES ('inv_3', 'other@example.com', ?)", [admin.userId]);
+    expect((await send(deps, "POST", account(member.userId, "/disable"), { headers: page(s) })).status).toBe(204);
+    // Disabling cancels nothing there.
+    expect(await deps.db.all("SELECT id, invited_by FROM invite ORDER BY id")).toEqual([
+      { id: "inv_1", invited_by: admin.userId },
+      { id: "inv_2", invited_by: member.userId },
+      { id: "inv_3", invited_by: admin.userId },
+    ]);
+    const r = await send(deps, "DELETE", account(member.userId), { headers: { ...page(s), ...JSON_HEADERS }, body: JSON.stringify({ username: "rook" }) });
+    expect(r.status, r.text).toBe(200);
+    expect(await deps.db.all("SELECT id, email, invited_by FROM invite ORDER BY id")).toEqual([
+      { id: "inv_2", email: "friend@example.com", invited_by: null },
+      { id: "inv_3", email: "other@example.com", invited_by: admin.userId },
+    ]);
+  });
+});

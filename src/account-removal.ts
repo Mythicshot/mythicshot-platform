@@ -50,6 +50,7 @@ const ownAccount = () => apiError(409, "own_account", "this is your own account;
 const lastAdmin = () => apiError(409, "last_admin", "this is the last active admin; the site would have no admin left");
 const notDisabled = () => apiError(409, "not_disabled", "only a disabled account can be deleted; disable it first");
 const deleting = () => apiError(409, "deleting", "this account is being deleted; send the delete again to finish it");
+const sharedWorkspace = () => apiError(409, "shared_workspace", "the account's workspace has other members; deleting it would delete their work too");
 const siteOwner = () => apiError(409, "site_owner", "this account owns the workspace the site was set up with, which cannot be deleted");
 const wrongName = () => apiError(400, "username_mismatch", "username must be the account's username exactly, or its email address when it has no username");
 
@@ -69,7 +70,18 @@ type Target = {
   site_workspace: number;
   /** Its workspace's tokens that are not revoked: the computers and scripts that can publish there. */
   connections: number;
+  /** 1 when another account belongs to its workspace: by a membership, or by its own row naming it (an older build's account). */
+  shared: number;
 };
+
+/**
+ * The condition that the workspace `ws` has no account but `uid`: no other membership, and
+ * no other account whose own row names it. A delete removes the whole workspace, so it is
+ * allowed only for a workspace of one account. Today every workspace has one; with teams,
+ * deleting one member must not take the others' work.
+ */
+const aloneIn = (ws: string, uid: string) =>
+  `NOT EXISTS (SELECT 1 FROM membership om WHERE om.workspace_id = ${ws} AND om.user_id <> ${uid}) AND NOT EXISTS (SELECT 1 FROM user ou WHERE ou.workspace_id = ${ws} AND ou.id <> ${uid})`;
 
 /**
  * The account with this id and its one workspace, or null for an id of another shape, one
@@ -82,7 +94,8 @@ async function readTarget(deps: Deps, id: string): Promise<Target | null> {
             EXISTS (SELECT 1 FROM account_removal r WHERE r.user_id = u.id) AS removing,
             (SELECT count(*) FROM user a WHERE a.is_admin = 1 AND a.status = 'active' AND a.id <> u.id) AS other_admins,
             EXISTS (SELECT 1 FROM setup s WHERE s.workspace_id = m.workspace_id) AS site_workspace,
-            (SELECT count(*) FROM api_token k WHERE k.workspace_id = m.workspace_id AND k.revoked_at IS NULL) AS connections
+            (SELECT count(*) FROM api_token k WHERE k.workspace_id = m.workspace_id AND k.revoked_at IS NULL) AS connections,
+            NOT (${aloneIn("m.workspace_id", "u.id")}) AS shared
        FROM user u JOIN membership m ON m.user_id = u.id
       WHERE u.id = ?`,
     [id],
@@ -135,8 +148,9 @@ function stopPublishes(ws: string, now: number): Stmt[] {
  * the audit row after it is the batch's guard (unless that statement removed exactly one
  * row it fails, and the whole batch is undone). Then, children before parents (foreign keys
  * never cascade): its requests to connect the app, its tokens, sessions, sign-in codes,
- * email change and rate counters, its sign-in methods and membership, the account, and the
- * workspace. Everything here is named by the account's or the workspace's id, or by a
+ * email change and rate counters, the invites to its address and its name on the invites it
+ * sent (where the invite table exists), its sign-in methods and membership, the account,
+ * and the workspace. Everything here is named by the account's or the workspace's id, or by a
  * counter key made from them, so nothing of another workspace can be reached.
  */
 async function finalStatements(deps: Deps, t: Target, adminId: string): Promise<Stmt[]> {
@@ -145,8 +159,23 @@ async function finalStatements(deps: Deps, t: Target, adminId: string): Promise<
   // The rate counters keyed to the account: its own, its workspace's, and its own requests
   // for its address and for the address of its open email change, if any. Counters keyed to
   // an address alone are the address's, not the account's, and run out by themselves.
-  const change = await deps.db.first<{ new_email: string }>("SELECT new_email FROM email_change WHERE user_id = ?", [uid]);
-  const keys = [await accountKey(uid), await workspaceKey(ws), await pairKey(uid, t.email), ...(change === null ? [] : [await pairKey(uid, change.new_email)])];
+  // In the same read: whether the invite table exists (migration 0012, which a build may
+  // run beside or before), so the invite statements are only sent where it does.
+  const found = await deps.db.first<{ new_email: string | null; invites: number }>(
+    "SELECT (SELECT new_email FROM email_change WHERE user_id = ?) AS new_email, EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'invite') AS invites",
+    [uid],
+  );
+  const newEmail = found?.new_email ?? null;
+  const keys = [await accountKey(uid), await workspaceKey(ws), await pairKey(uid, t.email), ...(newEmail === null ? [] : [await pairKey(uid, newEmail)])];
+  // Invites to the account's own address (none can be open while the account exists, but
+  // none may outlive it), and invites it sent, which stay valid with nobody named as sender.
+  const invites: Stmt[] =
+    found?.invites === 1
+      ? [
+          { sql: "DELETE FROM invite WHERE email = ?", params: [t.email] },
+          { sql: "UPDATE invite SET invited_by = NULL WHERE invited_by = ?", params: [uid] },
+        ]
+      : [];
   const nothingLeft = ["tour", "tour_deletion", "upload", "media"].map((table) => `NOT EXISTS (SELECT 1 FROM ${table} WHERE workspace_id = ?)`).join(" AND ");
   return [
     {
@@ -160,6 +189,7 @@ async function finalStatements(deps: Deps, t: Target, adminId: string): Promise<
     { sql: "DELETE FROM signin_code WHERE user_id = ?", params: [uid] },
     { sql: "DELETE FROM email_change WHERE user_id = ?", params: [uid] },
     { sql: "DELETE FROM rate_counter WHERE key IN (SELECT value FROM json_each(?))", params: [JSON.stringify(keys)] },
+    ...invites,
     { sql: "DELETE FROM signin_method WHERE user_id = ?", params: [uid] },
     { sql: "DELETE FROM membership WHERE user_id = ? AND workspace_id = ?", params: [uid, ws] },
     { sql: "DELETE FROM user WHERE id = ? AND status = 'disabled'", params: [uid] },
@@ -379,7 +409,8 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
    * left, and 200 {deleted: true} once the account is gone; after that the id is unknown
    * (404). Refused, before anything is changed: 400 bad_request for another body, 409
    * own_account, 409 not_disabled, 400 username_mismatch, 409 last_admin for the site's last
-   * admin, and 409 site_owner for the account whose workspace the setup record names. 500
+   * admin, 409 shared_workspace when another account belongs to its workspace, and 409
+   * site_owner for the account whose workspace the setup record names. 500
    * cleanup_pending when a store or the database failed part way: nothing is lost, send it
    * again. Every request stays within SUBREQUEST_BUDGET calls, whatever the workspace holds.
    */
@@ -400,6 +431,7 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
     if (t.status !== "disabled") return notDisabled();
     if (confirmation !== (t.username ?? t.email)) return wrongName();
     if (t.is_admin === 1 && t.other_admins === 0) return lastAdmin();
+    if (t.shared === 1) return sharedWorkspace();
     if (t.site_workspace === 1) return siteOwner();
 
     if (t.removing === 0) {
@@ -409,15 +441,17 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
       const started = await d.db.run(
         `INSERT INTO account_removal (user_id, workspace_id, started_by, total, created_at)
          SELECT u.id, m.workspace_id, ?, ${FILES_SQL}, ? FROM user u JOIN membership m ON m.user_id = u.id
-          WHERE u.id = ? AND m.workspace_id = ? AND u.status = 'disabled' AND NOT EXISTS (SELECT 1 FROM account_removal r WHERE r.user_id = u.id)`,
+          WHERE u.id = ? AND m.workspace_id = ? AND u.status = 'disabled' AND NOT EXISTS (SELECT 1 FROM account_removal r WHERE r.user_id = u.id)
+            AND ${aloneIn("m.workspace_id", "u.id")}`,
         [adminId, ...filesParams(t.workspace_id), d.now(), id, t.workspace_id],
       );
       if (started.changes === 0) {
         // Another delete request recorded it a moment before (go on), or the account was
-        // enabled since the read (then nothing may be removed).
+        // enabled, or another account joined its workspace, since the read (then nothing may
+        // be removed).
         const again = await readTarget(d, id);
         if (again === null) return notFound();
-        if (again.removing === 0) return notDisabled();
+        if (again.removing === 0) return again.shared === 1 ? sharedWorkspace() : notDisabled();
       }
     }
 

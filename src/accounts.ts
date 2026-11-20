@@ -137,6 +137,11 @@ export async function beforeAccountsToo<T>(withCondition: () => Promise<T>, with
  * row names (the rule the token lookup in src/auth.ts holds). `ws` is a column of the
  * query, such as `t.workspace_id`, never a value from a request. Two index lookups (the
  * account table's workspace index and the membership's key), no added call.
+ *
+ * It hides a whole workspace when ANY account of it is disabled. That is today's rule,
+ * where a workspace has exactly one account, and the rule the token lookup holds; it must
+ * be revisited when a workspace can have several members (teams), so that disabling one
+ * member does not take the others' links down.
  */
 export function noDisabledAccount(ws: string): string {
   return (

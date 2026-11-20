@@ -597,7 +597,7 @@ function schemas(): Record<string, Schema> {
     ),
     AdminAccountList: object(["accounts", "next"], {
       accounts: { type: "array", maxItems: ADMIN_PAGE, description: `The accounts, in the order they were made, at most ${ADMIN_PAGE}.`, items: ref("AdminAccount") },
-      next: { type: ["string", "null"], pattern: "^usr_[0-9a-f]{24}$", description: "The id to ask for the next page with, as ?after=<id>. null on the last page." },
+      next: { type: ["string", "null"], pattern: "^[A-Za-z0-9_-]{20,100}$", description: "The cursor to ask for the next page with, as ?after=<cursor>: opaque text, to be sent back as it is. An account deleted since does not cut the list short. null on the last page." },
     }),
     AllowanceChange: object(["storage_allowance_bytes"], {
       storage_allowance_bytes: { type: ["integer", "null"], minimum: 0, maximum: MAX_ALLOWANCE_BYTES, description: "The workspace's allowance in bytes, or null to go back to the site's default." },
@@ -1434,12 +1434,12 @@ function paths(): OpenApiDoc["paths"] {
       get: {
         tags: ["Admin"],
         summary: "List every account's storage use",
-        description: `For the site's admin: every account, in the order they were made, ${ADMIN_PAGE} at a time, with its workspace's id and name, its tour count, what it uses of its storage (counted as GET /api/v1/usage counts it for the account itself) and its allowance. Nothing of any workspace's tours is in it. Add ?after=<id>, with the next of the previous answer, for the next page. Every refusal is the one 404, whoever asks and whatever is wrong with the request. ${NOT_FROM_THE_PAGE}`,
+        description: `For the site's admin: every account, in the order they were made, ${ADMIN_PAGE} at a time, with its workspace's id and name, its tour count, what it uses of its storage (counted as GET /api/v1/usage counts it for the account itself) and its allowance. Nothing of any workspace's tours is in it. Add ?after=<cursor>, with the next of the previous answer, for the next page. Every refusal is the one 404, whoever asks and whatever is wrong with the request. ${NOT_FROM_THE_PAGE}`,
         operationId: "adminListAccounts",
         security: SESSION,
         responses: {
           "200": answer("The accounts.", ref("AdminAccountList")),
-          "400": refusal("after is not the id of an account.", "bad_request"),
+          "400": refusal("after is not a cursor this list gave (an account id, as versions before 0.1.30 gave, included): start again without it.", "bad_cursor"),
           "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, or a session on the tours address. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
         },
       },
@@ -1508,7 +1508,7 @@ function paths(): OpenApiDoc["paths"] {
       delete: {
         tags: ["Admin"],
         summary: "Delete a disabled account, in steps",
-        description: `For the site's admin: removes a disabled account and everything of its workspace: every tour with its draft and published pictures, unfinished uploads, every shared item, the workspace's tokens and requests to connect the app, the account's sessions, sign-in links and email change, the workspace and the account. This cannot be undone. Its address and its username are free again afterwards, and the audit record keeps account_deleted with the ids of the admin, the workspace and the account. Only a disabled account can be deleted, and the body must name it. A large workspace takes several requests, each removing a bounded part: send the same request until it answers 200. A delete that is stopped at any point leaves the account disabled and listed (with deleting true), and sending it again finishes it; while it is unfinished the account cannot be enabled. A repeated request after the account is gone answers 404, so treat 404 as "gone". Published pictures already held by a browser or a cache are not taken back (see the disable request). ${NOT_FROM_THE_PAGE}`,
+        description: `For the site's admin: removes a disabled account and everything of its workspace: every tour with its draft and published pictures, unfinished uploads, every shared item, the workspace's tokens and requests to connect the app, the account's sessions, sign-in links and email change, the workspace and the account; invites to its address are removed and those it sent stay valid. This cannot be undone. Only an account alone in its workspace can be deleted. Deleting, like disabling, cannot take back pictures a browser or a cache already holds (up to a year), nor stop those served from a bucket's own domain. Its address and its username are free again afterwards, and the audit record keeps account_deleted with the ids of the admin, the workspace and the account. Only a disabled account can be deleted, and the body must name it. A large workspace takes several requests, each removing a bounded part: send the same request until it answers 200. A delete that is stopped at any point leaves the account disabled and listed (with deleting true), and sending it again finishes it; while it is unfinished the account cannot be enabled. A repeated request after the account is gone answers 404, so treat 404 as "gone". Published pictures already held by a browser or a cache are not taken back (see the disable request). ${NOT_FROM_THE_PAGE}`,
         operationId: "adminDeleteAccount",
         security: SESSION,
         parameters: [accountId],
@@ -1518,7 +1518,7 @@ function paths(): OpenApiDoc["paths"] {
           "202": answer("The delete has more to do; done and total count the workspace's files. Send the same request again.", ref("InProgress")),
           "400": refusal("bad_request: the body is not a JSON object holding username and nothing else. username_mismatch: username is not the account's username (or, when it has none, its email address) exactly.", "bad_request", "username_mismatch"),
           "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header; and an account id that is malformed or names no account. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
-          "409": refusal("own_account: this is the caller's own account. not_disabled: the account is not disabled; disable it first. last_admin: this is the site's last admin. site_owner: the account owns the workspace the site was set up with, which cannot be deleted.", "own_account", "not_disabled", "last_admin", "site_owner"),
+          "409": refusal("own_account: this is the caller's own account. not_disabled: the account is not disabled; disable it first. last_admin: this is the site's last admin. shared_workspace: another account belongs to the account's workspace, whose work a delete would remove too. site_owner: the account owns the workspace the site was set up with, which cannot be deleted.", "own_account", "not_disabled", "last_admin", "shared_workspace", "site_owner"),
           "500": refusal("Part of the account is removed, but some of its files could not be removed yet. Nothing is lost: send the same request again.", "cleanup_pending"),
         },
       },

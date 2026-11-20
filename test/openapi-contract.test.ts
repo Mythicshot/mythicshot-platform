@@ -21,6 +21,7 @@
 // and run `npm run build:docs`. Never change a route to fit the description.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
+import { encodeAccountCursor } from "../src/admin-api.ts";
 import { createApp } from "../src/app.ts";
 import { setClientAddress } from "../src/client.ts";
 import { openapi } from "../src/docs/openapi.ts";
@@ -742,8 +743,9 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const list = await api.call("GET", "/api/v1/admin/accounts", { headers });
     expect(list.json.accounts.map((a: Json) => a.id)).toEqual([admin.userId, member.userId]);
     expect(list.json.accounts[1]).toMatchObject({ tours: 1, used_bytes: 240, allowance_bytes: 1_000_000, storage_allowance_bytes: null });
-    expect((await api.call("GET", `/api/v1/admin/accounts?after=${admin.userId}`, { headers })).json.accounts.map((a: Json) => a.id)).toEqual([member.userId]);
-    refused(await api.call("GET", "/api/v1/admin/accounts?after=nobody", { headers }), 400, "bad_request");
+    const first = list.json.accounts[0] as Json;
+    expect((await api.call("GET", `/api/v1/admin/accounts?after=${encodeAccountCursor(first.created_at, first.id)}`, { headers })).json.accounts.map((a: Json) => a.id)).toEqual([member.userId]);
+    refused(await api.call("GET", "/api/v1/admin/accounts?after=nobody", { headers }), 400, "bad_cursor");
 
     // Setting the allowance, and going back to the server's.
     const path = `/api/v1/admin/workspaces/${member.workspaceId}`;
@@ -797,6 +799,11 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     await deps.db.run("INSERT INTO setup (id, workspace_id, completed_at) VALUES (1, ?, ?)", [member.workspaceId, deps.now()]);
     refused(await del(member.userId, { username: "rook" }), 409, "site_owner");
     await deps.db.run("DELETE FROM setup");
+    // Another account in the workspace: its row names the workspace (as an older build wrote them).
+    const lodger = "usr_" + "9".repeat(24);
+    await deps.db.run("INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, 'lodger@example.com', ?)", [lodger, member.workspaceId, deps.now()]);
+    refused(await del(member.userId, { username: "rook" }), 409, "shared_workspace");
+    await deps.db.run("DELETE FROM user WHERE id = ?", [lodger]);
 
     // The last active admin: with the caller disabled after its own check (a hook on the
     // account's read stands in for another admin acting at that moment), the other admin

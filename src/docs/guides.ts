@@ -199,6 +199,7 @@ export const CODE_MEANINGS: Readonly<Record<string, string>> = {
   deleting: "A delete of the account has started, so it cannot be enabled; send the delete again to finish it.",
   not_disabled: "Only a disabled account can be deleted; disable it first.",
   username_mismatch: "The username typed to confirm a delete is not the account's username (or, for an account without one, its email address) exactly.",
+  shared_workspace: "Another account belongs to the account's workspace, so deleting it would delete their work too.",
   site_owner: "The account owns the workspace the site was set up with, which cannot be deleted.",
   internal: "The server failed; nothing about the failure is given.",
   misconfigured: "On Cloudflare, the two addresses in the settings cannot be used together.",
