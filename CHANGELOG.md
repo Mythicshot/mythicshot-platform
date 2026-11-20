@@ -2,6 +2,17 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.26 (2026-11-20)
+
+- Connecting Mythicshot with a pair of codes, through the API. `POST /api/v1/connect/start`, sent with no credential, answers a long secret device code, a short code such as `ABCD-EFGH` and the dashboard's connect page (from the settings, never from the request). A signed-in person looks the short code up (`GET /api/v1/connect/requests/<code>`, which shows the device's name) and confirms it (`POST /api/v1/connect/confirm`) or refuses it (`POST /api/v1/connect/refuse`). Mythicshot asks `POST /api/v1/connect/token` with the device code every 5 seconds and, once confirmed, receives a token for that person's workspace, once. The codes live 10 minutes and are never put in an address. The dashboard's connect page comes in a later version.
+- The token is made when Mythicshot collects it, not when the request is confirmed: a confirmed request nobody collects leaves no token, and of two collections at once only one gets it. A request confirmed by an account that is then disabled cannot be collected.
+- Every device code that can give no token, whether unknown, expired, refused, already used or not a device code at all, gets the one answer `410 expired_code`. Asking again within the 5 seconds answers `429 slow_down`. A request that carries a token or a session cookie answers `400 credentials_not_allowed`.
+- A network asks for at most 10 pairs of codes in 15 minutes and 40 in a day, has at most 5 waiting at once, and asks for tokens at most 360 times in 15 minutes. An account may try 5 short codes that name no waiting request in 10 minutes, and a network 20; a right code is not counted, and one account's wrong codes never lock another account out.
+- The workspace's tokens, for signed-in people: `GET /api/v1/tokens` lists them with their name, when they were made and last used, and how (`setup` or `sign_in`), never any part of a token; `PATCH /api/v1/tokens/<id>` renames one; `DELETE /api/v1/tokens/<id>` revokes one, refused from its next request on. A token can call none of these.
+- The audit record has five new events: a connection confirmed, refused and collected, a token renamed and a token revoked. None holds a code or a token.
+- The API description has a Connections section, and its guide to error codes names the new codes.
+- Upgrading: this version needs its database change (migration 0011: the request table, the install's key for the short codes, and a `kind` column on tokens, `setup` for every token there is). The Node server applies it when it starts, before it answers, and `npm run setup:cloudflare -- update` applies it before it deploys.
+
 ## 0.1.25 (2026-11-20)
 
 - Dashboard, Images and GIFs pages: when a delete gets no answer, the page asks the item itself. Only the API's own "no such item" answer counts as deleted, not any 404 (one from a proxy, say); an item still online or still being sent, or no answer to that either, shows the failure, and "too many requests" says so in its own sentence. Before, an item that newer items had pushed off the pages shown could be reported deleted while it was still online.
