@@ -2,6 +2,15 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.24 (2026-11-20)
+
+- Dashboard, Storage page: images and GIFs count beside tours. The line shows how many images, GIFs and tours the workspace has, what takes the room has GIFs and Images rows, and "Largest items" lists all three kinds together, each marked Tour, Image or GIF.
+- "Delete" works for every kind on the Storage page. An image or a GIF gets its own question and is removed through the shared items API.
+- `GET /api/v1/usage` adds `images` and `gifs` (items online) and, in `counted`, the bytes of images and of GIFs, split from the items' share of `used_bytes`. An item still being sent counts there, and one being deleted until its files are gone. The numbers in `counted` add up to `used_bytes`.
+- `GET /api/v1/usage/largest` adds `largest`: the ten largest tours, images and GIFs together, each with its kind. The `tours` list is unchanged.
+- The admin's list shows the bytes of images and of GIFs as two totals, and nothing else of anyone's items.
+- Dashboard, Images and GIFs pages: the line under the heading shows the whole count and size from the first load ("48 images in <workspace> · 64 MB used"), and again after a delete, even while "Show more" has more to load.
+
 ## 0.1.23 (2026-11-20)
 
 - Dashboard, Images and GIFs pages: the workspace's shared images and clips, newest first, each with a small preview, its size, the day it was shared and its link. "Copy link", "Open" and "Delete", and "Show more" past the first 50.

@@ -89,8 +89,8 @@ describe("migration 0010 on a 0.1.18 install", () => {
       expect(await db.first("PRAGMA integrity_check")).toEqual({ integrity_check: "ok" });
 
       // The usage is what it was: no item counts yet.
-      expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures: 3000, logos: 1234, uploads: 5000, media: 0, used: 9234, allowance: 50_000, over: false, tours: 1 });
-      expect(await usageOf(deps, b.workspaceId)).toEqual({ pictures: 0, logos: 0, uploads: 0, media: 0, used: 0, allowance: null, over: false, tours: 0 });
+      expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures: 3000, logos: 1234, uploads: 5000, media: 0, imageBytes: 0, gifBytes: 0, used: 9234, allowance: 50_000, over: false, tours: 1, images: 0, gifs: 0 });
+      expect(await usageOf(deps, b.workspaceId)).toEqual({ pictures: 0, logos: 0, uploads: 0, media: 0, imageBytes: 0, gifBytes: 0, used: 0, allowance: null, over: false, tours: 0, images: 0, gifs: 0 });
 
       // Running the migrations again applies nothing, and a second application of the file
       // (two processes starting together) fails as a whole and changes nothing.
@@ -119,7 +119,7 @@ describe("migration 0010 on a 0.1.18 install", () => {
       expect((await send(deps, "POST", `/api/v1/media/${id}/commit`, { token: a.token })).status).toBe(200);
       expect((await send(deps, "GET", "/api/v1/media?kind=image", { token: a.token })).json.items.map((i: Json) => i.id)).toEqual([id]);
       const usage = await send(deps, "GET", "/api/v1/usage", { token: a.token });
-      expect(usage.json).toEqual({ used_bytes: 9234 + 3000, allowance_bytes: 50_000, over: false, tours: 1, counted: { pictures: 3000, logos: 1234, uploads_in_progress: 5000 } });
+      expect(usage.json).toEqual({ used_bytes: 9234 + 3000, allowance_bytes: 50_000, over: false, tours: 1, images: 1, gifs: 0, counted: { pictures: 3000, logos: 1234, uploads_in_progress: 5000, images: 3000, gifs: 0 } });
       // A tour upload sees the item's room: 37,766 bytes are left of the allowance.
       const manifest = JSON.parse(JSON.stringify(fixtures.v2)) as Json;
       manifest.steps = manifest.steps.map((s: Json) => ({ ...s, bytes: Math.floor(37_767 / manifest.steps.length) + 1 }));

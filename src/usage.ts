@@ -15,6 +15,10 @@
 //   deleted or swept (closing) still counts until its row is removed, which happens only
 //   with its last object: a delete that finishes frees the room at once, and one that was
 //   cut off counts until it is retried.
+//   GET /api/v1/usage gives this sum in two parts by the item's kind, images and GIFs
+//   (clips), each with all of the above for its items in every state; an item still being
+//   sent counts in its kind's part, never in uploads_in_progress, which stays the tours'
+//   uploads alone.
 // Not counted: published copies (no size is recorded for them), pictures a replace took
 // out and files of a deleted tour that still wait to be cleaned up, uploads that are
 // closing, and upload_step.bytes (the reservation already holds the declared bytes). Two
@@ -24,7 +28,7 @@
 // upload (src/uploads.ts) or an item (src/media.ts), or claim an item's preview, built
 // from USED_SQL and ALLOWANCE_OF_SQL; this file words their
 // answer (storageFull) and serves a workspace its own numbers (GET /api/v1/usage)
-// and its largest tours (GET /api/v1/usage/largest).
+// and its largest tours, images and GIFs (GET /api/v1/usage/largest).
 //
 // This file imports no route module (src/uploads.ts imports it), so the settings, which
 // read allowanceFromSetting, and the routes can load in either order.
@@ -58,37 +62,64 @@ export function allowanceFromSetting(raw: string | undefined): { ok: true; bytes
 
 // The four sums, each a scalar subquery over the row `p`, which holds the workspace id
 // as p.ws. Both USED_SQL and usageOf are built from these, so the number a create is held
-// against is the number shown.
+// against is the number shown. MEDIA and its two parts for the usage answer are one
+// template (mediaBytes), which differs only in the kind it is held to; as the kind is image
+// or clip and nothing else (migrations/0010_media.sql), the two parts add up to MEDIA, and
+// test/usage.test.ts holds them to that.
 const PICTURES = "(SELECT coalesce(sum(s.bytes), 0) FROM tour t JOIN step s ON s.tour_id = t.id WHERE t.workspace_id = p.ws)";
 const LOGOS = "(SELECT coalesce(sum(t.logo_bytes), 0) FROM tour t WHERE t.workspace_id = p.ws)";
 const UPLOADS = "(SELECT coalesce(sum(u.reserved_bytes), 0) FROM upload u WHERE u.workspace_id = p.ws AND u.closing_at IS NULL)";
-const MEDIA =
-  "((SELECT coalesce(sum(m.bytes), 0) FROM media m WHERE m.workspace_id = p.ws) + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o JOIN media m ON m.id = o.media_id WHERE m.workspace_id = p.ws AND (o.current = 0 OR o.n = -1)))";
+/**
+ * Which of an item's claim rows (`o`, of media_object) count beside its declared bytes:
+ * every claim that is not current, and the current preview (n = -1). The current parts are
+ * the declared bytes themselves.
+ */
+const COUNTED_OBJECT = "(o.current = 0 OR o.n = -1)";
+/**
+ * The bytes of a workspace's items in every state, closing too: their declared bytes and
+ * their counted claim rows. With a kind, those of that kind's items alone.
+ */
+const mediaBytes = (kind?: "image" | "clip") => {
+  const only = kind === undefined ? "" : ` AND m.kind = '${kind}'`;
+  return `((SELECT coalesce(sum(m.bytes), 0) FROM media m WHERE m.workspace_id = p.ws${only}) + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o JOIN media m ON m.id = o.media_id WHERE m.workspace_id = p.ws${only} AND ${COUNTED_OBJECT}))`;
+};
+const MEDIA = mediaBytes();
 const TOURS = "(SELECT count(*) FROM tour t WHERE t.workspace_id = p.ws)";
+
+/** How many items of one kind are online: an unfinished item and a closing one are not counted. */
+const mediaCountOf = (kind: "image" | "clip") => `(SELECT count(*) FROM media m WHERE m.workspace_id = p.ws AND m.kind = '${kind}' AND m.state = 'online')`;
 
 /**
  * The size of one tour in bytes, as a scalar expression over the row `t` of `tour` in
  * scope: the bytes of its steps and the recorded size of its logo (null counts as
  * nothing). It is PICTURES and LOGOS for one tour, so over a workspace's tours these sizes
  * add up to exactly the usage's pictures plus logos; the usage's used_bytes is that plus
- * the room open uploads hold, which belongs to no tour yet. Like the usage, it counts no
+ * the room open uploads hold, which belongs to no tour yet, plus the shared images and GIFs
+ * (MEDIA). Like the usage, it counts no
  * published copy and no file that waits to be cleaned up. It takes no parameter.
  */
 export const TOUR_BYTES_SQL = "((SELECT coalesce(sum(s.bytes), 0) FROM step s WHERE s.tour_id = t.id) + coalesce(t.logo_bytes, 0))";
 
-/** How many tours GET /api/v1/usage/largest answers. */
+/** How many tours GET /api/v1/usage/largest answers, and how many things of every kind. */
 export const LARGEST_TOURS = 10;
+
+/**
+ * The size of one shared item in bytes, as a scalar expression over the row `m` of `media`
+ * in scope: what deleting it frees, as MEDIA counts it for this item: its declared bytes and
+ * its counted claim rows (its current preview and every claim that is not current).
+ */
+export const ITEM_BYTES_SQL = `(m.bytes + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o WHERE o.media_id = m.id AND ${COUNTED_OBJECT}))`;
 
 const PARAMS = "(SELECT ? AS ws) p";
 
 /**
- * The four sums and the tour count as the columns `pictures`, `logos`, `uploads`, `media`
- * and `tours`, for a SELECT whose FROM has a row `p` that holds the workspace id as p.ws. It
- * takes no parameter. usageOf reads one workspace's numbers with it, and the admin's list
+ * The sums and the counts as the columns `pictures`, `logos`, `uploads`, `image_bytes`,
+ * `gif_bytes` (MEDIA in its two parts), `tours`, `images` and `gifs` (online items), for a
+ * SELECT whose FROM has a row `p` that holds the workspace id as p.ws. It takes no parameter. usageOf reads one workspace's numbers with it, and the admin's list
  * of accounts reads every workspace's with it (src/admin-api.ts), so the two can never
  * disagree.
  */
-export const USAGE_COLUMNS = `${PICTURES} AS pictures, ${LOGOS} AS logos, ${UPLOADS} AS uploads, ${MEDIA} AS media, ${TOURS} AS tours`;
+export const USAGE_COLUMNS = `${PICTURES} AS pictures, ${LOGOS} AS logos, ${UPLOADS} AS uploads, ${mediaBytes("image")} AS image_bytes, ${mediaBytes("clip")} AS gif_bytes, ${TOURS} AS tours, ${mediaCountOf("image")} AS images, ${mediaCountOf("clip")} AS gifs`;
 
 /**
  * The bytes a workspace uses, as a scalar subquery for use inside another statement. It
@@ -120,23 +151,44 @@ export function allowanceParams(deps: Deps, workspaceId: string): Value[] {
 }
 
 /**
- * `used` is pictures + logos + uploads + media. `allowance` is null when there is no limit, and
- * `over` is true only when there is one and more than it is used: exactly the allowance
- * is not over it.
+ * `media` is MEDIA, imageBytes + gifBytes: the shared items in every state with their
+ * counted claim rows. `used` is pictures + logos + uploads + media. `allowance` is null when there is
+ * no limit, and `over` is true only when there is one and more than it is used: exactly the
+ * allowance is not over it. `tours` counts every tour; `images` and `gifs` count online
+ * items only.
  */
-export type Usage = { pictures: number; logos: number; uploads: number; media: number; used: number; allowance: number | null; over: boolean; tours: number };
+export type Usage = {
+  pictures: number;
+  logos: number;
+  uploads: number;
+  media: number;
+  imageBytes: number;
+  gifBytes: number;
+  used: number;
+  allowance: number | null;
+  over: boolean;
+  tours: number;
+  images: number;
+  gifs: number;
+};
+
+/** A row read with USAGE_COLUMNS and the allowance. */
+export type UsageRow = { pictures: number; logos: number; uploads: number; image_bytes: number; gif_bytes: number; tours: number; images: number; gifs: number; allowance: number | null };
 
 /** The numbers a row read with USAGE_COLUMNS and the allowance hold, as a Usage. usageOf and the admin's list both make theirs here. */
-export function usageFromRow(row: { pictures: number; logos: number; uploads: number; media: number; tours: number; allowance: number | null }): Usage {
-  const { pictures, logos, uploads, media, tours, allowance } = row;
+export function usageFromRow(row: UsageRow): Usage {
+  const { pictures, logos, uploads, tours, images, gifs, allowance } = row;
+  const imageBytes = row.image_bytes;
+  const gifBytes = row.gif_bytes;
+  const media = imageBytes + gifBytes;
   const used = pictures + logos + uploads + media;
-  return { pictures, logos, uploads, media, used, allowance, over: allowance !== null && used > allowance, tours };
+  return { pictures, logos, uploads, media, imageBytes, gifBytes, used, allowance, over: allowance !== null && used > allowance, tours, images, gifs };
 }
 
 /** The usage of one workspace and the allowance it is held against, in one database call. */
 export async function usageOf(deps: Deps, workspaceId: string): Promise<Usage> {
   const site = deps.config.storageAllowanceBytes ?? null;
-  const row = await deps.db.first<{ pictures: number; logos: number; uploads: number; media: number; tours: number; allowance: number | null }>(
+  const row = await deps.db.first<UsageRow>(
     `SELECT ${USAGE_COLUMNS},
             coalesce((SELECT ${ALLOWANCE_SQL} FROM workspace WHERE workspace.id = p.ws), ?) AS allowance
        FROM ${PARAMS}`,
@@ -146,6 +198,9 @@ export async function usageOf(deps: Deps, workspaceId: string): Promise<Usage> {
   );
   return usageFromRow(row!);
 }
+
+/** What an entry of GET /api/v1/usage/largest is: a tour, a shared image, or a shared clip, which people call a GIF. */
+export type LargestKind = "tour" | "image" | "gif";
 
 /** What a storage-full answer is about: a tour's upload, a shared image, a shared clip, or an item's preview picture. */
 export type StorageFullOf = "tour" | "image" | "clip" | "preview";
@@ -182,28 +237,53 @@ export function usageRoutes(app: Hono, deps: Deps): void {
     if (auth instanceof Response) return auth;
     // The workspace is the caller's own, from the credential: nothing in the request names one.
     const u = await usageOf(deps, auth.workspaceId);
+    // Fields are only ever added: images and gifs beside tours, and the items' bytes in
+    // counted, whose numbers add up to used_bytes.
     return json(200, {
       used_bytes: u.used,
       allowance_bytes: u.allowance,
       over: u.over,
       tours: u.tours,
-      counted: { pictures: u.pictures, logos: u.logos, uploads_in_progress: u.uploads },
+      images: u.images,
+      gifs: u.gifs,
+      counted: { pictures: u.pictures, logos: u.logos, uploads_in_progress: u.uploads, images: u.imageBytes, gifs: u.gifBytes },
     });
   });
   /**
-   * GET /api/v1/usage/largest: the LARGEST_TOURS largest tours of the caller's own
-   * workspace, each with its id, title and size (TOUR_BYTES_SQL), largest first; tours of
-   * the same size in the order of their ids. One statement, whatever the number of tours.
-   * It only reads.
+   * GET /api/v1/usage/largest: two lists of the caller's own workspace, each largest first,
+   * things of the same size in the order of their ids:
+   * - `tours`, as in the first version: the LARGEST_TOURS largest tours, each with its id,
+   *   title and size (TOUR_BYTES_SQL);
+   * - `largest`: the LARGEST_TOURS largest things of every kind, each a tour (`kind` "tour",
+   *   sized as in `tours`) or a shared item that is online or still being sent (`kind`
+   *   "image", or "gif" for a clip), sized by ITEM_BYTES_SQL: what deleting it frees. An
+   *   item still being sent is listed, as it holds room and can be deleted; a closing one is
+   *   not, as it is being deleted already (it counts in the usage until its files are gone).
+   *   An item without a title has null.
+   * One statement, whatever the number of tours and items. It only reads.
    */
   app.get("/api/v1/usage/largest", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
-    const rows = await deps.db.all<{ id: string; title: string; bytes: number }>(
-      `SELECT t.id, t.title, ${TOUR_BYTES_SQL} AS bytes FROM tour t WHERE t.workspace_id = ? ORDER BY bytes DESC, t.id LIMIT ?`,
-      [auth.workspaceId, LARGEST_TOURS],
+    type Row = { list: "tours" | "largest"; kind: LargestKind; id: string; title: string | null; bytes: number };
+    const rows = await deps.db.all<Row>(
+      `WITH p AS (SELECT ? AS ws),
+            tours AS (SELECT 'tour' AS kind, t.id AS id, t.title AS title, ${TOUR_BYTES_SQL} AS bytes FROM tour t, p WHERE t.workspace_id = p.ws),
+            items AS (SELECT CASE m.kind WHEN 'image' THEN 'image' ELSE 'gif' END AS kind, m.id AS id, m.title AS title, ${ITEM_BYTES_SQL} AS bytes
+                        FROM media m, p WHERE m.workspace_id = p.ws AND m.state <> 'closing')
+       SELECT 'tours' AS list, kind, id, title, bytes FROM (SELECT kind, id, title, bytes FROM tours ORDER BY bytes DESC, id LIMIT ?)
+       UNION ALL
+       SELECT 'largest' AS list, kind, id, title, bytes FROM (SELECT kind, id, title, bytes FROM (SELECT kind, id, title, bytes FROM tours UNION ALL SELECT kind, id, title, bytes FROM items) ORDER BY bytes DESC, id LIMIT ?)`,
+      [auth.workspaceId, LARGEST_TOURS, LARGEST_TOURS],
     );
-    return json(200, { tours: rows.map((r) => ({ id: r.id, title: r.title, bytes: r.bytes })) });
+    // A compound SELECT promises no order between or inside its parts, so each list is put
+    // in its order again here; the subqueries chose which rows.
+    const order = (a: Row, b: Row) => b.bytes - a.bytes || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const of = (list: Row["list"]) => rows.filter((r) => r.list === list).sort(order);
+    return json(200, {
+      tours: of("tours").map((r) => ({ id: r.id, title: r.title, bytes: r.bytes })),
+      largest: of("largest").map((r) => ({ kind: r.kind, id: r.id, title: r.title, bytes: r.bytes })),
+    });
   });
 }
 

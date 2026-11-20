@@ -8,12 +8,14 @@
 // Each body is fixed text; each script fills it through createElement and textContent, so
 // a title can never become markup.
 //
-// The line under the heading counts the items and adds up their sizes from the list itself
-// (the API gives no total for a kind). While the list has another page the total is not
-// known, so the line names how many of the newest are shown and leaves the size out; once
-// the last page is in, it is the whole count and size ("48 images in <workspace> · 64 MB
-// used"). The size is the items' own bytes; the small preview pictures, which the usage
-// counts too, are not in it.
+// The line under the heading is the mockup's "48 images in <workspace> · 64 MB used" from
+// the first load: the count and the size of the page's kind from GET /api/v1/usage, read
+// beside the list every time the list is read (so also after a delete): the top-level
+// images or gifs (the items online) and counted.images or counted.gifs (what they hold of
+// the allowance, previews and leftovers of sends included). When the usage cannot be read,
+// the line is made from the list itself, as before the usage had these totals: while the
+// list has another page it names how many of the newest are shown and leaves the size out;
+// once the last page is in, it is the whole count and the items' own bytes.
 //
 // A preview is the item's own route, GET /api/v1/media/<id>/preview, on this site (the
 // policy allows images from 'self'), loaded lazily at a fixed size with no referrer; its
@@ -160,6 +162,9 @@ ${text}
   var PLAY = ${p.play ? "true" : "false"};
   var LIST = "/api/v1/media?kind=" + KIND;
   var ITEM = "/api/v1/media/";
+  // The usage, and its two numbers for this page's kind.
+  var USAGE = "/api/v1/usage";
+  var TOTAL = KIND === "image" ? "images" : "gifs";
   // A delete is sent at most this many times in all while it answers 500 cleanup_pending.
   var MAX_TRIES = 3;
   // The pauses before the second and the third send, so a moment's fault in the store does not use them all at once.
@@ -187,6 +192,8 @@ ${text}
   var items = [];
   var pages = 0;
   var next = null;
+  // This kind's count and size from the usage ({ n, bytes }), or null when it could not be read.
+  var totals = null;
   // The list request running (a read, or Show more), or null: one at a time.
   var listing = null;
   // The item the question is about, and whether its delete is running.
@@ -370,9 +377,14 @@ ${text}
     var all = next === null;
     var bytes = 0;
     items.forEach(function (it) { bytes += it.bytes; });
-    $("media-count").textContent = all ? (n === 1 ? TEXT.oneItem : n + TEXT.items) : TEXT.newest + n + TEXT.items;
+    if (totals !== null) {
+      $("media-count").textContent = totals.n === 1 ? TEXT.oneItem : totals.n + TEXT.items;
+      $("media-used").textContent = TEXT.dot + Dash.formatBytes(totals.bytes) + TEXT.used;
+    } else {
+      $("media-count").textContent = all ? (n === 1 ? TEXT.oneItem : n + TEXT.items) : TEXT.newest + n + TEXT.items;
+      $("media-used").textContent = all ? TEXT.dot + Dash.formatBytes(bytes) + TEXT.used : "";
+    }
     $("media-in").textContent = workspace !== "" ? TEXT.inWorkspace + workspace : "";
-    $("media-used").textContent = all ? TEXT.dot + Dash.formatBytes(bytes) + TEXT.used : "";
     var rows = $("media-rows");
     rows.textContent = "";
     for (var i = 0; i < n; i++) rows.appendChild(row(items[i], i));
@@ -426,9 +438,20 @@ ${text}
     return track(before.then(function () { return readNow(Math.max(1, pages)); }));
   }
 
-  // The first "want" pages, then the page shown again. Resolves to true when shown, false
-  // when the visitor was sent to sign in, or the answer that failed (null when no answer
-  // came); then the page keeps what it showed before.
+  // This kind's count and size from the usage, or null when the answer is not one (or none came).
+  function totalsOf() {
+    return Dash.api("GET", USAGE).then(function (res) {
+      var u = res.status === 200 ? res.data : null;
+      if (u === null || typeof u !== "object" || u.counted === null || typeof u.counted !== "object") return null;
+      var n = u[TOTAL];
+      var bytes = u.counted[TOTAL];
+      return isCount(n) && isCount(bytes) ? { n: n, bytes: bytes } : null;
+    }, function () { return null; });
+  }
+
+  // The first "want" pages, then the page shown again, with the usage's totals read beside
+  // them. Resolves to true when shown, false when the visitor was sent to sign in, or the
+  // answer that failed (null when no answer came); then the page keeps what it showed before.
   function readNow(want) {
     var got = [];
     var cursor = null;
@@ -442,11 +465,18 @@ ${text}
         return cursor !== null && count < want ? step(cursor) : true;
       });
     }
+    var usage = totalsOf();
     return step(null).then(function (r) {
       if (r !== true) {
         if (r.status === 401) { Dash.signedOut(); return false; }
         return r;
       }
+      return usage.then(function (t) {
+        totals = t;
+        return true;
+      });
+    }).then(function (r) {
+      if (r !== true) return r;
       items = got;
       pages = count;
       next = cursor;

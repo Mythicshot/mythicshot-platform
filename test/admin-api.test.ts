@@ -30,7 +30,7 @@ const MAX = 9007199254740991;
 /** The keys of each answer, exactly. */
 const LIST_KEYS = ["accounts", "next"];
 const ACCOUNT_KEYS = ["admin", "allowance_bytes", "counted", "created_at", "email", "id", "over", "status", "storage_allowance_bytes", "tours", "used_bytes", "username", "workspace_id", "workspace_name"];
-const COUNTED_KEYS = ["logos", "pictures", "uploads_in_progress"];
+const COUNTED_KEYS = ["gifs", "images", "logos", "pictures", "uploads_in_progress"];
 const SUMMARY_KEYS = ["accounts", "standard_allowance_bytes", "used_bytes"];
 const SET_KEYS = ["allowance_bytes", "over", "storage_allowance_bytes", "used_bytes", "workspace_id"];
 
@@ -79,6 +79,8 @@ const list = (w: World, query = "") => ask(w.deps, "GET", ACCOUNTS + query, { he
 const setAllowance = (w: World, workspaceId: string, value: unknown) => ask(w.deps, "PATCH", workspacePath(workspaceId), { headers: page(w.a.session), json: { storage_allowance_bytes: value } });
 /** What GET /api/v1/usage answers the side itself, by its own token. */
 const usageOf = async (w: World, side: Side) => (await send(w.deps, "GET", "/api/v1/usage", { token: side.token })).json as Json;
+/** The numbers of a usage answer's counted, added up. */
+const sumCounted = (u: Json) => Object.values(u.counted as Record<string, number>).reduce((x, y) => x + y, 0);
 
 /**
  * Everything of a side an admin answer must never hold: its tours' ids, titles and slugs,
@@ -134,6 +136,17 @@ describe("the admin's list of accounts", () => {
       });
       expect(own.used_bytes).toBeGreaterThan(0);
       expect(own.tours).toBe(3);
+      // The shared items are in the totals, as two numbers of bytes and nothing more: each
+      // kind's bytes with previews and claims that are not current, the unfinished item included, and the breakdown adds up.
+      const items = await w.deps.db.all<{ kind: string; n: number }>(
+        "SELECT m.kind, sum(m.bytes + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o WHERE o.media_id = m.id AND (o.current = 0 OR o.n = -1))) AS n FROM media m WHERE m.workspace_id = ? GROUP BY m.kind ORDER BY m.kind",
+        [side.workspaceId],
+      );
+      expect(items.map((x) => x.kind)).toEqual(["clip", "image"]);
+      const account = r.json.accounts[i] as Json;
+      expect([account.counted.gifs, account.counted.images]).toEqual(items.map((x) => x.n));
+      expect(sumCounted(account)).toBe(account.used_bytes);
+      for (const k of ["images", "gifs", "largest", "items", "media"]) expect(k in account, k).toBe(false);
     }
 
     // Nothing of either workspace's content: no tour, chapter, step, picture, upload, token
@@ -143,6 +156,12 @@ describe("the admin's list of accounts", () => {
       // The needles are there to be found: ids, titles, slugs, picture names, secrets.
       for (const n of [side.ids.published.tour, side.ids.published.slug, `${side.name} published tour`, side.ids.published.publicName, side.ids.draft.step, side.ids.draft.chapter, side.ids.upload, side.token, side.session.id]) {
         expect(needles).toContain(n);
+      }
+      // Its shared items too: their ids, links and titles, finished or not.
+      const m = side.ids.media;
+      for (const n of [m.image, m.clip, m.uploading, m.imageLink, m.clipLink, m.uploadingLink, `${side.name} shared image`, `${side.name} shared clip`, `${side.name} unfinished item`]) {
+        expect(needles).toContain(n);
+        expect(r.text.includes(n), `the list holds ${n}`).toBe(false);
       }
       expect(needles).not.toContain(side.workspaceName);
       expect((await forbiddenOf(w, side)).includes(side.workspaceName), "every other admin answer is still checked for the name").toBe(true);
@@ -220,6 +239,11 @@ describe("the admin's summary", () => {
     expect(r.json).toEqual({ accounts: 2, used_bytes: own[0].used_bytes + own[1].used_bytes, standard_allowance_bytes: null });
     expect(r.json.used_bytes).toBe(listed.reduce((n, a) => n + (a.used_bytes as number), 0));
     expect(r.json.used_bytes).toBeGreaterThan(0);
+    // The sum takes in the shared items in every state, with their previews and claims that are not current.
+    const items = await w.deps.db.first<{ n: number }>("SELECT sum(m.bytes + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o WHERE o.media_id = m.id AND (o.current = 0 OR o.n = -1))) AS n FROM media m");
+    expect(items!.n).toBeGreaterThan(0);
+    expect(r.json.used_bytes).toBe(own.reduce((n, u) => n + sumCounted(u), 0));
+    expect(own.reduce((n, u) => n + (u.counted.images as number) + (u.counted.gifs as number), 0)).toBe(items!.n);
     // A workspace's own allowance is not the standard one.
     expect((await setAllowance(w, w.b.workspaceId, 5000)).status).toBe(200);
     expect((await ask(w.deps, "GET", SUMMARY, { headers: page(w.a.session) })).json.standard_allowance_bytes).toBeNull();

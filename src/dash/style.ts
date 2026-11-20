@@ -202,6 +202,7 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
 .largest th { text-align: left; font-size: 0.76rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 0 10px 8px 0; white-space: nowrap; }
 .largest td { padding: 11px 10px 11px 0; border-top: 1px solid var(--line); vertical-align: middle; }
 .largest .t { font-weight: 600; }
+.largest .t .tag { margin-left: 6px; font-weight: 400; }
 .largest .n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .largest .mini-cell { width: 30%; }
 .largest .del { text-align: right; padding-right: 0; }

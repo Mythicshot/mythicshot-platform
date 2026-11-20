@@ -248,7 +248,7 @@ describe("the API description", () => {
       "Finish a shared item",
       "The workspace and the server version",
       "The workspace's storage use",
-      "The workspace's ten largest tours",
+      "The workspace's ten largest tours, images and GIFs",
       "Ask for a sign-in link",
       "Finish signing in",
       "The session and who it is",
@@ -273,17 +273,21 @@ describe("the API description", () => {
     expect(Object.keys(op.responses)).toEqual(["200", "401"]);
     expect(op.responses["200"].content["application/json"].schema).toEqual({ $ref: "#/components/schemas/Usage" });
     const usage = (doc.components.schemas as Json).Usage;
-    const fields = ["used_bytes", "allowance_bytes", "over", "tours", "counted"];
+    const fields = ["used_bytes", "allowance_bytes", "over", "tours", "images", "gifs", "counted"];
     expect(Object.keys(usage.properties)).toEqual(fields);
     expect(usage.required).toEqual(fields);
     expect(usage.additionalProperties).toBe(false);
     expect(usage.properties.allowance_bytes.type).toEqual(["integer", "null"]);
-    const counted = ["pictures", "logos", "uploads_in_progress"];
+    const counted = ["pictures", "logos", "uploads_in_progress", "images", "gifs"];
     expect(Object.keys(usage.properties.counted.properties)).toEqual(counted);
     expect(usage.properties.counted.required).toEqual(counted);
     expect(usage.properties.counted.additionalProperties).toBe(false);
     // What is counted and what is not is said where a client reads it.
     for (const text of ["published", "24 hours", "No limit", "never deletes"]) expect(op.description, text).toContain(text);
+    // Shared items: how an unfinished one counts, that only online ones are counted as items, and that counted adds up.
+    for (const text of ["every shared image and clip", "an item being deleted counts until then", "not in uploads_in_progress", "items that are online", "add up to used_bytes"]) expect(op.description, text).toContain(text);
+    expect(usage.properties.counted.description).toContain("The five numbers add up to used_bytes.");
+    expect(usage.properties.used_bytes.description).toContain("the five numbers of counted together");
   });
 
   it("the create's 413 has two documented forms", () => {
@@ -400,11 +404,19 @@ describe("the API description", () => {
     const largest = operations(doc).find((o) => o.key === "GET /api/v1/usage/largest")!.op;
     expect([largest.tags, largest.operationId, Object.keys(largest.responses)]).toEqual([["Workspace"], "getLargestTours", ["200", "401"]]);
     expect(largest.responses["200"].content["application/json"].schema).toEqual({ $ref: "#/components/schemas/LargestTours" });
-    expect(s.LargestTours).toMatchObject({ required: ["tours"], additionalProperties: false });
+    expect(s.LargestTours).toMatchObject({ required: ["tours", "largest"], additionalProperties: false });
     expect(s.LargestTours.properties.tours.maxItems).toBe(10);
     const item = s.LargestTours.properties.tours.items;
     expect([Object.keys(item.properties), item.required, item.additionalProperties]).toEqual([["id", "title", "bytes"], ["id", "title", "bytes"], false]);
-    for (const text of ["The 10 largest tours", "largest first", "order of their id"]) expect(largest.description, text).toContain(text);
+    for (const text of ["the 10 largest tours", "largest first", "order of their id"]) expect(largest.description, text).toContain(text);
+    // The list of every kind: its entries name their kind, and an item may have no title.
+    expect(s.LargestTours.properties.largest.maxItems).toBe(10);
+    const entry = s.LargestTours.properties.largest.items;
+    expect([Object.keys(entry.properties), entry.required, entry.additionalProperties]).toEqual([["kind", "id", "title", "bytes"], ["kind", "id", "title", "bytes"], false]);
+    expect(entry.properties.kind.enum).toEqual(["tour", "image", "gif"]);
+    expect(entry.properties.title.type).toEqual(["string", "null"]);
+    expect(entry.properties.id.pattern).toBe("^(tour|med)_[0-9a-f]{24}$");
+    for (const text of ["the 10 largest things of every kind", "still being sent", "not one being deleted"]) expect(largest.description, text).toContain(text);
 
     const summary = operations(doc).find((o) => o.key === "GET /api/v1/admin/summary")!.op;
     expect([summary.tags, summary.operationId, Object.keys(summary.responses)]).toEqual([["Admin"], "adminSummary", ["200", "404"]]);

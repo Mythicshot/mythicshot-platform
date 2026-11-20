@@ -8,9 +8,9 @@
 // allowance. The list answers only this, per account: its
 // id, username, email, status, whether it is the admin, when it was made, its workspace's
 // id and name (the admin page's Workspace column), its tour count, the bytes it uses with the breakdown GET /api/v1/usage gives the
-// account itself, and its allowance (the workspace's own number or null for the site's,
+// account itself (the shared images' and GIFs' bytes as two totals), and its allowance (the workspace's own number or null for the site's,
 // and the number in force). Never a tour's id, title, slug or link, a chapter or step, a
-// picture's address or file name, a token, a session, or anything a tour's address could
+// picture's address or file name, a shared item's id, title or link, a token, a session, or anything a tour's address could
 // be built from; and the one change they take is a number.
 //
 // What holds for every route here:
@@ -56,7 +56,7 @@ function notFound(): Response {
 
 /** The numbers of one workspace, in the shape GET /api/v1/usage gives them. */
 function numbers(u: Usage) {
-  return { tours: u.tours, used_bytes: u.used, allowance_bytes: u.allowance, over: u.over, counted: { pictures: u.pictures, logos: u.logos, uploads_in_progress: u.uploads } };
+  return { tours: u.tours, used_bytes: u.used, allowance_bytes: u.allowance, over: u.over, counted: { pictures: u.pictures, logos: u.logos, uploads_in_progress: u.uploads, images: u.imageBytes, gifs: u.gifBytes } };
 }
 
 /**
@@ -85,7 +85,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
     if (auth instanceof Response) return auth;
     const row = await deps.db.first<{ accounts: number; used: number }>(
       `SELECT (SELECT count(*) FROM user) AS accounts,
-              (SELECT coalesce(sum(w.pictures + w.logos + w.uploads + w.media), 0) FROM (SELECT ${USAGE_COLUMNS} FROM (SELECT id AS ws FROM workspace) p) w) AS used`,
+              (SELECT coalesce(sum(w.pictures + w.logos + w.uploads + w.image_bytes + w.gif_bytes), 0) FROM (SELECT ${USAGE_COLUMNS} FROM (SELECT id AS ws FROM workspace) p) w) AS used`,
     );
     return json(200, { accounts: row?.accounts ?? 0, used_bytes: row?.used ?? 0, standard_allowance_bytes: deps.config.storageAllowanceBytes ?? null });
   });
@@ -117,8 +117,11 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       pictures: number;
       logos: number;
       uploads: number;
-      media: number;
+      image_bytes: number;
+      gif_bytes: number;
       tours: number;
+      images: number;
+      gifs: number;
     };
     // One read. The page of accounts is chosen first, one more than a page to tell whether
     // another follows; then each account's numbers, with the account's own usage SQL, over
