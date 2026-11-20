@@ -1,5 +1,5 @@
-// Mail as the core sees it: one port, the mailer that is off, the texts of the sign-in and
-// email-change mails, and the address their links start with. No platform API here: the
+// Mail as the core sees it: one port, the mailer that is off, the texts of the sign-in,
+// email-change and new-connection mails, and the address their links start with. No platform API here: the
 // SMTP client lives in src/node/smtp.ts, and tests use test/fake-mail.ts.
 import { normaliseHost, originOf } from "./hosts.ts";
 import type { Config } from "./ports.ts";
@@ -129,6 +129,63 @@ export function emailChangeMail(to: string, link: string, siteName: string = DEF
       link,
       "",
       `It works once and for 15 minutes, and you need to be signed in to that ${name} account when you open it. Until you confirm it there, nothing changes. If you did not ask for this, ignore this mail.`,
+      "",
+    ].join("\n"),
+  };
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** The longest device name a mail shows, in characters, as the API takes it. */
+const MAIL_NAME_MAX = 60;
+
+// Control characters (CR, LF, NEL and the rest), formatting characters, lone surrogates and
+// the line and paragraph separators: anything that could end a line or hide in one.
+const NOT_IN_A_LINE = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
+
+/**
+ * A device name as it may stand inside the quotes of one line of a mail. The API takes only
+ * names without such characters, but this does not rely on it: each character that could
+ * break or hide in a line becomes U+FFFD, so the name stays on its line and nothing of it is
+ * lost from sight, and a name longer than MAIL_NAME_MAX characters is cut there and marked
+ * "…". An empty name, or one that is not text, is "(no name)".
+ */
+function lineName(name: unknown): string {
+  const chars = [...(typeof name === "string" ? name : "").replace(NOT_IN_A_LINE, "\ufffd").trim()];
+  if (chars.length === 0) return "(no name)";
+  return chars.length > MAIL_NAME_MAX ? chars.slice(0, MAIL_NAME_MAX).join("") + "…" : chars.join("");
+}
+
+/** A moment as the mail says it, in UTC: `15 Jan 2027 at 08:00 UTC`. Throws Error("bad time") for anything but a time. */
+function mailTime(ms: number): string {
+  const d = new Date(typeof ms === "number" ? ms : Number.NaN);
+  if (Number.isNaN(d.getTime())) throw new Error("bad time");
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()} at ${two(d.getUTCHours())}:${two(d.getUTCMinutes())} UTC`;
+}
+
+/**
+ * The mail to an account once Mythicshot on a computer has collected its token, in the words
+ * of the approved mockup: which computer (its name inside quotes, on the first line, made
+ * safe by `lineName`), when, in UTC, what it can do, and where to disconnect it. `origin` is
+ * what linkOrigin gives; with null, or anything that is not such an origin, the last lines say
+ * where to go in words and hold no link. The site name is in the subject only: the app on the
+ * computer is always Mythicshot.
+ */
+export function connectedMail(to: string, deviceName: string, at: number, origin: string | null, siteName: string = DEFAULT_SITE_NAME): Mail {
+  const name = siteNameOf(siteName);
+  const where = isOrigin(origin)
+    ? ["If it was not, disconnect it here and it stops working at once:", "", `${origin}/connections`]
+    : ["If it was not, open the Connections page of your dashboard and disconnect it there: it stops working at once."];
+  return {
+    to,
+    subject: `A computer was connected to your ${name} account`,
+    text: [
+      `Mythicshot on the computer "${lineName(deviceName)}" was connected to your account on ${mailTime(at)}. It can publish, change and delete everything in your workspace.`,
+      "",
+      "If that was you, nothing needs to be done.",
+      "",
+      ...where,
       "",
     ].join("\n"),
   };
