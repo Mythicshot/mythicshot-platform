@@ -1001,7 +1001,7 @@ describe("one workspace against another", () => {
     expect(usedA).toEqual(await usage(w.a));
     expect(usedB).toEqual(await usage(w.b));
     expect(usedA.used_bytes).not.toBe(usedB.used_bytes);
-    expect(JSON.parse(first.b["GET /api/v1/tours by token"].body).tours).toHaveLength(3);
+    expect(JSON.parse(first.b["GET /api/v1/tours by token"].body).tours).toHaveLength(5);
 
     // Whatever the first workspace then does, the second's answers stay the same, byte for byte.
     w.tick();
