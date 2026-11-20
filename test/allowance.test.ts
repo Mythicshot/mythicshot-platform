@@ -8,7 +8,7 @@ import { makeDeps, seedWorkspace } from "#harness";
 import type { Deps, Stmt } from "../src/ports.ts";
 import { LOGO_RULE } from "../src/sniff.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS, UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
-import { formatBytes, storageFull, usageOf, type Usage } from "../src/usage.ts";
+import { formatBytes, roomSizes, storageFull, usageOf, type Usage } from "../src/usage.ts";
 import { abort, clone, commit, counts, createUpload, fixtures, logoPng, putLogo, putStep, send, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 
 const v2 = fixtures.v2 as Json;
@@ -94,7 +94,9 @@ async function publishAll(deps: Deps, token: string, tourId: string): Promise<Ca
 /** The refusal's sentence for these three numbers, as the plan's owner approved its meaning. */
 function sentence(used: number, allowance: number, needed: number): string {
   const left = Math.max(0, allowance - used);
-  return `this tour needs ${formatBytes(needed)} of room, but the workspace has ${formatBytes(left)} left of its ${formatBytes(allowance)} allowance. Nothing was uploaded. Delete tours you no longer need, or ask the site's admin for more room`;
+  // The need is rounded up and the room left down (roomSizes); the allowance as everywhere else.
+  const sizes = roomSizes(needed, left);
+  return `this tour needs ${sizes.needed} of room, but the workspace has ${sizes.left} left of its ${formatBytes(allowance)} allowance. Nothing was uploaded. Delete tours you no longer need, or ask the site's admin for more room`;
 }
 
 /** What a storage refusal must be, in full. */
@@ -157,7 +159,7 @@ describe("an upload against the allowance", () => {
     const large = await createUpload(big, owner.token, manifestOf([2_000_000]));
     expectFull(large, 3_000_001, 3_100_000, 2_000_000);
     // Sizes are written as the pages write them: at most one decimal, no trailing ".0".
-    expect(large.json.detail).toContain("this tour needs 1.9 MB of room, but the workspace has 97.7 KB left of its 3 MB allowance.");
+    expect(large.json.detail).toContain("this tour needs 2 MB of room, but the workspace has 97.6 KB left of its 3 MB allowance.");
   });
 
   it('the sentence is under 200 characters and reads after "Could not start the upload: "', async () => {
@@ -198,6 +200,44 @@ describe("an upload against the allowance", () => {
     // It says nothing was uploaded, and never that the site deletes anything.
     expect(sentence(1, 2, 3)).toContain("Nothing was uploaded.");
     expect(sentence(1, 2, 3)).not.toMatch(/will be deleted|was deleted|removed/);
+  });
+
+  it("the sentence never shows the room left as large as the room needed: the need rounds up, what is left rounds down", async () => {
+    const usage = (used: number, allowance: number): Usage => ({ pictures: used, logos: 0, uploads: 0, used, allowance, over: used > allowance, tours: 1 });
+    const detailOf = async (used: number, allowance: number, needed: number) => ((await storageFull(usage(used, allowance), needed).json()) as Json).detail as string;
+    // 3,250,000 needed and 3,230,000 left would both read 3.1 MB to the nearest tenth.
+    expect(await detailOf(7_255_760, 10_485_760, 3_250_000)).toContain("this tour needs 3.1 MB of room, but the workspace has 3 MB left of its 10 MB allowance.");
+    // The same in KB: 1130 needed and 1100 left would both read 1.1 KB.
+    expect(await detailOf(900, 2000, 1130)).toContain("this tour needs 1.2 KB of room, but the workspace has 1 KB left of its 2 KB allowance.");
+    // At a unit's edge: just under 1 MB left stays in KB, rounded down; just over 1 MB needed goes up to MB.
+    expect(await detailOf(1, 1_048_576, 1_048_577)).toContain("this tour needs 1.1 MB of room, but the workspace has 1023.9 KB left of its 1 MB allowance.");
+    // Nothing left.
+    expect(await detailOf(5000, 5000, 1)).toContain("this tour needs 1 byte of room, but the workspace has 0 bytes left of its 4.9 KB allowance.");
+    expect(await detailOf(5000, 10, 7)).toContain("this tour needs 7 bytes of room, but the workspace has 0 bytes left of its 10 bytes allowance.");
+
+    // Whenever more is needed than is left, the two sizes read differently, at every scale.
+    let seed = 12345;
+    const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648);
+    const pairs: [number, number][] = [];
+    for (let i = 0; i < 3000; i++) {
+      const scale = 2 ** (next() % 44);
+      const left = Math.floor((next() / 2147483648) * scale);
+      // Mostly a hair more than is left, sometimes much more.
+      const more = i % 3 === 0 ? 1 + (next() % 1000) : i % 3 === 1 ? 1 + Math.floor((next() / 2147483648) * Math.max(1, left / 50)) : 1 + Math.floor((next() / 2147483648) * scale);
+      pairs.push([left + more, left]);
+    }
+    for (const left of [0, 1023, 1024, 1_048_575, 1_048_576, 1_073_741_823, 1_073_741_824, Number.MAX_SAFE_INTEGER - 1]) pairs.push([left + 1, left]);
+    for (const [needed, left] of pairs) {
+      const sizes = roomSizes(needed, left);
+      expect(sizes.needed, `needed ${needed}, left ${left}`).not.toBe(sizes.left);
+      expect(sizes.needed, `needed ${needed}`).toMatch(/^(\d+ bytes?|\d+(\.\d*[1-9])? (KB|MB|GB))$/);
+      expect(sizes.left, `left ${left}`).toMatch(/^(\d+ bytes?|\d+(\.\d*[1-9])? (KB|MB|GB))$/);
+    }
+    // Two sizes that still read the same get more decimals until they differ, and at most their exact bytes.
+    expect(roomSizes(1100, 1150)).toEqual({ needed: "1.08 KB", left: "1.12 KB" });
+    expect(roomSizes(1024, 1024)).toEqual({ needed: "1024 bytes", left: "1024 bytes" });
+    // formatBytes itself is unchanged for every other use: to the nearest tenth.
+    expect([formatBytes(3_250_000), formatBytes(3_230_000), formatBytes(1130), formatBytes(1100)]).toEqual(["3.1 MB", "3.1 MB", "1.1 KB", "1.1 KB"]);
   });
 
   it("nothing is stored and no row is left for a refused upload", async () => {
