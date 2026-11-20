@@ -54,6 +54,8 @@ async function signedIn(deps: Parameters<typeof seedAccount>[0], opts: { admin?:
 /** Every text of the Admin page's body, in order, hidden parts included. Nothing else may be in it. */
 const ADMIN_WORDING = [
   "Mythicshot",
+  "Images",
+  "GIFs",
   "Tours",
   "Storage",
   "Account",

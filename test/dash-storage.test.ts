@@ -1,7 +1,7 @@
 // The dashboard's Storage page: GET /storage and its own script /dash/storage.js. What their
 // answers are (headers, where they answer, that they cost no database or storage call and
 // hold nothing about anyone), the exact wording of the approved mockups 5 and 6 as they
-// stand in this version (tours only: no Images or GIFs), and what the script's text may and
+// stand in this version (tours only: no images or GIFs counted yet), and what the script's text may and
 // may not do. What the script does when it runs is tested under Node in
 // test/node-dash-storage.test.ts.
 import { describe, expect, it } from "vitest";
@@ -59,6 +59,8 @@ async function signedIn(deps: Parameters<typeof seedAccount>[0], opts: { admin?:
 /** Every text of the Storage page's body, in order, hidden parts included. Nothing else may be in it. */
 const STORAGE_WORDING = [
   "Mythicshot",
+  "Images",
+  "GIFs",
   "Tours",
   "Storage",
   "Account",
@@ -212,8 +214,9 @@ describe("the Storage page", () => {
     const words = new Set(Object.values(STORAGE_TEXT));
     const sentences = scriptStrings(STORAGE_JS).filter((t) => /[a-z]/i.test(t) && /\s/.test(t) && t !== "use strict");
     for (const t of sentences) expect(words.has(t) || CLASS_NAMES.includes(t), `a text outside TEXT: ${JSON.stringify(t)}`).toBe(true);
-    // No Images or GIFs in this version.
-    for (const word of ["Images", "GIFs", "image", "GIF", "/images", "/gifs"]) for (const text of [STORAGE_HTML, STORAGE_JS]) expect(text, word).not.toContain(word);
+    // No images or GIFs on this page in this version: only the bar names them.
+    const main = STORAGE_HTML.slice(STORAGE_HTML.indexOf("</nav>"));
+    for (const word of ["Images", "GIFs", "image", "GIF", "/images", "/gifs"]) for (const text of [main, STORAGE_JS]) expect(text, word).not.toContain(word);
     for (const api of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "createContextualFragment", "DOMParser", "srcdoc", "confirm(", "alert(", "prompt("]) expect(STORAGE_JS, api).not.toContain(api);
   });
 
