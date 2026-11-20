@@ -8,9 +8,11 @@
 //   its age. An upload can be committed until it is swept, so it holds its room until
 //   then; otherwise one that outlived the day could land on top of a newer one, past the
 //   allowance.
-// - every shared item that is not closing (src/media.ts): the bytes its create declared,
-//   reserved from that create on, and the size of its preview once one is being stored.
-//   An item that is being deleted or was swept is closing, and stops counting at once.
+// - every shared item (src/media.ts): the bytes its create declared, reserved from that
+//   create on, and the size of every preview it has a claim for. An item that is being
+//   deleted or swept (closing) still counts until its row is removed, which happens only
+//   with its last object: a delete that finishes frees the room at once, and one that was
+//   cut off counts until it is retried.
 // Not counted: published copies (no size is recorded for them), pictures a replace took
 // out and files of a deleted tour that still wait to be cleaned up, uploads that are
 // closing, and upload_step.bytes (the reservation already holds the declared bytes). Two
@@ -58,7 +60,8 @@ export function allowanceFromSetting(raw: string | undefined): { ok: true; bytes
 const PICTURES = "(SELECT coalesce(sum(s.bytes), 0) FROM tour t JOIN step s ON s.tour_id = t.id WHERE t.workspace_id = p.ws)";
 const LOGOS = "(SELECT coalesce(sum(t.logo_bytes), 0) FROM tour t WHERE t.workspace_id = p.ws)";
 const UPLOADS = "(SELECT coalesce(sum(u.reserved_bytes), 0) FROM upload u WHERE u.workspace_id = p.ws AND u.closing_at IS NULL)";
-const MEDIA = "(SELECT coalesce(sum(m.bytes + coalesce(m.preview_bytes, 0)), 0) FROM media m WHERE m.workspace_id = p.ws AND m.state <> 'closing')";
+const MEDIA =
+  "((SELECT coalesce(sum(m.bytes), 0) FROM media m WHERE m.workspace_id = p.ws) + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o JOIN media m ON m.id = o.media_id WHERE m.workspace_id = p.ws AND o.n = -1))";
 const TOURS = "(SELECT count(*) FROM tour t WHERE t.workspace_id = p.ws)";
 
 /**

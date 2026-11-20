@@ -88,12 +88,15 @@ export const LIMITS_EMAIL_CHANGE = {
 } as const satisfies Record<string, Limit>;
 
 /**
- * The limits on shared items (src/media.ts). Starting an item, per workspace, keyed by
- * `workspaceKey`; every start that passes the checks of its body is counted, also one the
- * storage allowance then refuses. Over: 429 with retry-after.
+ * The limits on shared items (src/media.ts), per workspace, keyed by `workspaceKey`:
+ * starting an item, sending a part, sending a preview. Every request that passes the
+ * checks of its body is counted, also one that is then refused. Over: 429 with retry-after.
+ * The most a workspace needs in an hour is 60 items of 27 parts each, and four previews each.
  */
 export const LIMITS_MEDIA = {
   create: { bucket: "media_create", windowMs: 3_600_000, most: 60 },
+  part: { bucket: "media_part", windowMs: 3_600_000, most: 2000 },
+  preview: { bucket: "media_preview", windowMs: 3_600_000, most: 240 },
 } as const satisfies Record<string, Limit>;
 
 /** The key of a counter that counts for the whole site. */
