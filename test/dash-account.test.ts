@@ -19,6 +19,7 @@ import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { SIGNIN_JS } from "../src/signin/page.ts";
 import { send, type Call } from "./bundle.ts";
+import { expectNoForbiddenApis, expectPageShape } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -71,8 +72,8 @@ async function signedIn(deps: Parameters<typeof seedAccount>[0], opts: { admin?:
 
 const SHELL = ["Mythicshot", "Tours", "Storage", "Account", "Admin", "This page needs JavaScript."];
 
-/** Proposed, not in the mockups: the line under the address when the site cannot send mail. */
-const MAIL_OFF_LINE = "This site cannot send mail, so the email address cannot be changed here.";
+/** Not in the mockups: the line under the address when the site cannot send mail, the server's own sentence (review follow-up L6). */
+const MAIL_OFF_LINE = "This site cannot send mail, so an email address cannot be changed here.";
 
 /** Every text of the Account page's body, in order, hidden parts included (mockups 7 and 8). */
 const ACCOUNT_WORDING = [
@@ -126,6 +127,8 @@ const EMAIL_WORDING = [
   "Back to your account",
   "Confirm your new email address",
   EMAIL_CHANGE_SAYS.badCode,
+  // Proposed (review follow-up L3): for a person with more than one account.
+  "If you have more than one account, sign in to the one that asked for the change and open the link again.",
   "Back to your account",
 ];
 
@@ -239,6 +242,7 @@ describe("the Account page and the page an email-change link opens", () => {
     // Each sentence where it belongs.
     expect(doc.getElementById("email-change")!.textContent).toBe("Change");
     expect(doc.getElementById("email-off")!.textContent).toBe(MAIL_OFF_LINE);
+    expect(MAIL_OFF_LINE).toBe(EMAIL_CHANGE_SAYS.mailOff);
     expect(doc.getElementById("change-title")!.textContent).toBe("Change your email address");
     expect(doc.getElementById("change-hint")!.textContent).toBe("We send a link to the new address. Your address changes when you open it.");
     expect([doc.getElementById("change-cancel")!.textContent, doc.getElementById("change-send")!.textContent]).toEqual(["Cancel", "Send the link"]);
@@ -303,6 +307,8 @@ describe("the Account page and the page an email-change link opens", () => {
         `a use of the code: ${line}`,
       ).toBe(true);
     }
+    // The checks every dashboard page script has (test/dash-checks.ts), shared, not copied.
+    expectNoForbiddenApis(js, "/dash/account-email.js");
     // Nothing writes it anywhere else, puts it in an address, or logs it.
     const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "location.href", "location.hash =", "location.search =", "location.assign", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "open(", "setTimeout(", "setInterval(", "document.referrer", "?c=", "?code", "fetch(", "csrf"];
     for (const api of forbidden) expect(js, api).not.toContain(api);
@@ -310,8 +316,10 @@ describe("the Account page and the page an email-change link opens", () => {
     expect(js).not.toMatch(/\b(?:window|document|self|top|parent|globalThis)\s*\.\s*location\b/);
     const uses = [...js.matchAll(/\blocation\b\s*(\.\s*[a-zA-Z]+)?/g)].map((m) => (m[1] ?? "").replace(/\s/g, ""));
     expect(new Set(uses)).toEqual(new Set([".hash", ".pathname", ".search"]));
-    // Its one request, and leaving only through the shared script (to /signin).
-    expect([...js.matchAll(/\bapi\("([A-Z]+)", ("[^"]*")/g)].map((m) => `${m[1]} ${m[2]}`)).toEqual(['POST "/api/v1/account/email/confirm"']);
+    // Its requests: the confirm, and after a lost answer the session read again (which carries
+    // no code); leaving only through the shared script (to /signin).
+    expect([...js.matchAll(/\bapi\("([A-Z]+)", ("[^"]*")/g)].map((m) => `${m[1]} ${m[2]}`).sort()).toEqual(['GET "/api/v1/session"', 'POST "/api/v1/account/email/confirm"']);
+    expect(js).toContain('Dash.api("GET", "/api/v1/session").then(function (res) {');
     expect(js).toContain("Dash.signedOut()");
     // A page without a code in the right shape asks nothing: the dead link comes before Dash.start.
     expect(js.indexOf('if (code === "") {')).toBeLessThan(js.indexOf("Dash.start("));
@@ -334,6 +342,9 @@ describe("the Account page and the page an email-change link opens", () => {
   });
 
   it("both pages load nothing from another origin, carry no inline script, style or handler, and are usable with the keyboard and a screen reader", () => {
+    // The Account page has these through test/dash.test.ts (it is in DASH_PAGES); the link page, served apart, here.
+    expectPageShape(ACCOUNT_EMAIL_HTML, "/account/email");
+    expectNoForbiddenApis(ACCOUNT_JS, "/dash/account.js");
     for (const p of PAGES) {
       const doc = new FakeDocument(p.html);
       const all = doc.root.all();

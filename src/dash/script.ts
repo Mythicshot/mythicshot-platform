@@ -258,7 +258,7 @@ export const DASH_JS = `var Dash = (function () {
         return;
       }
       var d = res.data;
-      if (res.status !== 200 || d === null || typeof d !== "object" || typeof d.csrf !== "string" || d.account === null || typeof d.account !== "object" || d.workspace === null || typeof d.workspace !== "object") {
+      if (res.status !== 200 || d === null || typeof d !== "object" || typeof d.csrf !== "string" || d.account === null || typeof d.account !== "object" || d.workspace === null || typeof d.workspace !== "object" || d.session === null || typeof d.session !== "object") {
         load.textContent = failure(res);
         return;
       }
@@ -276,7 +276,7 @@ export const DASH_JS = `var Dash = (function () {
         workspace: typeof d.workspace.name === "string" ? d.workspace.name : "",
         named: named,
         email: typeof who.email === "string" ? who.email : "",
-        sessionId: d.session !== null && typeof d.session === "object" && typeof d.session.id === "string" ? d.session.id : "",
+        sessionId: typeof d.session.id === "string" ? d.session.id : "",
         emailChange: d.email_change === true,
       });
     }).then(null, function () {

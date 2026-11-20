@@ -5,9 +5,12 @@
 //
 // The code is after `#`, which a browser sends to no server. The script's first two
 // statements read that part of the address and take it out of the address bar, before the
-// script does anything else, so back, reload and the history never show it. The code then
-// lives in one variable of the script's own function and leaves it once, in that request's
-// body; it is never written to the page, a store, a log or an address.
+// script does anything else, so this tab's back, forward and reload no longer show it. A
+// browser may still keep the address it opened, code and all, in its own history: what
+// limits that is the code itself, which works once, for 15 minutes, and only with a session
+// of the account that asked for the change. In the page the code lives in one variable of
+// the script's own function and leaves it only in the confirm request's body; it is never
+// written to the page, a store, a log or an address.
 //
 // The states, one shown at a time, each in the look of mockup 8's boxes:
 // - Confirm: the person is signed in (the confirm route takes only the session of the
@@ -18,7 +21,14 @@
 //   returns.
 // - Dead link: the server refused the code (400 bad_code), or the address held no code of
 //   the right shape, in which case nothing is asked at all. Its sentence is the server's own
-//   (EMAIL_CHANGE_SAYS.badCode), with the way back to the account page.
+//   (EMAIL_CHANGE_SAYS.badCode), then a line for a person with more than one account
+//   (proposed), with the way back to the account page.
+//
+// A confirm whose answer never came (a network failure) may still have changed the address.
+// The code is kept and the general sentence shown, so the person can press again; when that
+// press is refused (bad_code), the page reads the session once more, and if its address is no
+// longer the one the page started with, the change went through: the page shows Done with the
+// new address rather than the dead link.
 import { dashHtml } from "./shell.ts";
 
 const EMAIL_MAIN = `  <div class="lone">
@@ -41,6 +51,7 @@ const EMAIL_MAIN = `  <div class="lone">
   <section class="dialog" id="dead" aria-labelledby="h-dead" hidden>
     <h1 id="h-dead" tabindex="-1">Confirm your new email address</h1>
     <p class="sub">This link no longer works. Ask for a new one from your account page.</p>
+    <p class="sub">If you have more than one account, sign in to the one that asked for the change and open the link again.</p>
     <div class="two"><a class="btn quiet" href="/account">Back to your account</a></div>
   </section>
   </div>`;
@@ -106,6 +117,29 @@ export const ACCOUNT_EMAIL_JS = `(function () {
 
   var btn = $("confirm-button");
   var message = $("confirm-message");
+  // The account's address when the page started, and whether a confirm's answer was lost.
+  var started = "";
+  var lost = false;
+
+  // Done: mockup 8's third box, with the new and the previous address.
+  function done(now, before) {
+    code = "";
+    $("h-done").textContent = TEXT.nowBefore + now;
+    $("done-old").textContent = before;
+    only("done", true);
+  }
+
+  // A refusal after a lost answer: done when the session's address has changed since the
+  // page started, else the dead link.
+  function refused() {
+    if (!lost) { dead(); return; }
+    Dash.api("GET", "/api/v1/session").then(function (res) {
+      var d = res.data;
+      var now = res.status === 200 && d !== null && typeof d === "object" && d.account !== null && typeof d.account === "object" && typeof d.account.email === "string" ? d.account.email : "";
+      if (now !== "" && started !== "" && now !== started) done(now, started);
+      else dead();
+    }, function () { dead(); });
+  }
   $("first-button").addEventListener("click", function () { Dash.signedOut(); });
 
   if (code === "") {
@@ -125,19 +159,23 @@ export const ACCOUNT_EMAIL_JS = `(function () {
     Dash.api("POST", "/api/v1/account/email/confirm", { code: code }).then(function (res) {
       var d = res.data;
       if (res.status === 200 && d !== null && typeof d === "object" && typeof d.email === "string" && typeof d.previous_email === "string") {
-        code = "";
         busy(btn, false);
-        $("h-done").textContent = TEXT.nowBefore + d.email;
-        $("done-old").textContent = d.previous_email;
-        only("done", true);
+        done(d.email, d.previous_email);
         return;
       }
       if (res.status === 401) { busy(btn, false); first(); return; }
-      if (res.status === 400 && Dash.errorOf(res) === "bad_code") { busy(btn, false); dead(); return; }
+      if (res.status === 400 && Dash.errorOf(res) === "bad_code") { busy(btn, false); refused(); return; }
       failed(res);
-    }, function () { failed(null); });
+    }, function () {
+      // No answer came: the change may or may not have been made.
+      lost = true;
+      failed(null);
+    });
   });
 
-  Dash.start(function () { only("confirm", false); }, first);
+  Dash.start(function (who) {
+    started = who.email;
+    only("confirm", false);
+  }, first);
 })();
 `;

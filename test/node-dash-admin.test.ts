@@ -699,8 +699,8 @@ describe("setting an allowance", () => {
 });
 
 describe("the allowance question: an allowance that leaves no room, Enter, and what a screen reader hears", () => {
-  const ZERO_STANDARD = "An allowance of 0 refuses every upload from this workspace. Leave the field empty for the standard allowance.";
-  const ZERO_NONE = "An allowance of 0 refuses every upload from this workspace. Leave the field empty for no allowance.";
+  // Proposed (review follow-ups B2, then M1): one sentence, with no advice that could lead in a circle.
+  const ZERO = "An allowance of 0 refuses every upload from this workspace.";
   const SAVED: Answer = { status: 200, json: { workspace_id: W2, allowance_bytes: 10 * GB, storage_allowance_bytes: 10 * GB, used_bytes: 5_690_831_667, over: false } };
 
   it("an allowance of 0 warns and asks Save anyway, for a workspace that uses nothing and for one that uses some", async () => {
@@ -711,9 +711,9 @@ describe("the allowance question: an allowance that leaves no room, Enter, and w
     for (const row of [0, 1]) {
       setButton(rows(tab)[row]).click();
       type(tab, "0");
-      expect([tab.$("allow-warn").textContent, tab.$("allow-warn").shown, tab.$("allow-hint").shown, tab.$("allow-save").textContent], String(row)).toEqual([ZERO_STANDARD, true, false, "Save anyway"]);
+      expect([tab.$("allow-warn").textContent, tab.$("allow-warn").shown, tab.$("allow-hint").shown, tab.$("allow-save").textContent], String(row)).toEqual([ZERO, true, false, "Save anyway"]);
       type(tab, "0 GB");
-      expect(tab.$("allow-warn").textContent, String(row)).toBe(ZERO_STANDARD);
+      expect(tab.$("allow-warn").textContent, String(row)).toBe(ZERO);
       tab.$("allow-cancel").click();
     }
     // Above what is used, no warning: 1 KB for the empty workspace, 6 MB for the other.
@@ -738,16 +738,43 @@ describe("the allowance question: an allowance that leaves no room, Enter, and w
     expect(tab.fetched.filter((f) => f.method === "PATCH").map((f) => f.body)).toEqual(['{"storage_allowance_bytes":0}']);
   });
 
-  it("with no standard allowance the 0 warning says an empty field is no allowance", async () => {
+  it("with no standard allowance a typed 0 gives the same sentence, and an empty field (no allowance) none", async () => {
     const empty = account(U1, W1, { workspace_name: "Empty", used_bytes: 0, standard: null });
     const tab = openAdmin(standard({ "GET /api/v1/admin/summary": summary(1, 0, null), "GET /api/v1/admin/accounts": list([empty]) }));
     await tab.settle();
     setButton(rows(tab)[0]).click();
     type(tab, "0");
-    expect([tab.$("allow-warn").textContent, tab.$("allow-save").textContent]).toEqual([ZERO_NONE, "Save anyway"]);
+    expect([tab.$("allow-warn").textContent, tab.$("allow-save").textContent]).toEqual([ZERO, "Save anyway"]);
     // An empty field is no allowance at all: nothing to warn about.
     type(tab, "");
     expect([tab.$("allow-warn").shown, tab.$("allow-save").textContent]).toEqual([false, "Save"]);
+  });
+
+  it("the warning is decided on the allowance that would apply: an empty field with a standard allowance of 0 is 0, and never 'under 0 bytes'", async () => {
+    const empty = account(U1, W1, { workspace_name: "Empty", used_bytes: 0, standard: 0 });
+    const some = account(U2, W2, { workspace_name: "Some", used_bytes: 5 * MB, standard: 0 });
+    const tab = openAdmin(standard({ "GET /api/v1/admin/summary": summary(2, 5 * MB, 0), "GET /api/v1/admin/accounts": list([empty, some]) }));
+    await tab.settle();
+    for (const row of [0, 1]) {
+      setButton(rows(tab)[row]).click();
+      type(tab, "");
+      expect([tab.$("allow-warn").textContent, tab.$("allow-warn").shown, tab.$("allow-save").textContent], String(row)).toEqual([ZERO, true, "Save anyway"]);
+      type(tab, "0");
+      expect(tab.$("allow-warn").textContent, String(row)).toBe(ZERO);
+      expect(tab.$("allow-warn").textContent, String(row)).not.toContain("0 bytes");
+      tab.$("allow-cancel").click();
+    }
+  });
+
+  it("a typed 0 gives the one sentence whether the standard allowance is above or below what the workspace uses", async () => {
+    for (const standardBytes of [5 * GB, 1 * MB]) {
+      const some = account(U2, W2, { workspace_name: "Some", used_bytes: 5 * MB, standard: standardBytes });
+      const tab = openAdmin(standard({ "GET /api/v1/admin/summary": summary(1, 5 * MB, standardBytes), "GET /api/v1/admin/accounts": list([some]) }));
+      await tab.settle();
+      setButton(rows(tab)[0]).click();
+      type(tab, "0");
+      expect([tab.$("allow-warn").textContent, tab.$("allow-save").textContent], String(standardBytes)).toEqual([ZERO, "Save anyway"]);
+    }
   });
 
   it("the field is tied to the hint or to the warning for a screen reader, never to the one that is hidden", async () => {
