@@ -493,7 +493,7 @@ describe("replace: what is public", { timeout: 60_000 }, () => {
     expect((await replaceChapter(deps, a.token, t, [5])).json.publish).toBe("ready");
     expect(await waiting()).toBe(true);
     const second = await publishAll(deps, a.token, t.tour_id);
-    expect(second.json).toEqual({ slug: first.json.slug, url: first.json.url, steps: 1 });
+    expect(second.json).toEqual({ slug: first.json.slug, url: first.json.url, steps: 1, access: "public", viewers: 0 });
     expect(await waiting()).toBe(false);
   });
 

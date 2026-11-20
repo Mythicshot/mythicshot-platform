@@ -38,7 +38,9 @@ type Site = { root: string; db: NodeDb; deps: Deps; dir: (n: number) => string; 
  * A new database migrated with the first `level` files only, and a folder for every level
  * up to 8. Migration 0010 (shared items) is applied beside every level: today's build
  * counts items in the storage use, so its routes need that table, and it touches nothing
- * the migrations here made. A real install runs today's build only after every migration
+ * the migrations here made. So is migration 0014 (who may view a tour): today's tour list,
+ * page and picture route read its setting, and it only adds a column with a default and
+ * two empty tables. A real install runs today's build only after every migration
  * (the Node server migrates before it serves, the Cloudflare update before it deploys).
  */
 async function siteAt(level: number): Promise<Site> {
@@ -56,7 +58,8 @@ async function siteAt(level: number): Promise<Site> {
   expect(await migrate(db, dir(level))).toEqual(files.slice(0, level));
   await mkdir(join(root, "media"));
   await copyFile(join(MIGRATIONS_DIR, "0010_media.sql"), join(root, "media", "0010_media.sql"));
-  expect(await migrate(db, join(root, "media"))).toEqual(["0010_media.sql"]);
+  await copyFile(join(MIGRATIONS_DIR, "0014_tour_access.sql"), join(root, "media", "0014_tour_access.sql"));
+  expect(await migrate(db, join(root, "media"))).toEqual(["0010_media.sql", "0014_tour_access.sql"]);
   const deps: Deps = { db, drafts: new NodeFileStore(join(root, "drafts")), pub: new NodeFileStore(join(root, "public")), config: { publicImageBase: "", setupCode: null }, now: () => NOW };
   return { root, db, deps, dir, files };
 }
@@ -535,7 +538,7 @@ describe("migration 0008 on an existing install", () => {
         }) as typeof t.db.all;
         expect(await migrate(t.db, t.dir(8))).toEqual([]);
         expect(applied).toEqual([NAME]);
-        expect(await fast.first("SELECT (SELECT count(*) FROM membership) AS m, (SELECT count(*) FROM _migrations) AS f")).toEqual({ m: 2, f: 9 }); // 1 to 8, and 0010 beside them
+        expect(await fast.first("SELECT (SELECT count(*) FROM membership) AS m, (SELECT count(*) FROM _migrations) AS f")).toEqual({ m: 2, f: 10 }); // 1 to 8, and 0010 and 0014 beside them
       } finally {
         t.db.close();
         fast.close();

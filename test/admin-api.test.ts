@@ -136,7 +136,7 @@ describe("the admin's list of accounts", () => {
         counted: own.counted,
       });
       expect(own.used_bytes).toBeGreaterThan(0);
-      expect(own.tours).toBe(3);
+      expect(own.tours).toBe(5);
       // The shared items are in the totals, as two numbers of bytes and nothing more: each
       // kind's bytes with previews and claims that are not current, the unfinished item included, and the breakdown adds up.
       const items = await w.deps.db.all<{ kind: string; n: number }>(
