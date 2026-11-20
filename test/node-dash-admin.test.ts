@@ -1,210 +1,64 @@
-// What the Admin page's script does when it runs: the page's document, the shared
-// /dash/dash.js and the page's /dash/admin.js are run in one fresh Node `vm` context
-// against a stand-in document built from the page's own HTML (test/pages-dom.ts), with a
-// stand-in address and fetch. The fetch either answers from the test or is handed to the
-// real app, as a browser on the app address would send it. Node only: the Workers runtime
-// runs no code from a string. The size parser (SIZE_JS) is also run on its own, on its
-// table of inputs.
+// What the Admin page's script does when it runs, for the list of accounts and for setting an
+// allowance: the page's document, the shared /dash/dash.js and the page's /dash/admin.js are
+// run in one fresh Node `vm` context against a stand-in document built from the page's own
+// HTML (test/pages-dom.ts), with a stand-in address and fetch (test/node-admin-page.ts). The fetch
+// either answers from the test or is handed to the real app, as a browser on the app address
+// would send it. Node only: the Workers runtime runs no code from a string. The size parser
+// (SIZE_JS) is also run on its own, on its table of inputs. Invites, disabling, enabling and
+// deleting are in test/node-dash-admin-actions.test.ts.
 //
 // What this leaves unproven, for docs/dashboard-browser-check.md: real layout at phone
 // width, focus rings, `inert` as a browser applies it, and a screen reader.
 import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
-import { createApp } from "../src/app.ts";
-import { ADMIN_HTML, ADMIN_JS, SIZE_JS } from "../src/dash/admin.ts";
+import { SIZE_JS } from "../src/dash/admin.ts";
 import { DASH_JS } from "../src/dash/script.ts";
-import type { Deps } from "../src/ports.ts";
-import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
 import { send } from "./bundle.ts";
-import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
+import { FakeElement } from "./pages-dom.ts";
 import { SIZE_TABLE } from "./sizes.ts";
+import {
+  APP,
+  CSRF,
+  FAILED,
+  FIREFOX,
+  GB,
+  MB,
+  MOCKUP,
+  MOCKUP_USED,
+  NOT_FOUND,
+  SIGNED_OUT,
+  STANDARD,
+  U1,
+  U2,
+  U3,
+  W1,
+  W2,
+  W3,
+  TOO_MANY,
+  account,
+  allowFor,
+  answers,
+  browser,
+  cells,
+  checkTabs,
+  key,
+  list,
+  more,
+  openAdmin,
+  rowOf,
+  rows,
+  session,
+  sessionOf,
+  standard,
+  summary,
+  type,
+  type Answer,
+  type Responder,
+  type Tab,
+} from "./node-admin-page.ts";
 
-const APP = "https://app.example.com";
-const CSRF = "c".repeat(64);
-const FIREFOX = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
-const FAILED = "Something went wrong. Try again in a moment.";
-const TOO_MANY = "Too many requests. Wait a few minutes and try again.";
-const GB = 1024 ** 3;
-const MB = 1024 ** 2;
-
-type Answer = { status: number; json?: unknown } | "network";
-type Fetched = { method: string; path: string; headers: Record<string, string>; body: string | undefined; init: Record<string, unknown> };
-type Responder = (req: Fetched) => Answer | Promise<Answer>;
-
-type Tab = {
-  doc: FakeDocument;
-  fetched: Fetched[];
-  left: () => string | null;
-  $: (id: string) => FakeElement;
-  has: (id: string) => boolean;
-  shows: () => string[];
-  settle: () => Promise<void>;
-  violations: string[];
-};
-
-const open: Tab[] = [];
-afterEach(() => {
-  for (const tab of open.splice(0)) expect(tab.violations, "the script used something it must not").toEqual([]);
-});
-
-/** Opens the Admin page and runs its two scripts in order, as a browser does with two deferred scripts. */
-function openAdmin(respond: Responder): Tab {
-  const doc = new FakeDocument(ADMIN_HTML);
-  let left: string | null = null;
-  const fetched: Fetched[] = [];
-  const pending: Promise<unknown>[] = [];
-  const violations: string[] = [];
-  const location = {
-    get origin() {
-      return APP;
-    },
-    replace(path: string) {
-      left = path;
-    },
-  };
-  const fetch = (path: string, init: Record<string, unknown> = {}) => {
-    const req: Fetched = { method: String(init.method ?? "GET"), path, headers: { ...(init.headers as Record<string, string>) }, body: init.body as string | undefined, init };
-    fetched.push(req);
-    const p = Promise.resolve(respond(req)).then((a) => {
-      if (a === "network") throw new TypeError("Failed to fetch");
-      const body = a.json === undefined ? null : JSON.stringify(a.json);
-      return new Response(a.status === 204 ? null : body, { status: a.status, headers: { "content-type": "application/json" } });
-    });
-    pending.push(p.catch(() => {}));
-    return p;
-  };
-  const context: Record<string, unknown> = { document: doc, location, fetch };
-  for (const name of ["localStorage", "sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "window", "self", "top", "parent", "opener", "open", "postMessage", "setInterval", "setTimeout", "console", "alert", "confirm", "prompt", "history", "navigator"]) {
-    Object.defineProperty(context, name, {
-      get() {
-        violations.push(name);
-        throw new Error(`${name} is not for the dashboard's scripts`);
-      },
-    });
-  }
-  const ctx = vm.createContext(context);
-  vm.runInContext(DASH_JS, ctx, { filename: "dash.js" });
-  vm.runInContext(ADMIN_JS, ctx, { filename: "admin.js" });
-  const find = (id: string) => doc.root.all().find((e) => e.id === id);
-  const tab: Tab = {
-    doc,
-    fetched,
-    left: () => left,
-    $: (id) => {
-      const el = find(id);
-      if (!el) throw new Error(`no #${id}`);
-      return el;
-    },
-    has: (id) => find(id) !== undefined,
-    shows: () => visibleText(doc),
-    async settle() {
-      for (let i = 0; i < 30; i++) {
-        await Promise.race([Promise.all(pending), new Promise((r) => globalThis.setTimeout(r, 1))]);
-        await new Promise((r) => setImmediate(r));
-      }
-    },
-    violations,
-  };
-  open.push(tab);
-  return tab;
-}
-
-/** A responder from a table of "<METHOD> <path>" to answers (a list is answered in order, its last one repeated); anything else fails the test. */
-function answers(table: Record<string, Answer | Answer[]>): Responder {
-  const queues = new Map(Object.entries(table).map(([k, v]) => [k, Array.isArray(v) ? [...v] : [v]]));
-  return (req) => {
-    const q = queues.get(`${req.method} ${req.path}`);
-    if (!q || q.length === 0) throw new Error(`unexpected request ${req.method} ${req.path}`);
-    return q.length > 1 ? q.shift()! : q[0];
-  };
-}
-
-const SIGNED_OUT: Answer = { status: 401, json: { error: "unauthorized" } };
-const NOT_FOUND: Answer = { status: 404, json: { error: "not_found" } };
-const session = (admin: unknown, username = "solex"): Answer => ({
-  status: 200,
-  json: { account: { id: "usr_1", username, email: "solex@example.com", admin }, workspace: { id: "ws_1", name: "Cowfee Raid Tools" }, session: { id: "ses_1", created_at: 1, expires_at: 2 }, csrf: CSRF },
-});
-const summary = (accounts: number, used: number, standard: number | null): Answer => ({ status: 200, json: { accounts, used_bytes: used, standard_allowance_bytes: standard } });
-
-const U1 = "usr_" + "1".repeat(24);
-const U2 = "usr_" + "2".repeat(24);
-const U3 = "usr_" + "3".repeat(24);
-const W1 = "ws_" + "1".repeat(24);
-const W2 = "ws_" + "2".repeat(24);
-const W3 = "ws_" + "3".repeat(24);
-const STANDARD = 5 * GB;
-
-/** One account as GET /api/v1/admin/accounts gives it. */
-function account(id: string, ws: string, over: Record<string, unknown>) {
-  const own = (over.storage_allowance_bytes ?? null) as number | null;
-  const standard = "standard" in over ? (over.standard as number | null) : STANDARD;
-  const allowance = own ?? standard;
-  const used = (over.used_bytes ?? 0) as number;
-  const out: Record<string, unknown> = {
-    id,
-    username: "someone",
-    email: "someone@example.com",
-    status: "active",
-    admin: false,
-    created_at: 1,
-    workspace_id: ws,
-    workspace_name: "A workspace",
-    tours: 0,
-    used_bytes: used,
-    allowance_bytes: allowance,
-    storage_allowance_bytes: own,
-    over: allowance !== null && used > allowance,
-    counted: { pictures: used, logos: 0, uploads_in_progress: 0 },
-    ...over,
-  };
-  delete out.standard;
-  return out;
-}
-
-/** The three accounts of mockup 9. */
-const MOCKUP = [
-  account(U1, W1, { username: "solex", email: "you@example.com", admin: true, workspace_name: "Cowfee Raid Tools", tours: 12, used_bytes: 1_288_490_189 }),
-  account(U2, W2, { username: "mara", email: "mara@example.com", workspace_name: "Harbor Studio", tours: 31, used_bytes: 5_690_831_667 }),
-  account(U3, W3, { username: "bram", email: "bram@example.com", workspace_name: "Bram's demos", tours: 2, used_bytes: 96 * MB, storage_allowance_bytes: 20 * GB }),
-];
-const MOCKUP_USED = 1_288_490_189 + 5_690_831_667 + 96 * MB;
-const list = (accounts: unknown[], next: string | null = null): Answer => ({ status: 200, json: { accounts, next } });
-
-/** The standard page: the admin signed in, mockup 9's accounts. */
-function standard(extra: Record<string, Answer | Answer[]> = {}): Responder {
-  return answers({ "GET /api/v1/session": session(true), "GET /api/v1/admin/summary": summary(3, MOCKUP_USED, STANDARD), "GET /api/v1/admin/accounts": list(MOCKUP), ...extra });
-}
-
-const rows = (tab: Tab) => tab.$("admin-rows").children.filter((c): c is FakeElement => c instanceof FakeElement);
-const cells = (row: FakeElement) => row.children.filter((c): c is FakeElement => c instanceof FakeElement);
-const setButton = (row: FakeElement) => row.all().find((e) => e.tagName === "button")!;
-const key = (el: FakeElement, k: string, shiftKey = false) => el.dispatch("keydown", { key: k, shiftKey });
-/** Types into the field as a person does: the value, then the input event. */
-const type = (tab: Tab, text: string) => {
-  const input = tab.$("allow-input");
-  input.value = text;
-  input.dispatch("input");
-};
-
-/** What one row shows, cell by cell. */
-function rowOf(row: FakeElement) {
-  const [who, ws, tours, bar, used, allowance, acts] = cells(row);
-  const mini = bar.all().find((e) => e.className.startsWith("mini"));
-  return {
-    name: who.all().find((e) => e.className === "name")!.textContent,
-    tags: who.all().filter((e) => e.className === "tag").map((e) => e.textContent),
-    email: who.all().find((e) => e.className === "d")?.textContent ?? null,
-    workspace: ws.textContent,
-    tours: tours.textContent,
-    bar: mini === undefined ? null : { cls: mini.className, width: mini.children.filter((c): c is FakeElement => c instanceof FakeElement)[0].style.width },
-    used: used.textContent,
-    over: used.all().filter((e) => e.className === "tag warn").map((e) => e.textContent),
-    allowance: allowance.textContent,
-    button: acts.textContent,
-  };
-}
+afterEach(checkTabs);
 
 // ---- The size parser on its own ----
 
@@ -364,25 +218,44 @@ describe("the Admin page for a member", () => {
 // ---- The admin ----
 
 describe("the Admin page for the admin", () => {
-  it("shows mockup 9: the summary line, a row per account with its tags, bar, sizes and button, and the hint", async () => {
+  it("shows mockup 9 and the invites set's mockup 1: the summary line, the invite card, a row per account with its tags, bar, sizes and More, and the hint", async () => {
     const tab = openAdmin(standard());
     await tab.settle();
-    expect(tab.fetched.map((f) => `${f.method} ${f.path}`).sort()).toEqual(["GET /api/v1/admin/accounts", "GET /api/v1/admin/summary", "GET /api/v1/session"]);
+    // The invites are read once the accounts were shown, never before.
+    expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", "GET /api/v1/admin/summary", "GET /api/v1/admin/accounts", "GET /api/v1/admin/invites"]);
     expect(tab.$("tab-admin").hidden).toBe(false);
     expect(tab.$("admin-summary").textContent).toBe("3 accounts · 6.6 GB used in all · standard allowance 5 GB");
     expect(rows(tab).map(rowOf)).toEqual([
-      { name: "solex", tags: ["Admin"], email: "you@example.com", workspace: "Cowfee Raid Tools", tours: "12", bar: { cls: "mini", width: "24%" }, used: "1.2 GB", over: [], allowance: "5 GB", button: "Set allowance" },
-      { name: "mara", tags: [], email: "mara@example.com", workspace: "Harbor Studio", tours: "31", bar: { cls: "mini over", width: "100%" }, used: "5.3 GBOver", over: ["Over"], allowance: "5 GB", button: "Set allowance" },
-      { name: "bram", tags: [], email: "bram@example.com", workspace: "Bram's demos", tours: "2", bar: { cls: "mini", width: "1%" }, used: "96 MB", over: [], allowance: "20 GB", button: "Set allowance" },
+      { name: "solex", tags: ["Admin"], email: "you@example.com", workspace: "Cowfee Raid Tools", tours: "12", bar: { cls: "mini", width: "24%" }, used: "1.2 GB", over: [], allowance: "5 GB", joined: "17 Nov 2026", button: "More", menu: ["Set allowance"] },
+      { name: "mara", tags: [], email: "mara@example.com", workspace: "Harbor Studio", tours: "31", bar: { cls: "mini over", width: "100%" }, used: "5.3 GBOver", over: ["Over"], allowance: "5 GB", joined: "18 Nov 2026", button: "More", menu: ["Set allowance", "Disable"] },
+      { name: "bram", tags: [], email: "bram@example.com", workspace: "Bram's demos", tours: "2", bar: { cls: "mini", width: "1%" }, used: "96 MB", over: [], allowance: "20 GB", joined: "19 Nov 2026", button: "More", menu: ["Set allowance", "Disable"] },
     ]);
-    expect(tab.shows()).toEqual(["Mythicshot", "solex", "Accounts", "3 accounts · 6.6 GB used in all · standard allowance 5 GB", "Set allowance", "Set allowance", "Set allowance", "You see how much each workspace uses, never what is in it. Inviting people comes in a later phase."]);
+    expect(tab.shows()).toEqual([
+      "Mythicshot",
+      "solex",
+      "Admin",
+      "3 accounts · 6.6 GB used in all · standard allowance 5 GB",
+      "Invite someone",
+      "They get a mail with a link that works once and for 7 days. They pick their own username and get an empty workspace of their own.",
+      "Email address",
+      "Send invite",
+      "Open invites",
+      "No open invites.",
+      "Accounts",
+      "More",
+      "More",
+      "More",
+      "You see totals only. What is in another person's workspace is never shown here.",
+    ]);
+    // The menus are closed.
+    for (const row of rows(tab)) expect(row.all().find((e) => e.getAttribute("role") === "menu")!.shown).toBe(false);
     expect(tab.$("admin-more").shown).toBe(false);
     expect(tab.$("missing").hidden).toBe(true);
     // Each button names its account for a screen reader; on a phone each figure carries its column's name.
     for (const [i, row] of rows(tab).entries()) {
-      expect(setButton(row).getAttribute("aria-describedby")).toBe(`account-${i}`);
-      expect(setButton(row).getAttribute("type")).toBe("button");
-      expect(cells(row).map((c) => c.getAttribute("data-label"))).toEqual([null, null, "Tours", null, "Used", "Allowance", null]);
+      expect(more(row).getAttribute("aria-describedby")).toBe(`account-${i}`);
+      expect(more(row).getAttribute("type")).toBe("button");
+      expect(cells(row).map((c) => c.getAttribute("data-label"))).toEqual([null, null, "Tours", null, "Used", "Allowance", "Joined", null]);
     }
     expect(tab.$("allow-dialog").hidden).toBe(true);
   });
@@ -413,14 +286,14 @@ describe("the Admin page for the admin", () => {
     await tab.settle();
     expect(rowOf(rows(tab)[0])).toMatchObject({ name: "<img src=x onerror=alert(1)>", email: '"<b>"@example.com', workspace: "</td><script>x</script>" });
     expect(tab.doc.root.all().some((e) => ["img", "b", "script"].includes(e.tagName) && e.parent?.tagName !== "head")).toBe(false);
-    setButton(rows(tab)[0]).click();
+    allowFor(rows(tab)[0]);
     expect(tab.$("allow-title").textContent).toBe("Storage allowance for </td><script>x</script>");
     expect(tab.$("allow-title").children.every((c) => !(c instanceof FakeElement))).toBe(true);
   });
 
   it("Show more asks for the page after the last one while the list says there is one, and adds its rows", async () => {
-    const more = [account("usr_" + "4".repeat(24), "ws_" + "4".repeat(24), { username: "tess" }), account("usr_" + "5".repeat(24), "ws_" + "5".repeat(24), { username: "rook" })];
-    const tab = openAdmin(standard({ "GET /api/v1/admin/summary": summary(5, MOCKUP_USED, STANDARD), "GET /api/v1/admin/accounts": list(MOCKUP, U3), [`GET /api/v1/admin/accounts?after=${U3}`]: list(more) }));
+    const page2 = [account("usr_" + "4".repeat(24), "ws_" + "4".repeat(24), { username: "tess" }), account("usr_" + "5".repeat(24), "ws_" + "5".repeat(24), { username: "rook" })];
+    const tab = openAdmin(standard({ "GET /api/v1/admin/summary": summary(5, MOCKUP_USED, STANDARD), "GET /api/v1/admin/accounts": list(MOCKUP, U3), [`GET /api/v1/admin/accounts?after=${U3}`]: list(page2) }));
     await tab.settle();
     expect(rows(tab)).toHaveLength(3);
     const button = tab.$("admin-more");
@@ -433,9 +306,9 @@ describe("the Admin page for the admin", () => {
     expect(button.shown).toBe(false);
     expect(button.disabled).toBe(false);
     // The focus moves to the first new row.
-    expect(tab.doc.activeElement).toBe(setButton(rows(tab)[3]));
+    expect(tab.doc.activeElement).toBe(more(rows(tab)[3]));
     // Distinct ids for every row, across pages.
-    expect(new Set(rows(tab).map((r) => setButton(r).getAttribute("aria-describedby"))).size).toBe(5);
+    expect(new Set(rows(tab).map((r) => more(r).getAttribute("aria-describedby"))).size).toBe(5);
   });
 
   it("Show more that fails says so and stays; a next that is not an account id shows no Show more", async () => {
@@ -480,8 +353,8 @@ describe("setting an allowance", () => {
   it("asks mockup 10's question: the title, what is used, the field with the workspace's own number, and the hint with the standard allowance", async () => {
     const tab = openAdmin(standard());
     await tab.settle();
-    const opener = setButton(rows(tab)[1]);
-    opener.click();
+    const opener = more(rows(tab)[1]);
+    allowFor(rows(tab)[1]);
     expect(tab.$("allow-dialog").hidden).toBe(false);
     expect(tab.$("allow-title").textContent).toBe("Storage allowance for Harbor Studio");
     expect(tab.$("allow-uses").textContent).toBe("Uses 5.3 GB now.");
@@ -530,11 +403,11 @@ describe("setting an allowance", () => {
       }),
     );
     await tab.settle();
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     expect(tab.$("allow-input").value).toBe("20 GB");
     expect(tab.$("allow-hint").textContent).toBe("Write a size such as 500 MB or 10 GB. Leave it empty for no allowance.");
     tab.$("allow-cancel").click();
-    setButton(rows(tab)[0]).click();
+    allowFor(rows(tab)[0]);
     // 1.1 GB would not read back as the same number: the field holds the bytes.
     expect(tab.$("allow-input").value).toBe("1234567890");
     tab.$("allow-save").click();
@@ -552,7 +425,7 @@ describe("setting an allowance", () => {
       }),
     );
     await tab.settle();
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     type(tab, "10 GB");
     const save = tab.$("allow-save");
     save.click();
@@ -574,7 +447,7 @@ describe("setting an allowance", () => {
     expect(tab.fetched.filter((f) => f.path === "/api/v1/admin/summary")).toHaveLength(2);
     expect(tab.$("allow-dialog").hidden).toBe(true);
     expect(rowOf(rows(tab)[1])).toMatchObject({ used: "5.3 GB", over: [], allowance: "10 GB", bar: { cls: "mini", width: "53%" } });
-    expect(tab.doc.activeElement).toBe(setButton(rows(tab)[1]));
+    expect(tab.doc.activeElement).toBe(more(rows(tab)[1]));
     expect([save.textContent, save.disabled, tab.$("allow-cancel").disabled]).toEqual(["Save", false, false]);
     expect(tab.doc.body.all().filter((e) => e.hasAttribute("inert") || e.hasAttribute("aria-hidden") && ["dash-top", "admin"].includes(e.id))).toEqual([]);
   });
@@ -589,7 +462,7 @@ describe("setting an allowance", () => {
       );
       await tab.settle();
       const before = rows(tab).map(rowOf);
-      setButton(rows(tab)[1]).click();
+      allowFor(rows(tab)[1]);
       type(tab, "10 GB");
       tab.$("allow-save").click();
       await tab.settle();
@@ -597,14 +470,14 @@ describe("setting an allowance", () => {
       expect([tab.$("admin-message").textContent, tab.$("admin-message").hidden]).toEqual(["The change was made, but the list could not be loaded again. Reload the page to see it.", false]);
       expect(rows(tab).map(rowOf)).toEqual(before);
       expect(tab.$("admin-summary").textContent).toBe("3 accounts · 6.6 GB used in all · standard allowance 5 GB");
-      expect(tab.doc.activeElement).toBe(setButton(rows(tab)[1]));
+      expect(tab.doc.activeElement).toBe(more(rows(tab)[1]));
     }
   });
 
   it("an empty field sends null, which puts the workspace back on the standard allowance", async () => {
     const tab = openAdmin(standard({ [`PATCH /api/v1/admin/workspaces/${W3}`]: { status: 200, json: { workspace_id: W3, allowance_bytes: STANDARD, storage_allowance_bytes: null, used_bytes: 96 * MB, over: false } } }));
     await tab.settle();
-    setButton(rows(tab)[2]).click();
+    allowFor(rows(tab)[2]);
     expect(tab.$("allow-input").value).toBe("20 GB");
     type(tab, "  ");
     tab.$("allow-save").click();
@@ -615,7 +488,7 @@ describe("setting an allowance", () => {
   it("a size that cannot be read says how to write one and sends nothing", async () => {
     const tab = openAdmin(standard());
     await tab.settle();
-    setButton(rows(tab)[0]).click();
+    allowFor(rows(tab)[0]);
     for (const text of ["1,5 GB", "10 TB", "-1", "lots", "9007199254740992"]) {
       type(tab, text);
       tab.$("allow-save").click();
@@ -635,7 +508,7 @@ describe("setting an allowance", () => {
     for (const [answer, text] of [[{ status: 429, json: { error: "rate_limited" } }, TOO_MANY], [{ status: 404, json: { error: "not_found" } }, FAILED], [{ status: 400, json: { error: "bad_allowance" } }, FAILED], [{ status: 500, json: { error: "internal" } }, FAILED], ["network", FAILED]] as const) {
       const tab = openAdmin(standard({ [`PATCH /api/v1/admin/workspaces/${W1}`]: answer as Answer }));
       await tab.settle();
-      setButton(rows(tab)[0]).click();
+      allowFor(rows(tab)[0]);
       type(tab, "2 GB");
       tab.$("allow-save").click();
       await tab.settle();
@@ -646,11 +519,11 @@ describe("setting an allowance", () => {
       expect(tab.doc.activeElement).toBe(tab.$("allow-save"));
       // Closing it now gives the focus to the account's button in the list as it was read again.
       tab.$("allow-cancel").click();
-      expect(tab.doc.activeElement).toBe(setButton(rows(tab)[0]));
+      expect(tab.doc.activeElement).toBe(more(rows(tab)[0]));
     }
     const out = openAdmin(standard({ [`PATCH /api/v1/admin/workspaces/${W1}`]: SIGNED_OUT }));
     await out.settle();
-    setButton(rows(out)[0]).click();
+    allowFor(rows(out)[0]);
     out.$("allow-save").click();
     await out.settle();
     expect(out.left()).toBe("/signin");
@@ -659,8 +532,8 @@ describe("setting an allowance", () => {
   it("the question keeps the keyboard: Escape anywhere closes it, Tab and Shift+Tab go round its controls, a click on the backdrop closes it", async () => {
     const tab = openAdmin(standard());
     await tab.settle();
-    const opener = setButton(rows(tab)[1]);
-    opener.click();
+    const opener = more(rows(tab)[1]);
+    allowFor(rows(tab)[1]);
     const [input, cancel, save] = ["allow-input", "allow-cancel", "allow-save"].map((id) => tab.$(id));
     // Tab from the last goes to the first, Shift+Tab from the first to the last; in between the browser moves.
     tab.doc.activeElement = save;
@@ -687,7 +560,7 @@ describe("setting an allowance", () => {
     // Closed, the document's keys are left alone.
     expect(key(tab.doc.body, "Tab").defaultPrevented).toBe(false);
     // A click on the backdrop closes it; a click inside the question does not.
-    opener.click();
+    allowFor(rows(tab)[1]);
     tab.$("allow-title").click();
     input.click();
     expect(tab.$("allow-dialog").hidden).toBe(false);
@@ -709,7 +582,7 @@ describe("the allowance question: an allowance that leaves no room, Enter, and w
     const tab = openAdmin(standard({ "GET /api/v1/admin/accounts": list([empty, some]), [`PATCH /api/v1/admin/workspaces/${W1}`]: { status: 200, json: { workspace_id: W1, allowance_bytes: 0, storage_allowance_bytes: 0, used_bytes: 0, over: false } } }));
     await tab.settle();
     for (const row of [0, 1]) {
-      setButton(rows(tab)[row]).click();
+      allowFor(rows(tab)[row]);
       type(tab, "0");
       expect([tab.$("allow-warn").textContent, tab.$("allow-warn").shown, tab.$("allow-hint").shown, tab.$("allow-save").textContent], String(row)).toEqual([ZERO, true, false, "Save anyway"]);
       type(tab, "0 GB");
@@ -717,11 +590,11 @@ describe("the allowance question: an allowance that leaves no room, Enter, and w
       tab.$("allow-cancel").click();
     }
     // Above what is used, no warning: 1 KB for the empty workspace, 6 MB for the other.
-    setButton(rows(tab)[0]).click();
+    allowFor(rows(tab)[0]);
     type(tab, "1 KB");
     expect([tab.$("allow-warn").shown, tab.$("allow-hint").shown, tab.$("allow-save").textContent]).toEqual([false, true, "Save"]);
     tab.$("allow-cancel").click();
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     type(tab, "6 MB");
     expect([tab.$("allow-warn").shown, tab.$("allow-save").textContent]).toEqual([false, "Save"]);
     // Exactly what it uses, and below it.
@@ -731,7 +604,7 @@ describe("the allowance question: an allowance that leaves no room, Enter, and w
     expect(tab.$("allow-warn").textContent).toBe("That is less than this workspace uses. Nothing is deleted, but its new uploads are refused until it is under 4 MB.");
     tab.$("allow-cancel").click();
     // Saving 0 anyway sends 0.
-    setButton(rows(tab)[0]).click();
+    allowFor(rows(tab)[0]);
     type(tab, "0");
     tab.$("allow-save").click();
     await tab.settle();
@@ -742,7 +615,7 @@ describe("the allowance question: an allowance that leaves no room, Enter, and w
     const empty = account(U1, W1, { workspace_name: "Empty", used_bytes: 0, standard: null });
     const tab = openAdmin(standard({ "GET /api/v1/admin/summary": summary(1, 0, null), "GET /api/v1/admin/accounts": list([empty]) }));
     await tab.settle();
-    setButton(rows(tab)[0]).click();
+    allowFor(rows(tab)[0]);
     type(tab, "0");
     expect([tab.$("allow-warn").textContent, tab.$("allow-save").textContent]).toEqual([ZERO, "Save anyway"]);
     // An empty field is no allowance at all: nothing to warn about.
@@ -756,7 +629,7 @@ describe("the allowance question: an allowance that leaves no room, Enter, and w
     const tab = openAdmin(standard({ "GET /api/v1/admin/summary": summary(2, 5 * MB, 0), "GET /api/v1/admin/accounts": list([empty, some]) }));
     await tab.settle();
     for (const row of [0, 1]) {
-      setButton(rows(tab)[row]).click();
+      allowFor(rows(tab)[row]);
       type(tab, "");
       expect([tab.$("allow-warn").textContent, tab.$("allow-warn").shown, tab.$("allow-save").textContent], String(row)).toEqual([ZERO, true, "Save anyway"]);
       type(tab, "0");
@@ -771,7 +644,7 @@ describe("the allowance question: an allowance that leaves no room, Enter, and w
       const some = account(U2, W2, { workspace_name: "Some", used_bytes: 5 * MB, standard: standardBytes });
       const tab = openAdmin(standard({ "GET /api/v1/admin/summary": summary(1, 5 * MB, standardBytes), "GET /api/v1/admin/accounts": list([some]) }));
       await tab.settle();
-      setButton(rows(tab)[0]).click();
+      allowFor(rows(tab)[0]);
       type(tab, "0");
       expect([tab.$("allow-warn").textContent, tab.$("allow-save").textContent], String(standardBytes)).toEqual([ZERO, "Save anyway"]);
     }
@@ -780,7 +653,7 @@ describe("the allowance question: an allowance that leaves no room, Enter, and w
   it("the field is tied to the hint or to the warning for a screen reader, never to the one that is hidden", async () => {
     const tab = openAdmin(standard());
     await tab.settle();
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     const input = tab.$("allow-input");
     type(tab, "10 GB");
     expect(input.getAttribute("aria-describedby")).toBe("allow-hint allow-message");
@@ -795,7 +668,7 @@ describe("the allowance question: an allowance that leaves no room, Enter, and w
   it("Enter in the field saves, once, as Save does", async () => {
     const tab = openAdmin(standard({ [`PATCH /api/v1/admin/workspaces/${W2}`]: SAVED }));
     await tab.settle();
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     type(tab, "10 GB");
     expect(key(tab.$("allow-input"), "Enter").defaultPrevented).toBe(true);
     key(tab.$("allow-input"), "Enter");
@@ -803,14 +676,14 @@ describe("the allowance question: an allowance that leaves no room, Enter, and w
     expect(tab.fetched.filter((f) => f.method === "PATCH").map((f) => f.body)).toEqual([`{"storage_allowance_bytes":${10 * GB}}`]);
     expect(tab.$("allow-dialog").hidden).toBe(true);
     // Other keys type as usual.
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     expect(key(tab.$("allow-input"), "a").defaultPrevented).toBe(false);
   });
 
   it("a double click on Save sends one request", async () => {
     const tab = openAdmin(standard({ [`PATCH /api/v1/admin/workspaces/${W2}`]: SAVED }));
     await tab.settle();
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     type(tab, "10 GB");
     tab.$("allow-save").click();
     tab.$("allow-save").click();
@@ -859,7 +732,7 @@ describe("the list with two pages loaded: one request at a time", () => {
   it("Show more does nothing, and is disabled, while the list is read again after a save", async () => {
     const p = paged({ [`PATCH /api/v1/admin/workspaces/${W2}`]: SAVED });
     const tab = await twoPages(p);
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     type(tab, "10 GB");
     p.hold(true);
     tab.$("allow-save").click();
@@ -888,7 +761,7 @@ describe("the list with two pages loaded: one request at a time", () => {
     tab.$("admin-more").click();
     await tab.settle();
     expect(p.waiting.map((w) => w.path)).toEqual([`/api/v1/admin/accounts?after=${U5}`]);
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     type(tab, "10 GB");
     tab.$("allow-save").click();
     await tab.settle();
@@ -907,7 +780,7 @@ describe("the list with two pages loaded: one request at a time", () => {
   it("after a save that fails, the list is read again with both pages, nothing twice and nothing dropped", async () => {
     const p = paged({ [`PATCH /api/v1/admin/workspaces/${W2}`]: { status: 500, json: { error: "internal" } } });
     const tab = await twoPages(p);
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     type(tab, "10 GB");
     tab.$("allow-save").click();
     await tab.settle();
@@ -921,37 +794,17 @@ describe("the list with two pages loaded: one request at a time", () => {
     const changed = MOCKUP.map((a) => (a.id === U2 ? { ...a, storage_allowance_bytes: 10 * GB, allowance_bytes: 10 * GB, over: false } : a));
     const p = paged({ "GET /api/v1/admin/accounts": [list(MOCKUP, U3), list(changed, U3)], [`PATCH /api/v1/admin/workspaces/${W2}`]: SAVED });
     const tab = await twoPages(p);
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     type(tab, "10 GB");
     tab.$("allow-save").click();
     await tab.settle();
     expect(names(tab)).toEqual(["solex", "mara", "bram", "tess", "rook"]);
     expect(rowOf(rows(tab)[1]).allowance).toBe("10 GB");
-    expect(tab.doc.activeElement).toBe(setButton(rows(tab)[1]));
+    expect(tab.doc.activeElement).toBe(more(rows(tab)[1]));
   });
 });
 
 // ---- Against the real app ----
-
-/** A tab's fetch that goes to the real app on the app address, as a browser sends it there, with a session cookie. */
-function browser(deps: Deps, cookie: string) {
-  const app = createApp(deps);
-  const seenAnswers: string[] = [];
-  const respond = async (req: Fetched): Promise<Answer> => {
-    const headers: Record<string, string> = { ...req.headers, "user-agent": FIREFOX, cookie };
-    if (req.method !== "GET" && req.method !== "HEAD") Object.assign(headers, { origin: APP, "sec-fetch-site": "same-origin" });
-    const res = await app.fetch(new Request(APP + req.path, { method: req.method, headers, body: req.body }));
-    const text = await res.text();
-    seenAnswers.push(text);
-    return { status: res.status, json: text === "" ? undefined : JSON.parse(text) };
-  };
-  return { respond, seenAnswers };
-}
-
-async function sessionOf(deps: Deps, userId: string): Promise<string> {
-  const made = await redeemSignInCode(deps, await createSignInCode(deps, userId), FIREFOX, null);
-  return `${SESSION_COOKIE}=${made!.secret}`;
-}
 
 describe("the Admin page against the real app", () => {
   it("the admin sees every account and sets, lowers and clears an allowance through the API", async () => {
@@ -968,7 +821,7 @@ describe("the Admin page against the real app", () => {
       ["realmember", [], member.email, "<b>Harbor</b> Studio", "5 GB"],
     ]);
 
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     expect(tab.$("allow-title").textContent).toBe("Storage allowance for <b>Harbor</b> Studio");
     type(tab, "1.5 gb");
     tab.$("allow-save").click();
@@ -978,7 +831,7 @@ describe("the Admin page against the real app", () => {
     expect(rowOf(rows(tab)[1]).allowance).toBe("1.5 GB");
 
     // Back to the standard allowance with an empty field.
-    setButton(rows(tab)[1]).click();
+    allowFor(rows(tab)[1]);
     expect(tab.$("allow-input").value).toBe("1.5 GB");
     type(tab, "");
     tab.$("allow-save").click();

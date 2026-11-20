@@ -52,7 +52,7 @@ export function encodeAccountCursor(createdAt: number, id: string): string {
   return btoa(`${createdAt}.${id}`).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** The time and id of a cursor encodeAccountCursor made, or null for anything else (an account id alone, as before 0.1.30, included). */
+/** The time and id of a cursor encodeAccountCursor made, or null for anything else (an account id alone, as before 0.1.33, included). */
 export function decodeAccountCursor(cursor: string): { createdAt: number; id: string } | null {
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(cursor)) return null;
   let text: string;

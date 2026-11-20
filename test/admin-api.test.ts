@@ -218,7 +218,7 @@ describe("the admin's list of accounts", () => {
     const order = await deps.db.all<{ id: string }>("SELECT id FROM user ORDER BY created_at, id");
     expect(listed.map((a) => a.id)).toEqual(order.map((o) => o.id));
 
-    // Anything that is not such a cursor is refused, an account id alone (the cursor before 0.1.30) included.
+    // Anything that is not such a cursor is refused, an account id alone (the cursor before 0.1.33) included.
     for (const bad of ["x", "usr_123", admin.userId, "tour_0123456789abcdef01234567", "usr_0123456789ABCDEF01234567", `${admin.userId}&after=${admin.userId}`, btoa("1.usr_123"), btoa(`-1.${admin.userId}`)]) {
       const r = await ask(deps, "GET", `${ACCOUNTS}?after=${encodeURIComponent(bad)}`, { headers });
       expect([r.status, r.json?.error], bad).toEqual([400, "bad_cursor"]);

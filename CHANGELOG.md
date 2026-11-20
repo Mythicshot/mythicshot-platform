@@ -2,6 +2,21 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.35 (2026-11-20)
+
+- The Admin page invites people. The card "Invite someone" takes an address and sends the invite; the page says it is on its way and until which day the link works, or, in plain words, that the address already has an account, does not look like an address, cannot be mailed from this site, or that 100 invites are open already. When the mail could not be sent the invite stays and the page says to press Resend. After too many invites in a short time, "Send invite" and every "Resend" rest for as long as the site says.
+- "Open invites" lists the invites, newest first, with the day each was sent and the day it works until, or an amber "Ran out" tag. "Resend" sends a fresh link at once and the earlier one stops working; "Cancel" asks first. On a phone each invite is a card.
+- Each account row has one "More" menu instead of its button: "Set allowance", then "Disable" or "Enable", then "Delete" for a disabled account. The admin's own row offers only "Set allowance", and an account whose delete has started shows an amber "Deleting" tag and offers only "Delete", to finish it.
+- "Disable" asks first and says what stops and that nothing is deleted; "Enable" asks nothing. "Delete" shows what goes (tours, images and GIFs, connected computers, the storage freed) and works only once the username is typed exactly (the email address for an account without one). A large delete shows its progress while the page sends it again; a refusal stops it at once, and a store that keeps failing or answers that keep getting lost stop it after three tries in a row. An interrupted delete is finished from the same row; the page remembers the typed name until it is reloaded, never in storage.
+- When an answer is lost on the way, the page reads the list again and says what is true: a disabled or enabled account by its status, a cancelled or resent invite by whether it is still listed and its dates, a deleted account by whether it is still listed.
+- The page's heading is "Admin", with the accounts in a card of their own, and its line under the table reads "You see totals only. What is in another person's workspace is never shown here."
+- The dashboard's shared script hands each page the account's own id, so the Admin page knows the admin's own row.
+- The accounts table has a "Joined" column, the day each account was made, with the year; the delete question's empty field shows the username to type, muted.
+- A delete in progress stops when the page is left: nothing more is sent before or after the next pause, so a page brought back from the browser's back/forward cache never carries on by itself; it shows the interruption, and the admin presses "Delete account" to go on. Reaching the loop's call limit says "This is taking longer than expected. Open Delete again to carry on."
+- Opening Delete again fills in the name and goes straight on only when the list just read marks the account as being deleted and the name was confirmed on this page; otherwise it asks again with an empty field.
+- A Resend whose answer was lost says the invite is no longer open only when the list read again is whole (fewer than 100 invites), as Cancel does; otherwise it says it went wrong.
+- Version notes: the old cursor of the list of accounts, an account id alone, was what versions before 0.1.33 gave (the API description and the code said 0.1.30, a number whose work was released in 0.1.33). The changelog gains short entries for 0.1.29 and 0.1.30, whose work came out as part of 0.1.32 and 0.1.33.
+
 ## 0.1.34 (2026-11-20)
 
 - The page an invite's link opens, `/invite`, on the app address. It takes the code from the part of the address after `#` and removes it from the address bar before it does anything else, then looks the invite up (`POST /api/v1/invite/check`, the code in the body) and asks "Choose your username", saying "You were invited as <address>." with the address in bold, so a person who was forwarded someone else's invite notices. Opening the link makes nothing: the account is made only when the person presses "Create my account" (or Enter in the field), with one request however often it is pressed, and the browser then lands on the Connections page, signed in.
@@ -45,6 +60,14 @@ Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on
 - Only the collection that made the token sends it, after the database has kept the token: a collection that fails, or the second of two at once, sends nothing, so there is one mail per token. It goes after the answer, and the answer is the same whether mail is off, the mail server refuses, the mail waits or a limit is reached. A site without mail, as every Cloudflare install in this version, makes no call for it.
 - Limits of its own, apart from sign-in's and email change's: 5 such mails a day per account, and 30 an hour for the site. A mail that is not sent (over a limit, an address that cannot be used, a mail server that refuses) is never tried again and is one new audit event, `connection_mail_not_sent`, with the request and a word for why, never the address.
 - The README, the API description and the Docker runbook's audit table say so.
+
+## 0.1.30 (2026-11-20)
+
+- This number's work, disabling, enabling and deleting an account, was released as part of 0.1.33 (see there). No release carries 0.1.30 itself.
+
+## 0.1.29 (2026-11-20)
+
+- This number's work, inviting people, was released as part of 0.1.32 (see there). No release carries 0.1.29 itself.
 
 ## 0.1.28 (2026-11-20)
 

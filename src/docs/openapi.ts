@@ -1511,7 +1511,7 @@ function paths(): OpenApiDoc["paths"] {
         security: SESSION,
         responses: {
           "200": answer("The accounts.", ref("AdminAccountList")),
-          "400": refusal("after is not a cursor this list gave (an account id, as versions before 0.1.30 gave, included): start again without it.", "bad_cursor"),
+          "400": refusal("after is not a cursor this list gave (an account id, as versions before 0.1.33 gave, included): start again without it.", "bad_cursor"),
           "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, or a session on the tours address. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
         },
       },
