@@ -1504,3 +1504,67 @@ describe("the admin routes", () => {
     }
   });
 });
+
+describe("deleting an account", () => {
+  /** The admin's request, with the first side's session. */
+  const asAdmin = (w: World, method: string, path: string, json?: unknown) => fire(w.deps, { method, path, ...(json === undefined ? {} : { json }) }, BY_SESSION.of(w.a));
+
+  it("removes every row of its workspace from every table of the schema and every file of it from both stores, and nothing of the other workspace", SLOW, async () => {
+    const w = await build();
+    const { deps, a, b } = w;
+    expect((await asAdmin(w, "POST", `/api/v1/admin/accounts/${b.userId}/disable`)).status).toBe(204);
+
+    // Every table of the schema, read from the database itself, says whose its rows are; a
+    // table added later without that fails here as it does in the snapshot test above.
+    const tables = await tablesOf(deps);
+    expect(tables.filter((t) => !Object.hasOwn(OWNED, t) && !Object.hasOwn(SHARED, t))).toEqual([]);
+    const beforeA = await snapshotOf(deps, a, w.keys);
+    const beforeB = await snapshotOf(deps, b, w.keys);
+    // The second side holds rows in most tables that belong to a workspace, and files in both stores.
+    expect(Object.entries(beforeB.rows).filter(([, rows]) => rows.length > 0).map(([t]) => t).length).toBeGreaterThan(15);
+    const filesB = Object.entries(beforeB.files).filter(([, v]) => v !== "missing").map(([k]) => k);
+    expect(filesB.some((k) => k.startsWith("p/")) && filesB.some((k) => k.startsWith("u/")) && filesB.some((k) => k.startsWith("m/"))).toBe(true);
+    // Everything that names the second side: its ids, keys, slugs, hashes, titles and address; a value the first side has too (such as a token's default name) names neither.
+    const ofA = new Set(needlesOf(beforeA, [a.workspaceId, a.userId, a.email]));
+    const needles = needlesOf(beforeB, [b.workspaceId, b.userId, b.email, b.session.id, ...namesIn(b.ids)]).filter((n) => !ofA.has(n));
+    const auditBefore = await deps.db.all<Json>("SELECT * FROM audit ORDER BY id");
+
+    let r = await asAdmin(w, "DELETE", `/api/v1/admin/accounts/${b.userId}`, { username: b.email });
+    for (let i = 0; r.status === 202 && i < 20; i++) {
+      w.tick();
+      r = await asAdmin(w, "DELETE", `/api/v1/admin/accounts/${b.userId}`, { username: b.email });
+    }
+    expect([r.status, r.json]).toEqual([200, { deleted: true }]);
+
+    for (const table of tables) {
+      const rows = await deps.db.all<Json>(`SELECT * FROM "${table}"`);
+      if (table === "audit") continue;
+      // No row of any table names anything of the deleted side, in any column.
+      for (const row of rows) for (const [column, value] of Object.entries(row)) if (typeof value === "string") expect(needles.includes(value), `${table}.${column} still holds ${value}`).toBe(false);
+      // And no row is the deleted workspace's by the table's own rule.
+      const where = OWNED[table];
+      if (where !== undefined) expect(await deps.db.all(`SELECT * FROM "${table}" WHERE ${where}`, Array(where.split("?").length - 1).fill(b.workspaceId)), table).toEqual([]);
+    }
+    // The audit record keeps what it had, and one row more: who deleted which account, by ids alone.
+    const auditAfter = await deps.db.all<Json>("SELECT * FROM audit ORDER BY id");
+    const added = auditAfter.filter((row) => !auditBefore.some((x) => x.id === row.id));
+    expect(added.map(({ event, user_id, workspace_id, subject, detail }) => ({ event, user_id, workspace_id, subject, detail }))).toEqual([
+      { event: "account_deleted", user_id: a.userId, workspace_id: b.workspaceId, subject: b.userId, detail: null },
+    ]);
+    expect(auditAfter.filter((row) => auditBefore.some((x) => x.id === row.id))).toEqual(auditBefore);
+    expect(JSON.stringify(auditAfter).includes(b.email)).toBe(false);
+
+    // No file of the deleted side is in either store, and every file left is the first side's.
+    const stored = [...(await w.keys.draftKeys()), ...(await w.keys.publicKeys())];
+    expect(filesB.filter((k) => stored.includes(k))).toEqual([]);
+    const afterA = await snapshotOf(deps, a, w.keys);
+    const filesA = Object.entries(afterA.files).filter(([, v]) => v !== "missing").map(([k]) => k);
+    expect(stored.filter((k) => !filesA.includes(k))).toEqual([]);
+    // Nothing of the first side changed but its record of the delete.
+    expect({ ...afterA, rows: { ...afterA.rows, audit: [] } }).toEqual({ ...beforeA, rows: { ...beforeA.rows, audit: [] } });
+    // The deleted account is gone from the admin's list, and its id answers as an unknown one.
+    const listed = (await asAdmin(w, "GET", "/api/v1/admin/accounts")).json.accounts as Json[];
+    expect(listed.map((x) => x.id)).toEqual([a.userId]);
+    expect(seen(await asAdmin(w, "GET", `/api/v1/admin/accounts/${b.userId}/removal`))).toEqual(seen(await asAdmin(w, "GET", `/api/v1/admin/accounts/${inventedIds().tokens.live.replace("tok_", "usr_")}/removal`)));
+  });
+});
