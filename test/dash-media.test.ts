@@ -321,11 +321,13 @@ describe("the Images and GIFs pages", () => {
       expect(p.js).toContain('var ITEM = "/api/v1/media/";');
       expect(p.js).toContain('return Dash.api("GET", after === null ? LIST : LIST + "&cursor=" + encodeURIComponent(after));');
       expect(p.js).toContain('return Dash.api("DELETE", ITEM + encodeURIComponent(id)).then(');
+      // The item itself, asked only when a delete got no answer: its id matched the API's shape and is escaped.
+      expect(p.js).toContain('return Dash.api("GET", ITEM + encodeURIComponent(id)).then(');
       // And the usage, read beside the list for the line's count and size of this kind.
       expect(p.js).toContain('var USAGE = "/api/v1/usage";');
       expect(p.js).toContain('var TOTAL = KIND === "image" ? "images" : "gifs";');
       expect(p.js).toContain('return Dash.api("GET", USAGE).then(');
-      expect(p.js.match(/Dash\.api\(/g), p.path).toHaveLength(3);
+      expect(p.js.match(/Dash\.api\(/g), p.path).toHaveLength(4);
       expect(p.js).not.toContain(p.other === "clip" ? "kind=clip" : "kind=image");
       // The preview's address: the fixed path and the item's own id, which matched the API's exact shape.
       expect(p.js).toContain("var ITEM_ID = /^med_[0-9a-f]{24}$/;");

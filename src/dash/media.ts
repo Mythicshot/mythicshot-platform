@@ -31,8 +31,10 @@
 // Delete asks first (Dash.question). While it answers 500 cleanup_pending (the item is
 // deleted; some of its files are not removed yet) it is sent again after a pause, at most
 // MAX_TRIES times in all. 204, 404 (already gone) and cleanup_pending are done, as on the
-// Tours page. When no answer came, the list read again decides: an item no longer listed
-// was deleted; one still listed (or a list that cannot be read) is a failure. However it ends
+// Tours page. When no answer came, the item itself is asked (GET /api/v1/media/<id>): only a
+// 404 means it was deleted; an item still there (online or still being sent), or no usable
+// answer to that either, is a failure. The list read again never decides it, because newer
+// items can push a still-online item off the pages shown. However it ends
 // the list is read again (every page shown so far), so the page shows what is true; a
 // delete that worked whose list cannot be read again says so, as on the Tours page. The
 // list is read one request at a time: Show more does nothing while a read runs, and a read
@@ -549,9 +551,15 @@ ${text}
     return res !== null && (res.status === 204 || res.status === 404 || cleaning(res));
   }
 
-  function listedNow(id) {
-    for (var i = 0; i < items.length; i++) if (items[i].id === id) return true;
-    return false;
+  // No answer came to a delete: the item itself decides, not the list (newer items can push a
+  // listed one off the pages shown). True only when it answers 404 (deleted, or never there);
+  // false when it is still there (online or still being sent), or when that answer is lost or
+  // anything else; null when the visitor was sent to sign in. The id matched ITEM_ID.
+  function gone(id) {
+    return Dash.api("GET", ITEM + encodeURIComponent(id)).then(function (res) {
+      if (res.status === 401) { Dash.signedOut(); return null; }
+      return res.status === 404;
+    }, function () { return false; });
   }
 
   function startPage() {
@@ -565,9 +573,11 @@ ${text}
       say("");
       question.busy(true, "delete-go", TEXT.deleting);
       rowsDisabled(true);
-      function settle(res) {
+      // res: the delete's last answer, or null when none came; asked: whether the item itself
+      // then answered that it is gone.
+      function settle(res, asked) {
         if (res !== null && res.status === 401) { Dash.signedOut(); return; }
-        var ok = done(res);
+        var ok = done(res) || (res === null && asked === true);
         if (ok) question.close(false);
         // However the delete ended, the list is read again before the page says anything;
         // the rows' buttons stay disabled until then.
@@ -576,11 +586,6 @@ ${text}
           working = false;
           question.busy(false, "delete-go");
           rowsDisabled(false);
-          // No answer came: the list read again decides. An item no longer listed was deleted.
-          if (res === null && r === true && !listedNow(it.id)) {
-            ok = true;
-            question.close(false);
-          }
           if (ok) {
             say(r === true ? "" : TEXT.notReloaded);
             $("h-page").focus();
@@ -590,7 +595,12 @@ ${text}
           $("delete-go").focus();
         });
       }
-      run(it.id).then(settle, function () { return settle(null); });
+      run(it.id).then(function (res) { return settle(res, false); }, function () {
+        return gone(it.id).then(function (g) {
+          if (g === null) return;
+          return settle(null, g);
+        });
+      });
     });
   }
 
