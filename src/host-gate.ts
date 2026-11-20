@@ -111,6 +111,10 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /dash/tours.js": "app",
   "GET /dash/dash.css": "app",
   "GET /dash/dash.js": "app",
+  "GET /images": "app",
+  "GET /dash/images.js": "app",
+  "GET /gifs": "app",
+  "GET /dash/gifs.js": "app",
   "GET /storage": "app",
   "GET /dash/storage.js": "app",
   "GET /admin": "app",
@@ -124,6 +128,18 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /p/:name": "tours-redirect",
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": "tours",
   "GET /t/:slug": "tours-redirect",
+
+  // The pages and files a shared link opens, the preview pictures, and the pages' own
+  // stylesheet and script: on the img address when it is set, else on the tours address.
+  // They take no credential, so nothing of the session or a token reaches them.
+  "GET /i/:name": "media",
+  "GET /i/:name/download": "media",
+  "GET /i/:name/preview": "media",
+  "GET /r/:name": "media",
+  "GET /r/:name/download": "media",
+  "GET /r/:name/preview": "media",
+  "GET /s/share.css": "media",
+  "GET /s/share.js": "media",
 
   // The API documentation. The tours origin holds what users publish and may be framed
   // anywhere, so nothing of the page is served from it: it sends the page on to the app

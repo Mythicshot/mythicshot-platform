@@ -71,7 +71,7 @@ async function signedIn(deps: Parameters<typeof seedAccount>[0], opts: { admin?:
 
 const BRAND = "Mythicshot";
 const NOSCRIPT = "This page needs JavaScript.";
-const TABS = ["Tours", "Storage", "Account", "Admin"];
+const TABS = ["Images", "GIFs", "Tours", "Storage", "Account", "Admin"];
 
 /** Every text of the Tours page's body, in order, hidden parts included. Nothing else may be in it. */
 const TOURS_WORDING = [
@@ -308,18 +308,22 @@ describe("the dashboard's pages and files", () => {
     expect(SCRIPTS.length).toBe(DASH_PAGES.length + 1);
   });
 
-  it("the bar holds the brand, the four tabs of this version in order, and a place for the username; no Images or GIFs", () => {
+  it("the bar holds the brand, the six tabs in order, and a place for the username", () => {
     const doc = new FakeDocument(TOURS_HTML);
     const nav = doc.body.all().find((e) => e.tagName === "nav")!;
     const links = nav.all().filter((e) => e.tagName === "a");
     expect(links.map((a) => [a.textContent, a.getAttribute("href"), a.getAttribute("aria-current"), a.hidden])).toEqual([
+      ["Images", "/images", null, false],
+      ["GIFs", "/gifs", null, false],
       ["Tours", "/tours", "page", false],
       ["Storage", "/storage", null, false],
       ["Account", "/account", null, false],
       ["Admin", "/admin", null, true],
     ]);
     expect(DASH_TABS.map((t) => t.label)).toEqual(TABS);
-    for (const word of ["Images", "GIFs", "/images", "/gifs"]) for (const text of [TOURS_HTML, DASH_JS, TOURS_JS]) expect(text, word).not.toContain(word);
+    // The Tours page and the shared script name Images and GIFs only in the bar: nowhere else.
+    for (const word of ["/images", "/gifs"]) expect(TOURS_HTML.split(word).length - 1, word).toBe(1);
+    for (const word of ["Images", "GIFs", "/images", "/gifs"]) for (const text of [DASH_JS, TOURS_JS]) expect(text, word).not.toContain(word);
     const user = doc.getElementById("dash-user")!;
     expect([user.textContent, user.className]).toEqual(["", "who"]);
     expect(doc.body.all().find((e) => e.className === "brand")!.textContent).toBe(BRAND);
@@ -340,7 +344,7 @@ describe("the dashboard's pages and files", () => {
     for (const script of ["/dash/dash.js", "https://evil.example.net/x.js", "//evil.example.net/x.js", "/dash/../x.js", "/dash/x.js?a", '/dash/x.js" onload="x', "/signin/signin.js"]) {
       expect(() => dashHtml({ title: "x", active: "tours", main: "", script }), script).toThrow();
     }
-    expect(() => dashHtml({ title: "x", active: "images" as never, main: "", script: "/dash/x.js" })).toThrow();
+    expect(() => dashHtml({ title: "x", active: "videos" as never, main: "", script: "/dash/x.js" })).toThrow();
   });
 
   it("the pages load nothing from another origin and carry no inline script, style or handler", () => {

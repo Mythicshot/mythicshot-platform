@@ -2,7 +2,7 @@
 // (the brand, the tabs and the username) and the page's own body. The shared stylesheet
 // and script are src/dash/style.ts and src/dash/script.ts; src/dash/routes.ts serves them.
 //
-// How a page joins the dashboard (Tours, Storage, Account and Admin are built this way):
+// How a page joins the dashboard (Images, GIFs, Tours, Storage, Account and Admin are built this way):
 //
 // 1. Its body and its script live in a module of its own under src/dash/, as the Tours
 //    page does in src/dash/tours.ts: the body as an HTML string (fixed text only, no data),
@@ -31,8 +31,8 @@
 //    (test/hosts.test.ts), in OPEN (test/isolation.test.ts) and in UNDOCUMENTED_ROUTES
 //    (src/docs/openapi.ts), and its words are pinned in a test as test/dash.test.ts does.
 //
-// The tabs are fixed here, in this order: Tours, Storage, Account, Admin. Images and GIFs
-// come with a later plan and are not shown until then. The Admin tab is in every page,
+// The tabs are fixed here, in this order: Images, GIFs, Tours, Storage, Account, Admin.
+// Where a person lands (after signing in, and on GET /) is still Tours. The Admin tab is in every page,
 // hidden; only the shared script shows it, and only when the session says the person is
 // an admin. Nothing about anyone is in the document: the username, too, is filled in by
 // the shared script through textContent.
@@ -40,6 +40,8 @@ import { escapeHtml } from "../signin/invite.ts";
 
 /** The tabs of this version, in order: what each is called and where it leads. */
 export const DASH_TABS = [
+  { key: "images", label: "Images", href: "/images" },
+  { key: "gifs", label: "GIFs", href: "/gifs" },
   { key: "tours", label: "Tours", href: "/tours" },
   { key: "storage", label: "Storage", href: "/storage" },
   { key: "account", label: "Account", href: "/account" },

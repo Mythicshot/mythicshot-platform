@@ -266,6 +266,34 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
     reason: "a published tour's page, for visitors: only a published tour answers, from its snapshot",
     samples: (w) => [w.a.ids.published.slug, w.a.ids.draft.slug, w.a.ids.publishing.slug, inventedIds().published.slug].map((slug) => ({ method: "GET", path: `/t/${slug}` })),
   },
+  // Shared items: found by their 100-bit link id alone, and only while online and of an
+  // account that is not disabled; every other link is the one 404 page.
+  "GET /i/:name": {
+    reason: "a shared image's page or file, for visitors: only an online item answers, by its random link id, never by its database id",
+    samples: (w) => [{ method: "GET", path: `/i/${w.a.ids.media.imageLink}` }, { method: "GET", path: `/i/${w.a.ids.media.imageLink}.png` }, { method: "GET", path: `/i/${w.a.ids.media.uploadingLink}` }, { method: "GET", path: `/i/${w.a.ids.media.image}` }, { method: "GET", path: `/i/${w.a.ids.media.clipLink}` }, { method: "GET", path: `/i/${inventedIds().media.imageLink}` }],
+  },
+  "GET /i/:name/download": {
+    reason: "a shared image's file to save, for visitors: only an online item answers, by its random link id",
+    samples: (w) => [{ method: "GET", path: `/i/${w.a.ids.media.imageLink}/download` }, { method: "GET", path: `/i/${w.a.ids.media.uploadingLink}/download` }, { method: "GET", path: `/i/${inventedIds().media.imageLink}/download` }],
+  },
+  "GET /i/:name/preview": {
+    reason: "a shared image's preview picture, for link previews: only an online item's, by its random link id",
+    samples: (w) => [{ method: "GET", path: `/i/${w.a.ids.media.imageLink}/preview` }, { method: "GET", path: `/i/${w.a.ids.media.uploadingLink}/preview` }, { method: "GET", path: `/i/${inventedIds().media.imageLink}/preview` }],
+  },
+  "GET /r/:name": {
+    reason: "a shared clip's page or file, for visitors: only an online item answers, by its random link id, never by its database id",
+    samples: (w) => [{ method: "GET", path: `/r/${w.a.ids.media.clipLink}` }, { method: "GET", path: `/r/${w.a.ids.media.clipLink}.gif` }, { method: "GET", path: `/r/${w.a.ids.media.imageLink}` }, { method: "GET", path: `/r/${w.a.ids.media.clip}` }, { method: "GET", path: `/r/${inventedIds().media.clipLink}` }],
+  },
+  "GET /r/:name/download": {
+    reason: "a shared clip's file to save, for visitors: only an online item answers, by its random link id",
+    samples: (w) => [{ method: "GET", path: `/r/${w.a.ids.media.clipLink}/download` }, { method: "GET", path: `/r/${inventedIds().media.clipLink}/download` }],
+  },
+  "GET /r/:name/preview": {
+    reason: "a shared clip's preview picture, for link previews and its poster: only an online item's, by its random link id",
+    samples: (w) => [{ method: "GET", path: `/r/${w.a.ids.media.clipLink}/preview` }, { method: "GET", path: `/r/${inventedIds().media.clipLink}/preview` }],
+  },
+  "GET /s/share.css": { reason: "the shared-item pages' stylesheet, fixed text", samples: () => [{ method: "GET", path: "/s/share.css" }] },
+  "GET /s/share.js": { reason: "the shared-item pages' script, fixed text", samples: () => [{ method: "GET", path: "/s/share.js" }] },
   "GET /docs": { reason: "the documentation page, the same for everyone", samples: () => [{ method: "GET", path: "/docs" }] },
   "GET /docs/:file{(?:viewer|docs)\\.[0-9a-f]{16}\\.(?:js|css)}": { reason: "the documentation page's own files", samples: () => [{ method: "GET", path: "/docs/viewer.0123456789abcdef.js" }] },
   "GET /docs/licences.txt": { reason: "licence notices, fixed text", samples: () => [{ method: "GET", path: "/docs/licences.txt" }] },
@@ -285,6 +313,10 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
   "GET /dash/tours.js": { reason: "the Tours page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/tours.js" }] },
   "GET /dash/dash.css": { reason: "the dashboard's stylesheet, fixed text", samples: () => [{ method: "GET", path: "/dash/dash.css" }] },
   "GET /dash/dash.js": { reason: "the dashboard's shared script, fixed text", samples: () => [{ method: "GET", path: "/dash/dash.js" }] },
+  "GET /images": { reason: "the dashboard's Images page, fixed text the same for everyone; the items it shows its script asks the API for", samples: () => [{ method: "GET", path: "/images" }] },
+  "GET /dash/images.js": { reason: "the Images page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/images.js" }] },
+  "GET /gifs": { reason: "the dashboard's GIFs page, fixed text the same for everyone; the items it shows its script asks the API for", samples: () => [{ method: "GET", path: "/gifs" }] },
+  "GET /dash/gifs.js": { reason: "the GIFs page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/gifs.js" }] },
   "GET /storage": { reason: "the dashboard's Storage page, fixed text the same for everyone; the numbers it shows its script asks the API for", samples: () => [{ method: "GET", path: "/storage" }] },
   "GET /dash/storage.js": { reason: "the Storage page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/storage.js" }] },
   "GET /admin": { reason: "the dashboard's Admin page, fixed text the same for everyone; its script asks the admin routes only for an admin's session, and they answer no one else", samples: () => [{ method: "GET", path: "/admin" }] },
@@ -1220,6 +1252,13 @@ describe("routes with no owner", () => {
     // A code nobody was given gets the one refusal of a sign-in link.
     expect(statuses["POST /api/v1/signin/complete"]).toEqual([403]);
     expect(statuses["GET /"]).toEqual([302]);
+    // A shared item answers only online, by its link id and under its own letter; the image has a preview, the clip none.
+    expect(statuses["GET /i/:name"]).toEqual([200, 200, 404, 404, 404, 404]);
+    expect(statuses["GET /i/:name/download"]).toEqual([200, 404, 404]);
+    expect(statuses["GET /i/:name/preview"]).toEqual([200, 404, 404]);
+    expect(statuses["GET /r/:name"]).toEqual([200, 200, 404, 404, 404]);
+    expect(statuses["GET /r/:name/download"]).toEqual([200, 404]);
+    expect(statuses["GET /r/:name/preview"]).toEqual([404, 404]);
     for (const key of Object.keys(OPEN).filter((k) => !k.includes(" /setup") && !k.includes(":slug") && !k.includes(":name") && !k.endsWith("/signin/complete") && k !== "GET /")) for (const s of statuses[key]) expect(s, key).toBe(200);
 
     // A draft's link, the link of a tour whose publish has not finished, and a picture that

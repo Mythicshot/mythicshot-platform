@@ -2,13 +2,27 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
-## 0.1.22 (2026-11-20)
+## 0.1.24 (2026-11-20)
 
 - Dashboard, Storage page: images and GIFs count beside tours. The line shows how many images, GIFs and tours the workspace has, what takes the room has GIFs and Images rows, and "Largest items" lists all three kinds together, each marked Tour, Image or GIF.
 - "Delete" works for every kind on the Storage page. An image or a GIF gets its own question and is removed through the shared items API.
 - `GET /api/v1/usage` adds `images` and `gifs` (items online) and, in `counted`, the bytes of images and of GIFs, split from the items' share of `used_bytes`. An item still being sent counts there, and one being deleted until its files are gone. The numbers in `counted` add up to `used_bytes`.
 - `GET /api/v1/usage/largest` adds `largest`: the ten largest tours, images and GIFs together, each with its kind. The `tours` list is unchanged.
 - The admin's list shows the bytes of images and of GIFs as two totals, and nothing else of anyone's items.
+
+## 0.1.23 (2026-11-20)
+
+- Dashboard, Images and GIFs pages: the workspace's shared images and clips, newest first, each with a small preview, its size, the day it was shared and its link. "Copy link", "Open" and "Delete", and "Show more" past the first 50.
+- Delete asks first, and the list is read again afterwards so it always shows what is true.
+- The bar now reads Images, GIFs, Tours, Storage, Account and Admin. Signing in still lands on Tours.
+
+## 0.1.21 (2026-11-20)
+
+- A shared image or clip has its own page at its link: the picture as large as it fits, or the clip playing in a loop without sound, with its title, size and date, "Open full size" or "Open file", and "Download". The page never says who shared it.
+- Chat apps that preview links show the picture and the title.
+- A link to an item that was deleted, is not finished, or belongs to a disabled account shows one "This link no longer works" page, the same as a link that never existed.
+- Clips can be watched from any point, and a file is read only as far as it is played.
+- Upgrading: an install whose image or clip size setting is above 76,000,000 bytes (38 parts of 2,000,000 bytes) is now refused at start, because a larger file could not be sent in one answer within the limit of storage and database calls a request may make. Lower the setting to 76,000,000 bytes or less. An item already stored with more parts than that answers "This link no longer works".
 
 ## 0.1.20 (2026-11-20)
 

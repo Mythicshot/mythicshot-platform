@@ -3,11 +3,12 @@
 // The cross-workspace cases are in test/isolation.test.ts with every other route's.
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
-import { SUBREQUEST_BUDGET } from "../src/budget.ts";
+import { SUBREQUEST_BUDGET, metered } from "../src/budget.ts";
 import { CLIP_MAX_DURATION_MS, DEFAULT_MEDIA_LIMITS, MAX_LOOSE_CLAIMS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, mediaLimits, mediaLimitsProblem, mediaLink, onlineItemFiles } from "../src/media.ts";
 import type { Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
 import { LIMITS_MEDIA, workspaceKey } from "../src/rate.ts";
+import { MAX_SERVED_PARTS, SERVE_LOOKUP_CALLS } from "../src/limits.ts";
 import { storageFull, type Usage } from "../src/usage.ts";
 import { ORIGIN, abort, count, createUpload, fixtures, gif, jpeg, mp4, png, send, uploadTour, type Call, type Json } from "./bundle.ts";
 
@@ -883,6 +884,86 @@ describe("the three invariants", () => {
     expect(await count(deps, "media_object")).toBe(3);
   });
 
+  it("(b) expiry is final: a send whose object lands after its claim's lifetime is never stored, even when another send pruned it meanwhile", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await create(deps, token, CLIP)).json.id as string;
+    const file = fileOf(CLIP);
+    // The object of the slow send of part 1 lands; then the clock passes the claim's
+    // lifetime. Another request prunes the claim as loose: it deletes the claim's object,
+    // the slow send's batch runs, and only then does the pruner delete the row (with its
+    // `current = 0` re-check), as pruneClaims does in that order.
+    const slow = interrupt(deps, async () => {
+      now += 5 * 60 * 1000 + 1000;
+    });
+    const pruneMeanwhile: Deps = {
+      ...slow,
+      db: {
+        ...slow.db,
+        batch: async (stmts) => {
+          if (!stmts.some((st) => st.sql.includes("SET stored_at"))) return deps.db.batch(stmts);
+          const loose = await deps.db.all<{ claim: string }>("SELECT claim FROM media_object WHERE media_id = ? AND n = 1 AND current = 0 AND stored_at IS NULL AND claimed_at < ?", [id, now - 5 * 60 * 1000]);
+          expect(loose).toHaveLength(1);
+          await deps.drafts.delete(loose.map((l) => `m/${id}/part-001.${l.claim}`));
+          await deps.db.batch(stmts);
+          await deps.db.run("DELETE FROM media_object WHERE media_id = ? AND current = 0 AND (stored_at IS NOT NULL OR claimed_at < ?) AND claim = ?", [id, now - 5 * 60 * 1000, loose[0].claim]);
+        },
+      },
+    };
+    const r = await putPart(pruneMeanwhile, token, id, 1, partOf(file, 1));
+    expect([r.status, r.json?.error]).toEqual([409, "superseded"]);
+    expect(await deps.db.first("SELECT count(*) AS n FROM media_object WHERE media_id = ? AND n = 1 AND current = 1", [id])).toEqual({ n: 0 });
+    expect(await count(deps, "media_object")).toBe(0);
+    expect(await objectsOf(draftKeys, id)).toEqual([]);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+    // A fresh send of the part goes through, and the item can be finished with every object there.
+    for (const n of [0, 1, 2]) expect((await putPart(deps, token, id, n, partOf(file, n))).status).toBe(204);
+    expect((await commit(deps, token, id)).status).toBe(200);
+    const files = await onlineItemFiles(deps, (await get(deps, token, id)).json.link_id);
+    for (const key of files!.parts) expect(await readAll(deps, key)).not.toBeNull();
+  });
+
+  it("(b) a send past the claim's lifetime alone, with nobody pruning, is not stored either", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    const slow = interrupt(deps, async () => {
+      now += 5 * 60 * 1000 - 60_000 + 1;
+    });
+    refused(await putPart(slow, token, id, 0, fileOf(IMAGE)), 409, "superseded");
+    expect(await count(deps, "media_object")).toBe(0);
+    expect(await objectsOf(draftKeys, id)).toEqual([]);
+    expect((await putPart(deps, token, id, 0, fileOf(IMAGE))).status).toBe(204);
+  });
+
+  it("at the bound of loose claims, a finished item answers already_online, a full allowance storage_full, and a failing clean-up still 429", async () => {
+    const { deps } = await makeDeps({ storageAllowanceBytes: IMAGE.bytes + 4 * 2000 + 500 });
+    const { token } = await seedWorkspace(deps, "Acme");
+    const now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    const loose = async (n: number, bytes: number) => {
+      for (let i = 0; i < MAX_LOOSE_CLAIMS; i++) {
+        await deps.db.run("INSERT INTO media_object (media_id, claim, n, ext, bytes, claimed_at) VALUES (?, ?, ?, ?, ?, ?)", [id, `${n === -1 ? "e" : "d"}${i}`.padEnd(24, "0"), n, n === -1 ? "png" : null, bytes, now]);
+      }
+    };
+    // Young loose preview claims: the allowance is the reason a further preview is refused.
+    await loose(-1, 2000);
+    refused(await putPreview(deps, token, id, png(10, 10, 1000)), 413, "storage_full");
+    // A failing clean-up on the way does not turn the 429 into a 500.
+    const failing: Deps = { ...deps, drafts: { ...deps.drafts, delete: () => Promise.reject(new Error("the store is down")) } };
+    await deps.db.run("UPDATE media_object SET claimed_at = ? WHERE media_id = ? AND claim LIKE 'e1%'", [now - 10 * 60 * 1000, id]);
+    refused(await quiet(() => putPart(failing, token, id, 0, fileOf(IMAGE))), 429, "too_many_items");
+    // An item that went online meanwhile answers as one.
+    await deps.db.run("UPDATE media SET state = 'online' WHERE id = ?", [id]);
+    await deps.db.run("UPDATE media_object SET claimed_at = ? WHERE media_id = ?", [now, id]);
+    expect((await putPart(deps, token, id, 0, fileOf(IMAGE))).json.error).toBe("already_online");
+  });
+
   it("(c) a commit leaves no replaced or expired claim behind", async () => {
     const { deps, draftKeys } = await makeDeps();
     const { token } = await seedWorkspace(deps, "Acme");
@@ -949,7 +1030,7 @@ describe("the serving lookup", () => {
     expect((await commit(deps, token, id)).status).toBe(200);
     const files = await onlineItemFiles(deps, linkId);
     expect(files).toEqual({
-      id, kind: "clip", contentType: "video/mp4", bytes: CLIP.bytes, width: 1280, height: 720, durationMs: 12_000, title: null,
+      id, kind: "clip", contentType: "video/mp4", bytes: CLIP.bytes, width: 1280, height: 720, durationMs: 12_000, title: null, sharedAt: expect.any(Number),
       parts: [expect.stringMatching(new RegExp(`^m/${id}/part-000\\.[0-9a-f]{24}$`)), expect.stringMatching(/part-001\./), expect.stringMatching(/part-002\./)],
       preview: { key: expect.stringMatching(new RegExp(`^m/${id}/preview\\.[0-9a-f]{24}\\.png$`)), type: "png" },
     });
@@ -963,6 +1044,15 @@ describe("the serving lookup", () => {
     expect(joined).toEqual(file);
     expect(await onlineItemFiles(deps, "a".repeat(20))).toBeNull();
     expect(await onlineItemFiles(deps, "not a link id")).toBeNull();
+    // The shared date is the commit's moment.
+    const row = await deps.db.first<{ online_at: number }>("SELECT online_at FROM media WHERE id = ?", [id]);
+    expect(files!.sharedAt).toBe(row!.online_at);
+    // Two database calls for every input: online, unknown, malformed, empty.
+    for (const asked of [linkId, "a".repeat(20), "not a link id", "", linkId.toUpperCase()]) {
+      const m = metered(deps);
+      await onlineItemFiles(m.deps, asked);
+      expect(m.calls(), asked).toBe(2);
+    }
     await deps.db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [owner.userId]);
     expect(await onlineItemFiles(deps, linkId)).toBeNull();
     await deps.db.run("UPDATE user SET status = 'active' WHERE id = ?", [owner.userId]);
@@ -1014,10 +1104,16 @@ describe("age, rate limits and settings", () => {
     expect((await putPart(deps, other.token, theirs, 0, fileOf(IMAGE))).status).toBe(204);
   });
 
-  it("limit settings that would need more than 999 parts, or are no whole numbers, are a configuration problem", () => {
+  it("limit settings that would need more parts than one public answer can send within the call budget, or are no whole numbers, are a configuration problem", () => {
     expect(mediaLimitsProblem({})).toBeNull();
-    expect(mediaLimitsProblem({ mediaImageMaxBytes: 999 * PART_BYTES, mediaClipMaxBytes: 1, mediaImageMaxSide: 65_535 })).toBeNull();
-    for (const bad of [{ mediaClipMaxBytes: 999 * PART_BYTES + 1 }, { mediaImageMaxBytes: 0 }, { mediaImageMaxBytes: 1.5 }, { mediaImageMaxSide: 0 }, { mediaImageMaxSide: 65_536 }]) {
+    // The lookup's calls and the most parts fill the budget exactly, and the defaults are well inside it.
+    expect(SERVE_LOOKUP_CALLS + MAX_SERVED_PARTS).toBe(SUBREQUEST_BUDGET);
+    expect(Math.ceil(DEFAULT_MEDIA_LIMITS.clipMaxBytes / PART_BYTES)).toBeLessThanOrEqual(MAX_SERVED_PARTS);
+    expect(mediaLimitsProblem({ mediaImageMaxBytes: MAX_SERVED_PARTS * PART_BYTES, mediaClipMaxBytes: MAX_SERVED_PARTS * PART_BYTES, mediaImageMaxSide: 65_535 })).toBeNull();
+    expect(mediaLimitsProblem({ mediaClipMaxBytes: MAX_SERVED_PARTS * PART_BYTES + 1 })).toBe(
+      `media settings: the most bytes of a shared image or clip must be a whole number from 1 to ${MAX_SERVED_PARTS * PART_BYTES} (${MAX_SERVED_PARTS} parts of ${PART_BYTES} bytes, which one answer can send within the call budget)`,
+    );
+    for (const bad of [{ mediaClipMaxBytes: MAX_SERVED_PARTS * PART_BYTES + 1 }, { mediaImageMaxBytes: MAX_SERVED_PARTS * PART_BYTES + 1 }, { mediaClipMaxBytes: 999 * PART_BYTES }, { mediaImageMaxBytes: 0 }, { mediaImageMaxBytes: 1.5 }, { mediaImageMaxSide: 0 }, { mediaImageMaxSide: 65_536 }]) {
       expect(mediaLimitsProblem(bad), JSON.stringify(bad)).toMatch(/^media settings: /);
     }
     expect(() => mediaLimits({ publicImageBase: "", setupCode: null, mediaClipMaxBytes: 10 ** 10 })).toThrow(/media settings/);

@@ -166,6 +166,28 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
   .narrow-only { display: inline; }
 }
 
+/* The Images and GIFs pages. */
+.media { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+.media th { text-align: left; font-size: 0.76rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 0 10px 8px 0; white-space: nowrap; }
+.media td { padding: 11px 10px 11px 0; border-top: 1px solid var(--line); vertical-align: middle; }
+.media .n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.media .t { font-weight: 600; }
+.media .d { color: var(--muted); font-size: 0.85rem; }
+.media .thumb-cell { width: 66px; }
+.thumb { position: relative; display: block; width: 56px; height: 36px; overflow: hidden; border-radius: 6px; border: 1px solid var(--line); background: linear-gradient(135deg, var(--tag-bg) 0 55%, var(--line) 55% 100%); }
+.thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.thumb.play::after { content: ""; position: absolute; left: 50%; top: 50%; transform: translate(-35%, -50%); border-left: 10px solid var(--muted); border-top: 6px solid transparent; border-bottom: 6px solid transparent; filter: drop-shadow(0 0 1px var(--card)); }
+@media (max-width: 720px) {
+  .media, .media tbody { display: block; }
+  .media thead, .media td.size, .media td.when { display: none; }
+  .media tr { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 0 12px; align-items: start; padding: 12px 0; border-top: 1px solid var(--line); }
+  .media tr:first-child { border-top: 0; padding-top: 0; }
+  .media tr:last-child { padding-bottom: 0; }
+  .media td { display: block; padding: 0; border-top: 0; }
+  .media td.thumb-cell { width: auto; }
+  .media td.acts-cell { grid-column: 1 / -1; margin-top: 8px; }
+}
+
 /* The Storage page. */
 .total { margin: 0; }
 .meter { height: 10px; margin: 0 0 8px; border-radius: 8px; background: var(--line); overflow: hidden; }
