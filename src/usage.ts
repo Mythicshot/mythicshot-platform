@@ -8,12 +8,17 @@
 //   its age. An upload can be committed until it is swept, so it holds its room until
 //   then; otherwise one that outlived the day could land on top of a newer one, past the
 //   allowance.
-// - every shared item that is not closing (src/media.ts): the bytes its create declared,
-//   reserved from that create on, and the size of its preview once one is being stored.
-//   An item that is being deleted or was swept is closing, and stops counting at once.
-//   GET /api/v1/usage gives this sum in two parts, the images and the GIFs (clips), each
-//   with its items' previews; an item still being sent counts in its kind's part, never in
-//   uploads_in_progress, which stays the tours' uploads alone.
+// - every shared item (src/media.ts): the bytes its create declared, reserved from that
+//   create on (they hold its current parts), and every other object it has a claim row
+//   for: its current preview, and each claim that is not current (a send under way, a part
+//   or preview it replaced that is not removed yet, a send that died). An item that is being
+//   deleted or swept (closing) still counts until its row is removed, which happens only
+//   with its last object: a delete that finishes frees the room at once, and one that was
+//   cut off counts until it is retried.
+//   GET /api/v1/usage gives this sum in two parts by the item's kind, images and GIFs
+//   (clips), each with all of the above for its items in every state; an item still being
+//   sent counts in its kind's part, never in uploads_in_progress, which stays the tours'
+//   uploads alone.
 // Not counted: published copies (no size is recorded for them), pictures a replace took
 // out and files of a deleted tour that still wait to be cleaned up, uploads that are
 // closing, and upload_step.bytes (the reservation already holds the declared bytes). Two
@@ -57,18 +62,30 @@ export function allowanceFromSetting(raw: string | undefined): { ok: true; bytes
 
 // The four sums, each a scalar subquery over the row `p`, which holds the workspace id
 // as p.ws. Both USED_SQL and usageOf are built from these, so the number a create is held
-// against is the number shown. MEDIA is read in two parts for the usage answer
-// (mediaBytesOf); the two parts add up to MEDIA, as the kind is image or clip and nothing
-// else (migrations/0010_media.sql), and test/usage.test.ts holds them to that.
+// against is the number shown. MEDIA and its two parts for the usage answer are one
+// template (mediaBytes), which differs only in the kind it is held to; as the kind is image
+// or clip and nothing else (migrations/0010_media.sql), the two parts add up to MEDIA, and
+// test/usage.test.ts holds them to that.
 const PICTURES = "(SELECT coalesce(sum(s.bytes), 0) FROM tour t JOIN step s ON s.tour_id = t.id WHERE t.workspace_id = p.ws)";
 const LOGOS = "(SELECT coalesce(sum(t.logo_bytes), 0) FROM tour t WHERE t.workspace_id = p.ws)";
 const UPLOADS = "(SELECT coalesce(sum(u.reserved_bytes), 0) FROM upload u WHERE u.workspace_id = p.ws AND u.closing_at IS NULL)";
-const MEDIA = "(SELECT coalesce(sum(m.bytes + coalesce(m.preview_bytes, 0)), 0) FROM media m WHERE m.workspace_id = p.ws AND m.state <> 'closing')";
+/**
+ * Which of an item's claim rows (`o`, of media_object) count beside its declared bytes:
+ * every claim that is not current, and the current preview (n = -1). The current parts are
+ * the declared bytes themselves.
+ */
+const COUNTED_OBJECT = "(o.current = 0 OR o.n = -1)";
+/**
+ * The bytes of a workspace's items in every state, closing too: their declared bytes and
+ * their counted claim rows. With a kind, those of that kind's items alone.
+ */
+const mediaBytes = (kind?: "image" | "clip") => {
+  const only = kind === undefined ? "" : ` AND m.kind = '${kind}'`;
+  return `((SELECT coalesce(sum(m.bytes), 0) FROM media m WHERE m.workspace_id = p.ws${only}) + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o JOIN media m ON m.id = o.media_id WHERE m.workspace_id = p.ws${only} AND ${COUNTED_OBJECT}))`;
+};
+const MEDIA = mediaBytes();
 const TOURS = "(SELECT count(*) FROM tour t WHERE t.workspace_id = p.ws)";
 
-/** MEDIA for the items of one kind: what each image (or clip) that is not closing holds, its preview included. */
-const mediaBytesOf = (kind: "image" | "clip") =>
-  `(SELECT coalesce(sum(m.bytes + coalesce(m.preview_bytes, 0)), 0) FROM media m WHERE m.workspace_id = p.ws AND m.kind = '${kind}' AND m.state <> 'closing')`;
 /** How many items of one kind are online: an unfinished item and a closing one are not counted. */
 const mediaCountOf = (kind: "image" | "clip") => `(SELECT count(*) FROM media m WHERE m.workspace_id = p.ws AND m.kind = '${kind}' AND m.state = 'online')`;
 
@@ -87,9 +104,10 @@ export const LARGEST_TOURS = 10;
 
 /**
  * The size of one shared item in bytes, as a scalar expression over the row `m` of `media`
- * in scope: its declared bytes and its preview's, as MEDIA counts an item that is not closing.
+ * in scope: what deleting it frees, as MEDIA counts it for this item: its declared bytes and
+ * its counted claim rows (its current preview and every claim that is not current).
  */
-export const ITEM_BYTES_SQL = "(m.bytes + coalesce(m.preview_bytes, 0))";
+export const ITEM_BYTES_SQL = `(m.bytes + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o WHERE o.media_id = m.id AND ${COUNTED_OBJECT}))`;
 
 const PARAMS = "(SELECT ? AS ws) p";
 
@@ -100,7 +118,7 @@ const PARAMS = "(SELECT ? AS ws) p";
  * of accounts reads every workspace's with it (src/admin-api.ts), so the two can never
  * disagree.
  */
-export const USAGE_COLUMNS = `${PICTURES} AS pictures, ${LOGOS} AS logos, ${UPLOADS} AS uploads, ${mediaBytesOf("image")} AS image_bytes, ${mediaBytesOf("clip")} AS gif_bytes, ${TOURS} AS tours, ${mediaCountOf("image")} AS images, ${mediaCountOf("clip")} AS gifs`;
+export const USAGE_COLUMNS = `${PICTURES} AS pictures, ${LOGOS} AS logos, ${UPLOADS} AS uploads, ${mediaBytes("image")} AS image_bytes, ${mediaBytes("clip")} AS gif_bytes, ${TOURS} AS tours, ${mediaCountOf("image")} AS images, ${mediaCountOf("clip")} AS gifs`;
 
 /**
  * The bytes a workspace uses, as a scalar subquery for use inside another statement. It
@@ -132,8 +150,8 @@ export function allowanceParams(deps: Deps, workspaceId: string): Value[] {
 }
 
 /**
- * `media` is imageBytes + gifBytes: the shared items that are not closing, with their
- * previews. `used` is pictures + logos + uploads + media. `allowance` is null when there is
+ * `media` is MEDIA, imageBytes + gifBytes: the shared items in every state with their
+ * counted claim rows. `used` is pictures + logos + uploads + media. `allowance` is null when there is
  * no limit, and `over` is true only when there is one and more than it is used: exactly the
  * allowance is not over it. `tours` counts every tour; `images` and `gifs` count online
  * items only.
@@ -236,9 +254,11 @@ export function usageRoutes(app: Hono, deps: Deps): void {
    * - `tours`, as in the first version: the LARGEST_TOURS largest tours, each with its id,
    *   title and size (TOUR_BYTES_SQL);
    * - `largest`: the LARGEST_TOURS largest things of every kind, each a tour (`kind` "tour",
-   *   sized as in `tours`) or a shared item that is not closing (`kind` "image", or "gif"
-   *   for a clip, sized by ITEM_BYTES_SQL as the usage counts it, so an item still being
-   *   sent is listed: it holds room and can be deleted). An item without a title has null.
+   *   sized as in `tours`) or a shared item that is online or still being sent (`kind`
+   *   "image", or "gif" for a clip), sized by ITEM_BYTES_SQL: what deleting it frees. An
+   *   item still being sent is listed, as it holds room and can be deleted; a closing one is
+   *   not, as it is being deleted already (it counts in the usage until its files are gone).
+   *   An item without a title has null.
    * One statement, whatever the number of tours and items. It only reads.
    */
   app.get("/api/v1/usage/largest", async (c) => {

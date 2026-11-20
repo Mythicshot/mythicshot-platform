@@ -285,7 +285,7 @@ describe("the API description", () => {
     // What is counted and what is not is said where a client reads it.
     for (const text of ["published", "24 hours", "No limit", "never deletes"]) expect(op.description, text).toContain(text);
     // Shared items: how an unfinished one counts, that only online ones are counted as items, and that counted adds up.
-    for (const text of ["shared image and clip with its preview", "not in uploads_in_progress", "items that are online", "add up to used_bytes"]) expect(op.description, text).toContain(text);
+    for (const text of ["every shared image and clip", "an item being deleted counts until then", "not in uploads_in_progress", "items that are online", "add up to used_bytes"]) expect(op.description, text).toContain(text);
     expect(usage.properties.counted.description).toContain("The five numbers add up to used_bytes.");
     expect(usage.properties.used_bytes.description).toContain("the five numbers of counted together");
   });

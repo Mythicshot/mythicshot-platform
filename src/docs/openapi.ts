@@ -11,7 +11,7 @@
 // it fetched the description from. The one example carries a placeholder address.
 import { ADMIN_PAGE, MAX_ALLOWANCE_BYTES } from "../admin-api.ts";
 import { LIMITS } from "../manifest.ts";
-import { CLIP_MAX_DURATION_MS, CLIP_MAX_SIDE, DEFAULT_MEDIA_LIMITS, LIST_PAGE, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, TITLE_MAX } from "../media.ts";
+import { CLIP_MAX_DURATION_MS, CLIP_MAX_SIDE, DEFAULT_MEDIA_LIMITS, LIST_PAGE, MAX_LOOSE_CLAIMS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, TITLE_MAX } from "../media.ts";
 import { LIMITS_MEDIA } from "../rate.ts";
 import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../publish.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
@@ -220,7 +220,7 @@ function introduction(): string {
     `- One publish request copies up to ${COPY_BATCH} images; one delete request removes up to ${DELETE_FILES_PER_CALL} files.`,
     `- ${DEFAULT_MAX_OPEN_UPLOADS} open uploads per workspace, unless the server's settings give another number.`,
     `- An upload that is not finished is removed after ${hours} hours.`,
-    `- A shared image: ${n(DEFAULT_MEDIA_LIMITS.imageMaxBytes)} bytes and ${n(DEFAULT_MEDIA_LIMITS.imageMaxSide)} pixels on a side, PNG or JPEG. A shared clip: ${n(DEFAULT_MEDIA_LIMITS.clipMaxBytes)} bytes, GIF or MP4, at most ${n(CLIP_MAX_SIDE)} pixels on a side and ${CLIP_MAX_DURATION_MS / 60_000} minutes long. The server's settings can give other numbers for the image and clip sizes. Each is sent in parts of ${n(PART_BYTES)} bytes. An item's preview: ${n(PREVIEW_RULE.maxBytes)} bytes and ${n(PREVIEW_RULE.maxSide)} pixels on a side, PNG or JPEG. A workspace starts at most ${LIMITS_MEDIA.create.most} items an hour, and an item that is not finished is removed after ${MEDIA_MAX_AGE_MS / 3_600_000} hours.`,
+    `- A shared image: ${n(DEFAULT_MEDIA_LIMITS.imageMaxBytes)} bytes and ${n(DEFAULT_MEDIA_LIMITS.imageMaxSide)} pixels on a side, PNG or JPEG. A shared clip: ${n(DEFAULT_MEDIA_LIMITS.clipMaxBytes)} bytes, GIF or MP4, at most ${n(CLIP_MAX_SIDE)} pixels on a side and ${CLIP_MAX_DURATION_MS / 60_000} minutes long. The server's settings can give other numbers for the image and clip sizes. Each is sent in parts of ${n(PART_BYTES)} bytes. An item's preview: ${n(PREVIEW_RULE.maxBytes)} bytes and ${n(PREVIEW_RULE.maxSide)} pixels on a side, PNG or JPEG. A workspace starts at most ${LIMITS_MEDIA.create.most} items, sends at most ${n(LIMITS_MEDIA.part.most)} parts and ${LIMITS_MEDIA.preview.most} previews an hour, and an item that is not finished within ${MEDIA_MAX_AGE_MS / 3_600_000} hours is removed and can no longer be finished.`,
     "- A workspace may have a storage allowance, set by the server's settings or its admin. An upload or a shared item that would take the workspace over it is refused when it is started, with 413 `storage_full` and the numbers, before anything is stored. Nothing is ever deleted because of an allowance.",
     `- A publish that makes no progress for ${minutes} minutes counts as abandoned.`,
     "",
@@ -314,8 +314,8 @@ function schemas(): Record<string, Schema> {
             pictures: whole("The images of every step of every tour, published or not."),
             logos: whole("The tours' logos. A logo stored by a server before version 0.1.8 counts as 0."),
             uploads_in_progress: whole("The room held by tour uploads that are not finished: what each one needed when it was started. A shared item still being sent is not in it: it counts under images or gifs."),
-            images: whole("The shared images, each with its preview: every image online and every one still being sent, which counts its declared bytes from the moment it is started. One being deleted counts nothing."),
-            gifs: whole("The shared clips (GIFs and MP4s), each with its preview, counted as images are."),
+            images: whole("The shared images, in every state: each one's its declared bytes, its current preview, and every send of a part or preview that is not the current one yet or any more (one under way, one it replaced, one that died) until its file is removed. An image counts from the moment it is started, also while it is still being sent, and one being deleted counts until its files are gone."),
+            gifs: whole("The shared clips (GIFs and MP4s), counted as images are."),
           },
           "What used_bytes is made of, in bytes. The five numbers add up to used_bytes.",
         ),
@@ -341,7 +341,7 @@ function schemas(): Record<string, Schema> {
           kind: { type: "string", enum: ["tour", "image", "gif"], description: "tour, image, or gif for a shared clip (a GIF or an MP4). Delete a tour with DELETE /api/v1/tours/{id}, an image or a GIF with DELETE /api/v1/media/{id}." },
           id: { type: "string", pattern: "^(tour|med)_[0-9a-f]{24}$", description: "A tour's id (tour_…) or a shared item's (med_…)." },
           title: { type: ["string", "null"], description: "The title. null for a shared item that has none; a tour always has one. Show it as text: it may hold any characters." },
-          bytes: whole("The size in bytes, as GET /api/v1/usage counts it: a tour's as the tour list gives it, an item's declared bytes with its preview."),
+          bytes: whole("The size in bytes: what deleting it frees, as GET /api/v1/usage counts it. A tour's as the tour list gives it; an item's its declared bytes, its current preview, and every send of a part or preview that is not the current one yet or any more (one under way, one it replaced, one that died) until its file is removed."),
         }),
       },
     }),
@@ -494,8 +494,8 @@ function schemas(): Record<string, Schema> {
             pictures: whole("The images of every step of every tour."),
             logos: whole("The tours' logos."),
             uploads_in_progress: whole("The room held by tour uploads that are not finished."),
-            images: whole("The shared images with their previews, as one total."),
-            gifs: whole("The shared clips (GIFs and MP4s) with their previews, as one total."),
+            images: whole("The shared images, counted as in GET /api/v1/usage, as one total."),
+            gifs: whole("The shared clips (GIFs and MP4s), counted as in GET /api/v1/usage, as one total."),
           },
           "What used_bytes is made of, in bytes, as in GET /api/v1/usage. The five numbers add up to used_bytes.",
         ),
@@ -971,7 +971,7 @@ function paths(): OpenApiDoc["paths"] {
       delete: {
         tags: ["Items"],
         summary: "Delete a shared item",
-        description: "Removes an item, finished or not, with every part and its preview. Its bytes stop counting at once, and its public address stops working. When some files could not be removed yet, the answer is 500 cleanup_pending: send the same request again.",
+        description: "Removes an item, finished or not, with every part and its preview. Its public address stops working at once. 204 means nothing of it is left and its bytes no longer count. 500 cleanup_pending means it is deleted all the same, but some of its files are still to go (the store failed, or a part or preview was being sent at that moment), and it counts until they are: send the same request again.",
         operationId: "deleteMedia",
         security: TOKEN,
         parameters: [mediaId],
@@ -979,7 +979,7 @@ function paths(): OpenApiDoc["paths"] {
           "204": empty("Nothing of the item is left."),
           "401": UNAUTHORIZED,
           "404": noMedia(", or already deleted"),
-          "500": refusal("The item is deleted, but some of its files could not be removed yet. Send the same request again.", "cleanup_pending"),
+          "500": refusal("The item is deleted, but some of its files are still to be removed, and until they are its bytes count. Send the same request again.", "cleanup_pending"),
         },
       },
     },
@@ -997,8 +997,9 @@ function paths(): OpenApiDoc["paths"] {
           "400": refusal("bad_part: the part's length is not the one it must have. bad_media: part 0 is not a file of the declared type, or its width and height differ from the declared ones.", "bad_part", "bad_media"),
           "401": UNAUTHORIZED,
           "404": noMedia(", or the item has no part of that number"),
-          "409": refusal("The item is finished; its parts cannot change.", "already_online"),
+          "409": refusal("already_online: the item is finished; its parts cannot change. superseded: this send did not take its place (it took too long, or its claim was removed); the item is still open: check it and send again what is missing.", "already_online", "superseded"),
           "413": refusal("The part is too long.", "too_large"),
+          "429": { description: `This workspace already sent ${LIMITS_MEDIA.part.most} parts in the last hour, or ${MAX_LOOSE_CLAIMS} sends of this item have not finished yet.`, headers: retryAfter, content: refusal("", "too_many_items").content },
         },
       },
     },
@@ -1016,8 +1017,9 @@ function paths(): OpenApiDoc["paths"] {
           "400": refusal("The body is not a PNG or JPEG within the preview's size.", "bad_image"),
           "401": UNAUTHORIZED,
           "404": noMedia(""),
-          "409": refusal("The item is finished; its preview cannot change.", "already_online"),
+          "409": refusal("already_online: the item is finished; its preview cannot change. superseded: this send did not take its place (it took too long, or its claim was removed); the item is still open: send it again.", "already_online", "superseded"),
           "413": answer("too_large: the preview is too long. storage_full: it would take the workspace over its storage allowance; nothing was stored.", { oneOf: [refusalSchema("too_large"), ref("StorageFull")] }),
+          "429": { description: `This workspace already sent ${LIMITS_MEDIA.preview.most} previews in the last hour, or ${MAX_LOOSE_CLAIMS} sends of this item have not finished yet.`, headers: retryAfter, content: refusal("", "too_many_items").content },
         },
       },
       get: {
@@ -1060,7 +1062,7 @@ function paths(): OpenApiDoc["paths"] {
       get: {
         tags: ["Workspace"],
         summary: "The workspace's storage use",
-        description: `What the token's workspace uses of its storage allowance, in bytes. Counted: the image of every step of every tour, published or not; each tour's logo; and the room held by every upload that is not finished (its images as the manifest gives them, and for a logo it carries the logo_bytes it was started with, or ${n(LOGO_RULE.maxBytes)} bytes without, until the logo's real size is recorded when the upload is finished), until the upload is finished, cancelled or removed. An upload nobody finishes is not removed by the clock alone: it is removed when the workspace next starts an upload once it is more than ${hours} hours old, and until then its room is still counted here. Also counted: every shared image and clip with its preview, from the moment it is started (its declared bytes) until it is deleted or, unfinished after ${MEDIA_MAX_AGE_MS / 3_600_000} hours, removed. counted gives them as images and gifs (clips: GIFs and MP4s), and an item that is not finished counts there, under its own kind, not in uploads_in_progress, which holds the tours' uploads only. The top-level images and gifs count the items that are online. Not counted: the copies of images a published tour serves, files that wait to be removed after a delete or a replace, and an item being deleted. The five numbers of counted add up to used_bytes. allowance_bytes is null when neither the server's settings nor the workspace has one: No limit. over is true when more is used than the allowance, which can happen when an allowance is lowered; the server never deletes or unpublishes anything because of it, and only starting an upload that needs room is refused.`,
+        description: `What the token's workspace uses of its storage allowance, in bytes. Counted: the image of every step of every tour, published or not; each tour's logo; and the room held by every upload that is not finished (its images as the manifest gives them, and for a logo it carries the logo_bytes it was started with, or ${n(LOGO_RULE.maxBytes)} bytes without, until the logo's real size is recorded when the upload is finished), until the upload is finished, cancelled or removed. An upload nobody finishes is not removed by the clock alone: it is removed when the workspace next starts an upload once it is more than ${hours} hours old, and until then its room is still counted here. Also counted: every shared image and clip, with its declared bytes, its current preview, and every send of a part or preview that is not the current one yet or any more (one under way, one it replaced, one that died) until its file is removed, from the moment it is started until its files are gone after a delete, or after it is removed unfinished once ${MEDIA_MAX_AGE_MS / 3_600_000} hours old; an item being deleted counts until then. counted gives them as images and gifs (clips: GIFs and MP4s), and an item that is not finished counts there, under its own kind, not in uploads_in_progress, which holds the tours' uploads only. The top-level images and gifs count the items that are online. Not counted: the copies of images a published tour serves, and files of tours that wait to be removed after a delete or a replace. The five numbers of counted add up to used_bytes. allowance_bytes is null when neither the server's settings nor the workspace has one: No limit. over is true when more is used than the allowance, which can happen when an allowance is lowered; the server never deletes or unpublishes anything because of it, and only starting an upload that needs room is refused.`,
         operationId: "getUsage",
         security: TOKEN,
         responses: { "200": answer("The workspace's numbers.", ref("Usage")), "401": UNAUTHORIZED },
@@ -1070,7 +1072,7 @@ function paths(): OpenApiDoc["paths"] {
       get: {
         tags: ["Workspace"],
         summary: "The workspace's ten largest tours, images and GIFs",
-        description: `Two lists of the token's workspace. tours: the ${LARGEST_TOURS} largest tours, largest first, each with its id, its title and its size in bytes as the tour list gives it (its steps' images and its logo, as GET /api/v1/usage counts them). Tours of the same size come in the order of their id. largest: the ${LARGEST_TOURS} largest things of every kind together, each with its kind (tour, image, or gif for a clip), id, title (null for an item without one) and size in bytes as GET /api/v1/usage counts it (an item's declared bytes with its preview). It holds an item that is still being sent, as it takes room and can be deleted, but not one being deleted. Things of the same size come in the order of their id. Each list has fewer when the workspace has fewer; none for an empty one.`,
+        description: `Two lists of the token's workspace. tours: the ${LARGEST_TOURS} largest tours, largest first, each with its id, its title and its size in bytes as the tour list gives it (its steps' images and its logo, as GET /api/v1/usage counts them). Tours of the same size come in the order of their id. largest: the ${LARGEST_TOURS} largest things of every kind together, each with its kind (tour, image, or gif for a clip), id, title (null for an item without one) and size in bytes: what deleting it frees, as GET /api/v1/usage counts it (for an item, its declared bytes, its current preview and every send that is not current). It holds items online and items still being sent, which take room and can be deleted, but not one being deleted already, which still counts in GET /api/v1/usage until its files are gone. Things of the same size come in the order of their id. Each list has fewer when the workspace has fewer; none for an empty one.`,
         operationId: "getLargestTours",
         security: TOKEN,
         responses: { "200": answer("The largest tours, and the largest of every kind.", ref("LargestTours")), "401": UNAUTHORIZED },

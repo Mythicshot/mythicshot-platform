@@ -610,7 +610,7 @@ describe("one workspace against another", () => {
     for (const n of invented) expect(names).not.toContain(n);
     for (const side of [w.a, w.b]) {
       const s = await snapshotOf(w.deps, side, w.keys);
-      for (const table of ["workspace", "user", "membership", "signin_method", "signin_code", "session", "email_change", "audit", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object", "media", "media_part"]) {
+      for (const table of ["workspace", "user", "membership", "signin_method", "signin_code", "session", "email_change", "audit", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object", "media", "media_object"]) {
         expect(s.rows[table].length, `${side.name} has no row in ${table}`).toBeGreaterThan(0);
       }
       // Every file a row names is there, but the one picture the publish in progress has not copied yet.
@@ -814,10 +814,15 @@ describe("one workspace against another", () => {
       const pictures = sum(s.rows.step, "bytes");
       const logos = sum(s.rows.tour, "logo_bytes");
       const uploads = sum(s.rows.upload.filter((u) => u.closing_at === null), "reserved_bytes");
-      const live = s.rows.media.filter((m) => m.state !== "closing");
-      const of = (kind: string) => live.filter((m) => m.kind === kind);
-      const images = sum(of("image"), "bytes") + sum(of("image"), "preview_bytes");
-      const gifs = sum(of("clip"), "bytes") + sum(of("clip"), "preview_bytes");
+      // Every item in every state with its counted claim rows (the current preview, every claim that is not current), split by kind.
+      const counts = (o: Json) => o.current === 0 || o.n === -1;
+      const of = (kind: string) => s.rows.media.filter((m) => m.kind === kind);
+      const bytesOf = (kind: string) => {
+        const ids = new Set(of(kind).map((m) => m.id));
+        return sum(of(kind), "bytes") + sum(s.rows.media_object.filter((o) => ids.has(o.media_id) && counts(o)), "bytes");
+      };
+      const images = bytesOf("image");
+      const gifs = bytesOf("clip");
       expect(images).toBeGreaterThan(0);
       expect(gifs).toBeGreaterThan(0);
       const online = (kind: string) => of(kind).filter((m) => m.state === "online").length;

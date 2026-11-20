@@ -26,7 +26,7 @@ import { setClientAddress } from "../src/client.ts";
 import { openapi } from "../src/docs/openapi.ts";
 import type { Deps } from "../src/ports.ts";
 import { COPY_BATCH } from "../src/publish.ts";
-import { LIMITS_MEDIA } from "../src/rate.ts";
+import { LIMITS_MEDIA, workspaceKey } from "../src/rate.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS } from "../src/uploads.ts";
@@ -855,6 +855,37 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     }
     expect((await api.call("DELETE", `/api/v1/media/${clipId}`, { token: a.token })).status).toBe(204);
     expect((await api.call("DELETE", `/api/v1/media/${id}`, { token: a.token })).status).toBe(204);
+
+    // A send whose claim is removed while it writes (as one older than its lifetime is), on an item still open.
+    const open = (await create(a.token, { ...image, title: "Still open" })).json.id as string;
+    let cut = false;
+    const losing: Deps = {
+      ...deps,
+      drafts: {
+        ...deps.drafts,
+        put: async (key, body, meta) => {
+          if (!cut && key.startsWith(`m/${open}/`)) {
+            cut = true;
+            await deps.db.run("DELETE FROM media_object WHERE media_id = ? AND claim = ?", [open, key.split(".")[1]]);
+          }
+          return deps.drafts.put(key, body, meta);
+        },
+      },
+    };
+    refused(await client(losing).call("PUT", `/api/v1/media/${open}/parts/0`, bytesOf(a.token, png(64, 48, 3000))), 409, "superseded");
+    cut = false;
+    refused(await client(losing).call("PUT", `/api/v1/media/${open}/preview`, bytesOf(a.token, png(32, 24, 500))), 409, "superseded");
+    expect((await api.call("DELETE", `/api/v1/media/${open}`, { token: a.token })).status).toBe(204);
+
+    // At most so many parts and previews an hour: the counts so far are written directly, one short of each limit.
+    const sendsOf = (await create(a.token, image)).json.id as string;
+    const key = await workspaceKey(a.workspaceId);
+    for (const limit of [LIMITS_MEDIA.part, LIMITS_MEDIA.preview]) {
+      await deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?) ON CONFLICT (bucket, key, window_start) DO UPDATE SET count = excluded.count", [limit.bucket, key, now - (now % limit.windowMs), limit.most]);
+    }
+    refused(await part(a.token, sendsOf, 0, png(64, 48, 3000)), 429, "too_many_items");
+    refused(await preview(a.token, sendsOf, png(32, 24, 500)), 429, "too_many_items");
+    expect((await api.call("DELETE", `/api/v1/media/${sendsOf}`, { token: a.token })).status).toBe(204);
 
     // At most so many starts an hour.
     for (let i = 0; i < LIMITS_MEDIA.create.most; i++) expect((await send(deps, "POST", "/api/v1/media", jsonOf(b.token, image))).status).toBe(201);

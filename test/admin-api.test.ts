@@ -137,9 +137,9 @@ describe("the admin's list of accounts", () => {
       expect(own.used_bytes).toBeGreaterThan(0);
       expect(own.tours).toBe(3);
       // The shared items are in the totals, as two numbers of bytes and nothing more: each
-      // kind's bytes with previews, the unfinished item included, and the breakdown adds up.
+      // kind's bytes with previews and claims that are not current, the unfinished item included, and the breakdown adds up.
       const items = await w.deps.db.all<{ kind: string; n: number }>(
-        "SELECT kind, sum(bytes + coalesce(preview_bytes, 0)) AS n FROM media WHERE workspace_id = ? AND state <> 'closing' GROUP BY kind ORDER BY kind",
+        "SELECT m.kind, sum(m.bytes + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o WHERE o.media_id = m.id AND (o.current = 0 OR o.n = -1))) AS n FROM media m WHERE m.workspace_id = ? GROUP BY m.kind ORDER BY m.kind",
         [side.workspaceId],
       );
       expect(items.map((x) => x.kind)).toEqual(["clip", "image"]);
@@ -239,8 +239,8 @@ describe("the admin's summary", () => {
     expect(r.json).toEqual({ accounts: 2, used_bytes: own[0].used_bytes + own[1].used_bytes, standard_allowance_bytes: null });
     expect(r.json.used_bytes).toBe(listed.reduce((n, a) => n + (a.used_bytes as number), 0));
     expect(r.json.used_bytes).toBeGreaterThan(0);
-    // The sum takes in the shared items that are not closing, with their previews.
-    const items = await w.deps.db.first<{ n: number }>("SELECT sum(bytes + coalesce(preview_bytes, 0)) AS n FROM media WHERE state <> 'closing'");
+    // The sum takes in the shared items in every state, with their previews and claims that are not current.
+    const items = await w.deps.db.first<{ n: number }>("SELECT sum(m.bytes + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o WHERE o.media_id = m.id AND (o.current = 0 OR o.n = -1))) AS n FROM media m");
     expect(items!.n).toBeGreaterThan(0);
     expect(r.json.used_bytes).toBe(own.reduce((n, u) => n + sumCounted(u), 0));
     expect(own.reduce((n, u) => n + (u.counted.images as number) + (u.counted.gifs as number), 0)).toBe(items!.n);

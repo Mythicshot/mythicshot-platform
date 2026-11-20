@@ -81,7 +81,7 @@ describe("migration 0010 on a 0.1.18 install", () => {
       expect(await migrate(db, upTo10)).toEqual([NAME]);
       const after = await everything(db);
       const added = Object.keys(after).filter((t) => !(t in before)).sort();
-      expect(added).toEqual(["media", "media_part"]);
+      expect(added).toEqual(["media", "media_object"]);
       for (const t of added) expect(after[t], t).toEqual([]);
       // Every row of every table that was there is unchanged, in every column.
       expect(Object.fromEntries(Object.entries(after).filter(([t]) => !added.includes(t)))).toEqual(before);
@@ -147,7 +147,8 @@ describe("migration 0010 on a 0.1.18 install", () => {
       "CREATE TABLE media",
       "CREATE INDEX media_list ON media",
       "CREATE INDEX media_state ON media",
-      "CREATE TABLE media_part",
+      "CREATE TABLE media_object",
+      "CREATE UNIQUE INDEX media_object_current ON media_object",
     ]);
     expect(text).not.toMatch(/\b(DROP|ALTER|RENAME|UPDATE|DELETE|INSERT)\b/);
   });

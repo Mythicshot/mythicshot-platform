@@ -4,10 +4,10 @@
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
 import { SUBREQUEST_BUDGET } from "../src/budget.ts";
-import { CLIP_MAX_DURATION_MS, DEFAULT_MEDIA_LIMITS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, mediaLink } from "../src/media.ts";
+import { CLIP_MAX_DURATION_MS, DEFAULT_MEDIA_LIMITS, MAX_LOOSE_CLAIMS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, mediaLimits, mediaLimitsProblem, mediaLink, onlineItemFiles } from "../src/media.ts";
 import type { Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
-import { LIMITS_MEDIA } from "../src/rate.ts";
+import { LIMITS_MEDIA, workspaceKey } from "../src/rate.ts";
 import { storageFull, type Usage } from "../src/usage.ts";
 import { ORIGIN, abort, count, createUpload, fixtures, gif, jpeg, mp4, png, send, uploadTour, type Call, type Json } from "./bundle.ts";
 
@@ -68,14 +68,27 @@ async function shareItem(deps: Deps, token: string, spec: Spec, fill = 0): Promi
   return r.json;
 }
 
-/** The objects of one item in the public store. */
+/** The objects of one item in the private store, each key without its claim token: `m/<id>/part-NNN`, `m/<id>/preview.png`. */
 async function objectsOf(keys: () => Promise<string[]>, id: string): Promise<string[]> {
-  return (await keys()).filter((k) => k.startsWith(`m/${id}/`));
+  return (await keys()).filter((k) => k.startsWith(`m/${id}/`)).map((k) => k.replace(/\.[0-9a-f]{24}(?=$|\.)/, "")).sort();
 }
 
 async function readAll(deps: Deps, key: string): Promise<Uint8Array | null> {
   const file = await deps.drafts.get(key);
   return file === null ? null : new Uint8Array(await new Response(file.body).arrayBuffer());
+}
+
+/** The bytes part `n` of an item serves now: its current claim's object. */
+async function served(deps: Deps, id: string, n: number): Promise<Uint8Array | null> {
+  const row = await deps.db.first<{ claim: string }>("SELECT claim FROM media_object WHERE media_id = ? AND n = ? AND current = 1", [id, n]);
+  return row === null ? null : readAll(deps, `m/${id}/part-${String(n).padStart(3, "0")}.${row.claim}`);
+}
+
+/** Every object under m/ that no claim row names: there must never be one. */
+async function orphans(deps: Deps, keys: () => Promise<string[]>): Promise<string[]> {
+  const rows = await deps.db.all<{ media_id: string; n: number; claim: string; ext: string | null }>("SELECT media_id, n, claim, ext FROM media_object");
+  const named = new Set(rows.map((r) => (r.n === -1 ? `m/${r.media_id}/preview.${r.claim}.${r.ext}` : `m/${r.media_id}/part-${String(r.n).padStart(3, "0")}.${r.claim}`)));
+  return (await keys()).filter((k) => k.startsWith("m/") && !named.has(k));
 }
 
 const refused = (r: Call, status: number, error: string) => expect([r.status, r.json?.error], r.text).toEqual([status, error]);
@@ -113,7 +126,7 @@ describe("an item's life", () => {
 
     // Stored as its own object in the private store, with the bytes sent; the preview beside it.
     expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`, `m/${id}/preview.png`]);
-    expect(await readAll(deps, `m/${id}/part-000`)).toEqual(file);
+    expect(await served(deps, id, 0)).toEqual(file);
 
     // The preview, to its own workspace: the sniffed type and nothing a browser could run.
     const p = await send(deps, "GET", `/api/v1/media/${id}/preview`, { token });
@@ -138,7 +151,7 @@ describe("an item's life", () => {
     expect(done.json).toMatchObject({ kind: "clip", path: `/r/${done.json.link_id}` });
     expect((await get(deps, token, id)).json).toMatchObject({ kind: "clip", content_type: "video/mp4", width: 1280, height: 720, duration_ms: 12_000, has_preview: false, title: null });
     expect(await objectsOf(draftKeys, id)).toEqual([0, 1, 2].map((n) => `m/${id}/part-00${n}`));
-    expect((await readAll(deps, `m/${id}/part-002`))?.length).toBe(500_000);
+    expect((await served(deps, id, 2))?.length).toBe(500_000);
     expect((await list(deps, token, "kind=clip")).json.items.map((i: Json) => i.id)).toEqual([id]);
   });
 
@@ -358,7 +371,7 @@ describe("parts", () => {
       expect([r.status, r.json?.error], `${what}: ${r.text}`).toEqual([400, "bad_media"]);
       expect(r.text, what).not.toContain("script");
     }
-    expect(await count(deps, "media_part")).toBe(0);
+    expect(await count(deps, "media_object")).toBe(0);
     expect((await draftKeys()).filter((k) => k.startsWith("m/"))).toEqual([]);
   });
 
@@ -375,7 +388,7 @@ describe("parts", () => {
     refused(await putPart(deps, token, id, 1, new Uint8Array(PART_BYTES + 1)), 413, "too_large");
     // Out of range, and numbers that are not part numbers: the extra part is not there.
     for (const n of ["3", "999", "-1", "01", "x", "1.0"]) expect((await putPart(deps, token, id, n, partOf(file, 0))).json, n).toEqual({ error: "not_found", detail: "no such part" });
-    expect(await count(deps, "media_part")).toBe(0);
+    expect(await count(deps, "media_object")).toBe(0);
 
     expect((await putPart(deps, token, id, 0, partOf(file, 0))).status).toBe(204);
     expect((await putPart(deps, token, id, 2, partOf(file, 2))).status).toBe(204);
@@ -385,11 +398,12 @@ describe("parts", () => {
     // Sending a part again replaces it.
     const other = fileOf(CLIP, 0x55);
     expect((await putPart(deps, token, id, 2, partOf(other, 2))).status).toBe(204);
-    expect(await readAll(deps, `m/${id}/part-002`)).toEqual(partOf(other, 2));
+    expect(await served(deps, id, 2)).toEqual(partOf(other, 2));
     expect((await putPart(deps, token, id, 1, partOf(file, 1))).status).toBe(204);
 
-    // A part claimed by a request that has not finished blocks the commit.
-    await deps.db.run("UPDATE media_part SET claim = 'aaaaaaaaaaaaaaaaaaaaaaaa', stored_at = NULL WHERE media_id = ? AND n = 1", [id]);
+    // A part whose only claim is not stored yet is not there for the commit.
+    await deps.db.run("UPDATE media_object SET current = 0 WHERE media_id = ? AND n = 1", [id]);
+    await deps.db.run("INSERT INTO media_object (media_id, claim, n, bytes, claimed_at) VALUES (?, 'aaaaaaaaaaaaaaaaaaaaaaaa', 1, 2000000, 1)", [id]);
     refused(await commit(deps, token, id), 409, "incomplete");
     expect((await putPart(deps, token, id, 1, partOf(file, 1))).status).toBe(204);
 
@@ -401,7 +415,7 @@ describe("parts", () => {
     // After commit no part and no preview can change.
     refused(await putPart(deps, token, id, 1, partOf(file, 1)), 409, "already_online");
     refused(await putPreview(deps, token, id, png(10, 10, 100)), 409, "already_online");
-    expect(await readAll(deps, `m/${id}/part-002`)).toEqual(partOf(other, 2));
+    expect(await served(deps, id, 2)).toEqual(partOf(other, 2));
     expect(await objectsOf(draftKeys, id)).toHaveLength(3);
   });
 
@@ -410,7 +424,7 @@ describe("parts", () => {
     const { token } = await seedWorkspace(deps, "Acme");
     const { id } = await sendItem(deps, token, CLIP);
     // Only a row changed behind the routes' back can say so: every part's length is checked when it is sent.
-    await deps.db.run("UPDATE media_part SET bytes = bytes - 1 WHERE media_id = ? AND n = 2", [id]);
+    await deps.db.run("UPDATE media_object SET bytes = bytes - 1 WHERE media_id = ? AND n = 2", [id]);
     const r = await commit(deps, token, id);
     refused(r, 409, "incomplete");
     expect(r.json.detail).toBe("the parts add up to 4499999 bytes, not the 4500000 declared");
@@ -434,7 +448,7 @@ describe("parts", () => {
     expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`, `m/${id}/preview.jpg`]);
     const p = await send(deps, "GET", `/api/v1/media/${id}/preview`, { token });
     expect([p.status, p.headers.get("content-type"), p.bytes.length]).toEqual([200, "image/jpeg", 2000]);
-    expect(await deps.db.first("SELECT preview_type, preview_bytes FROM media WHERE id = ?", [id])).toEqual({ preview_type: "jpg", preview_bytes: 2000 });
+    expect(await deps.db.all("SELECT ext, bytes, current FROM media_object WHERE media_id = ? AND n = -1", [id])).toEqual([{ ext: "jpg", bytes: 2000, current: 1 }]);
   });
 });
 
@@ -544,7 +558,7 @@ describe("delete and sweep", () => {
       expect((await get(deps, token, id)).json).toEqual(NO_ITEM);
       expect((await remove(deps, token, id)).json).toEqual(NO_ITEM);
     }
-    expect([await count(deps, "media"), await count(deps, "media_part")]).toEqual([0, 0]);
+    expect([await count(deps, "media"), await count(deps, "media_object")]).toEqual([0, 0]);
     expect(await draftKeys()).toEqual([]);
   });
 
@@ -565,13 +579,15 @@ describe("delete and sweep", () => {
     expect(cut.status).toBe(500);
     expect((await get(deps, token, item.id)).json).toEqual(NO_ITEM);
     expect((await list(deps, token, "kind=clip")).json.items).toEqual([]);
-    expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(0);
+    // Its objects are still there, so its bytes still count, until the repeat removes them.
+    expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(CLIP.bytes);
     refused(await commit(deps, token, item.id), 404, "not_found");
     expect(await objectsOf(draftKeys, item.id)).toHaveLength(3);
     // The repeat finishes it.
     expect((await remove(deps, token, item.id)).status).toBe(204);
     expect(await objectsOf(draftKeys, item.id)).toEqual([]);
     expect(await count(deps, "media")).toBe(0);
+    expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(0);
   });
 
   it("a part that lands after its item was deleted is removed by the request that wrote it", async () => {
@@ -584,14 +600,14 @@ describe("delete and sweep", () => {
       drafts: {
         ...deps.drafts,
         put: async (key, body, meta) => {
-          expect((await remove(deps, token, id)).status).toBe(204);
+          expect((await remove(deps, token, id)).status).toBe(500);
           return deps.drafts.put(key, body, meta);
         },
       },
     };
     expect((await putPart(slow, token, id, 0, fileOf(IMAGE))).json).toEqual(NO_ITEM);
     expect(await objectsOf(draftKeys, id)).toEqual([]);
-    expect([await count(deps, "media"), await count(deps, "media_part")]).toEqual([0, 0]);
+    expect([await count(deps, "media"), await count(deps, "media_object")]).toEqual([0, 0]);
   });
 
   it("unfinished items are swept a day on, by the workspace's own next create, at most five at a time; online ones stay", SLOW, async () => {
@@ -621,6 +637,390 @@ describe("delete and sweep", () => {
     // The online item, the newer one and the other workspace's stay.
     for (const id of [online.id, fresh, theirs]) expect(await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM media WHERE id = ?", [id]), id).toEqual({ n: 1 });
     expect(await objectsOf(draftKeys, theirs)).toEqual([`m/${theirs}/part-000`]);
+  });
+});
+
+describe("the three invariants", () => {
+  /** Runs `during` once, in the middle of the next store put under m/: after the object is written, before the put returns. */
+  function interrupt(deps: Deps, during: () => Promise<void>, opts: { before?: boolean } = {}): Deps {
+    let done = false;
+    return {
+      ...deps,
+      drafts: {
+        ...deps.drafts,
+        put: async (key, body, meta) => {
+          if (done || !key.startsWith("m/")) return deps.drafts.put(key, body, meta);
+          done = true;
+          if (opts.before) await during();
+          await deps.drafts.put(key, body, meta);
+          if (!opts.before) await during();
+        },
+      },
+    };
+  }
+  const quiet = async <T>(run: () => Promise<T>): Promise<T> => {
+    const log = console.error;
+    console.error = () => {};
+    try {
+      return await run();
+    } finally {
+      console.error = log;
+    }
+  };
+
+  it("(a) a part whose request dies after its object landed, while the item is being deleted, is still named by a row, counted, and removed later", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    // The delete runs while the part is being written, and the request then dies: its
+    // object is in the store, and neither its "done" statement nor its own clean-up runs.
+    const dying: Deps = interrupt(deps, async () => {
+      expect((await remove(deps, token, id)).status).toBe(500);
+    }, { before: true });
+    const dead: Deps = { ...dying, db: { ...dying.db, batch: () => Promise.reject(new Error("cut off")) }, drafts: { ...dying.drafts, delete: () => Promise.reject(new Error("cut off")) } };
+    expect((await quiet(() => putPart(dead, token, id, 0, fileOf(IMAGE)))).status).toBe(500);
+    expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`]);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+    // Deleted for everyone, and still counted: its object is there.
+    expect((await get(deps, token, id)).json).toEqual(NO_ITEM);
+    expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(2 * IMAGE.bytes); // the item, and the object of the send that died
+    // A delete while the claim is young removes the object but keeps the row, which could still see one written.
+    refused(await remove(deps, token, id), 500, "cleanup_pending");
+    expect(await objectsOf(draftKeys, id)).toEqual([]);
+    expect(await count(deps, "media_object")).toBe(1);
+    // Past the claim's lifetime the next sweep finishes it, and the room is free.
+    now += 5 * 60 * 1000 + 1;
+    expect((await create(deps, token, { ...IMAGE, title: "next" })).status).toBe(201);
+    expect(await deps.db.first("SELECT count(*) AS n FROM media WHERE id = ?", [id])).toEqual({ n: 0 });
+    expect(await count(deps, "media_object")).toBe(0);
+    expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(IMAGE.bytes);
+  });
+
+  it("(a) a preview whose request dies after its object landed is named by a row too, and a held item does not hold the sweep up", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { workspaceId, token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const { id } = await sendItem(deps, token, IMAGE);
+    const dying = interrupt(deps, async () => {
+      expect((await remove(deps, token, id)).status).toBe(500);
+    }, { before: true });
+    const dead: Deps = { ...dying, db: { ...dying.db, batch: () => Promise.reject(new Error("cut off")) }, drafts: { ...dying.drafts, delete: () => Promise.reject(new Error("cut off")) } };
+    expect((await quiet(() => putPreview(dead, token, id, png(10, 10, 300)))).status).toBe(500);
+    expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/preview.png`]);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+
+    // The oldest closing item still holds a young claim; six unfinished items are a day old.
+    // One sweep skips the held one and removes five others, so it cannot keep them waiting.
+    const others: string[] = [];
+    for (let i = 0; i < 6; i++) others.push((await sendItem(deps, token, IMAGE)).id);
+    now += MEDIA_MAX_AGE_MS + 1;
+    const held = "med_" + "0".repeat(24);
+    await deps.db.batch([
+      { sql: "INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, state, created_at) VALUES (?, ?, ?, 'image', 'image/png', 10, 1, 1, 1, 'closing', 1)", params: [held, workspaceId, "h".repeat(20)] },
+      { sql: "INSERT INTO media_object (media_id, claim, n, bytes, claimed_at) VALUES (?, ?, 0, 10, ?)", params: [held, "b".repeat(24), now] },
+    ]);
+    expect((await create(deps, token, IMAGE)).status).toBe(201);
+    // Closing before: the held one, the item whose request died (its claim is old now), the six others: five of those seven go.
+    const left = await deps.db.all<{ id: string }>("SELECT id FROM media WHERE state = 'closing'");
+    expect(left).toHaveLength(3);
+    expect(left.map((r) => r.id)).toContain(held);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+  });
+
+  it("(b) a slow part send that lost its place lands after commit under its own key, and the online item serves what was committed", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    const made = await create(deps, token, IMAGE);
+    const id = made.json.id as string;
+    const winner = fileOf(IMAGE, 0x11);
+    const loser = fileOf(IMAGE, 0x22);
+    // The slow send has claimed part 0 and is writing; another send of part 0 and the commit finish meanwhile.
+    const slow = interrupt(deps, async () => {
+      expect((await putPart(deps, token, id, 0, winner)).status).toBe(204);
+      expect((await commit(deps, token, id)).status).toBe(200);
+    }, { before: true });
+    refused(await putPart(slow, token, id, 0, loser), 409, "already_online");
+    expect(await served(deps, id, 0)).toEqual(winner);
+    const files = await onlineItemFiles(deps, made.json.id === id ? (await get(deps, token, id)).json.link_id : "");
+    expect(files?.parts).toHaveLength(1);
+    expect(await readAll(deps, files!.parts[0])).toEqual(winner);
+    // The loser removed its own object; nothing else is under the item.
+    expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`]);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+  });
+
+  it("(b) a slow preview send can neither replace the committed preview, nor leave one whose type disagrees, nor delete the newer one", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    const { id } = await sendItem(deps, token, IMAGE);
+    const newer = jpeg(20, 10, 700, 3);
+    const slow = interrupt(deps, async () => {
+      expect((await putPreview(deps, token, id, newer)).status).toBe(204);
+      expect((await commit(deps, token, id)).status).toBe(200);
+    }, { before: true });
+    // The old preview, a PNG, was claimed first and lands last.
+    refused(await putPreview(slow, token, id, png(20, 10, 600, 4)), 409, "already_online");
+    const linkId = (await get(deps, token, id)).json.link_id as string;
+    const files = await onlineItemFiles(deps, linkId);
+    expect(files?.preview?.type).toBe("jpg");
+    expect(await readAll(deps, files!.preview!.key)).toEqual(newer);
+    const p = await send(deps, "GET", `/api/v1/media/${id}/preview`, { token });
+    expect([p.headers.get("content-type"), p.bytes]).toEqual(["image/jpeg", newer]);
+    expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`, `m/${id}/preview.jpg`]);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+  });
+
+  it("(b) of two sends of one part that both finish before commit, one is served and the other's object is gone", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    const first = fileOf(IMAGE, 1);
+    const second = fileOf(IMAGE, 2);
+    const slow = interrupt(deps, async () => {
+      expect((await putPart(deps, token, id, 0, second)).status).toBe(204);
+    }, { before: true });
+    expect((await putPart(slow, token, id, 0, first)).status).toBe(204);
+    // The one whose "done" came last is served; there is exactly one object and one claim row.
+    expect(await served(deps, id, 0)).toEqual(first);
+    expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`]);
+    expect(await count(deps, "media_object")).toBe(1);
+    expect((await commit(deps, token, id)).status).toBe(200);
+  });
+
+  it("(b) when the read after the stored batch fails, the stored object survives and is served", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedAccount(deps);
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    const file = fileOf(IMAGE, 5);
+    // The batch that marks the claim stored commits; the next read fails once.
+    let armed = false;
+    const flaky: Deps = {
+      ...deps,
+      db: {
+        ...deps.db,
+        batch: async (stmts) => {
+          await deps.db.batch(stmts);
+          if (stmts.some((st) => st.sql.includes("SET stored_at"))) armed = true;
+        },
+        all: async (sql, params) => {
+          if (armed) {
+            armed = false;
+            throw new Error("the read failed");
+          }
+          return deps.db.all(sql, params);
+        },
+      },
+    };
+    expect((await quiet(() => putPart(flaky, token, id, 0, file))).status).toBe(500);
+    expect(await served(deps, id, 0)).toEqual(file);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+    expect((await commit(deps, token, id)).status).toBe(200);
+    const files = await onlineItemFiles(deps, (await get(deps, token, id)).json.link_id);
+    expect(await readAll(deps, files!.parts[0])).toEqual(file);
+  });
+
+  it("(b) a send whose claim was taken away while the item is still uploading answers 409 superseded, not 404", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    // Its claim row goes while it writes (as a claim older than its lifetime is removed).
+    const slow = interrupt(deps, async () => {
+      await deps.db.run("DELETE FROM media_object WHERE media_id = ?", [id]);
+    }, { before: true });
+    const r = await putPart(slow, token, id, 0, fileOf(IMAGE));
+    expect([r.status, r.json?.error]).toEqual([409, "superseded"]);
+    expect((await get(deps, token, id)).json.state).toBe("uploading");
+    expect(await objectsOf(draftKeys, id)).toEqual([]);
+    expect((await putPart(deps, token, id, 0, fileOf(IMAGE))).status).toBe(204);
+  });
+
+  it("(c) sends that die after their object landed count, are bounded per item, and are removed after their lifetime by a later touch", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await create(deps, token, CLIP)).json.id as string;
+    const file = fileOf(CLIP);
+    const usage = async () => (await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes as number;
+    // A send dies after its object landed: no "done", no clean-up.
+    const dying: Deps = { ...deps, db: { ...deps.db, batch: () => Promise.reject(new Error("cut off")) }, drafts: { ...deps.drafts, delete: () => Promise.reject(new Error("cut off")) } };
+    for (let i = 0; i < MAX_LOOSE_CLAIMS; i++) {
+      expect((await quiet(() => putPart(dying, token, id, 0, partOf(file, 0)))).status, `dying send ${i + 1}`).toBe(500);
+      now += 1000;
+    }
+    // Their objects are there, named by rows, and counted beside the item's own bytes.
+    expect((await draftKeys()).filter((k) => k.startsWith(`m/${id}/`))).toHaveLength(MAX_LOOSE_CLAIMS);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+    expect(await usage()).toBe(CLIP.bytes + MAX_LOOSE_CLAIMS * PART_BYTES);
+    // One more send is refused while they are young: 429, and when to come back.
+    const refusedSend = await putPart(deps, token, id, 1, partOf(file, 1));
+    refused(refusedSend, 429, "too_many_items");
+    const wait = Number(refusedSend.headers.get("retry-after"));
+    expect(wait).toBeGreaterThan(0);
+    expect(wait).toBeLessThanOrEqual(300);
+    expect(await count(deps, "media_object")).toBe(MAX_LOOSE_CLAIMS);
+    // Past their lifetime the next send removes them (objects, then rows) and goes through.
+    now += 5 * 60 * 1000;
+    for (let n = 0; n < 3; n++) expect((await putPart(deps, token, id, n, partOf(file, n))).status, `part ${n}`).toBe(204);
+    expect(await count(deps, "media_object")).toBe(3);
+    expect(await usage()).toBe(CLIP.bytes);
+    expect(await objectsOf(draftKeys, id)).toEqual([0, 1, 2].map((n) => `m/${id}/part-00${n}`));
+    // A send that dies after the item was finished leaves a claim on an online item: counted
+    // until the sweep of a later create meets it past its lifetime.
+    const dyingLate = interrupt(dying, async () => {
+      expect((await commit(deps, token, id)).status).toBe(200);
+    }, { before: true });
+    expect((await quiet(() => putPart(dyingLate, token, id, 2, partOf(file, 2)))).status).toBe(500);
+    expect(await usage()).toBe(CLIP.bytes + 500_000);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+    now += 5 * 60 * 1000 + 1;
+    expect((await create(deps, token, IMAGE)).status).toBe(201);
+    expect(await usage()).toBe(CLIP.bytes + IMAGE.bytes);
+    expect(await objectsOf(draftKeys, id)).toEqual([0, 1, 2].map((n) => `m/${id}/part-00${n}`));
+    expect(await count(deps, "media_object")).toBe(3);
+  });
+
+  it("(c) a commit leaves no replaced or expired claim behind", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    expect((await putPart(deps, token, id, 0, fileOf(IMAGE))).status).toBe(204);
+    // A claim of a send that died long ago, written directly with its object.
+    const claim = "c".repeat(24);
+    await deps.db.run("INSERT INTO media_object (media_id, claim, n, bytes, claimed_at) VALUES (?, ?, 0, ?, ?)", [id, claim, IMAGE.bytes, now - 10 * 60 * 1000]);
+    await deps.drafts.put(`m/${id}/part-000.${claim}`, fileOf(IMAGE), { contentType: "image/png" });
+    expect((await commit(deps, token, id)).status).toBe(200);
+    expect(await count(deps, "media_object")).toBe(1);
+    expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`]);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+  });
+
+  it("(c) a delete with a send still under way says cleanup_pending and counts until it is finished; an item at its row bound deletes within the budget", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const { id } = await sendItem(deps, token, { ...CLIP, bytes: DEFAULT_MEDIA_LIMITS.clipMaxBytes });
+    // The most claim rows an item can hold: every part, a preview, and the loose ones.
+    expect((await putPreview(deps, token, id, png(10, 10, 100))).status).toBe(204);
+    for (let i = 0; i < MAX_LOOSE_CLAIMS; i++) {
+      await deps.db.run("INSERT INTO media_object (media_id, claim, n, bytes, claimed_at) VALUES (?, ?, 1, 2000000, ?)", [id, String(i).repeat(24), now]);
+    }
+    expect(await count(deps, "media_object")).toBe(27 + 1 + MAX_LOOSE_CLAIMS);
+    const held = await remove(deps, token, id);
+    refused(held, 500, "cleanup_pending");
+    expect(held.calls).toBeLessThanOrEqual(8);
+    expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(DEFAULT_MEDIA_LIMITS.clipMaxBytes + MAX_LOOSE_CLAIMS * PART_BYTES);
+    expect(await objectsOf(draftKeys, id)).toEqual([]);
+    now += 5 * 60 * 1000 + 1;
+    const done = await remove(deps, token, id);
+    expect([done.status, done.calls <= 8]).toEqual([204, true]);
+    expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(0);
+  });
+
+  it("(c) a delete that cannot finish keeps counting the item until it does", async () => {
+    const { deps } = await makeDeps({ storageAllowanceBytes: IMAGE.bytes + 1000 });
+    const { token } = await seedWorkspace(deps, "Acme");
+    const item = await shareItem(deps, token, IMAGE);
+    const broken: Deps = { ...deps, drafts: { ...deps.drafts, delete: () => Promise.reject(new Error("the store is down")) } };
+    refused(await quiet(() => remove(broken, token, item.id)), 500, "cleanup_pending");
+    // The room is not free while the objects are there; the repeat, or the next create's sweep, frees it.
+    expect((await send(deps, "GET", "/api/v1/usage", { token })).json).toMatchObject({ used_bytes: IMAGE.bytes });
+    expect((await remove(deps, token, item.id)).status).toBe(204);
+    expect((await send(deps, "GET", "/api/v1/usage", { token })).json).toMatchObject({ used_bytes: 0 });
+    expect((await create(deps, token, IMAGE)).status).toBe(201);
+  });
+});
+
+describe("the serving lookup", () => {
+  it("answers an online item's part keys in order and its preview, and nothing for an unfinished, deleted or disabled one", SLOW, async () => {
+    const { deps } = await makeDeps();
+    const owner = await seedAccount(deps);
+    const { token } = owner;
+    const { id, file } = await sendItem(deps, token, CLIP);
+    expect((await putPreview(deps, token, id, png(16, 9, 400))).status).toBe(204);
+    const linkId = (await get(deps, token, id)).json.link_id as string;
+    expect(await onlineItemFiles(deps, linkId)).toBeNull();
+    expect((await commit(deps, token, id)).status).toBe(200);
+    const files = await onlineItemFiles(deps, linkId);
+    expect(files).toEqual({
+      id, kind: "clip", contentType: "video/mp4", bytes: CLIP.bytes, width: 1280, height: 720, durationMs: 12_000, title: null,
+      parts: [expect.stringMatching(new RegExp(`^m/${id}/part-000\\.[0-9a-f]{24}$`)), expect.stringMatching(/part-001\./), expect.stringMatching(/part-002\./)],
+      preview: { key: expect.stringMatching(new RegExp(`^m/${id}/preview\\.[0-9a-f]{24}\\.png$`)), type: "png" },
+    });
+    const joined = new Uint8Array(CLIP.bytes);
+    let at = 0;
+    for (const key of files!.parts) {
+      const bytes = (await readAll(deps, key))!;
+      joined.set(bytes, at);
+      at += bytes.length;
+    }
+    expect(joined).toEqual(file);
+    expect(await onlineItemFiles(deps, "a".repeat(20))).toBeNull();
+    expect(await onlineItemFiles(deps, "not a link id")).toBeNull();
+    await deps.db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [owner.userId]);
+    expect(await onlineItemFiles(deps, linkId)).toBeNull();
+    await deps.db.run("UPDATE user SET status = 'active' WHERE id = ?", [owner.userId]);
+    expect((await remove(deps, token, id)).status).toBe(204);
+    expect(await onlineItemFiles(deps, linkId)).toBeNull();
+  });
+});
+
+describe("age, rate limits and settings", () => {
+  it("an unfinished item older than a day answers as swept before any sweep runs: no part, no preview, no commit, no read", async () => {
+    const { deps } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const { id, file } = await sendItem(deps, token, IMAGE);
+    now += MEDIA_MAX_AGE_MS + 1;
+    for (const r of [await putPart(deps, token, id, 0, file), await putPreview(deps, token, id, png(10, 10, 100)), await commit(deps, token, id), await get(deps, token, id), await send(deps, "GET", `/api/v1/media/${id}/preview`, { token })]) {
+      expect(r.json).toEqual(NO_ITEM);
+    }
+    // It still counts until the sweep removes it, as an upload does, and a delete still removes it.
+    expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(IMAGE.bytes);
+    expect((await remove(deps, token, id)).status).toBe(204);
+    expect(await count(deps, "media")).toBe(0);
+  });
+
+  it("a workspace sends at most 2,000 parts and 240 previews an hour", async () => {
+    const { deps } = await makeDeps();
+    const { workspaceId, token } = await seedWorkspace(deps, "Acme");
+    const other = await seedWorkspace(deps, "Other");
+    expect([LIMITS_MEDIA.part, LIMITS_MEDIA.preview]).toEqual([{ bucket: "media_part", windowMs: 3_600_000, most: 2000 }, { bucket: "media_preview", windowMs: 3_600_000, most: 240 }]);
+    // The counts so far, written directly: one short of each limit.
+    const now = 1_800_000_000_000;
+    deps.now = () => now;
+    const key = await workspaceKey(workspaceId);
+    for (const limit of [LIMITS_MEDIA.part, LIMITS_MEDIA.preview]) {
+      await deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?)", [limit.bucket, key, now - (now % limit.windowMs), limit.most - 1]);
+    }
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    expect((await putPart(deps, token, id, 0, fileOf(IMAGE))).status).toBe(204);
+    expect((await putPreview(deps, token, id, png(10, 10, 100))).status).toBe(204);
+    const part = await putPart(deps, token, id, 0, fileOf(IMAGE));
+    refused(part, 429, "too_many_items");
+    expect(Number(part.headers.get("retry-after"))).toBeGreaterThan(0);
+    refused(await putPreview(deps, token, id, png(10, 10, 100)), 429, "too_many_items");
+    // A refused send stores nothing.
+    expect(await count(deps, "media_object")).toBe(2);
+    // Another workspace is not limited by it.
+    const theirs = (await create(deps, other.token, IMAGE)).json.id as string;
+    expect((await putPart(deps, other.token, theirs, 0, fileOf(IMAGE))).status).toBe(204);
+  });
+
+  it("limit settings that would need more than 999 parts, or are no whole numbers, are a configuration problem", () => {
+    expect(mediaLimitsProblem({})).toBeNull();
+    expect(mediaLimitsProblem({ mediaImageMaxBytes: 999 * PART_BYTES, mediaClipMaxBytes: 1, mediaImageMaxSide: 65_535 })).toBeNull();
+    for (const bad of [{ mediaClipMaxBytes: 999 * PART_BYTES + 1 }, { mediaImageMaxBytes: 0 }, { mediaImageMaxBytes: 1.5 }, { mediaImageMaxSide: 0 }, { mediaImageMaxSide: 65_536 }]) {
+      expect(mediaLimitsProblem(bad), JSON.stringify(bad)).toMatch(/^media settings: /);
+    }
+    expect(() => mediaLimits({ publicImageBase: "", setupCode: null, mediaClipMaxBytes: 10 ** 10 })).toThrow(/media settings/);
   });
 });
 
@@ -716,5 +1116,6 @@ describe("the call budget", () => {
     for (const c of [...calls, done.calls, listed.calls, gone.calls]) expect(c).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
     // The delete is a handful of calls whatever the number of parts: one store delete takes them all.
     expect(gone.calls).toBeLessThanOrEqual(8);
+    expect({ create: calls[0], parts: Math.max(...calls.slice(1)), commit: done.calls, list: listed.calls, remove: gone.calls }).toEqual({ create: 7, parts: 8, commit: 7, list: 3, remove: 7 });
   });
 });

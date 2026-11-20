@@ -338,13 +338,27 @@ describe("the largest tours", () => {
 
 // ---- Shared items in the usage and the largest list ----
 
-type ItemSpec = { kind: "image" | "clip"; bytes: number; state?: "uploading" | "online" | "closing"; preview?: number; title?: string | null; type?: string };
+type ItemSpec = {
+  kind: "image" | "clip";
+  bytes: number;
+  state?: "uploading" | "online" | "closing";
+  /** The current preview's size. */
+  preview?: number;
+  /** Previews it replaced, not removed yet (claims that are not current). */
+  oldPreviews?: number[];
+  /** Parts sent again or sends that died (claims that are not current). */
+  stale?: number[];
+  title?: string | null;
+  type?: string;
+};
 let itemSeq = 0;
+let claimSeq = 0;
 
 /**
- * One shared item's row, written as src/media.ts leaves it in each state: the declared
- * bytes, the state, and a claimed preview's size. The API's own steps are tested in
- * test/media.test.ts; here only the numbers they leave behind matter.
+ * One shared item's rows, written as src/media.ts leaves them: the item with its declared
+ * bytes and state, its current part 0 (which the declared bytes hold, so it is never
+ * counted again), its current preview, and the claims that are not current. The API's own
+ * steps are tested in test/media.test.ts; here only the numbers they leave behind matter.
  */
 async function item(deps: Deps, ws: Ws, spec: ItemSpec): Promise<string> {
   itemSeq++;
@@ -352,13 +366,27 @@ async function item(deps: Deps, ws: Ws, spec: ItemSpec): Promise<string> {
   // Each hex digit of the number as a letter from a to p: unique, and in the link's alphabet.
   const link = itemSeq.toString(16).padStart(20, "0").replace(/[0-9a-f]/g, (d) => String.fromCharCode(97 + parseInt(d, 16)));
   const type = spec.type ?? (spec.kind === "image" ? "image/png" : "image/gif");
-  const preview = spec.preview ?? null;
   const state = spec.state ?? "online";
   await deps.db.run(
-    `INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, duration_ms, title, state, preview_type, preview_bytes, created_at, online_at)
-     VALUES (?, ?, ?, ?, ?, ?, 1, 64, 64, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, ws.workspaceId, link, spec.kind, type, spec.bytes, spec.kind === "clip" ? 1000 : null, spec.title ?? null, state, preview === null ? null : "png", preview, T0, state === "online" ? T0 : null],
+    `INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, duration_ms, title, state, created_at, online_at)
+     VALUES (?, ?, ?, ?, ?, ?, 1, 64, 64, ?, ?, ?, ?, ?)`,
+    [id, ws.workspaceId, link, spec.kind, type, spec.bytes, spec.kind === "clip" ? 1000 : null, spec.title ?? null, state, T0, state === "online" ? T0 : null],
   );
+  const object = (n: number, bytes: number, current: 0 | 1, stored: boolean) =>
+    deps.db.run("INSERT INTO media_object (media_id, claim, n, ext, bytes, claimed_at, stored_at, current) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [
+      id,
+      (++claimSeq).toString(16).padStart(24, "0"),
+      n,
+      n === -1 ? "png" : null,
+      bytes,
+      T0,
+      stored ? T0 : null,
+      current,
+    ]);
+  await object(0, Math.min(spec.bytes, 2_000_000), 1, true);
+  if (spec.preview !== undefined) await object(-1, spec.preview, 1, true);
+  for (const bytes of spec.oldPreviews ?? []) await object(-1, bytes, 0, true);
+  for (const bytes of spec.stale ?? []) await object(0, bytes, 0, false);
   return id;
 }
 
@@ -367,24 +395,35 @@ const usageAnswer = async (deps: Deps, token: string) => (await send(deps, "GET"
 
 const sumOf = (o: Json) => Object.values(o as Record<string, number>).reduce((x, y) => x + y, 0);
 
+/** MEDIA as the shared items API defines it, for one workspace and kind, read straight from the rows. */
+async function mediaRows(deps: Deps, workspaceId: string, kind: "image" | "clip"): Promise<number> {
+  const row = await deps.db.first<{ n: number }>(
+    `SELECT (SELECT coalesce(sum(bytes), 0) FROM media WHERE workspace_id = ? AND kind = ?)
+          + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o JOIN media m ON m.id = o.media_id WHERE m.workspace_id = ? AND m.kind = ? AND (o.current = 0 OR o.n = -1)) AS n`,
+    [workspaceId, kind, workspaceId, kind],
+  );
+  return row!.n;
+}
+
 describe("shared items in the usage", () => {
-  it("counts images and GIFs apart, each with its preview; an unfinished item counts its bytes but not as an item, a closing one counts nothing", async () => {
+  it("counts images and GIFs apart in every state: previews, replaced previews and claims that are not current count; a closing item counts until its rows are gone; only online items are counted as items", async () => {
     const { deps, a } = await setup({ storageAllowanceBytes: 10_000_000 });
     await uploadTour(deps, a.token, manifestOf([600, 400]));
     await openUpload(deps, a, 50);
-    // Images: one online with a preview, one online without, one still being sent with a claimed preview, one closing.
+    // Images: online with a preview; online with a replaced preview; still being sent with a preview and a part being sent again; closing with a preview.
     await item(deps, a, { kind: "image", bytes: 5000, preview: 700 });
-    await item(deps, a, { kind: "image", bytes: 3000, type: "image/jpeg" });
-    await item(deps, a, { kind: "image", bytes: 2000, state: "uploading", preview: 90 });
+    await item(deps, a, { kind: "image", bytes: 3000, type: "image/jpeg", preview: 300, oldPreviews: [250] });
+    await item(deps, a, { kind: "image", bytes: 2000, state: "uploading", preview: 90, stale: [2000] });
     await item(deps, a, { kind: "image", bytes: 400_000, state: "closing", preview: 999 });
-    // Clips: a GIF and an MP4 online (one with a preview), one still being sent, one closing.
+    // Clips: a GIF online with a preview, an MP4 online, one still being sent with two dead sends, one closing with a dead send.
     await item(deps, a, { kind: "clip", bytes: 40_000, preview: 1200 });
     await item(deps, a, { kind: "clip", bytes: 60_000, type: "video/mp4" });
-    await item(deps, a, { kind: "clip", bytes: 9000, state: "uploading" });
-    await item(deps, a, { kind: "clip", bytes: 800_000, state: "closing" });
+    await item(deps, a, { kind: "clip", bytes: 9000, state: "uploading", stale: [9000, 4000] });
+    await item(deps, a, { kind: "clip", bytes: 800_000, state: "closing", stale: [123] });
 
-    const imageBytes = 5000 + 700 + 3000 + 2000 + 90;
-    const gifBytes = 40_000 + 1200 + 60_000 + 9000;
+    const imageBytes = 5000 + 700 + (3000 + 300 + 250) + (2000 + 90 + 2000) + (400_000 + 999);
+    const gifBytes = 40_000 + 1200 + 60_000 + (9000 + 9000 + 4000) + (800_000 + 123);
+    expect([await mediaRows(deps, a.workspaceId, "image"), await mediaRows(deps, a.workspaceId, "clip")]).toEqual([imageBytes, gifBytes]);
     const used = 1000 + 50 + imageBytes + gifBytes;
     expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures: 1000, logos: 0, uploads: 50, media: imageBytes + gifBytes, imageBytes, gifBytes, used, allowance: 10_000_000, over: false, tours: 1, images: 2, gifs: 2 });
     // The create statement holds the workspace against the very same number.
@@ -400,29 +439,32 @@ describe("shared items in the usage", () => {
     // Finishing the unfinished image makes it an item; its bytes were counted all along.
     await deps.db.run("UPDATE media SET state = 'online' WHERE workspace_id = ? AND kind = 'image' AND state = 'uploading'", [a.workspaceId]);
     expect(await usageAnswer(deps, a.token)).toMatchObject({ used_bytes: used, images: 3, gifs: 2, counted: { images: imageBytes } });
-    // Deleting closes an item first: from then on it counts nothing.
+    // Deleting closes an item first: it is no longer one of the GIFs, but its room counts until its rows are gone.
     await deps.db.run("UPDATE media SET state = 'closing' WHERE workspace_id = ? AND kind = 'clip' AND bytes = 40000", [a.workspaceId]);
+    expect(await usageAnswer(deps, a.token)).toMatchObject({ used_bytes: used, gifs: 1, counted: { gifs: gifBytes } });
+    // Once its rows are removed (as a finished delete removes them), the room is free.
+    await deps.db.run("DELETE FROM media_object WHERE media_id IN (SELECT id FROM media WHERE workspace_id = ? AND kind = 'clip' AND bytes = 40000)", [a.workspaceId]);
+    await deps.db.run("DELETE FROM media WHERE workspace_id = ? AND kind = 'clip' AND bytes = 40000", [a.workspaceId]);
     const after = await usageAnswer(deps, a.token);
     expect(after).toMatchObject({ used_bytes: used - 41_200, gifs: 1, counted: { gifs: gifBytes - 41_200 } });
     expect(sumOf(after.counted)).toBe(after.used_bytes);
     expect(await usedBySql(deps, a.workspaceId)).toBe(used - 41_200);
   });
 
-  it("the sum of counted is used_bytes whatever the workspace holds, and the two kinds add up to every item that is not closing", async () => {
+  it("the sum of counted is used_bytes whatever the workspace holds, and the two kinds are MEDIA split by kind", async () => {
     const { deps, a } = await setup();
     const states = ["uploading", "online", "closing"] as const;
     for (const [i, state] of states.entries()) {
       for (const kind of ["image", "clip"] as const) {
         await item(deps, a, { kind, state, bytes: 1000 * (i + 1) + (kind === "clip" ? 7 : 3) });
-        await item(deps, a, { kind, state, bytes: 100 * (i + 1), preview: 11 * (i + 1) });
+        await item(deps, a, { kind, state, bytes: 100 * (i + 1), preview: 11 * (i + 1), oldPreviews: [5 + i], stale: [13 * (i + 1)] });
       }
       await openUpload(deps, a, 10 + i);
       await uploadTour(deps, a.token, manifestOf([300 + i]), { kind: "new" }, i);
       const u = await usageAnswer(deps, a.token);
       expect(sumOf(u.counted), state).toBe(u.used_bytes);
       expect(u.used_bytes, state).toBe(await usedBySql(deps, a.workspaceId));
-      const notClosing = await deps.db.first<{ n: number }>("SELECT coalesce(sum(bytes + coalesce(preview_bytes, 0)), 0) AS n FROM media WHERE workspace_id = ? AND state <> 'closing'", [a.workspaceId]);
-      expect((u.counted.images as number) + (u.counted.gifs as number), state).toBe(notClosing!.n);
+      expect([u.counted.images, u.counted.gifs], state).toEqual([await mediaRows(deps, a.workspaceId, "image"), await mediaRows(deps, a.workspaceId, "clip")]);
     }
   });
 
@@ -468,6 +510,8 @@ describe("the largest of every kind", () => {
     await add({ kind: "clip", bytes: 4700, type: "video/mp4", title: '<img src=x onerror="alert(1)">' }, "gif", 4700);
     await add({ kind: "image", bytes: 2500, state: "uploading", title: "Still sending" }, "image", 2500);
     await add({ kind: "clip", bytes: 1500, preview: 10, title: "Small" }, "gif", 1510);
+    // What deleting frees: its bytes, its current preview, a preview it replaced and a send that died.
+    await add({ kind: "image", bytes: 1000, preview: 300, oldPreviews: [200], stale: [1700], title: "With leftovers" }, "image", 3200);
     await add({ kind: "image", bytes: 900, title: "Smallest" }, "image", 900);
     // A closing item is not listed, however large; nor is anything of B.
     await item(deps, a, { kind: "clip", bytes: 9_000_000, state: "closing", title: "Being deleted" });
@@ -484,7 +528,7 @@ describe("the largest of every kind", () => {
     // The tie: the tour and the image of 3000 bytes, in the order of their ids.
     const tied = want.filter((e) => e.bytes === 3000).map((e) => e.id).sort();
     expect(r.json.largest.filter((e: Json) => e.bytes === 3000).map((e: Json) => e.id)).toEqual(tied);
-    // The smallest two of twelve are left out.
+    // The smallest three of thirteen are left out.
     expect(r.json.largest.map((e: Json) => e.title)).not.toContain("Smallest");
     expect(r.json.largest.map((e: Json) => e.title)).not.toContain("Tour 1");
     // The tours list is as it always was: tours only, without a kind.
@@ -508,12 +552,15 @@ describe("the largest of every kind", () => {
     await uploadTour(deps, a.token, v3);
     await item(deps, a, { kind: "image", bytes: 5000, preview: 100 });
     await item(deps, a, { kind: "clip", bytes: 7000, state: "uploading" });
-    await item(deps, a, { kind: "clip", bytes: 9000, state: "closing" });
+    await item(deps, a, { kind: "clip", bytes: 8000, state: "uploading", stale: [8000, 50] });
+    await item(deps, a, { kind: "image", bytes: 3000, oldPreviews: [77] });
+    // A closing item counts in the usage until its rows are gone, but is not listed: it is being deleted already.
+    await item(deps, a, { kind: "clip", bytes: 9000, state: "closing", preview: 40, stale: [11] });
     const u = await usageAnswer(deps, a.token);
     const listed = (await send(deps, "GET", LARGEST, { token: a.token })).json.largest as Json[];
-    expect(listed.map((e) => e.kind).sort()).toEqual(["gif", "image", "tour"]);
+    expect(listed.map((e) => e.kind).sort()).toEqual(["gif", "gif", "image", "image", "tour"]);
     const total = listed.reduce((n, e) => n + (e.bytes as number), 0);
-    expect(total).toBe(u.counted.pictures + u.counted.logos + u.counted.images + u.counted.gifs);
+    expect(total).toBe(u.counted.pictures + u.counted.logos + u.counted.images + u.counted.gifs - (9000 + 40 + 11));
   });
 
   it("the answer is as many database calls for many tours and items as for few, and as many as the usage's one statement", async () => {
