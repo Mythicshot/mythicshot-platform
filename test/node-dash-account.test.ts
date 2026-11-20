@@ -476,11 +476,12 @@ describe("changing the email address from the Account page", () => {
     const tab = openPage(ACCOUNT_HTML, ACCOUNT_JS, `${APP}/account`, (req) => (req.method === "POST" ? server.respond(req) : base(req)));
     await tab.settle();
     tab.$("email-change").click();
-    tab.$("change-email").value = "  new@example.com ";
+    tab.$("change-email").value = "  New@Example.COM ";
     tab.$("change-send").click();
     await tab.settle();
     const post = tab.fetched.find((f) => f.method === "POST")!;
-    expect([post.path, post.headers, JSON.parse(post.body!), post.init.credentials, post.init.referrerPolicy]).toEqual(["/api/v1/account/email", { "content-type": "application/json", "X-Csrf-Token": CSRF }, { email: "new@example.com" }, "same-origin", "no-referrer"]);
+    // The address goes as typed, trimmed; the server makes it lower-case.
+    expect([post.path, post.headers, JSON.parse(post.body!), post.init.credentials, post.init.referrerPolicy]).toEqual(["/api/v1/account/email", { "content-type": "application/json", "X-Csrf-Token": CSRF }, { email: "New@Example.COM" }, "same-origin", "no-referrer"]);
     // While it runs: the busy label, nothing can be pressed twice, nothing closes it, and Tab keeps the focus inside.
     expect([tab.$("change-send").textContent, tab.$("change-send").disabled, tab.$("change-cancel").disabled, tab.$("change-email").disabled, tab.$("change-send").getAttribute("aria-busy")]).toEqual(["Sending…", true, true, true, "true"]);
     expect(tab.$("change-send").click()).toBeNull();
@@ -496,6 +497,7 @@ describe("changing the email address from the Account page", () => {
     await tab.settle();
     expect(tab.$("change-dialog").shown).toBe(false);
     expect(tab.$("sent-dialog").shown).toBe(true);
+    // The second box names the address as the server stores it: trimmed and lower-case.
     expect(tab.shows().slice(-3)).toEqual(["Check new@example.com", "Open the link we sent there to finish. It works once and for 15 minutes. Until then you keep signing in with you@example.com.", "Done"]);
     expect(tab.doc.activeElement).toBe(tab.$("sent-done"));
     expect(inert(tab)).toEqual([true, true]);
@@ -771,7 +773,7 @@ describe("the Account page and the link page against the real app", () => {
     expect(page.$("account-email").textContent).toBe(owner.email);
     expect(page.$("email-change").shown).toBe(true);
     page.$("email-change").click();
-    page.$("change-email").value = "solex.new@example.com";
+    page.$("change-email").value = "Solex.New@Example.com";
     page.$("change-send").click();
     await page.settle();
     await made.settle();

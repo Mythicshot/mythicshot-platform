@@ -2,7 +2,7 @@
 // (the brand, the tabs and the username) and the page's own body. The shared stylesheet
 // and script are src/dash/style.ts and src/dash/script.ts; src/dash/routes.ts serves them.
 //
-// How a later page joins the dashboard (Storage, Account and Admin are planned):
+// How a page joins the dashboard (Tours, Storage, Account and Admin are built this way):
 //
 // 1. Its body and its script live in a module of its own under src/dash/, as the Tours
 //    page does in src/dash/tours.ts: the body as an HTML string (fixed text only, no data),
@@ -10,14 +10,20 @@
 //      dashHtml({ title: "Storage", active: "storage", main: STORAGE_MAIN, script: "/dash/storage.js" })
 //    `active` marks that page's tab. `script` is served after the shared /dash/dash.js,
 //    both with `defer`, so the page's script runs once the shared one has defined `Dash`.
-// 2. The page's script starts with Dash.start(function (who) { ... }). Dash.start asks
-//    GET /api/v1/session, sends a visitor who is not signed in to /signin, fills the
-//    username and shows the Admin tab for an admin, and only then calls the function with
-//    { username, admin, workspace }. Inside it, Dash.api(method, path, body) sends every
-//    request (the session cookie, and the X-Csrf-Token header on every change),
-//    Dash.formatBytes and Dash.dateOf write sizes and dates as every page does, and
-//    Dash.failure(res) is the approved sentence for a failed request. Data reaches the page
-//    only through textContent and safe attributes.
+// 2. The page's script starts with Dash.start(function (who) { ... }, whenSignedOut).
+//    Dash.start asks GET /api/v1/session; a visitor who is not signed in is sent to /signin,
+//    or handed to whenSignedOut when the page passes one (the email-change link page does).
+//    Otherwise it fills the username and shows the Admin tab for an admin, and only then
+//    calls the function with { username, admin, workspace, named, email, sessionId,
+//    emailChange }: the name the bar shows ("Account" without a username), whether the
+//    session says admin, the workspace's name, whether the account has a username, its email
+//    address, this session's id, and whether the site can change the address (email_change).
+//    Inside it, Dash.api(method, path, body) sends every request (the session cookie, and
+//    the X-Csrf-Token header on every change), Dash.formatBytes and Dash.dateOf write sizes
+//    and dates as every page does, Dash.failure(res) is the approved sentence for a failed
+//    request, and Dash.question({...}) is the one way to ask a question in the page (see
+//    its comment in src/dash/script.ts). Data reaches the page only through textContent and
+//    safe attributes.
 // 3. Its route goes into DASH_PAGES in src/dash/routes.ts, one line: the path, the HTML
 //    and the script's path and text. That serves both with ACCOUNT_PAGE_HEADERS and no
 //    database call. Its styles go into src/dash/style.ts, after the shared ones.

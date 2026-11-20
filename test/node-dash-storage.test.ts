@@ -466,6 +466,65 @@ describe("deleting from the Storage page", () => {
     expect(tab.doc.activeElement).toBe(deleteOf(rows(tab)[0]));
   });
 
+  it("every row's Delete is disabled while the delete runs and while the numbers are read again afterwards", async () => {
+    let release: (a: Answer) => void = () => {};
+    const held = new Promise<Answer>((r) => (release = r));
+    let usageAsked = 0;
+    const base = standard({ ["DELETE /api/v1/tours/" + T1]: { status: 200, json: { deleted: true } }, "GET /api/v1/usage/largest": [largest(M5_TOURS), largest(M5_TOURS.slice(1))] });
+    const tab = openStorage((req) => {
+      if (req.method === "GET" && req.path === "/api/v1/usage" && ++usageAsked === 2) return held;
+      return base(req);
+    });
+    await tab.settle();
+    const before = rows(tab).map(deleteOf);
+    deleteOf(rows(tab)[0]).click();
+    tab.$("delete-go").click();
+    expect(before.map((b) => b.disabled)).toEqual([true, true, true]);
+    await tab.settle();
+    // The delete is done and the question closed; the numbers are still on their way.
+    expect(tab.$("delete-dialog").shown).toBe(false);
+    expect(before.map((b) => b.disabled)).toEqual([true, true, true]);
+    expect(before[1].click()).toBeNull();
+    expect(tab.$("delete-dialog").shown).toBe(false);
+    release(usage({ ...M5, tours: 11 }));
+    await tab.settle();
+    expect(rows(tab).map((r) => [titleOf(r), deleteOf(r).disabled])).toEqual([
+      ["Timeline rehearsal walkthrough", false],
+      ["Loot council vote, full round", false],
+    ]);
+  });
+
+  it("when the numbers cannot be read again, the rows shown get their Delete back", async () => {
+    const tab = openStorage(standard({ ["DELETE /api/v1/tours/" + T1]: { status: 409, json: { error: "publish_busy" } }, "GET /api/v1/usage": [usage(M5), { status: 500, json: { error: "internal" } }] }));
+    await tab.settle();
+    deleteOf(rows(tab)[0]).click();
+    tab.$("delete-go").click();
+    await tab.settle();
+    expect(rows(tab).map((r) => deleteOf(r).disabled)).toEqual([false, false, false]);
+  });
+
+  it("a double click on Delete tour sends one request", async () => {
+    const tab = openStorage(standard({ ["DELETE /api/v1/tours/" + T1]: { status: 200, json: { deleted: true } }, "GET /api/v1/usage/largest": [largest(M5_TOURS), largest(M5_TOURS.slice(1))] }));
+    await tab.settle();
+    deleteOf(rows(tab)[0]).click();
+    tab.$("delete-go").click();
+    tab.$("delete-go").click();
+    tab.$("delete-go").dispatch("click");
+    await tab.settle();
+    expect(tab.fetched.filter((f) => f.method === "DELETE")).toHaveLength(1);
+  });
+
+  it("a delete that stays in progress is asked at most 1000 times, then says it did not happen", async () => {
+    const tab = openStorage(standard({ ["DELETE /api/v1/tours/" + T1]: { status: 202, json: { status: "in_progress", done: 1, total: 3 } } }));
+    await tab.settle();
+    deleteOf(rows(tab)[0]).click();
+    tab.$("delete-go").click();
+    for (let i = 0; i < 40 && tab.$("delete-go").disabled; i++) await tab.settle();
+    expect(tab.fetched.filter((f) => f.method === "DELETE")).toHaveLength(1000);
+    expect([tab.$("delete-dialog").shown, tab.$("delete-message").textContent]).toEqual([true, FAILED]);
+    expect(tab.$("delete-go").disabled).toBe(false);
+  });
+
   it("a lost session goes to /signin", async () => {
     const tab = openStorage(standard({ ["DELETE /api/v1/tours/" + T1]: SIGNED_OUT }));
     await tab.settle();

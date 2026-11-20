@@ -264,11 +264,39 @@ describe("the size parser", () => {
     ["NaN", undefined],
     ["0x10", undefined],
     ["١٠ GB", undefined],
+    // Exact to the byte, however many digits the fraction has (review follow-up B6).
+    ["167518636910.729 KB", 171_539_084_196_586],
+    ["3573639.63091475 GB", Number((357363963091475n * 1073741824n + 50000000n) / 100000000n)],
+    ["0.0000000005 GB", 1],
+    ["0.0000000004 GB", 0],
   ];
 
   it("takes sizes such as 500 MB, 10 GB, 1.5 GB and plain bytes, in any case, counting 1024 to the next unit, and refuses everything else", () => {
     const parse = sizeOf();
     for (const [text, want] of TABLE) expect(parse(text), JSON.stringify(text)).toBe(want);
+  });
+
+  it("rounds to the nearest byte exactly, as whole-number arithmetic on the digits does", () => {
+    const parse = sizeOf();
+    const units: [string, bigint][] = [["KB", 1024n], ["MB", 1048576n], ["GB", 1073741824n]];
+    // A fixed-seed generator, so a failure can be repeated.
+    let seed = 20261119;
+    const rand = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    const digits = (n: number) => Array.from({ length: n }, () => String(rand(10))).join("");
+    for (let i = 0; i < 3000; i++) {
+      const [unit, factor] = units[rand(3)];
+      const whole = digits(1 + rand(10));
+      const frac = digits(1 + rand(18));
+      const scale = 10n ** BigInt(frac.length);
+      const exact = (BigInt(whole) * scale + BigInt(frac)) * factor;
+      let want = exact / scale;
+      if ((exact % scale) * 2n >= scale) want += 1n;
+      const text = `${whole}.${frac} ${unit}`;
+      expect(parse(text), text).toBe(want <= 9007199254740991n ? Number(want) : undefined);
+    }
   });
 
   it("reads back every size the pages write, so a size shown can be saved as it is", () => {
@@ -465,7 +493,6 @@ describe("setting an allowance", () => {
     expect(behind.map((e) => e.id)).toEqual(["dash-top", "admin"]);
     for (const e of behind) expect(e.getAttribute("aria-hidden"), e.id).toBe("true");
     expect(tab.$("allow-dialog").hasAttribute("inert")).toBe(false);
-    // Empty is the standard allowance, which is below what this workspace uses: the warning, with the standard number.
     type(tab, "10 GB");
     expect([tab.$("allow-hint").shown, tab.$("allow-warn").shown, tab.$("allow-save").textContent]).toEqual([true, false, "Save"]);
     expect(tab.shows().slice(-6)).toEqual(["Storage allowance for Harbor Studio", "Uses 5.3 GB now.", "Allowance", "Write a size such as 500 MB or 10 GB. Leave it empty to use the standard allowance of 5 GB.", "Cancel", "Save"]);
@@ -473,9 +500,11 @@ describe("setting an allowance", () => {
     expect(tab.$("allow-warn").textContent).toBe("That is less than this workspace uses. Nothing is deleted, but its new uploads are refused until it is under 2 GB.");
     expect([tab.$("allow-hint").shown, tab.$("allow-warn").shown, tab.$("allow-save").textContent]).toEqual([false, true, "Save anyway"]);
     expect(tab.shows().slice(-6)).toEqual(["Storage allowance for Harbor Studio", "Uses 5.3 GB now.", "Allowance", "That is less than this workspace uses. Nothing is deleted, but its new uploads are refused until it is under 2 GB.", "Cancel", "Save anyway"]);
-    // Exactly what is used is not less than it.
+    // Exactly what is used leaves no room either: the warning says so (review follow-up B2).
     type(tab, "5690831667");
-    expect(tab.$("allow-save").textContent).toBe("Save");
+    expect(tab.$("allow-warn").textContent).toBe("That is exactly what this workspace uses. Nothing is deleted, but its new uploads are refused until it is under 5.3 GB.");
+    expect(tab.$("allow-save").textContent).toBe("Save anyway");
+    // Empty is the standard allowance, which is below what this workspace uses: the warning, with the standard number.
     type(tab, "");
     expect(tab.$("allow-warn").textContent).toBe("That is less than this workspace uses. Nothing is deleted, but its new uploads are refused until it is under 5 GB.");
     expect(tab.$("allow-save").textContent).toBe("Save anyway");
@@ -639,9 +668,13 @@ describe("setting an allowance", () => {
     expect(tab.doc.activeElement).toBe(input);
     expect(key(input, "Tab", true).defaultPrevented).toBe(true);
     expect(tab.doc.activeElement).toBe(save);
+    // In between, the question moves the focus itself, as every dashboard question does (Dash.question).
     cancel.focus();
-    expect(key(cancel, "Tab").defaultPrevented).toBe(false);
-    expect(key(cancel, "Tab", true).defaultPrevented).toBe(false);
+    expect(key(cancel, "Tab").defaultPrevented).toBe(true);
+    expect(tab.doc.activeElement).toBe(save);
+    cancel.focus();
+    expect(key(cancel, "Tab", true).defaultPrevented).toBe(true);
+    expect(tab.doc.activeElement).toBe(input);
     // Focus that got out of the question (on the page itself) is brought back by Tab, at the document.
     tab.doc.activeElement = tab.doc.body;
     expect(key(tab.doc.body, "Tab").defaultPrevented).toBe(true);
@@ -662,6 +695,212 @@ describe("setting an allowance", () => {
     expect(tab.$("allow-dialog").hidden).toBe(true);
     expect(tab.doc.activeElement).toBe(opener);
     expect(tab.fetched.filter((f) => f.method !== "GET")).toEqual([]);
+  });
+});
+
+describe("the allowance question: an allowance that leaves no room, Enter, and what a screen reader hears", () => {
+  const ZERO_STANDARD = "An allowance of 0 refuses every upload from this workspace. Leave the field empty for the standard allowance.";
+  const ZERO_NONE = "An allowance of 0 refuses every upload from this workspace. Leave the field empty for no allowance.";
+  const SAVED: Answer = { status: 200, json: { workspace_id: W2, allowance_bytes: 10 * GB, storage_allowance_bytes: 10 * GB, used_bytes: 5_690_831_667, over: false } };
+
+  it("an allowance of 0 warns and asks Save anyway, for a workspace that uses nothing and for one that uses some", async () => {
+    const empty = account(U1, W1, { workspace_name: "Empty", used_bytes: 0 });
+    const some = account(U2, W2, { workspace_name: "Some", used_bytes: 5 * MB });
+    const tab = openAdmin(standard({ "GET /api/v1/admin/accounts": list([empty, some]), [`PATCH /api/v1/admin/workspaces/${W1}`]: { status: 200, json: { workspace_id: W1, allowance_bytes: 0, storage_allowance_bytes: 0, used_bytes: 0, over: false } } }));
+    await tab.settle();
+    for (const row of [0, 1]) {
+      setButton(rows(tab)[row]).click();
+      type(tab, "0");
+      expect([tab.$("allow-warn").textContent, tab.$("allow-warn").shown, tab.$("allow-hint").shown, tab.$("allow-save").textContent], String(row)).toEqual([ZERO_STANDARD, true, false, "Save anyway"]);
+      type(tab, "0 GB");
+      expect(tab.$("allow-warn").textContent, String(row)).toBe(ZERO_STANDARD);
+      tab.$("allow-cancel").click();
+    }
+    // Above what is used, no warning: 1 KB for the empty workspace, 6 MB for the other.
+    setButton(rows(tab)[0]).click();
+    type(tab, "1 KB");
+    expect([tab.$("allow-warn").shown, tab.$("allow-hint").shown, tab.$("allow-save").textContent]).toEqual([false, true, "Save"]);
+    tab.$("allow-cancel").click();
+    setButton(rows(tab)[1]).click();
+    type(tab, "6 MB");
+    expect([tab.$("allow-warn").shown, tab.$("allow-save").textContent]).toEqual([false, "Save"]);
+    // Exactly what it uses, and below it.
+    type(tab, "5 MB");
+    expect(tab.$("allow-warn").textContent).toBe("That is exactly what this workspace uses. Nothing is deleted, but its new uploads are refused until it is under 5 MB.");
+    type(tab, "4 MB");
+    expect(tab.$("allow-warn").textContent).toBe("That is less than this workspace uses. Nothing is deleted, but its new uploads are refused until it is under 4 MB.");
+    tab.$("allow-cancel").click();
+    // Saving 0 anyway sends 0.
+    setButton(rows(tab)[0]).click();
+    type(tab, "0");
+    tab.$("allow-save").click();
+    await tab.settle();
+    expect(tab.fetched.filter((f) => f.method === "PATCH").map((f) => f.body)).toEqual(['{"storage_allowance_bytes":0}']);
+  });
+
+  it("with no standard allowance the 0 warning says an empty field is no allowance", async () => {
+    const empty = account(U1, W1, { workspace_name: "Empty", used_bytes: 0, standard: null });
+    const tab = openAdmin(standard({ "GET /api/v1/admin/summary": summary(1, 0, null), "GET /api/v1/admin/accounts": list([empty]) }));
+    await tab.settle();
+    setButton(rows(tab)[0]).click();
+    type(tab, "0");
+    expect([tab.$("allow-warn").textContent, tab.$("allow-save").textContent]).toEqual([ZERO_NONE, "Save anyway"]);
+    // An empty field is no allowance at all: nothing to warn about.
+    type(tab, "");
+    expect([tab.$("allow-warn").shown, tab.$("allow-save").textContent]).toEqual([false, "Save"]);
+  });
+
+  it("the field is tied to the hint or to the warning for a screen reader, never to the one that is hidden", async () => {
+    const tab = openAdmin(standard());
+    await tab.settle();
+    setButton(rows(tab)[1]).click();
+    const input = tab.$("allow-input");
+    type(tab, "10 GB");
+    expect(input.getAttribute("aria-describedby")).toBe("allow-hint allow-message");
+    type(tab, "1 GB");
+    expect(input.getAttribute("aria-describedby")).toBe("allow-warn allow-message");
+    type(tab, "0");
+    expect(input.getAttribute("aria-describedby")).toBe("allow-warn allow-message");
+    type(tab, "lots");
+    expect(input.getAttribute("aria-describedby")).toBe("allow-hint allow-message");
+  });
+
+  it("Enter in the field saves, once, as Save does", async () => {
+    const tab = openAdmin(standard({ [`PATCH /api/v1/admin/workspaces/${W2}`]: SAVED }));
+    await tab.settle();
+    setButton(rows(tab)[1]).click();
+    type(tab, "10 GB");
+    expect(key(tab.$("allow-input"), "Enter").defaultPrevented).toBe(true);
+    key(tab.$("allow-input"), "Enter");
+    await tab.settle();
+    expect(tab.fetched.filter((f) => f.method === "PATCH").map((f) => f.body)).toEqual([`{"storage_allowance_bytes":${10 * GB}}`]);
+    expect(tab.$("allow-dialog").hidden).toBe(true);
+    // Other keys type as usual.
+    setButton(rows(tab)[1]).click();
+    expect(key(tab.$("allow-input"), "a").defaultPrevented).toBe(false);
+  });
+
+  it("a double click on Save sends one request", async () => {
+    const tab = openAdmin(standard({ [`PATCH /api/v1/admin/workspaces/${W2}`]: SAVED }));
+    await tab.settle();
+    setButton(rows(tab)[1]).click();
+    type(tab, "10 GB");
+    tab.$("allow-save").click();
+    tab.$("allow-save").click();
+    tab.$("allow-save").dispatch("click");
+    await tab.settle();
+    expect(tab.fetched.filter((f) => f.method === "PATCH")).toHaveLength(1);
+  });
+});
+
+describe("the list with two pages loaded: one request at a time", () => {
+  const U4 = "usr_" + "4".repeat(24);
+  const U5 = "usr_" + "5".repeat(24);
+  const U6 = "usr_" + "6".repeat(24);
+  const PAGE2 = [account(U4, "ws_" + "4".repeat(24), { username: "tess" }), account(U5, "ws_" + "5".repeat(24), { username: "rook" })];
+  const PAGE3 = [account(U6, "ws_" + "6".repeat(24), { username: "vale" })];
+  const SAVED: Answer = { status: 200, json: { workspace_id: W2, allowance_bytes: 10 * GB, storage_allowance_bytes: 10 * GB, used_bytes: 5_690_831_667, over: false } };
+  const names = (tab: Tab) => rows(tab).map((r) => rowOf(r).name);
+
+  /** A responder over three pages of accounts; while holding, every GET waits until the test releases it, in order. */
+  function paged(extra: Record<string, Answer | Answer[]> = {}) {
+    const waiting: { path: string; release: () => void }[] = [];
+    let holding = false;
+    const base = standard({
+      "GET /api/v1/admin/summary": summary(6, MOCKUP_USED, STANDARD),
+      "GET /api/v1/admin/accounts": list(MOCKUP, U3),
+      [`GET /api/v1/admin/accounts?after=${U3}`]: list(PAGE2, U5),
+      [`GET /api/v1/admin/accounts?after=${U5}`]: list(PAGE3),
+      ...extra,
+    });
+    const respond: Responder = (req) => {
+      if (!holding || req.method !== "GET") return base(req);
+      return new Promise<Answer>((resolve) => waiting.push({ path: req.path, release: () => resolve(base(req) as Answer) }));
+    };
+    return { respond, hold: (on: boolean) => (holding = on), waiting };
+  }
+
+  async function twoPages(p: ReturnType<typeof paged>): Promise<Tab> {
+    const tab = openAdmin(p.respond);
+    await tab.settle();
+    tab.$("admin-more").click();
+    await tab.settle();
+    expect(names(tab)).toEqual(["solex", "mara", "bram", "tess", "rook"]);
+    return tab;
+  }
+
+  it("Show more does nothing, and is disabled, while the list is read again after a save", async () => {
+    const p = paged({ [`PATCH /api/v1/admin/workspaces/${W2}`]: SAVED });
+    const tab = await twoPages(p);
+    setButton(rows(tab)[1]).click();
+    type(tab, "10 GB");
+    p.hold(true);
+    tab.$("allow-save").click();
+    await tab.settle();
+    // The save is done; the list is being read again.
+    expect(p.waiting.map((w) => w.path)).toEqual(["/api/v1/admin/summary", "/api/v1/admin/accounts"]);
+    expect(tab.$("admin-more").disabled).toBe(true);
+    tab.$("admin-more").click();
+    tab.$("admin-more").dispatch("click");
+    await tab.settle();
+    expect(tab.fetched.filter((f) => f.path === `/api/v1/admin/accounts?after=${U5}`)).toEqual([]);
+    p.hold(false);
+    while (p.waiting.length > 0) {
+      p.waiting.shift()!.release();
+      await tab.settle();
+    }
+    expect(names(tab)).toEqual(["solex", "mara", "bram", "tess", "rook"]);
+    expect([tab.$("admin-more").shown, tab.$("admin-more").disabled]).toEqual([true, false]);
+    expect(tab.fetched.filter((f) => f.path === `/api/v1/admin/accounts?after=${U5}`)).toEqual([]);
+  });
+
+  it("a save while Show more is on its way: the list is read again only after it, with every page it then has, nothing twice and nothing dropped", async () => {
+    const p = paged({ [`PATCH /api/v1/admin/workspaces/${W2}`]: SAVED });
+    const tab = await twoPages(p);
+    p.hold(true);
+    tab.$("admin-more").click();
+    await tab.settle();
+    expect(p.waiting.map((w) => w.path)).toEqual([`/api/v1/admin/accounts?after=${U5}`]);
+    setButton(rows(tab)[1]).click();
+    type(tab, "10 GB");
+    tab.$("allow-save").click();
+    await tab.settle();
+    // The save went out; its reading of the list waits for Show more.
+    expect(tab.fetched.filter((f) => f.method === "PATCH")).toHaveLength(1);
+    expect(p.waiting.map((w) => w.path)).toEqual([`/api/v1/admin/accounts?after=${U5}`]);
+    p.hold(false);
+    p.waiting.shift()!.release();
+    await tab.settle();
+    expect(names(tab)).toEqual(["solex", "mara", "bram", "tess", "rook", "vale"]);
+    // Then the list was read again with its three pages.
+    const reads = tab.fetched.filter((f) => f.path.startsWith("/api/v1/admin/accounts")).map((f) => f.path);
+    expect(reads.slice(-3)).toEqual(["/api/v1/admin/accounts", `/api/v1/admin/accounts?after=${U3}`, `/api/v1/admin/accounts?after=${U5}`]);
+  });
+
+  it("after a save that fails, the list is read again with both pages, nothing twice and nothing dropped", async () => {
+    const p = paged({ [`PATCH /api/v1/admin/workspaces/${W2}`]: { status: 500, json: { error: "internal" } } });
+    const tab = await twoPages(p);
+    setButton(rows(tab)[1]).click();
+    type(tab, "10 GB");
+    tab.$("allow-save").click();
+    await tab.settle();
+    expect(tab.$("allow-message").textContent).toBe(FAILED);
+    expect(names(tab)).toEqual(["solex", "mara", "bram", "tess", "rook"]);
+    expect(tab.fetched.filter((f) => f.path.startsWith("/api/v1/admin/accounts")).map((f) => f.path).slice(-2)).toEqual(["/api/v1/admin/accounts", `/api/v1/admin/accounts?after=${U3}`]);
+    expect([tab.$("admin-more").shown, tab.$("admin-more").disabled]).toEqual([true, false]);
+  });
+
+  it("after a save that works, the list is read again with both pages, and the row shows the new allowance", async () => {
+    const changed = MOCKUP.map((a) => (a.id === U2 ? { ...a, storage_allowance_bytes: 10 * GB, allowance_bytes: 10 * GB, over: false } : a));
+    const p = paged({ "GET /api/v1/admin/accounts": [list(MOCKUP, U3), list(changed, U3)], [`PATCH /api/v1/admin/workspaces/${W2}`]: SAVED });
+    const tab = await twoPages(p);
+    setButton(rows(tab)[1]).click();
+    type(tab, "10 GB");
+    tab.$("allow-save").click();
+    await tab.settle();
+    expect(names(tab)).toEqual(["solex", "mara", "bram", "tess", "rook"]);
+    expect(rowOf(rows(tab)[1]).allowance).toBe("10 GB");
+    expect(tab.doc.activeElement).toBe(setButton(rows(tab)[1]));
   });
 });
 

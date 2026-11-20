@@ -16,8 +16,8 @@
 // account's own, and so does this page. The address changes only when the mailed link is
 // opened and confirmed (src/dash/account-email.ts).
 //
-// The two boxes behave as the Storage page's question does (src/dash/storage.ts is the
-// reference): while one is open the bar and the page are inert and hidden from screen
+// The two boxes are the dashboard's one question helper (Dash.question, src/dash/script.ts):
+// while one is open the bar and the page are inert and hidden from screen
 // readers, Escape and Tab are handled for the whole document, a click on the backdrop is
 // Cancel (or Done), and while the request runs nothing closes it, its controls are disabled
 // and the focus stays inside it. When a box closes the focus goes back to Change. Message
@@ -47,7 +47,7 @@ const ACCOUNT_MAIN = `  <div id="account-page">
   </section>
   </div>
   <div class="backdrop" id="change-dialog" hidden>
-    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="change-title" aria-describedby="change-hint">
+    <div class="dialog" id="change-box" role="dialog" aria-modal="true" aria-labelledby="change-title" aria-describedby="change-hint">
       <h2 id="change-title" tabindex="-1">Change your email address</h2>
       <label class="field-label" for="change-email">New email address</label>
       <input class="field" id="change-email" type="email" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="254" aria-describedby="change-hint change-message">
@@ -60,7 +60,7 @@ const ACCOUNT_MAIN = `  <div id="account-page">
     </div>
   </div>
   <div class="backdrop" id="sent-dialog" hidden>
-    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="sent-title" aria-describedby="sent-text">
+    <div class="dialog" id="sent-box" role="dialog" aria-modal="true" aria-labelledby="sent-title" aria-describedby="sent-text">
       <h2 id="sent-title" tabindex="-1"></h2>
       <p class="sub" id="sent-text">Open the link we sent there to finish. It works once and for 15 minutes. Until then you keep signing in with <span class="address" id="sent-old"></span>.</p>
       <div class="two">
@@ -94,9 +94,10 @@ export const ACCOUNT_JS = `(function () {
   // This browser's session, and the account's address as the session gave it.
   var current = "";
   var email = "";
-  // Which box is open ("change", "sent" or null), and whether its request runs.
-  var open = null;
-  var working = false;
+  // The two boxes (Dash.question, src/dash/script.ts). Each gives the focus back to Change.
+  var change = Dash.question({ backdrop: "change-dialog", box: "change-box", role: "dialog", title: "change-title", message: "change-message", behind: BEHIND, fields: ["change-email"], buttons: ["change-cancel", "change-send"], lock: "disabled" });
+  var sent = Dash.question({ backdrop: "sent-dialog", box: "sent-box", role: "dialog", title: "sent-title", behind: BEHIND, buttons: ["sent-done"] });
+  function toChange() { return $("email-change"); }
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -209,58 +210,28 @@ export const ACCOUNT_JS = `(function () {
 
   // ---- Changing the email address ----
 
-  // While a box is open, the bar and the page behind it are inert.
-  function behind(inert) {
-    BEHIND.forEach(function (id) {
-      var e = $(id);
-      if (inert) {
-        e.setAttribute("inert", "");
-        e.setAttribute("aria-hidden", "true");
-      } else {
-        e.removeAttribute("inert");
-        e.removeAttribute("aria-hidden");
-      }
-    });
-  }
-
   function openChange() {
-    if (open !== null || working) return;
-    open = "change";
+    if (change.isOpen() || sent.isOpen()) return;
     var input = $("change-email");
     input.value = "";
     input.removeAttribute("aria-invalid");
-    sayIn($("change-message"), "");
-    $("change-dialog").hidden = false;
-    behind(true);
-    input.focus();
-  }
-
-  // Closes whichever box is open; the focus goes back to Change.
-  function closeBox() {
-    if (open === null || working) return;
-    open = null;
-    $("change-dialog").hidden = true;
-    $("sent-dialog").hidden = true;
-    sayIn($("change-message"), "");
-    behind(false);
-    $("email-change").focus();
+    change.open({ focus: "change-email", back: toChange });
   }
 
   function invalid() {
     var input = $("change-email");
-    sayIn($("change-message"), TEXT.badEmail);
+    change.say(TEXT.badEmail);
     input.setAttribute("aria-invalid", "true");
     input.focus();
   }
 
-  // The second box, for every 200 answer, whatever the address was.
+  // The second box, for every 200 answer, whatever the address was. It names the address as
+  // the server stores it: trimmed and lower-case (the server's parseEmail takes only
+  // visible ASCII, so lower-case here is the same).
   function showSent(value) {
-    open = "sent";
-    $("sent-title").textContent = TEXT.checkBefore + value;
+    change.close(false);
     $("sent-old").textContent = email;
-    $("change-dialog").hidden = true;
-    $("sent-dialog").hidden = false;
-    $("sent-done").focus();
+    sent.open({ title: TEXT.checkBefore + value.toLowerCase(), focus: "sent-done", back: toChange });
   }
 
   // The sentence for a request that did not do what was asked: the server's own when the
@@ -271,35 +242,22 @@ export const ACCOUNT_JS = `(function () {
   }
 
   function sendLink() {
-    if (open !== "change" || working) return;
+    if (!change.isOpen() || change.isWorking()) return;
     var input = $("change-email");
-    var cancel = $("change-cancel");
-    var go = $("change-send");
     var value = input.value.trim();
     if (!looksLikeEmail(value)) { invalid(); return; }
     input.removeAttribute("aria-invalid");
-    sayIn($("change-message"), "");
-    working = true;
-    input.disabled = true;
-    cancel.disabled = true;
-    busy(go, true, TEXT.sending);
+    change.say("");
+    change.busy(true, "change-send", TEXT.sending);
     function settle(res) {
       if (res !== null && res.status === 401) { Dash.signedOut(); return; }
-      working = false;
-      input.disabled = false;
-      cancel.disabled = false;
-      busy(go, false);
+      change.busy(false, "change-send");
       if (res !== null && res.status === 200) { showSent(value); return; }
       if (res !== null && res.status === 400 && Dash.errorOf(res) === "bad_email") { invalid(); return; }
-      sayIn($("change-message"), problem(res));
-      go.focus();
+      change.say(problem(res));
+      $("change-send").focus();
     }
     Dash.api("POST", "/api/v1/account/email", { email: value }).then(settle, function () { settle(null); });
-  }
-
-  // The controls a person can reach in the open box, in order.
-  function stops() {
-    return open === "change" ? [$("change-email"), $("change-cancel"), $("change-send")] : [$("sent-done")];
   }
 
   function startPage() {
@@ -310,35 +268,13 @@ export const ACCOUNT_JS = `(function () {
       leave($("signout-everywhere"), $("signout"), function () { return Dash.api("POST", "/api/v1/signout/everywhere"); });
     });
     $("email-change").addEventListener("click", openChange);
-    $("change-cancel").addEventListener("click", closeBox);
+    $("change-cancel").addEventListener("click", function () { change.dismiss(); });
     $("change-send").addEventListener("click", sendLink);
-    $("sent-done").addEventListener("click", closeBox);
+    $("sent-done").addEventListener("click", function () { sent.dismiss(); });
     $("change-email").addEventListener("keydown", function (ev) {
       if (ev.key !== "Enter") return;
       ev.preventDefault();
       sendLink();
-    });
-    // A click on a backdrop, outside the box itself, is Cancel or Done.
-    ["change-dialog", "sent-dialog"].forEach(function (id) {
-      var backdrop = $(id);
-      backdrop.addEventListener("click", function (ev) { if (ev.target === backdrop) closeBox(); });
-    });
-    // For the whole document while a box is open: Escape closes it; Tab and Shift+Tab go
-    // round its controls, or stay on its title while its request runs.
-    document.addEventListener("keydown", function (ev) {
-      if (open === null) return;
-      if (ev.key === "Escape") {
-        ev.preventDefault();
-        closeBox();
-        return;
-      }
-      if (ev.key !== "Tab") return;
-      ev.preventDefault();
-      if (working) { $("change-title").focus(); return; }
-      var list = stops();
-      var at = list.indexOf(document.activeElement);
-      var next = at === -1 ? (ev.shiftKey ? list.length - 1 : 0) : (at + (ev.shiftKey ? list.length - 1 : 1)) % list.length;
-      list[next].focus();
     });
   }
 

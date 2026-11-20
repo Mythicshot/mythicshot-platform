@@ -18,7 +18,11 @@
 // the content security policy allows, never through a style attribute.
 //
 // Setting an allowance: the field takes a size as a person writes it (SIZE_JS below); empty
-// means the standard allowance, which the API is told with null. After a save the list is
+// means the standard allowance, which the API is told with null. An allowance that leaves the
+// workspace no room (0, what it uses, or less) shows a warning and "Save anyway". The question
+// is the dashboard's one question helper (Dash.question, src/dash/script.ts); Enter in the
+// field is Save. The list is read one request at a time: Show more does nothing while a read
+// runs, and a read waits for Show more. After a save the list is
 // read again from the API, and after any failure too, so the page never shows a number the
 // server did not give it.
 import { dashHtml } from "./shell.ts";
@@ -29,7 +33,7 @@ const ADMIN_MAIN = `  <section id="admin" aria-labelledby="h-page" hidden>
     <p class="message" id="admin-message" role="status" aria-live="polite" hidden></p>
     <div class="card">
       <table class="accounts">
-        <thead><tr><th scope="col">Account</th><th scope="col">Workspace</th><th scope="col" class="n">Tours</th><th scope="col" class="bar"></th><th scope="col" class="n">Used</th><th scope="col" class="n">Allowance</th><th scope="col"></th></tr></thead>
+        <thead><tr><th scope="col">Account</th><th scope="col">Workspace</th><th scope="col" class="n">Tours</th><th scope="col" class="bar"><span class="vh">Share</span></th><th scope="col" class="n">Used</th><th scope="col" class="n">Allowance</th><th scope="col"><span class="vh">Actions</span></th></tr></thead>
         <tbody id="admin-rows"></tbody>
       </table>
     </div>
@@ -41,11 +45,11 @@ const ADMIN_MAIN = `  <section id="admin" aria-labelledby="h-page" hidden>
     <p><a href="/tours">Back to Tours</a></p>
   </section>
   <div class="backdrop" id="allow-dialog" hidden>
-    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="allow-title" aria-describedby="allow-uses">
+    <div class="dialog" id="allow-box" role="dialog" aria-modal="true" aria-labelledby="allow-title" aria-describedby="allow-uses">
       <h2 id="allow-title" tabindex="-1"></h2>
       <p class="sub" id="allow-uses"></p>
       <label for="allow-input">Allowance</label>
-      <input class="field" id="allow-input" type="text" autocomplete="off" spellcheck="false" aria-describedby="allow-hint allow-warn allow-message">
+      <input class="field" id="allow-input" type="text" autocomplete="off" spellcheck="false" aria-describedby="allow-hint allow-message">
       <p class="hint" id="allow-hint"></p>
       <p class="warn-box" id="allow-warn" hidden></p>
       <p class="message" id="allow-message" role="status" aria-live="polite" hidden></p>
@@ -65,7 +69,8 @@ export const ADMIN_HTML = dashHtml({ title: "Admin", active: "admin", main: ADMI
  * not a size. The rule: optional spaces around; digits, with at most one decimal part
  * written with a point (a comma is refused); optional spaces; then B, byte, bytes, KB, MB
  * or GB in any case, or nothing for bytes. 1024 to the next unit, as the pages write sizes;
- * a fraction is rounded to the nearest byte, and bytes themselves take no fraction. TB and
+ * a fraction is rounded to the nearest byte (a half up), exactly: the digits are worked on as
+ * whole numbers (BigInt), never as a floating-point number; bytes themselves take no fraction. TB and
  * every other unit are refused: the pages write the largest sizes in GB. The result must be
  * a whole number from 0 to 9007199254740991, the largest allowance the API takes.
  */
@@ -83,8 +88,13 @@ export const SIZE_JS = `  // A size as a person writes it (500 MB, 10 GB, 1.5 GB
     if (m[2] !== undefined && unit === 1) return undefined;
     // More than 16 digits before the point is past the largest allowance, and is not read at all.
     if (m[1].replace(/^0+(?=[0-9])/, "").length > 16) return undefined;
-    var bytes = Math.round(Number(m[2] === undefined ? m[1] : m[1] + "." + m[2]) * unit);
-    return Number.isSafeInteger(bytes) && bytes <= MAX_BYTES ? bytes : undefined;
+    // (whole + fraction) times the unit, rounded: on whole numbers, (whole * 10^k + digits) * unit / 10^k.
+    var frac = m[2] === undefined ? "" : m[2];
+    var scale = BigInt("1" + "0".repeat(frac.length));
+    var exact = (BigInt(m[1]) * scale + BigInt(frac === "" ? "0" : frac)) * BigInt(unit);
+    var bytes = exact / scale;
+    if ((exact % scale) * BigInt(2) >= scale) bytes += BigInt(1);
+    return bytes <= BigInt(MAX_BYTES) ? Number(bytes) : undefined;
   }
 `;
 
@@ -113,6 +123,9 @@ export const ADMIN_JS = `(function () {
     hintNone: " Leave it empty for no allowance.",
     warnBefore: "That is less than this workspace uses. Nothing is deleted, but its new uploads are refused until it is under ",
     warnAfter: ".",
+    warnEqualBefore: "That is exactly what this workspace uses. Nothing is deleted, but its new uploads are refused until it is under ",
+    zeroStandard: "An allowance of 0 refuses every upload from this workspace. Leave the field empty for the standard allowance.",
+    zeroNone: "An allowance of 0 refuses every upload from this workspace. Leave the field empty for no allowance.",
     badSize: "Write a size such as 500 MB or 10 GB.",
     save: "Save",
     saveAnyway: "Save anyway",
@@ -127,6 +140,8 @@ export const ADMIN_JS = `(function () {
   var WORKSPACE_ID = /^ws_[0-9a-f]{24}$/;
   // What the page behind the question is, made inert while it is open.
   var BEHIND = ["dash-top", "admin"];
+  // The question that sets an allowance (Dash.question, src/dash/script.ts).
+  var question = Dash.question({ backdrop: "allow-dialog", box: "allow-box", role: "dialog", title: "allow-title", message: "allow-message", behind: BEHIND, fields: ["allow-input"], buttons: ["allow-cancel", "allow-save"], lock: "readonly" });
 ${SIZE_JS}
   var $ = function (id) { return document.getElementById(id); };
   // The standard allowance from the summary, null when there is none.
@@ -137,11 +152,11 @@ ${SIZE_JS}
   var next = null;
   // Each account's Set allowance button, by workspace id, to give focus back after the list is rebuilt.
   var buttons = {};
-  // The question that is open ({ a: the account, ws: its workspace id }), and whether a save is running.
+  // The question that is open ({ a: the account, ws: its workspace id }).
   var asking = null;
-  var working = false;
-  var loadingMore = false;
   var gone = false;
+  // The list request running (a read, or Show more), or null: one at a time.
+  var listing = null;
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -164,7 +179,7 @@ ${SIZE_JS}
 
   // The admin screen and its question leave the page; what is left is what a missing page shows.
   function notFound() {
-    if (asking !== null) setInert(false);
+    question.close(false);
     asking = null;
     gone = true;
     var parts = [$("admin"), $("allow-dialog")];
@@ -199,10 +214,34 @@ ${SIZE_JS}
     return Dash.api("GET", path);
   }
 
+  // One list request at a time: Show more is disabled while one runs, and does nothing then;
+  // a read asked for while Show more runs starts when it has ended, so it reads every page
+  // shown by then. track() marks the request running until it ends.
+  function track(p) {
+    listing = p;
+    var more = $("admin-more");
+    if (more !== null) more.disabled = true;
+    function end() {
+      if (listing !== p) return;
+      listing = null;
+      var btn = $("admin-more");
+      if (btn !== null) btn.disabled = false;
+    }
+    p.then(end, end);
+    return p;
+  }
+
+  // The summary and the pages of the list shown so far (at least one), read again once any
+  // list request running has ended. Resolves as readNow does.
+  function read() {
+    var before = listing === null ? Promise.resolve() : listing.then(null, function () {});
+    return track(before.then(function () { return readNow(Math.max(1, pages)); }));
+  }
+
   // The summary and the first \`want\` pages of the list, then the page shown again. Resolves
   // to true when shown, false when the visitor was sent on (to sign in, or to the missing
   // page), or the answer that failed (null when no answer came).
-  function read(want) {
+  function readNow(want) {
     var got = [];
     var cursor = null;
     var count = 0;
@@ -318,18 +357,10 @@ ${SIZE_JS}
   // ---- Show more ----
 
   function more() {
-    if (loadingMore || next === null) return;
-    loadingMore = true;
-    var btn = $("admin-more");
-    btn.disabled = true;
+    if (listing !== null || next === null || gone) return;
     say("");
     var from = shown.length;
-    function done() {
-      loadingMore = false;
-      btn.disabled = false;
-    }
-    pageOf(next).then(function (res) {
-      done();
+    track(pageOf(next).then(function (res) {
       if (res.status === 401) { Dash.signedOut(); return; }
       if (res.status === 404) { notFound(); return; }
       if (!listed(res)) { say(Dash.failure(res)); return; }
@@ -340,9 +371,8 @@ ${SIZE_JS}
       if (shown.length > from) focusRow(shown[from].workspace_id);
       else $("h-page").focus();
     }, function () {
-      done();
       say(Dash.TEXT.failed);
-    });
+    }));
   }
 
   // ---- The question that sets an allowance ----
@@ -356,83 +386,66 @@ ${SIZE_JS}
     return sizeOf(text) === own ? text : String(own);
   }
 
-  // While the question is open, the bar and the admin screen behind it are inert and hidden
-  // from screen readers.
-  function setInert(on) {
-    BEHIND.forEach(function (id) {
-      var e = $(id);
-      if (e === null) return;
-      if (on) {
-        e.setAttribute("inert", "");
-        e.setAttribute("aria-hidden", "true");
-      } else {
-        e.removeAttribute("inert");
-        e.removeAttribute("aria-hidden");
-      }
-    });
+  // What the field asks for leaves the workspace no room, and the warning that says so (or
+  // "" when it leaves room): an allowance of 0, one at what is used, one below it. An empty
+  // field asks for the standard allowance.
+  function warningFor(v) {
+    if (v === undefined || asking === null) return "";
+    if (v === 0) return standard !== null ? TEXT.zeroStandard : TEXT.zeroNone;
+    var wanted = v === null ? standard : v;
+    if (wanted === null) return "";
+    if (wanted === asking.a.used_bytes) return TEXT.warnEqualBefore + Dash.formatBytes(wanted) + TEXT.warnAfter;
+    if (wanted < asking.a.used_bytes) return TEXT.warnBefore + Dash.formatBytes(wanted) + TEXT.warnAfter;
+    return "";
   }
 
-  // The warning instead of the hint, and Save anyway, when the allowance asked for is below
-  // what the workspace uses. An empty field asks for the standard allowance.
+  // The warning instead of the hint, and Save anyway, when the allowance leaves no room. A
+  // screen reader is pointed at whichever of the two is shown, never at the hidden one.
   function update() {
     if (asking === null) return;
-    var v = sizeOf($("allow-input").value);
-    var wanted = v === null ? standard : v;
-    var less = v !== undefined && wanted !== null && wanted < asking.a.used_bytes;
+    var text = warningFor(sizeOf($("allow-input").value));
     var warn = $("allow-warn");
-    warn.textContent = less ? TEXT.warnBefore + Dash.formatBytes(wanted) + TEXT.warnAfter : "";
-    warn.hidden = !less;
-    $("allow-hint").hidden = less;
-    $("allow-save").textContent = less ? TEXT.saveAnyway : TEXT.save;
+    warn.textContent = text;
+    warn.hidden = text === "";
+    $("allow-hint").hidden = text !== "";
+    $("allow-input").setAttribute("aria-describedby", text !== "" ? "allow-warn allow-message" : "allow-hint allow-message");
+    $("allow-save").textContent = text !== "" ? TEXT.saveAnyway : TEXT.save;
   }
 
   function complain(text) {
     var input = $("allow-input");
-    sayIn($("allow-message"), text);
+    question.say(text);
     if (text !== "") input.setAttribute("aria-invalid", "true");
     else input.removeAttribute("aria-invalid");
   }
 
   function ask(a) {
-    if (working || asking !== null || gone) return;
-    asking = { a: a, ws: a.workspace_id };
+    if (question.isOpen() || gone) return;
+    var ws = a.workspace_id;
+    asking = { a: a, ws: ws };
     var input = $("allow-input");
-    $("allow-title").textContent = TEXT.askTitle + (typeof a.workspace_name === "string" ? a.workspace_name : "");
     $("allow-uses").textContent = TEXT.usesBefore + Dash.formatBytes(a.used_bytes) + TEXT.usesAfter;
     $("allow-hint").textContent = TEXT.hintSize + (standard !== null ? TEXT.hintStandardBefore + Dash.formatBytes(standard) + TEXT.hintStandardAfter : TEXT.hintNone);
     input.value = prefill(a);
-    complain("");
+    input.removeAttribute("aria-invalid");
     update();
-    setInert(true);
-    $("allow-dialog").hidden = false;
-    input.focus();
+    question.open({
+      title: TEXT.askTitle + (typeof a.workspace_name === "string" ? a.workspace_name : ""),
+      focus: "allow-input",
+      // Back to the account's button, as the list shows it by then.
+      back: function () { return buttons[ws]; },
+      fallback: "h-page",
+      onClose: function () {
+        asking = null;
+        $("allow-input").removeAttribute("aria-invalid");
+      },
+    });
     input.select();
   }
 
-  function close() {
-    if (asking === null || working) return;
-    var ws = asking.ws;
-    asking = null;
-    complain("");
-    $("allow-dialog").hidden = true;
-    setInert(false);
-    focusRow(ws);
-  }
-
   function busy(on) {
-    var save = $("allow-save");
-    working = on;
-    save.disabled = on;
-    $("allow-cancel").disabled = on;
-    if (on) {
-      $("allow-input").setAttribute("readonly", "");
-      save.textContent = TEXT.saving;
-      save.setAttribute("aria-busy", "true");
-    } else {
-      $("allow-input").removeAttribute("readonly");
-      save.removeAttribute("aria-busy");
-      update();
-    }
+    question.busy(on, "allow-save", on ? TEXT.saving : undefined);
+    if (!on) update();
   }
 
   // After a failure: the sentence in the question, the buttons back, and the list read again.
@@ -440,7 +453,7 @@ ${SIZE_JS}
     busy(false);
     complain(text);
     $("allow-save").focus();
-    return read(Math.max(1, pages)).then(function () {
+    return read().then(function () {
       if (asking === null) return;
       for (var i = 0; i < shown.length; i++) {
         if (shown[i].workspace_id === asking.ws) {
@@ -453,7 +466,7 @@ ${SIZE_JS}
   }
 
   function save() {
-    if (asking === null || working) return;
+    if (asking === null || question.isWorking()) return;
     var input = $("allow-input");
     var v = sizeOf(input.value);
     if (v === undefined) {
@@ -466,11 +479,11 @@ ${SIZE_JS}
     say("");
     busy(true);
     Dash.api("PATCH", WORKSPACES + encodeURIComponent(id), { storage_allowance_bytes: v }).then(function (res) {
-      if (res.status === 401) { working = false; Dash.signedOut(); return; }
+      if (res.status === 401) { Dash.signedOut(); return; }
       if (res.status !== 200) return failed(Dash.failure(res));
       busy(false);
-      close();
-      return read(Math.max(1, pages)).then(function (r) {
+      question.close(true);
+      return read().then(function (r) {
         if (r === false) return;
         // The allowance is set; when the list cannot be read again, the page says so and keeps what it shows.
         say(r === true ? "" : TEXT.notReloaded);
@@ -482,31 +495,18 @@ ${SIZE_JS}
   }
 
   function startPage() {
-    var dialog = $("allow-dialog");
     $("admin-more").addEventListener("click", more);
-    $("allow-cancel").addEventListener("click", close);
+    $("allow-cancel").addEventListener("click", function () { question.dismiss(); });
     $("allow-save").addEventListener("click", save);
     $("allow-input").addEventListener("input", function () {
       complain("");
       update();
     });
-    // A click on the backdrop, outside the question, closes it.
-    dialog.addEventListener("click", function (ev) {
-      if (ev.target === dialog) close();
-    });
-    // While the question is open, Escape anywhere closes it, and Tab and Shift+Tab go round
-    // its controls, even when the focus got out of it. While a save runs, Escape does
-    // nothing and Tab keeps the focus on the question's title.
-    document.addEventListener("keydown", function (ev) {
-      if (asking === null) return;
-      if (ev.key === "Escape") { ev.preventDefault(); close(); return; }
-      if (ev.key !== "Tab") return;
-      if (working) { ev.preventDefault(); $("allow-title").focus(); return; }
-      var list = [$("allow-input"), $("allow-cancel"), $("allow-save")].filter(function (c) { return !c.disabled; });
-      var at = list.indexOf(document.activeElement);
-      if (at === -1) { ev.preventDefault(); list[ev.shiftKey ? list.length - 1 : 0].focus(); }
-      else if (ev.shiftKey && at === 0) { ev.preventDefault(); list[list.length - 1].focus(); }
-      else if (!ev.shiftKey && at === list.length - 1) { ev.preventDefault(); list[0].focus(); }
+    // Enter in the field is Save.
+    $("allow-input").addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter") return;
+      ev.preventDefault();
+      save();
     });
   }
 
@@ -514,7 +514,7 @@ ${SIZE_JS}
   Dash.start(function (who) {
     // Nothing is asked of the admin routes before the session says admin.
     if (who.admin !== true) { notFound(); return; }
-    return read(1).then(function (r) {
+    return read().then(function (r) {
       if (r !== true && r !== false) $("dash-load").textContent = Dash.failure(r);
     });
   });
