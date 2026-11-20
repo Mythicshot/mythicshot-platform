@@ -149,7 +149,8 @@ export async function usageOf(deps: Deps, workspaceId: string): Promise<Usage> {
 export function storageFull(u: Usage, needed: number): Response {
   const allowance = u.allowance ?? 0;
   const left = Math.max(0, allowance - u.used);
-  const detail = `this tour needs ${formatBytes(needed)} of room, but the workspace has ${formatBytes(left)} left of its ${formatBytes(allowance)} allowance. Nothing was uploaded. Delete tours you no longer need, or ask the site's admin for more room`;
+  const sizes = roomSizes(needed, left);
+  const detail = `this tour needs ${sizes.needed} of room, but the workspace has ${sizes.left} left of its ${formatBytes(allowance)} allowance. Nothing was uploaded. Delete tours you no longer need, or ask the site's admin for more room`;
   return json(413, { error: "storage_full", detail, used_bytes: u.used, allowance_bytes: allowance, needed_bytes: needed });
 }
 
@@ -209,6 +210,10 @@ const UNITS = ["KB", "MB", "GB"] as const;
  * this, so both are held to the one table in test/sizes.ts.
  */
 export function formatBytes(n: number): string {
+  // No caller passes a negative or non-finite size; if one did, it reads as nothing rather
+  // than "-5 bytes" or "NaN GB". The account page's script has no such guard and is left as
+  // it is: it only ever shows numbers the API answered.
+  if (!Number.isFinite(n) || n < 0) return "0 bytes";
   if (n < 1024) return n === 1 ? "1 byte" : `${n} bytes`;
   let value = n;
   for (const [i, unit] of UNITS.entries()) {
@@ -217,4 +222,49 @@ export function formatBytes(n: number): string {
     if (rounded < 1024 || i === UNITS.length - 1) return `${rounded} ${unit}`;
   }
   return `${n} bytes`;
+}
+
+/** The most decimals roomSizes tries before it gives both sizes as exact bytes. */
+const MAX_ROOM_DECIMALS = 12;
+
+/**
+ * A size written by formatBytes's rule (1024 to a unit, GB the largest, no trailing zeros),
+ * but with `decimals` decimals and rounded the way given: "up" never shows less than the
+ * size, "down" never more. Exact, in whole numbers, so no binary fraction tips a rounding.
+ * Under 1024 it is the exact number of bytes. Rounding up to 1024 of a unit is 1 of the next.
+ */
+function directedBytes(n: number, way: "up" | "down", decimals: number): string {
+  if (!Number.isSafeInteger(n) || n < 0) return "0 bytes";
+  if (n < 1024) return n === 1 ? "1 byte" : `${n} bytes`;
+  const scale = 10n ** BigInt(decimals);
+  const scaled = BigInt(n) * scale;
+  let unit = 1n;
+  for (const [i, name] of UNITS.entries()) {
+    unit *= 1024n;
+    const q = way === "up" ? (scaled + unit - 1n) / unit : scaled / unit;
+    if (q < 1024n * scale || i === UNITS.length - 1) {
+      const whole = q / scale;
+      const frac = (q % scale).toString().padStart(decimals, "0").replace(/0+$/, "");
+      return `${whole}${frac === "" ? "" : "." + frac} ${name}`;
+    }
+  }
+  return `${n} bytes`;
+}
+
+/**
+ * The two sizes of the storage-full sentence: the room needed rounded up and the room left
+ * rounded down, so the sentence never understates the need or overstates what is left.
+ * With one decimal first, and while the two would read the same, more decimals for both;
+ * past MAX_ROOM_DECIMALS both are given as exact bytes. Whenever more is needed than is
+ * left the two differ already at one decimal (a rounding up and a rounding down of two
+ * different numbers in one unit cannot meet), so the loop only matters for equal or
+ * smaller needs. Used for this sentence only; every other size is formatBytes.
+ */
+export function roomSizes(needed: number, left: number): { needed: string; left: string } {
+  for (let decimals = 1; decimals <= MAX_ROOM_DECIMALS; decimals++) {
+    const sizes = { needed: directedBytes(needed, "up", decimals), left: directedBytes(left, "down", decimals) };
+    if (sizes.needed !== sizes.left) return sizes;
+  }
+  const exact = (n: number) => (n === 1 ? "1 byte" : `${n} bytes`);
+  return { needed: exact(needed), left: exact(left) };
 }
