@@ -17,7 +17,9 @@
 //   first is the one the suite sends requests with. The first side's account is the site's
 //   admin, since nobody can sign in on a site without one;
 // - an open change of its account's email address, as asking for one leaves it (written by
-//   SQL, since asking needs a site that can mail), with the code its link would carry.
+//   SQL, since asking needs a site that can mail), with the code its link would carry;
+// - three shared items: an online image with a preview, an online GIF clip, and an
+//   unfinished image whose one part and preview are sent but which is not committed.
 // The two sides differ in every title, every picture's bytes and every size, so a value of
 // one can never be mistaken for the other's.
 //
@@ -25,10 +27,10 @@
 // journal in front of both stores: every put and delete any request makes is recorded.
 //
 import { seedAccount } from "#harness";
-import { hashToken, newId, newSlug, newToken } from "../src/auth.ts";
+import { hashToken, newId, newLinkId, newSlug, newToken } from "../src/auth.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import type { Deps, FileStore } from "../src/ports.ts";
-import { clone, commit, createUpload, fixtures, putStep, send, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
+import { clone, commit, createUpload, fixtures, gif, logoPng, png, putStep, send, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 
 /** The harness's listing of both stores (`makeDeps()` returns it beside `deps`). */
 export type StoreKeys = { draftKeys: () => Promise<string[]>; publicKeys: () => Promise<string[]> };
@@ -52,8 +54,13 @@ export type Ids = {
   upload: string;
   /** An open upload that replaces the draft tour's chapter: step 1 reused, step 2 not sent. */
   replaceUpload: string;
-  /** The manifest steps of the two open uploads and of the draft chapter as it is now, to build pictures that would be accepted. */
-  pictures: { upload: Json[]; replaceUpload: Json[]; draft: Json[] };
+  /** Shared items: an online image (with a preview), an online clip, and an unfinished image (its part and preview sent); each with its link id. */
+  media: { image: string; clip: string; uploading: string; imageLink: string; clipLink: string; uploadingLink: string };
+  /**
+   * The manifest steps of the two open uploads and of the draft chapter as it is now, and
+   * the declared shape of the unfinished item, to build pictures that would be accepted.
+   */
+  pictures: { upload: Json[]; replaceUpload: Json[]; draft: Json[]; media: { width: number; height: number; bytes: number } };
   /** The byte the side's pictures are filled with. */
   fill: number;
   /** The session the suite sends the side's requests with, and a second live session of the same account. */
@@ -118,6 +125,7 @@ const sizes = (base: number) => ({
   upload: [base + 6, base + 7],
   large: Array.from({ length: 13 }, (_, i) => base + 10 + i),
   gone: [base + 30],
+  media: { image: base + 40, clip: base + 41, uploading: base + 42 },
 });
 
 /**
@@ -136,10 +144,12 @@ export function inventedIds(like?: Ids): Ids {
     deleting: { tour: newId("tour") },
     upload: newId("up"),
     replaceUpload: newId("up"),
+    media: { image: newId("med"), clip: newId("med"), uploading: newId("med"), imageLink: newLinkId(), clipLink: newLinkId(), uploadingLink: newLinkId() },
     pictures: like?.pictures ?? {
       upload: manifestOf(s.upload, "x", true).steps,
       replaceUpload: manifestOf(s.openReplace, "x").steps,
       draft: manifestOf(s.replaced, "x").steps,
+      media: { width: 64, height: 64, bytes: s.media.uploading },
     },
     fill: like?.fill ?? 0,
     session: newId("ses"),
@@ -169,6 +179,25 @@ async function need<T>(row: Promise<T | null>, what: string): Promise<T> {
   const found = await row;
   if (found === null) throw new Error(`the world could not be built: no ${what}`);
   return found;
+}
+
+/** The one part of the unfinished item `pictures.media` describes, as its owner would send it. */
+export function mediaPart(spec: { width: number; height: number; bytes: number }, fill: number): Uint8Array {
+  return png(spec.width, spec.height, spec.bytes, fill);
+}
+
+/** Shares one item through the API: create, its one part, a preview when asked, and commit unless told not to. Returns the id and link id. */
+async function shareItem(deps: Deps, token: string, body: Json, part: Uint8Array, opts: { preview: boolean; commit: boolean }): Promise<{ id: string; link: string }> {
+  const made = must(await send(deps, "POST", "/api/v1/media", { token, body: JSON.stringify(body), headers: JSON_HEADERS }), 201, `the item ${body.title}`);
+  const id = made.json.id as string;
+  must(await send(deps, "PUT", `/api/v1/media/${id}/parts/0`, { token, body: part as NonNullable<RequestInit["body"]> }), 204, `the part of ${body.title}`);
+  if (opts.preview) must(await send(deps, "PUT", `/api/v1/media/${id}/preview`, { token, body: logoPng(1000 + part.length) as NonNullable<RequestInit["body"]> }), 204, `the preview of ${body.title}`);
+  if (!opts.commit) {
+    const row = await need(deps.db.first<{ link_id: string }>("SELECT link_id FROM media WHERE id = ?", [id]), "unfinished item");
+    return { id, link: row.link_id };
+  }
+  const done = must(await send(deps, "POST", `/api/v1/media/${id}/commit`, { token }), 200, `the commit of ${body.title}`);
+  return { id, link: done.json.link_id as string };
 }
 
 /** A create that replaces a chapter, with the hash of each picture as the client would send it. */
@@ -257,6 +286,12 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
   must(await cutOff((broken) => send(broken, "DELETE", `/api/v1/tours/${gone.tour_id}`, { token })), 500, "the delete that is cut off");
   await need(deps.db.first("SELECT 1 AS x FROM tour_deletion WHERE tour_id = ?", [gone.tour_id]), "deletion in progress");
 
+  // The shared items.
+  const mediaSpec = { width: 64, height: 64, bytes: s.media.uploading };
+  const image = await shareItem(deps, token, { kind: "image", content_type: "image/png", bytes: s.media.image, width: 64, height: 64, title: `${name} shared image` }, png(64, 64, s.media.image, fill), { preview: true, commit: true });
+  const clip = await shareItem(deps, token, { kind: "clip", content_type: "image/gif", bytes: s.media.clip, width: 32, height: 32, duration_ms: 1200, title: `${name} shared clip` }, gif(32, 32, s.media.clip, fill), { preview: false, commit: true });
+  const unfinished = await shareItem(deps, token, { kind: "image", content_type: "image/png", ...mediaSpec, title: `${name} unfinished item` }, mediaPart(mediaSpec, fill), { preview: true, commit: false });
+
   const tourIds = async (t: { tour_id: string; chapter_id: string }): Promise<TourIds & { sha256: string[] }> => {
     const slug = (await need(deps.db.first<{ slug: string }>("SELECT slug FROM tour WHERE id = ?", [t.tour_id]), "tour")).slug;
     const steps = await deps.db.all<{ id: string; sha256: string | null }>("SELECT id, sha256 FROM step WHERE tour_id = ? ORDER BY position, id", [t.tour_id]);
@@ -283,7 +318,8 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
     deleting: { tour: gone.tour_id },
     upload,
     replaceUpload: second.json.upload_id,
-    pictures: { upload: uploading.steps, replaceUpload: openReplace.steps, draft: replaced.steps },
+    media: { image: image.id, clip: clip.id, uploading: unfinished.id, imageLink: image.link, clipLink: clip.link, uploadingLink: unfinished.link },
+    pictures: { upload: uploading.steps, replaceUpload: openReplace.steps, draft: replaced.steps, media: mediaSpec },
     fill,
     session: "",
     otherSession: "",
@@ -359,6 +395,8 @@ export const OWNED: Readonly<Record<string, string>> = {
   upload_step: "upload_id IN (SELECT id FROM upload WHERE workspace_id = ?)",
   tour_deletion: "workspace_id = ?",
   deleted_object: "tour_id IN (SELECT tour_id FROM tour_deletion WHERE workspace_id = ?)",
+  media: "workspace_id = ?",
+  media_part: "media_id IN (SELECT id FROM media WHERE workspace_id = ?)",
 };
 
 /** Tables whose rows belong to no workspace, each with the reason. */
@@ -375,13 +413,14 @@ async function digest(store: FileStore, key: string): Promise<string> {
   return `${bytes.byteLength} bytes, sha256 ${await sha256Hex(bytes)}, ${file.contentType}, ${file.cacheControl}`;
 }
 
-const storeOf = (deps: Deps, key: string) => (key.startsWith("p/") ? deps.pub : deps.drafts);
+/** Published pictures (`p/`) and shared items' objects (`m/`) are in the public store; everything else in the drafts. */
+const storeOf = (deps: Deps, key: string) => (key.startsWith("p/") || key.startsWith("m/") ? deps.pub : deps.drafts);
 
 export type Snapshot = { rows: Record<string, Json[]>; files: Record<string, string> };
 
 /**
  * Everything that belongs to the side's workspace: every row of every table in OWNED, and
- * every stored file one of those rows names or that lies under one of its uploads' ids,
+ * every stored file one of those rows names or that lies under one of its uploads' or items' ids,
  * with its length, the hash of its bytes and its type ("missing" for a named file that is
  * not there).
  */
@@ -399,6 +438,8 @@ export async function snapshotOf(deps: Deps, side: { workspaceId: string }, keys
   }
   const uploads = (rows.upload ?? []).map((u) => `u/${u.id}/`);
   for (const key of await keys.draftKeys()) if (uploads.some((prefix) => key.startsWith(prefix))) named.add(key);
+  const items = (rows.media ?? []).map((m) => `m/${m.id}/`);
+  for (const key of await keys.publicKeys()) if (items.some((prefix) => key.startsWith(prefix))) named.add(key);
   const files: Record<string, string> = {};
   for (const key of [...named].sort()) files[key] = await digest(storeOf(deps, key), key);
   return { rows, files };
