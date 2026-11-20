@@ -2,6 +2,15 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.25 (2026-11-20)
+
+- Dashboard, Images and GIFs pages: when a delete gets no answer, the page asks the item itself. Only the API's own "no such item" answer counts as deleted, not any 404 (one from a proxy, say); an item still online or still being sent, or no answer to that either, shows the failure, and "too many requests" says so in its own sentence. Before, an item that newer items had pushed off the pages shown could be reported deleted while it was still online.
+- Dashboard, Storage page: an image's or a GIF's delete that gets no answer is decided the same way, by asking the item, no longer from the list of the largest items. Tour deletes are unchanged.
+- Upgrade rehearsal: a JSON answer of the new build that only adds fields is allowed, counted as "differ only by added fields", and each added field is named once per route by its path, never with a value. Both bodies must be written exactly as plain JSON writes their values, and the new one with its added keys taken out must be the old one byte for byte. Every added key must be shaped like a field name (lowercase words joined by underscores, at most 40 characters); one of any other shape, such as an item id or a token, fails the answer and is never printed. A changed or removed value, a changed type or list length, or another status still fails, and an answer that is not JSON must still be the same to the byte. The way back stays strict.
+- Upgrade rehearsal: a pass with added fields ends `RESULT: PASS, with N added fields to read above`, still with exit status 0, so that someone reads them before updating: a new field can also be a leak.
+- Upgrade rehearsal: `--mode three` (or `REHEARSE_MODE=three`) adds the address for images and clips, `img.example.com`. An old build from before 0.1.19 runs with two addresses and the new one with three, and the report says so. With two or three addresses each address's health answer must name that address's own role, so a build that does not take `IMG_HOST` fails to start instead of passing as three addresses.
+- Changelog: the missing 0.1.22 entry, and the 0.1.21 entry and the API description now say that the image and clip sizes are fixed in this version, with no setting to change them. The API description no longer says a setting can change the number of open uploads a workspace may have either: no setting fills it.
+
 ## 0.1.24 (2026-11-20)
 
 - Dashboard, Storage page: images and GIFs count beside tours. The line shows how many images, GIFs and tours the workspace has, what takes the room has GIFs and Images rows, and "Largest items" lists all three kinds together, each marked Tour, Image or GIF.
@@ -17,13 +26,17 @@ Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on
 - Delete asks first, and the list is read again afterwards so it always shows what is true.
 - The bar now reads Images, GIFs, Tours, Storage, Account and Admin. Signing in still lands on Tours.
 
+## 0.1.22 (2026-11-20)
+
+- This number's work, counting images and GIFs in a workspace's storage, was released as part of 0.1.24.
+
 ## 0.1.21 (2026-11-20)
 
 - A shared image or clip has its own page at its link: the picture as large as it fits, or the clip playing in a loop without sound, with its title, size and date, "Open full size" or "Open file", and "Download". The page never says who shared it.
 - Chat apps that preview links show the picture and the title.
 - A link to an item that was deleted, is not finished, or belongs to a disabled account shows one "This link no longer works" page, the same as a link that never existed.
 - Clips can be watched from any point, and a file is read only as far as it is played.
-- Upgrading: an install whose image or clip size setting is above 76,000,000 bytes (38 parts of 2,000,000 bytes) is now refused at start, because a larger file could not be sent in one answer within the limit of storage and database calls a request may make. Lower the setting to 76,000,000 bytes or less. An item already stored with more parts than that answers "This link no longer works".
+- The most bytes of a shared image or clip stay at their defaults (10 MB and 50 MB): no setting changes them in this version. Should a later version add such a setting, a value above 76,000,000 bytes (38 parts of 2,000,000 bytes) would be refused at start, because a larger file could not be sent in one answer within the limit of storage and database calls a request may make. An item already stored with more parts than that answers "This link no longer works".
 
 ## 0.1.20 (2026-11-20)
 

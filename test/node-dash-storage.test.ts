@@ -706,19 +706,61 @@ describe("deleting an image or a GIF from the Storage page", () => {
     }
   });
 
-  it("a delete whose answer is lost looks at the list read again: gone means done, still listed means it failed", async () => {
-    // Gone from a list that has room for it: deleted, and the question closes as for a delete that answered.
-    const gone = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", "GET /api/v1/usage": [usage(M5), afterGif], "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
+  it("a delete whose answer is lost asks the item itself: only the API's own 404 not_found means done", async () => {
+    const ITEM = "GET /api/v1/media/" + G1;
+    const items = (tab: Tab) => tab.fetched.filter((f) => f.method === "GET" && f.path === "/api/v1/media/" + G1);
+    const NOT_FOUND = { status: 404, json: { error: "not_found", detail: "no such item" } };
+    // The API's own not_found: deleted, and the question closes as for a delete that answered.
+    const gone = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", [ITEM]: NOT_FOUND, "GET /api/v1/usage": [usage(M5), afterGif], "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
     await gone.settle();
     deleteOf(rows(gone)[GIF_ROW]).click();
     gone.$("delete-go").click();
     await gone.settle();
+    expect(items(gone).map((f) => [f.path, f.body])).toEqual([["/api/v1/media/" + G1, undefined]]);
     expect(gone.$("delete-dialog").shown).toBe(false);
     expect([gone.$("storage-message").hidden, gone.$("delete-message").hidden]).toEqual([true, true]);
     expect(rows(gone).map(titleOf)).toEqual(["Full onboarding, long cut", "Timeline rehearsal walkthrough"]);
     expect(gone.doc.activeElement).toBe(gone.$("h-page"));
 
-    // Lost on the second send, after a first cleanup_pending: the list decides the same way.
+    // Still there (online or still being sent), even though the largest list read again no longer shows it: it failed.
+    for (const state of ["online", "uploading"]) {
+      const kept = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", [ITEM]: { status: 200, json: { id: G1, kind: "clip", state } }, "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
+      await kept.settle();
+      deleteOf(rows(kept)[GIF_ROW]).click();
+      kept.$("delete-go").click();
+      await kept.settle();
+      expect(kept.$("delete-dialog").shown, state).toBe(true);
+      expect([kept.$("delete-message").textContent, kept.$("delete-go").disabled, kept.$("delete-go").textContent], state).toEqual([FAILED, false, "Delete GIF"]);
+      expect(kept.$("storage-message").hidden, state).toBe(true);
+      expect(kept.doc.activeElement, state).toBe(kept.$("delete-go"));
+    }
+
+    // A 404 that is not the API's own (from a proxy, say), no answer, or a server error: a failure; 429 says so in its own sentence.
+    for (const [asked, text] of [
+      [{ status: 404, json: null }, FAILED],
+      [{ status: 404, json: { error: "gone" } }, FAILED],
+      ["network", FAILED],
+      [{ status: 500, json: { error: "internal" } }, FAILED],
+      [{ status: 429, json: { error: "rate_limited" } }, TOO_MANY],
+    ] as const) {
+      const what = JSON.stringify(asked);
+      const unsure = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", [ITEM]: asked as Answer, "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
+      await unsure.settle();
+      deleteOf(rows(unsure)[GIF_ROW]).click();
+      unsure.$("delete-go").click();
+      await unsure.settle();
+      expect([unsure.$("delete-dialog").shown, unsure.$("delete-message").textContent], what).toEqual([true, text]);
+    }
+
+    // A lost session while asking goes to /signin.
+    const out = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", [ITEM]: SIGNED_OUT }));
+    await out.settle();
+    deleteOf(rows(out)[GIF_ROW]).click();
+    out.$("delete-go").click();
+    await out.settle();
+    expect(out.left()).toBe("/signin");
+
+    // Lost after a first cleanup_pending: the item was deleted by then, and nothing is asked.
     const second = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: [{ status: 500, json: { error: "cleanup_pending" } }, "network"], "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
     await second.settle();
     deleteOf(rows(second)[GIF_ROW]).click();
@@ -727,38 +769,17 @@ describe("deleting an image or a GIF from the Storage page", () => {
     second.tick();
     await second.settle();
     expect(deletes(second)).toHaveLength(2);
+    expect(items(second)).toHaveLength(0);
     expect(second.$("delete-dialog").shown).toBe(false);
 
-    // Still listed: it failed, and the question says so with its buttons back.
-    const kept = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network" }));
-    await kept.settle();
-    deleteOf(rows(kept)[GIF_ROW]).click();
-    kept.$("delete-go").click();
-    await kept.settle();
-    expect(kept.$("delete-dialog").shown).toBe(true);
-    expect([kept.$("delete-message").textContent, kept.$("delete-go").disabled, kept.$("delete-go").textContent]).toEqual([FAILED, false, "Delete GIF"]);
-    expect(kept.$("storage-message").hidden).toBe(true);
-
-    // Not listed, but the list is full of larger things, so it cannot tell: a failure, never a claim that it was deleted.
-    const big = (i: number): Entry => ({ kind: "tour", id: "tour_" + String(i).padStart(24, "0"), title: `Big ${i}`, bytes: GB + i });
-    const full = Array.from({ length: 10 }, (_, i) => big(i));
-    const unsure = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", "GET /api/v1/usage/largest": [largest(M5_TOURS), largest(full)] }));
-    await unsure.settle();
-    deleteOf(rows(unsure)[GIF_ROW]).click();
-    unsure.$("delete-go").click();
-    await unsure.settle();
-    expect(unsure.$("delete-dialog").shown).toBe(true);
-    expect(unsure.$("delete-message").textContent).toBe(FAILED);
-    expect(rows(unsure)).toHaveLength(10);
-
-    // The list cannot be read again either: a failure, and the page keeps what it showed.
-    const blind = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", "GET /api/v1/usage/largest": [largest(M5_TOURS), { status: 500, json: { error: "internal" } }] }));
-    await blind.settle();
-    deleteOf(rows(blind)[GIF_ROW]).click();
-    blind.$("delete-go").click();
-    await blind.settle();
-    expect([blind.$("delete-dialog").shown, blind.$("delete-message").textContent]).toEqual([true, FAILED]);
-    expect(rows(blind).map(titleOf)).toEqual(M5_TOURS.map((t) => t.title));
+    // A tour's lost delete is as before: nothing is asked, and it is a failure.
+    const tour = openStorage(standard({ ["DELETE /api/v1/tours/" + T1]: "network" }));
+    await tour.settle();
+    deleteOf(rows(tour)[0]).click();
+    tour.$("delete-go").click();
+    await tour.settle();
+    expect(tour.fetched.filter((f) => f.method === "GET" && f.path.startsWith("/api/v1/media/"))).toHaveLength(0);
+    expect([tour.$("delete-dialog").shown, tour.$("delete-message").textContent]).toEqual([true, FAILED]);
   });
 
   it("once a send answered cleanup_pending the item is deleted: a later 429, 500 or lost answer still counts as done", async () => {
@@ -795,27 +816,6 @@ describe("deleting an image or a GIF from the Storage page", () => {
     expect([stale.$("delete-dialog").shown, stale.$("delete-message").hidden]).toEqual([false, true]);
   });
 
-  it("a lost answer with a full list: an entry of the same size is put in order by id, as the server orders the list", async () => {
-    const SIZE = 96 * MB;
-    const same = (id: string, i: number): Entry => ({ kind: id.startsWith("tour_") ? "tour" : "image", id, title: `Same ${i}`, bytes: SIZE });
-    const bigger = Array.from({ length: 9 }, (_, i): Entry => ({ kind: "tour", id: "tour_" + String(i).padStart(24, "0"), title: `Big ${i}`, bytes: GB + i }));
-    // The last entry has the item's size and an id after the item's ("tour_" > "med_"): the item, were it there, would be listed before it, so it is gone.
-    const later = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", "GET /api/v1/usage/largest": [largest(M5_TOURS), largest([...bigger, same(T3, 0)])] }));
-    await later.settle();
-    deleteOf(rows(later)[GIF_ROW]).click();
-    later.$("delete-go").click();
-    await later.settle();
-    expect(later.$("delete-dialog").shown).toBe(false);
-    expect(later.$("delete-message").hidden).toBe(true);
-    // The last entry has the item's size and an id before the item's: the item could be just past the list, so it cannot tell, and it is a failure.
-    const earlier = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", "GET /api/v1/usage/largest": [largest(M5_TOURS), largest([...bigger, same("med_" + "0".repeat(24), 1)])] }));
-    await earlier.settle();
-    deleteOf(rows(earlier)[GIF_ROW]).click();
-    earlier.$("delete-go").click();
-    await earlier.settle();
-    expect([earlier.$("delete-dialog").shown, earlier.$("delete-message").textContent]).toEqual([true, FAILED]);
-  });
-
   it("an item already gone (404) counts as deleted", async () => {
     const tab = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: { status: 404, json: { error: "not_found", detail: "no such item" } }, "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
     await tab.settle();
@@ -834,7 +834,8 @@ describe("deleting an image or a GIF from the Storage page", () => {
       [{ status: 409, json: { error: "publish_busy" } }, FAILED],
       ["network", FAILED],
     ] as const) {
-      const tab = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: answer as Answer, "GET /api/v1/usage": [usage(M5), usage({ ...M5, images: 47 })] }));
+      // A lost answer asks the item, which is still online.
+      const tab = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: answer as Answer, ["GET /api/v1/media/" + G1]: { status: 200, json: { id: G1, kind: "clip", state: "online" } }, "GET /api/v1/usage": [usage(M5), usage({ ...M5, images: 47 })] }));
       await tab.settle();
       deleteOf(rows(tab)[GIF_ROW]).click();
       tab.$("delete-go").click();

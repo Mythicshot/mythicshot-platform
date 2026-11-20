@@ -28,8 +28,11 @@
 //   as the Images and GIFs pages do. It is done on 204, 404 (already gone), or a last
 //   cleanup_pending: the item is closing by then, so it is no longer listed (it counts in the
 //   usage until its files are gone), and a later request or the sweep removes what is left.
-//   When no answer came, the largest list read again decides: the item is gone when it is no
-//   longer listed although it would still fit in the list; otherwise it is a failure.
+//   When no answer came, the item itself is asked (GET /api/v1/media/:id): only the API's own
+//   404 not_found means it was deleted. An item still there (online or still being sent), any
+//   other answer, or none, is a failure, told with the sentence of that answer (429 is "too
+//   many requests"). The largest list never decides it: it cannot tell an item that is gone
+//   from one pushed past its end.
 // After any outcome the page reads the usage and the largest list again; when that fails
 // after a delete that worked, the page says the change was made and asks for a reload.
 // Message lines are hidden while they have nothing to say.
@@ -115,8 +118,6 @@ export const STORAGE_JS = `(function () {
   var ITEM_ROUNDS = 3;
   // The pauses before the second and the third send, so a moment's fault in the store does not use them all at once.
   var PAUSES_MS = [400, 1200];
-  // How many entries the largest list holds at most (LARGEST_TOURS in src/usage.ts).
-  var LARGEST = 10;
   var TOUR_ID = /^tour_[0-9a-f]{24}$/;
   var ITEM_ID = /^med_[0-9a-f]{24}$/;
   // What each kind of entry is called on the page, and asked about.
@@ -136,8 +137,6 @@ export const STORAGE_JS = `(function () {
   var working = false;
   // Each listed entry's Delete button, by id, to give the focus back after the question.
   var deleteOf = {};
-  // The entries the list shows now.
-  var listed = [];
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -255,7 +254,6 @@ export const STORAGE_JS = `(function () {
     $("room-uploads").textContent = Dash.formatBytes(u.counted.uploads_in_progress);
 
     var list = entries.filter(entryOk);
-    listed = list;
     var max = 0;
     list.forEach(function (e) { if (e.bytes > max) max = e.bytes; });
     deleteOf = {};
@@ -345,17 +343,15 @@ export const STORAGE_JS = `(function () {
     return next();
   }
 
-  // After a delete whose answer was lost, whether the list read again shows the item gone: it
-  // is not listed although it would still fit: the list is not full, or holds an entry the
-  // server orders after it (smaller, or of the same size with a later id).
-  function goneFromList(e) {
-    var after = false;
-    for (var i = 0; i < listed.length; i++) {
-      var x = listed[i];
-      if (x.id === e.id) return false;
-      if (x.bytes < e.bytes || (x.bytes === e.bytes && x.id > e.id)) after = true;
-    }
-    return listed.length < LARGEST || after;
+  // After an image's or a GIF's delete whose answer was lost: the item itself decides. Resolves
+  // to { gone, res }: gone only when it answers the API's own 404 not_found; res is that answer
+  // (null when none came), for the sentence of a failure. Null when the visitor was sent to sign
+  // in. The id matched ITEM_ID.
+  function askItem(id) {
+    return Dash.api("GET", "/api/v1/media/" + encodeURIComponent(id)).then(function (res) {
+      if (res.status === 401) { Dash.signedOut(); return null; }
+      return { gone: res.status === 404 && Dash.errorOf(res) === "not_found", res: res };
+    }, function () { return { gone: false, res: null }; });
   }
 
   function leftovers(res) {
@@ -386,9 +382,11 @@ export const STORAGE_JS = `(function () {
       sayIn($("storage-message"), "");
       question.busy(true, "delete-go", TEXT.deleting);
       rowsDisabled(true);
-      function settle(res) {
+      // res: the delete's last answer, or null when none came; asked: what the item itself
+      // answered then (askItem), for an image or a GIF.
+      function settle(res, asked) {
         if (res !== null && res.status === 401) { Dash.signedOut(); return; }
-        var ok = done(e, res);
+        var ok = done(e, res) || (res === null && asked !== undefined && asked.gone);
         if (ok) question.close(false);
         // However the delete ended, the numbers are read again before the page says anything;
         // the rows' Delete buttons stay disabled until then.
@@ -397,21 +395,25 @@ export const STORAGE_JS = `(function () {
           working = false;
           question.busy(false, "delete-go");
           rowsDisabled(false);
-          // No answer came for an image or a GIF: the list read again decides.
-          if (res === null && e.kind !== "tour" && r === true && goneFromList(e)) {
-            ok = true;
-            question.close(false);
-          }
           if (ok) {
             sayIn($("storage-message"), r === true ? "" : TEXT.notReloaded);
             $("h-page").focus();
             return;
           }
-          question.say(problem(e, res));
+          question.say(problem(e, res === null && asked !== undefined ? asked.res : res));
           $("delete-go").focus();
         });
       }
-      (e.kind === "tour" ? runTour(e.id) : runItem(e.id)).then(settle, function () { return settle(null); });
+      if (e.kind === "tour") {
+        runTour(e.id).then(function (res) { return settle(res); }, function () { return settle(null); });
+        return;
+      }
+      runItem(e.id).then(function (res) { return settle(res); }, function () {
+        return askItem(e.id).then(function (asked) {
+          if (asked === null) return;
+          return settle(null, asked);
+        });
+      });
     });
   }
 

@@ -20,7 +20,12 @@ export type Recorded = { key: string; route: string; answer: Answer };
  * - in the body of `GET /api/v1/me`, the value of `"version"`, which names the build.
  *   Only that one value is swapped before the bytes are compared, and `content-length`
  *   is let follow the swap; every other byte must be the same.
- * The API description's ETags would be a third entry, but the rehearsal records no
+ * - from the old build to the new one only (never on the way back): a JSON answer whose
+ *   new body is the old body plus new object keys, every old value unchanged
+ *   (onlyAddedFields: byte for byte, keys in their order, and every added key shaped like
+ *   a field name), with `content-length` let follow the longer body. Such answers are
+ *   counted apart, with the added field paths named once per route and no value.
+ * The API description's ETags would be a further entry, but the rehearsal records no
  * description answer: its text changes with every version by design.
  */
 export const IGNORED_HEADERS: readonly string[] = ["date"];
@@ -41,6 +46,12 @@ export type AnswerComparison = {
   identical: number;
   /** Answers that differ only in the version value of GET /api/v1/me. */
   allowed: number;
+  /**
+   * Answers whose newer JSON body only adds object keys (see onlyAddedFields), when the
+   * comparison allows it: the count, and per route the added field paths, each once.
+   */
+  addedFields: number;
+  addedFieldsByRoute: Record<string, string[]>;
   /** Keys whose route the older build did not have. */
   added: string[];
   /** One line per answer that differs, naming the key and what differs, never a value. */
@@ -93,6 +104,116 @@ export function answerProblems(before: Answer, after: Answer): string[] {
   return out;
 }
 
+/**
+ * An added key counts as a field only when it is shaped like the API's own field names:
+ * lowercase words joined by single underscores, at most 40 characters, no digit and no
+ * capital. An item id (`med_...`), a token (`dp_...`), a slug or any other key that could
+ * hold data is not one: such an added key fails the answer, and is never printed.
+ */
+const FIELD_NAME = /^[a-z]+(?:_[a-z]+)*$/;
+const FIELD_MAX_CHARS = 40;
+export const isFieldName = (key: string) => key.length <= FIELD_MAX_CHARS && FIELD_NAME.test(key);
+/** The problem written for an answer that adds a key of another shape: fixed text, never the key. */
+export const NOT_A_FIELD_NAME = "an added key that is not shaped like a field name";
+const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+/** A key as a path shows it: its name when it is shaped like a field name, else `*`, so an existing key that is data (an id used as a key) is never printed either. */
+const shown = (key: string) => (isFieldName(key) ? key : "*");
+const joined = (path: string, key: string) => (path === "" ? shown(key) : `${path}.${shown(key)}`);
+
+export type AddedKeys = {
+  /** `after` with every key `before` lacks taken out, every other key kept in its order. */
+  stripped: unknown;
+  /** The paths of the added keys shaped like field names, each once, sorted. */
+  paths: string[];
+  /** How many added keys are not shaped like field names. */
+  notFieldNames: number;
+};
+
+/**
+ * The keys `after` adds to `before`, at any depth, and `after` without them. Objects are
+ * walked key by key (a key `before` has is kept and walked into; one it lacks is an added
+ * key) and arrays element by element (an element past the end of `before`'s array is kept
+ * as it is); anything else is kept as it is. Whether the rest is unchanged is not decided
+ * here: onlyAddedFields compares `stripped`, written as JSON, with the old body's bytes.
+ *
+ * A path is the keys from the top joined by dots, with `[]` for "every element of an
+ * array", so the same field in every element is one path: `counted.images`,
+ * `largest[].kind`. It never holds a value.
+ */
+export function addedKeys(before: unknown, after: unknown): AddedKeys {
+  const found = new Set<string>();
+  let notFieldNames = 0;
+  const walk = (b: unknown, a: unknown, path: string): unknown => {
+    if (Array.isArray(a)) return Array.isArray(b) ? a.map((x, i) => (i < b.length ? walk(b[i], x, `${path}[]`) : x)) : a;
+    if (!isObject(a) || !isObject(b)) return a;
+    // No prototype, so that a key named __proto__ is kept as a key like any other.
+    const out: Record<string, unknown> = Object.create(null);
+    for (const k of Object.keys(a)) {
+      if (Object.hasOwn(b, k)) out[k] = walk(b[k], a[k], joined(path, k));
+      else if (isFieldName(k)) found.add(joined(path, k));
+      else notFieldNames++;
+    }
+    return out;
+  };
+  const stripped = walk(before, after, "");
+  return { stripped, paths: [...found].sort(), notFieldNames };
+}
+
+const JSON_TYPE = /^application\/(?:[a-z0-9.+-]+\+)?json\s*(?:;|$)/i;
+
+/**
+ * The body as text and its value, when the answer says it is JSON and its bytes are exactly
+ * the plain JSON of that value (JSON.stringify of JSON.parse gives the same text): no byte
+ * order mark, no space, no number written another way (1.0, 1e2, -0, an integer past what
+ * a double holds), no duplicate key, no escape a string does not need. Null otherwise.
+ */
+function plainJson(a: Answer): { text: string; value: unknown } | null {
+  if (!JSON_TYPE.test(a.headers["content-type"] ?? "")) return null;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(a.body);
+    const value: unknown = JSON.parse(text);
+    return JSON.stringify(value) === text ? { text, value } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the newer answer only adds fields (`paths`), or why not (`problem`: fixed text to report, or null for a plain difference). */
+export type OnlyAdded = { ok: true; paths: string[] } | { ok: false; problem: string | null };
+
+/**
+ * Whether the newer answer is the older one plus new fields, and nothing else:
+ * - the same status, and every header the same but the ignored ones and `content-length`,
+ *   which may follow the longer body (present in both or in neither);
+ * - both bodies JSON by their content type, each exactly the plain JSON of its value
+ *   (plainJson);
+ * - the newer value with its added keys taken out, keeping its key order (addedKeys),
+ *   written as JSON, is the older body byte for byte: so every old key is there, in its
+ *   order, with the same value, and every array has the same length;
+ * - at least one key added, and every added key shaped like a field name (isFieldName).
+ *   An added key of any other shape fails, with NOT_A_FIELD_NAME as the problem.
+ * A non-JSON answer is never let through here.
+ */
+export function onlyAddedFields(before: Answer, after: Answer): OnlyAdded {
+  const no: OnlyAdded = { ok: false, problem: null };
+  if (before.status !== after.status) return no;
+  const strip = (h: Record<string, string>) => Object.fromEntries(Object.entries(h).filter(([k]) => k !== "content-length"));
+  if (headerProblems(strip(before.headers), strip(after.headers)).length > 0) return no;
+  if (("content-length" in before.headers) !== ("content-length" in after.headers)) return no;
+  const b = plainJson(before);
+  const a = plainJson(after);
+  if (b === null || a === null) return no;
+  const added = addedKeys(b.value, a.value);
+  if (JSON.stringify(added.stripped) !== b.text) return no;
+  if (added.notFieldNames > 0) return { ok: false, problem: NOT_A_FIELD_NAME };
+  return added.paths.length > 0 ? { ok: true, paths: added.paths } : no;
+}
+
+/** How many added field paths a comparison names, over all its routes (each route's list counted whole). */
+export function addedFieldCount(c: AnswerComparison): number {
+  return Object.values(c.addedFieldsByRoute).reduce((n, paths) => n + paths.length, 0);
+}
+
 /** Whether `a` is the plain not-found answer every build gives a route it does not have. */
 export function isPlainNotFound(a: Answer): boolean {
   return a.status === 404 && decoder.decode(a.body) === NOT_FOUND_BODY;
@@ -102,9 +223,14 @@ export function isPlainNotFound(a: Answer): boolean {
  * Compares two recordings of the same requests. Every key must be in both (a picture the
  * newer page no longer names is a missing key; one it names in addition is an unexpected
  * key), and every pair must be the same but for the allow-list.
+ *
+ * With `allowAddedFields` (the old build against the new one only), a JSON answer whose
+ * newer body only adds object keys is let through too (onlyAddedFields), after the version
+ * swap on GET /api/v1/me, and counted apart with its added paths. Without it (the way back,
+ * the same build twice) such an answer is a difference like any other.
  */
-export function compareAnswers(before: Recorded[], after: Recorded[]): AnswerComparison {
-  const result: AnswerComparison = { identical: 0, allowed: 0, added: [], problems: [] };
+export function compareAnswers(before: Recorded[], after: Recorded[], opts: { allowAddedFields?: boolean } = {}): AnswerComparison {
+  const result: AnswerComparison = { identical: 0, allowed: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] };
   const later = new Map(after.map((r) => [r.key, r]));
   const earlier = new Set(before.map((r) => r.key));
   for (const b of before) {
@@ -131,7 +257,15 @@ export function compareAnswers(before: Recorded[], after: Recorded[]): AnswerCom
       result.allowed++;
       continue;
     }
-    result.problems.push(`${b.key}: ${direct.join(", ")}`);
+    const only = opts.allowAddedFields === true ? onlyAddedFields(swapped ?? b.answer, a.answer) : null;
+    if (only !== null && only.ok) {
+      result.addedFields++;
+      const seen = new Set([...(result.addedFieldsByRoute[b.route] ?? []), ...only.paths]);
+      result.addedFieldsByRoute[b.route] = [...seen].sort();
+      continue;
+    }
+    const why = only !== null && !only.ok && only.problem !== null ? [only.problem] : [];
+    result.problems.push(`${b.key}: ${[...direct, ...why].join(", ")}`);
   }
   for (const a of after) if (!earlier.has(a.key)) result.problems.push(`${a.key}: unexpected after`);
   return result;

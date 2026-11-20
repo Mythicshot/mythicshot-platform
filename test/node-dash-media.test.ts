@@ -642,21 +642,26 @@ describe("deleting an item", () => {
     expect(never.doc.activeElement).toBe(never.$("h-page"));
   });
 
-  it("a delete whose answer is lost looks at the list read again: gone means done, still listed means it failed", async () => {
-    // The item is no longer listed: it was deleted, and the question closes as for a delete that answered.
-    const gone = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
+  it("a delete whose answer is lost asks the item itself: only a 404 means done; still there, or no answer again, means it failed", async () => {
+    const ITEM_M1 = `GET /api/v1/media/${M1}`;
+    const items = (tab: Tab) => tab.fetched.filter((f) => f.method === "GET" && f.path === `/api/v1/media/${M1}`);
+    // The item answers 404: it was deleted, and the question closes as for a delete that answered.
+    const gone = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [ITEM_M1]: { status: 404, json: { error: "not_found" } }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
     await gone.settle();
     byText(rows(gone)[0], "Delete").click();
     gone.$("delete-go").click();
     await gone.settle();
     expect(deletes(gone)).toHaveLength(1);
+    expect(items(gone).map((f) => [f.path, f.body])).toEqual([[`/api/v1/media/${M1}`, undefined]]);
     expect(gone.$("delete-dialog").hidden).toBe(true);
     expect([gone.$("delete-message").hidden, gone.$("media-message").hidden]).toEqual([true, true]);
+    expect(lists(gone)).toHaveLength(2);
     expect(rows(gone)).toHaveLength(2);
     for (const b of rowButtons(gone)) expect(b.disabled, b.textContent).toBe(false);
     expect(gone.doc.activeElement).toBe(gone.$("h-page"));
-    // A lost answer after a cleanup_pending: the list decides too.
-    const later = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: [{ status: 500, json: { error: "cleanup_pending" } }, "network"], [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
+
+    // A lost answer after a cleanup_pending: the item decides too.
+    const later = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: [{ status: 500, json: { error: "cleanup_pending" } }, "network"], [ITEM_M1]: { status: 404, json: { error: "not_found" } }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
     await later.settle();
     byText(rows(later)[0], "Delete").click();
     later.$("delete-go").click();
@@ -664,30 +669,65 @@ describe("deleting an item", () => {
     later.tick();
     await later.settle();
     expect(deletes(later)).toHaveLength(2);
+    expect(items(later)).toHaveLength(1);
     expect(later.$("delete-dialog").hidden).toBe(true);
     expect(rows(later)).toHaveLength(2);
 
-    // Still listed: the question stays open with the failure, its buttons back.
-    const still = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network" }));
-    await still.settle();
-    byText(rows(still)[0], "Delete").click();
-    still.$("delete-go").click();
-    await still.settle();
-    expect(still.$("delete-dialog").hidden).toBe(false);
-    expect([still.$("delete-message").textContent, still.$("delete-message").hidden]).toEqual([FAILED, false]);
-    expect(rows(still)).toHaveLength(3);
-    expect([still.$("delete-go").disabled, still.$("delete-keep").disabled]).toEqual([false, false]);
-    expect(still.doc.activeElement).toBe(still.$("delete-go"));
+    // The item is still there, online or still being sent: the delete did not happen, even when
+    // newer items pushed it off the pages shown, so the list read again no longer has it.
+    for (const state of ["online", "uploading"]) {
+      const newer = [image(M4, "n4n4abcdefghijklmnop", { title: "Newer one" }), image(M5, "n5n5abcdefghijklmnop", { title: "Newer two" })];
+      const still = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [ITEM_M1]: { status: 200, json: { ...MOCKUP_IMAGES[0], state } }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list([...newer, ...MOCKUP_IMAGES.slice(1)])] }));
+      await still.settle();
+      byText(rows(still)[0], "Delete").click();
+      still.$("delete-go").click();
+      await still.settle();
+      expect(items(still), state).toHaveLength(1);
+      expect(still.$("delete-dialog").hidden, state).toBe(false);
+      expect([still.$("delete-message").textContent, still.$("delete-message").hidden], state).toEqual([FAILED, false]);
+      expect(rows(still).map((row) => titleOf(row).textContent), state).toEqual(["Newer one", "Newer two", "Timeline, boss two", "Untitled image"]);
+      expect([still.$("delete-go").disabled, still.$("delete-keep").disabled], state).toEqual([false, false]);
+      for (const b of rowButtons(still)) expect(b.disabled, `${state} ${b.textContent}`).toBe(false);
+      expect(still.doc.activeElement, state).toBe(still.$("delete-go"));
+    }
 
-    // The list cannot be read again either: nothing says the item is gone, so the failure stands.
-    const unknown = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), "network"] }));
-    await unknown.settle();
-    byText(rows(unknown)[0], "Delete").click();
-    unknown.$("delete-go").click();
-    await unknown.settle();
-    expect(unknown.$("delete-dialog").hidden).toBe(false);
-    expect(unknown.$("delete-message").textContent).toBe(FAILED);
-    expect(rows(unknown)).toHaveLength(3);
+    // The item cannot be asked either (no answer, a 404 that is not the API's own not_found, as
+    // from a proxy, or another answer): nothing says it is gone, so the failure stands, though the
+    // list read again no longer has it. A 429 is told with its own sentence.
+    for (const [asked, text] of [
+      ["network", FAILED],
+      [{ status: 404, json: null }, FAILED],
+      [{ status: 404, json: { error: "gone" } }, FAILED],
+      [{ status: 500, json: { error: "internal" } }, FAILED],
+      [{ status: 429, json: { error: "rate_limited" } }, TOO_MANY],
+    ] as [Answer, string][]) {
+      const what = JSON.stringify(asked);
+      const unknown = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [ITEM_M1]: asked, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
+      await unknown.settle();
+      byText(rows(unknown)[0], "Delete").click();
+      unknown.$("delete-go").click();
+      await unknown.settle();
+      expect(unknown.$("delete-dialog").hidden, what).toBe(false);
+      expect(unknown.$("delete-message").textContent, what).toBe(text);
+      expect(rows(unknown), what).toHaveLength(2);
+      expect(unknown.doc.activeElement, what).toBe(unknown.$("delete-go"));
+    }
+
+    // A lost session while asking goes to sign in.
+    const out = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [ITEM_M1]: SIGNED_OUT }));
+    await out.settle();
+    byText(rows(out)[0], "Delete").click();
+    out.$("delete-go").click();
+    await out.settle();
+    expect(out.left()).toBe("/signin");
+
+    // An answered delete never asks the item.
+    const answered = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: { status: 204 }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
+    await answered.settle();
+    byText(rows(answered)[0], "Delete").click();
+    answered.$("delete-go").click();
+    await answered.settle();
+    expect(items(answered)).toHaveLength(0);
   });
 
   it("a delete that fails keeps the question open with the reason, reads the list again and gives every button back; one already gone counts as deleted", async () => {
@@ -699,7 +739,8 @@ describe("deleting an item", () => {
     ];
     for (const [answer, text] of cases) {
       const what = JSON.stringify(answer);
-      const tab = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: [answer, { status: 404, json: { error: "not_found" } }], [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
+      // A lost answer asks the item, which is still online.
+      const tab = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: [answer, { status: 404, json: { error: "not_found" } }], [`GET /api/v1/media/${M1}`]: { status: 200, json: { ...MOCKUP_IMAGES[0], state: "online" } }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
       await tab.settle();
       byText(rows(tab)[0], "Delete").click();
       tab.$("delete-go").click();

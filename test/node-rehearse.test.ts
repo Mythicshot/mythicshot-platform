@@ -1,7 +1,14 @@
 // The comparisons of the upgrade rehearsal (scripts/rehearse-compare.ts), without starting
-// any server: the allow-list lets through the date header and the version value and
-// nothing else, and every kind of real difference fails. The full rehearsal starts the
-// builds themselves and is run on its own: npm run rehearse:upgrade.
+// any build: the allow-list lets through the date header, the version value and (from the
+// old build to the new one only) fields a JSON answer adds, and every kind of real
+// difference fails. The address modes are checked on build folders made here and against a
+// stand-in server on 127.0.0.1. The full rehearsal starts the builds themselves and is run
+// on its own: npm run rehearse:upgrade.
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { transformSync } from "esbuild";
 import { describe, expect, it } from "vitest";
 import {
   checkAccountsBackfill,
@@ -17,7 +24,7 @@ import {
   type Recorded,
   type StoreListing,
 } from "../scripts/rehearse-compare.ts";
-import { pictureAddresses, readTokens } from "../scripts/rehearse-upgrade.ts";
+import { buildModes, healthHosts, healthRoles, knowsImgRole, modeSettings, parseArgs, pictureAddresses, readTokens, recordSite, resultLine, waitReady, type Mode, type Running } from "../scripts/rehearse-upgrade.ts";
 
 const enc = new TextEncoder();
 
@@ -45,7 +52,7 @@ function site(opts: { version?: string; date?: string; usage?: Answer; picture?:
 describe("answers", () => {
   it("the same answers at another moment are identical: only the date header differs", () => {
     const c = compareAnswers(site(), site({ date: "Fri, 20 Nov 2026 11:11:11 GMT" }));
-    expect(c).toEqual({ identical: 6, allowed: 0, added: [], problems: [] });
+    expect(c).toEqual({ identical: 6, allowed: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
   });
 
   it("a newer version in the workspace answer is the one allowed body difference, and content-length follows it", () => {
@@ -105,6 +112,158 @@ describe("answers", () => {
     expect(compareAnswers(site({ usage: answer(200, '{"used_bytes":1}') }), site()).problems).toHaveLength(1);
     expect(compareAnswers(site({ usage: answer(404, '{"error":"not_found","detail":"no such workspace"}') }), site({ usage: answer(200, '{"used_bytes":1}') })).problems).toHaveLength(1);
     expect(compareAnswers(site({ usage: answer(200, '{"used_bytes":1}') }), site({ usage: answer(200, '{"used_bytes":2}') })).problems).toHaveLength(1);
+  });
+});
+
+describe("answers that only add fields", () => {
+  const ADD = { allowAddedFields: true };
+  const usage = (body: unknown, headers: Record<string, string> = {}) => [rec("token 1: usage (one address)", "GET /api/v1/usage", answer(200, JSON.stringify(body), headers))];
+  const OLD = { used_bytes: 1500, tours: 2, counted: { pictures: 1000, logos: 500 } };
+  const compare = (before: unknown, after: unknown) => compareAnswers(usage(before), usage(after), ADD);
+
+  it("an added top-level key is allowed, counted apart and named by its path, and content-length follows it", () => {
+    const c = compare(OLD, { ...OLD, images: 3 });
+    expect(c).toEqual({ identical: 0, allowed: 0, addedFields: 1, addedFieldsByRoute: { "GET /api/v1/usage": ["images"] }, added: [], problems: [] });
+  });
+
+  it("an added nested key is allowed, named by its full path", () => {
+    const c = compare(OLD, { ...OLD, counted: { ...OLD.counted, images: 10, gifs: 20 }, gifs: 1 });
+    expect(c.problems).toEqual([]);
+    expect(c.addedFieldsByRoute).toEqual({ "GET /api/v1/usage": ["counted.gifs", "counted.images", "gifs"] });
+  });
+
+  it("a key added inside every element of an array is allowed and named once, and once per route across answers", () => {
+    const tours = (extra: (i: number) => Record<string, unknown>) => ({ tours: [1, 2, 3].map((i) => ({ id: `tour_${i}`, slug: `slug${i}`, meta: { n: i }, ...extra(i) })) });
+    const before = [rec("token 1: tour list (app address)", "GET /api/v1/tours", answer(200, JSON.stringify(tours(() => ({}))))), rec("token 1: tour list (tours address)", "GET /api/v1/tours", answer(200, JSON.stringify(tours(() => ({})))))];
+    const after = [rec("token 1: tour list (app address)", "GET /api/v1/tours", answer(200, JSON.stringify(tours((i) => ({ views: i * 7 }))))), rec("token 1: tour list (tours address)", "GET /api/v1/tours", answer(200, JSON.stringify(tours((i) => (i === 2 ? { views: 1, kind: "tour" } : { views: 0 })))))];
+    const c = compareAnswers(before, after, ADD);
+    expect(c.problems).toEqual([]);
+    expect(c.addedFields).toBe(2);
+    expect(c.addedFieldsByRoute).toEqual({ "GET /api/v1/tours": ["tours[].kind", "tours[].views"] });
+  });
+
+  it("the paths never hold a value, and an existing key that is not shaped like a field name is written as *", () => {
+    const secret = "owner@example.com";
+    const ID = "med_" + "1".repeat(24);
+    const c = compare({ by_id: { [ID]: { title: "Acme" } } }, { by_id: { [ID]: { title: "Acme", note: secret } } });
+    expect(c.problems).toEqual([]);
+    expect(c.addedFieldsByRoute).toEqual({ "GET /api/v1/usage": ["by_id.*.note"] });
+    expect(JSON.stringify(c)).not.toContain("example.com");
+    expect(JSON.stringify(c)).not.toContain(ID);
+  });
+
+  it("an added key that is not shaped like a field name fails the answer and is never printed: an item id, a token, a slug, digits, capitals, too long", () => {
+    const keys = {
+      item: "med_" + "a1".repeat(12),
+      token: "dp_" + "0123456789abcdef0123456789abcdef01234567",
+      slug: "q8d2abcdefghijklmnop",
+      digits: "images2",
+      capitals: "Images",
+      dashed: "used-bytes",
+      long: "a".repeat(41),
+      email: "owner@example.com",
+    };
+    for (const [what, key] of Object.entries(keys)) {
+      // At the top, nested, and inside the elements of an array.
+      for (const [before, after] of [
+        [OLD, { ...OLD, [key]: 1 }],
+        [OLD, { ...OLD, counted: { ...OLD.counted, [key]: { bytes: 1 } } }],
+        [{ items: [{ id: "a" }] }, { items: [{ id: "a", [key]: true }] }],
+      ] as [unknown, unknown][]) {
+        const c = compare(before, after);
+        expect(c.addedFields, what).toBe(0);
+        expect(c.problems, what).toHaveLength(1);
+        expect(c.problems[0], what).toMatch(/, an added key that is not shaped like a field name$/);
+        const report = JSON.stringify(c);
+        expect(report, what).not.toContain(key);
+        if (what !== "digits" && what !== "capitals") expect(report, what).not.toContain(key.slice(0, 8));
+      }
+    }
+    // One bad key fails the answer even beside good ones; a field name of 40 characters is still one.
+    expect(compare(OLD, { ...OLD, images: 1, [keys.item]: 1 }).problems).toHaveLength(1);
+    expect(compare(OLD, { ...OLD, ["a_" + "b".repeat(38)]: 1 }).problems).toEqual([]);
+  });
+
+  it("the bytes must be the plain JSON of their values: a number written another way, -0, a duplicate key, a BOM, spaces or reordered old keys fail even beside an added key", () => {
+    const raw = (before: string, after: string) => compareAnswers([rec("u", "GET /api/v1/usage", answer(200, before))], [rec("u", "GET /api/v1/usage", answer(200, after))], ADD);
+    // The plain cases pass.
+    expect(raw('{"a":1,"b":"x"}', '{"a":1,"b":"x","c":2}').problems).toEqual([]);
+    expect(raw('{"a":1,"b":"x"}', '{"c":2,"a":1,"b":"x"}').problems).toEqual([]);
+    // A big integer that changed past what a double holds, and one that cannot be held at all.
+    expect(raw('{"n":9007199254740993}', '{"n":9007199254740992,"c":1}').problems).toHaveLength(1);
+    expect(raw('{"n":9007199254740993}', '{"n":9007199254740993,"c":1}').problems).toHaveLength(1);
+    // 1 and 1.0, 0 and -0, 100 and 1e2.
+    expect(raw('{"n":1}', '{"n":1.0,"c":1}').problems).toHaveLength(1);
+    expect(raw('{"n":0}', '{"n":-0,"c":1}').problems).toHaveLength(1);
+    expect(raw('{"n":100}', '{"n":1e2,"c":1}').problems).toHaveLength(1);
+    // A duplicate key in the raw text, old or new.
+    expect(raw('{"a":1}', '{"a":2,"a":1,"c":1}').problems).toHaveLength(1);
+    expect(raw('{"a":2,"a":1}', '{"a":1,"c":1}').problems).toHaveLength(1);
+    // A byte order mark, and spaces.
+    expect(raw('{"a":1}', '\uFEFF{"a":1,"c":1}').problems).toHaveLength(1);
+    expect(raw('{"a":1}', '{"a": 1,"c":1}').problems).toHaveLength(1);
+    // Old keys in another order.
+    expect(raw('{"a":1,"b":2}', '{"b":2,"a":1,"c":1}').problems).toHaveLength(1);
+    expect(raw('{"o":{"a":1,"b":2}}', '{"o":{"b":2,"a":1},"c":1}').problems).toHaveLength(1);
+    // A string written with an escape it does not need.
+    expect(raw('{"s":"a"}', '{"s":"\\u0061","c":1}').problems).toHaveLength(1);
+  });
+
+  it("a changed value beside an added key fails, and the problem names no value", () => {
+    const c = compare(OLD, { ...OLD, used_bytes: 1501, images: 3 });
+    expect(c.addedFields).toBe(0);
+    expect(c.problems).toHaveLength(1);
+    expect(c.problems[0]).toMatch(/^token 1: usage \(one address\): header content-length differs, body differs \(\d+ and \d+ bytes\)$/);
+    // Deeper, and a changed type (a number that became a string) fails too.
+    expect(compare(OLD, { ...OLD, counted: { pictures: 1000, logos: 499, images: 1 } }).problems).toHaveLength(1);
+    expect(compare(OLD, { ...OLD, tours: "2", images: 1 }).problems).toHaveLength(1);
+    expect(compare({ a: null }, { a: {}, b: 1 }).problems).toHaveLength(1);
+    expect(compare({ a: [1] }, { a: { 0: 1 }, b: 1 }).problems).toHaveLength(1);
+  });
+
+  it("a removed key fails, even beside an added one", () => {
+    const { tours: _gone, ...rest } = OLD;
+    expect(compare(OLD, rest).problems).toHaveLength(1);
+    expect(compare(OLD, { ...rest, images: 1 }).problems).toHaveLength(1);
+    expect(compare(OLD, { ...OLD, counted: { pictures: 1000, images: 1 } }).problems).toHaveLength(1);
+  });
+
+  it("an array whose length changes fails, and so does a changed element", () => {
+    expect(compare({ tours: [{ id: "a" }, { id: "b" }] }, { tours: [{ id: "a", x: 1 }] }).problems).toHaveLength(1);
+    expect(compare({ tours: [{ id: "a" }] }, { tours: [{ id: "a" }, { id: "b" }] }).problems).toHaveLength(1);
+    expect(compare({ tours: [{ id: "a" }, { id: "b" }] }, { tours: [{ id: "b", x: 1 }, { id: "a", x: 1 }] }).problems).toHaveLength(1);
+  });
+
+  it("a changed status or another header fails, and content-length may differ only with an allowed body", () => {
+    const b = usage(OLD);
+    const status = [rec(b[0].key, b[0].route, { ...answer(201, JSON.stringify({ ...OLD, images: 1 })) })];
+    expect(compareAnswers(b, status, ADD).problems).toHaveLength(1);
+    expect(compareAnswers(b, usage({ ...OLD, images: 1 }, { etag: '"x"' }), ADD).problems).toHaveLength(1);
+    // The same body with another content-length is not an added field.
+    const sameBody = usage(OLD);
+    sameBody[0].answer.headers["content-length"] = "9999";
+    expect(compareAnswers(b, sameBody, ADD).problems).toEqual(["token 1: usage (one address): header content-length differs"]);
+  });
+
+  it("a non-JSON answer stays byte-exact, even when its text would parse as JSON with an added key", () => {
+    const page = (body: string) => [rec("token 1: tour 1 page", "GET /t/:slug", answer(200, body, { "content-type": "text/html; charset=utf-8" }))];
+    expect(compareAnswers(page('{"a":1}'), page('{"a":1,"b":2}'), ADD).problems).toHaveLength(1);
+    expect(compareAnswers(page("<p>a</p>"), page("<p>a</p><p>b</p>"), ADD).problems).toHaveLength(1);
+    // A JSON content type whose body is not JSON: compared byte for byte, and it fails.
+    expect(compareAnswers(usage(OLD), [rec("token 1: usage (one address)", "GET /api/v1/usage", answer(200, "{not json"))], ADD).problems).toHaveLength(1);
+  });
+
+  it("the version swap and added fields together on the workspace answer are allowed", () => {
+    const me = (v: string, extra = "") => [rec("token 1: workspace (one address)", "GET /api/v1/me", answer(200, `{"workspace":"Acme","version":"${v}"${extra}}`))];
+    const c = compareAnswers(me("0.1.24"), me("0.1.25", ',"region":"eu"'), ADD);
+    expect(c.problems).toEqual([]);
+    expect(c.addedFieldsByRoute).toEqual({ "GET /api/v1/me": ["region"] });
+  });
+
+  it("without the allowance (the way back, the same build twice) an added field is a difference like any other", () => {
+    const c = compareAnswers(usage(OLD), usage({ ...OLD, images: 3 }));
+    expect(c.addedFields).toBe(0);
+    expect(c.problems).toHaveLength(1);
   });
 });
 
@@ -292,5 +451,182 @@ describe("migrations, usage, pages and tokens", () => {
       message = (err as Error).message;
     }
     expect(message).toBe("token 2 is not a token (dp_ and 40 lowercase hex characters)");
+  });
+});
+
+describe("the report's last line", () => {
+  it("a pass with added fields says how many there are to read; a plain pass and a failure are as before", () => {
+    expect(resultLine(0, 0)).toBe("RESULT: PASS");
+    expect(resultLine(0, 4)).toBe("RESULT: PASS, with 4 added fields to read above");
+    expect(resultLine(0, 1)).toBe("RESULT: PASS, with 1 added field to read above");
+    expect(resultLine(2, 4)).toBe("RESULT: FAIL (2 checks failed)");
+    expect(resultLine(1, 0)).toBe("RESULT: FAIL (1 check failed)");
+  });
+});
+
+describe("the address modes", () => {
+  it("one, two or three, from --mode or REHEARSE_MODE; anything else is refused", () => {
+    const pos = ["data", "old", "new"];
+    expect(parseArgs([...pos], {}).mode).toBe("one");
+    expect(parseArgs([...pos, "--mode", "three"], {}).mode).toBe("three");
+    expect(parseArgs([...pos, "--mode=three"], {}).mode).toBe("three");
+    expect(parseArgs([...pos], { REHEARSE_MODE: " three " }).mode).toBe("three");
+    expect(parseArgs([...pos, "--mode", "two"], { REHEARSE_MODE: "three" }).mode).toBe("two");
+    expect(() => parseArgs([...pos, "--mode", "four"], {})).toThrow("the mode is one, two or three");
+  });
+
+  it("three sets the img address beside the two, and every address of a mode is checked for health", () => {
+    expect(modeSettings("one")).toEqual({});
+    expect(modeSettings("two")).toEqual({ TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com" });
+    expect(modeSettings("three")).toEqual({ TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com", IMG_HOST: "img.example.com" });
+    expect(healthHosts("one")).toEqual(["localhost"]);
+    expect(healthHosts("two")).toEqual(["tours.example.com", "app.example.com"]);
+    expect(healthHosts("three")).toEqual(["tours.example.com", "app.example.com", "img.example.com"]);
+  });
+
+  describe("whether a build knows the img address, from its compiled files", () => {
+    /** A build folder holding only the two files knowsImgRole reads, compiled from the given TypeScript as tsc would emit them. */
+    function buildWith(hostsTs: string | null, configTs: string | null): string {
+      const dir = mkdtempSync(join(tmpdir(), "rehearse-build-"));
+      mkdirSync(join(dir, "dist", "node"), { recursive: true });
+      const js = (ts: string) => transformSync(ts, { loader: "ts", format: "esm" }).code;
+      if (hostsTs !== null) writeFileSync(join(dir, "dist", "hosts.js"), js(hostsTs));
+      if (configTs !== null) writeFileSync(join(dir, "dist", "node", "config.js"), js(configTs));
+      return dir;
+    }
+    const today = { hosts: readFileSync(new URL("../src/hosts.ts", import.meta.url), "utf8"), config: readFileSync(new URL("../src/node/config.ts", import.meta.url), "utf8") };
+    // What 0.1.18 had: two roles, and settings that do not read IMG_HOST.
+    const before = {
+      hosts: 'export const HOST_ROLES = ["tours", "app"] as const;\nexport type HostRole = (typeof HOST_ROLES)[number];\n// IMG_HOST is not a setting here; "img" is no role.\n',
+      config: 'const ALLOWED = ["DATA_DIR", "PORT", "TOURS_HOST", "APP_HOST", "INVITE_CONTACT"];\nexport const allowed = ALLOWED;\n',
+    };
+
+    it("this checkout's build knows it; one shaped like 0.1.18 does not", () => {
+      const dirs = [buildWith(today.hosts, today.config), buildWith(before.hosts, before.config)];
+      try {
+        expect(knowsImgRole(dirs[0])).toBe(true);
+        expect(knowsImgRole(dirs[1])).toBe(false);
+      } finally {
+        for (const d of dirs) rmSync(d, { recursive: true, force: true });
+      }
+    });
+
+    it("both are needed: the img role and the setting read on Node; a missing file means it does not", () => {
+      const dirs = [buildWith(today.hosts, before.config), buildWith(before.hosts, today.config), buildWith(null, today.config), buildWith(today.hosts, null)];
+      try {
+        for (const d of dirs) expect(knowsImgRole(d)).toBe(false);
+        expect(knowsImgRole(join(tmpdir(), "no-such-build-folder-for-the-rehearsal"))).toBe(false);
+      } finally {
+        for (const d of dirs) rmSync(d, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("with three, an old build that does not know the img address runs with two, and the report says so in one line", () => {
+    const knows = (version: string) => ({ version, knowsImg: true });
+    const not = (version: string) => ({ version, knowsImg: false });
+    expect(buildModes("three", knows("0.1.24"), knows("0.1.25"))).toEqual({ old: "three", next: "three", note: null });
+    const mixed = buildModes("three", not("0.1.18"), knows("0.1.25"));
+    expect(mixed).toEqual({ old: "two", next: "three", note: "the old build 0.1.18 does not know the img address, which came in 0.1.19: it runs with two addresses, the new build with three" });
+    expect(mixed.note).not.toContain("\n");
+    expect(() => buildModes("three", knows("0.1.24"), not("0.1.18"))).toThrow("the new build 0.1.18 does not know the img address (IMG_HOST, from 0.1.19); rehearse it with --mode two");
+    // The other modes are as asked, whatever the builds know.
+    for (const m of ["one", "two"] as Mode[]) expect(buildModes(m, not("0.1.7"), not("0.1.8"))).toEqual({ old: m, next: m, note: null });
+  });
+
+  describe("against a stand-in server on 127.0.0.1", () => {
+    const TOKEN_1 = "dp_" + "1".repeat(40);
+    type Seen = { method: string; path: string; host: string };
+
+    /**
+     * Answers every route the rehearsal asks, the same on every address: one listed tour whose
+     * page names one picture. Its health answer reports, for each host, the address `roles`
+     * gives (none when it gives none), as a build reports the role it sees a host in.
+     */
+    async function standIn(roles: Record<string, string> = {}): Promise<{ server: Server; port: number; seen: Seen[] }> {
+      const seen: Seen[] = [];
+      const server = createServer((req, res) => {
+        seen.push({ method: req.method ?? "", path: req.url ?? "", host: req.headers.host ?? "" });
+        const json = (body: unknown) => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(body));
+        };
+        if (req.url === "/healthz") return json(roles[req.headers.host ?? ""] === undefined ? { ok: true } : { ok: true, address: roles[req.headers.host ?? ""] });
+        if (req.url === "/api/v1/tours") return json({ tours: [{ id: "tour_1", slug: "abcdefghij" }] });
+        if (req.url === "/t/abcdefghij") {
+          res.writeHead(200, { "content-type": "text/html" });
+          return res.end(`<script type="application/json" id="tour">${JSON.stringify({ base: "", tour: { chapters: [{ steps: [{ image: "p/a.png" }] }] } })}</script>`);
+        }
+        json({ ok: true });
+      });
+      await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+      const a = server.address();
+      return { server, port: typeof a === "object" && a !== null ? a.port : 0, seen };
+    }
+
+    it("three asks the very requests of two, on the tours and app addresses, and the img address only for its health", async () => {
+      const { server, port, seen } = await standIn();
+      try {
+        const two = await recordSite(port, "two", [TOKEN_1]);
+        const twoSeen = seen.splice(0);
+        const three = await recordSite(port, "three", [TOKEN_1]);
+        const threeSeen = seen.splice(0);
+        expect(three.map((r) => [r.key, r.route])).toEqual(two.map((r) => [r.key, r.route]));
+        expect(threeSeen).toEqual(twoSeen);
+        expect(new Set(threeSeen.map((s) => s.host))).toEqual(new Set(["tours.example.com", "app.example.com"]));
+        expect(three.map((r) => r.key)).toContain("health (tours address)");
+        expect(three.map((r) => r.key)).toContain("health (app address)");
+        expect(three.map((r) => r.key)).toContain("token 1: tour 1 page (app address)");
+        // Starting: health on each of the three addresses.
+        const r = { port, out: [`rehearse-bound 127.0.0.1 ${port}`], err: [], exited: new Promise<number | null>(() => {}), startedAt: Date.now() } as unknown as Running;
+        await waitReady(r, healthHosts("three"));
+        expect(seen.map((s) => [s.path, s.host])).toEqual([["/healthz", "tours.example.com"], ["/healthz", "app.example.com"], ["/healthz", "img.example.com"]]);
+      } finally {
+        server.close();
+      }
+    });
+
+    /** A started build as waitReady sees it, on the stand-in's port. */
+    const started = (port: number) => ({ port, out: [`rehearse-bound 127.0.0.1 ${port}`], err: [], exited: new Promise<number | null>(() => {}), startedAt: Date.now() }) as unknown as Running;
+    const RIGHT = { "tours.example.com": "tours", "app.example.com": "app", "img.example.com": "img" };
+
+    it("with two or three addresses, each host must answer health as its own address; with one, the answer is taken as today", async () => {
+      expect(healthRoles("one")).toEqual([null]);
+      expect(healthRoles("two")).toEqual(["tours", "app"]);
+      expect(healthRoles("three")).toEqual(["tours", "app", "img"]);
+      const { server, port } = await standIn(RIGHT);
+      try {
+        for (const m of ["two", "three"] as Mode[]) await waitReady(started(port), healthHosts(m), healthRoles(m));
+      } finally {
+        server.close();
+      }
+      // One address: a build answers no address, as every build does today.
+      const plain = await standIn();
+      try {
+        await waitReady(started(plain.port), healthHosts("one"), healthRoles("one"));
+      } finally {
+        plain.server.close();
+      }
+    });
+
+    it("a build given IMG_HOST that does not answer as the img address there fails to start with a clear line, and so does a swapped role", async () => {
+      const cases: [Record<string, string>, Mode, string][] = [
+        // A build that ignores IMG_HOST: the img host is no address of the site.
+        [{ "tours.example.com": "tours", "app.example.com": "app" }, "three", "the build answers health on img.example.com as no address of the site, not as the img address"],
+        // Answering as the tours address there (an img address it does not know falls back to nothing, but a wrong role is caught too).
+        [{ ...RIGHT, "img.example.com": "tours" }, "three", "the build answers health on img.example.com as the tours address, not as the img address"],
+        [{ ...RIGHT, "tours.example.com": "app" }, "two", "the build answers health on tours.example.com as the app address, not as the tours address"],
+        // A role the rehearsal does not know is never repeated.
+        [{ ...RIGHT, "app.example.com": "owner@example.com" }, "two", "the build answers health on app.example.com as something else, not as the app address"],
+      ];
+      for (const [roles, m, line] of cases) {
+        const { server, port } = await standIn(roles);
+        try {
+          await expect(waitReady(started(port), healthHosts(m), healthRoles(m))).rejects.toThrow(line);
+        } finally {
+          server.close();
+        }
+      }
+    });
   });
 });
