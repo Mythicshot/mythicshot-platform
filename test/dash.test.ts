@@ -35,13 +35,19 @@ const SECURITY: Record<string, string> = {
 };
 
 type Served = { path: string; body: string; type: string };
-const PAGES: Served[] = [{ path: "/tours", body: TOURS_HTML, type: "text/html; charset=utf-8" }];
+// Every page the shell serves, from DASH_PAGES itself, so a page added later gets every
+// check below that is not about the Tours page's own words.
+const PAGES: (Served & { script: string })[] = DASH_PAGES.map((p) => ({ path: p.path, body: p.html, type: "text/html; charset=utf-8", script: p.script.path }));
 const FILES: Served[] = [
   { path: "/dash/dash.css", body: DASH_CSS, type: "text/css; charset=utf-8" },
   { path: "/dash/dash.js", body: DASH_JS, type: "text/javascript; charset=utf-8" },
-  { path: "/dash/tours.js", body: TOURS_JS, type: "text/javascript; charset=utf-8" },
+  ...DASH_PAGES.map((p) => ({ path: p.script.path, body: p.script.body, type: "text/javascript; charset=utf-8" })),
 ];
 const ALL = [...PAGES, ...FILES];
+/** The shared script and every page's own script. */
+const SCRIPTS = [DASH_JS, ...DASH_PAGES.map((p) => p.script.body)];
+/** The pages that are not the admin's: none of them may name an admin route or field. */
+const MEMBER_PAGES = DASH_PAGES.filter((p) => p.path !== "/admin");
 
 const seen = (c: Call) => ({ status: c.status, headers: [...c.headers.entries()].sort(), body: c.text });
 
@@ -76,6 +82,7 @@ const TOURS_WORDING = [
   "Status",
   "Size",
   "Changed",
+  "Actions",
   "No tours yet",
   "Record a tour in Mythicshot and choose Publish. It shows up here with a link to share.",
   '"Changes waiting" means Mythicshot uploaded a newer version that visitors do not see yet. "More" holds: Publish changes, Unpublish, Delete.',
@@ -88,6 +95,7 @@ const TOURS_WORDING = [
 const DASH_TEXT: Record<string, string> = {
   tooMany: "Too many requests. Wait a few minutes and try again.",
   failed: "Something went wrong. Try again in a moment.",
+  account: "Account",
   oneByte: "1 byte",
   bytes: " bytes",
 };
@@ -118,6 +126,10 @@ const TOURS_TEXT: Record<string, string> = {
   publishing: "Publishing…",
   unpublishing: "Unpublishing…",
   deleting: "Deleting…",
+  cut: "…",
+  emptyTour: "This tour has no steps, so it cannot be published.",
+  publishBusy: "This tour is being published. Try again when that is done.",
+  notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
 };
 
 /** The strings with a space in the scripts that are not words for a person: class names and a link's rel. */
@@ -159,8 +171,11 @@ describe("the dashboard's pages and files", () => {
       const head = await send(two.deps, "HEAD", s.path, { origin: APP });
       expect([head.status, head.bytes.length, head.headers.get("content-security-policy"), head.calls], s.path).toEqual([200, 0, POLICY, 0]);
     }
-    // The routes are the ones the shell serves, and nothing else.
-    expect(DASH_PAGES.filter((p) => p.path === "/tours").map((p) => [p.path, p.html, p.script.path, p.script.body])).toEqual([["/tours", TOURS_HTML, "/dash/tours.js", TOURS_JS]]);
+    // The Tours page is among them, and every page's script is its own file under /dash/.
+    expect(DASH_PAGES.find((p) => p.path === "/tours")).toEqual({ path: "/tours", html: TOURS_HTML, script: { path: "/dash/tours.js", body: TOURS_JS } });
+    expect(new Set(DASH_PAGES.map((p) => p.script.path)).size).toBe(DASH_PAGES.length);
+    for (const p of DASH_PAGES) expect(p.script.path, p.path).toMatch(/^\/dash\/[a-z][a-z-]*\.js$/);
+    expect(PAGES.length).toBeGreaterThan(0);
   });
 
   it("no page or file holds anything about anyone: the same answer for nobody, a member, an admin and a token", async () => {
@@ -183,17 +198,33 @@ describe("the dashboard's pages and files", () => {
       }
     }
     // The workspace's name ("Account" for these accounts) is fetched by the script, never in the page.
-    expect(textNodes(new FakeDocument(TOURS_HTML).body).filter((t) => t.includes("Account") && t !== "Account")).toEqual([]);
+    // The Admin page's heading is the mockup's word "Accounts", on /admin alone; any other text holding "Account" still fails.
+    for (const s of PAGES) expect(textNodes(new FakeDocument(s.body).body).filter((t) => t.includes("Account") && t !== "Account" && !(s.path === "/admin" && t === "Accounts")), s.path).toEqual([]);
   });
 
   it("a member's page carries no admin data: the Admin tab is hidden, leads only to /admin, and only the script can show it", () => {
-    const doc = new FakeDocument(TOURS_HTML);
-    const admin = doc.getElementById("tab-admin")!;
-    expect([admin.tagName, admin.getAttribute("href"), admin.hidden, admin.textContent]).toEqual(["a", "/admin", true, "Admin"]);
-    // Nothing else in the page or its scripts names an admin route or field.
-    for (const text of [TOURS_HTML, DASH_JS, TOURS_JS]) {
-      expect(text).not.toContain("/api/v1/admin");
-      expect(text).not.toMatch(/allowance|accounts|is_admin/);
+    for (const p of DASH_PAGES) {
+      const admin = new FakeDocument(p.html).getElementById("tab-admin")!;
+      expect([admin.tagName, admin.getAttribute("href"), admin.hidden, admin.textContent], p.path).toEqual(["a", "/admin", true, "Admin"]);
+    }
+    // Nothing else in a member's page or its scripts names an admin route or field. The
+    // Storage page is about the person's own storage, so on /storage alone, and only there,
+    // two exact things are taken out before the check: the approved sentence of mockup 6 and
+    // the field allowance_bytes read from the person's own usage answer (u.allowance_bytes,
+    // GET /api/v1/usage, a member's route). Any other "allowance" there (an admin field, an
+    // admin's wording, a workspace's number) still fails, and /tours and the shared script are
+    // checked whole as before.
+    const OWN_ALLOWANCE = ["You are over your storage allowance. New uploads are refused until you delete tours or get more room.", "u.allowance_bytes"];
+    const own = (path: string, text: string) => (path === "/storage" ? OWN_ALLOWANCE.reduce((t, x) => t.split(x).join(""), text) : text);
+    for (const [path, text] of [["/dash/dash.js", DASH_JS], ...MEMBER_PAGES.flatMap((p) => [[p.path, p.html], [p.path, p.script.body]])]) {
+      expect(text, path).not.toContain("/api/v1/admin");
+      expect(own(path, text), path).not.toMatch(/allowance|accounts|is_admin/);
+    }
+    // What is taken out is there exactly as written: the sentence once in the page, the field only on the usage answer.
+    const storage = DASH_PAGES.find((p) => p.path === "/storage");
+    if (storage !== undefined) {
+      expect(storage.html.split(OWN_ALLOWANCE[0]).length - 1).toBe(1);
+      expect(storage.script.body.match(/allowance/g)?.length).toBe(storage.script.body.split(OWN_ALLOWANCE[1]).length - 1);
     }
     // The shared script shows the tab only on the session's own word, and for an admin only.
     expect(DASH_JS).toContain("var admin = who.admin === true;");
@@ -270,7 +301,7 @@ describe("the dashboard's pages and files", () => {
     expect(doc.getElementById("delete-keep")!.textContent).toBe("Keep it");
     expect(doc.getElementById("delete-go")!.textContent).toBe("Delete tour");
     // The scripts set text only through textContent, and ask nothing with confirm().
-    for (const js of [DASH_JS, TOURS_JS]) {
+    for (const js of SCRIPTS) {
       for (const api of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "createContextualFragment", "DOMParser", "srcdoc", "confirm(", "alert(", "prompt("]) expect(js, api).not.toContain(api);
     }
   });
@@ -316,7 +347,7 @@ describe("the dashboard's pages and files", () => {
       const all = doc.root.all();
       expect(all.filter((e) => e.tagName === "script").map((e) => [e.getAttribute("src"), e.hasAttribute("defer"), e.textContent]), s.path).toEqual([
         ["/dash/dash.js", true, ""],
-        ["/dash/tours.js", true, ""],
+        [s.script, true, ""],
       ]);
       expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")]), s.path).toEqual([["stylesheet", "/dash/dash.css"]]);
       expect(all.filter((e) => e.tagName === "style"), s.path).toEqual([]);
@@ -331,17 +362,26 @@ describe("the dashboard's pages and files", () => {
       expect(all.filter((e) => e.tagName === "form"), s.path).toEqual([]);
     }
     expect(DASH_CSS).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
-    // The scripts set no style attribute and add no handler attribute; the only style they touch is none.
-    for (const js of [DASH_JS, TOURS_JS]) {
-      expect(js).not.toMatch(/setAttribute\("(?:style|on[a-z]+|src|srcdoc)"/);
-      expect(js).not.toMatch(/\.style\b/);
-      expect(js).not.toMatch(/\.on[a-z]+\s*=/);
+    // The scripts set no style attribute and add no handler attribute. The one style a page's
+    // script may touch is a bar's width through the CSSOM, `.style.width = `, which the policy
+    // allows (the account page sizes its bar the same way); only the Storage and Admin pages
+    // have bars, so every other script may touch no style at all. Any other .style use, a style attribute,
+    // cssText, setProperty or style["..."] fails.
+    for (const [path, js] of [["/dash/dash.js", DASH_JS], ...DASH_PAGES.map((p) => [p.path, p.script.body])]) {
+      expect(js, path).not.toMatch(/setAttribute\(\s*["'](?:style|on[a-z]+|src|srcdoc)["']/);
+      expect(js, path).not.toMatch(/cssText|setProperty\(|\[\s*["']style["']\s*\]/);
+      const widths = path === "/storage" || path === "/admin" ? js.replace(/\.style\.width = /g, "") : js;
+      expect(widths, path).not.toMatch(/\.style\b/);
+      expect(js, path).not.toMatch(/\.on[a-z]+\s*=/);
     }
   });
 
   it("the scripts keep to this site: one place makes every request, with the session and the anti-forgery header on every change", () => {
     expect(DASH_JS.match(/\bfetch\(/g), "one place makes every request").toHaveLength(1);
-    expect(TOURS_JS).not.toMatch(/\bfetch\(/);
+    for (const p of DASH_PAGES) expect(p.script.body, p.path).not.toMatch(/\bfetch\(|XMLHttpRequest|csrf/i);
+    // A path that is not one absolute path of this site is refused before any request.
+    expect(DASH_JS).toContain('if (typeof path !== "string" || !/^\\/(?![\\/\\\\])/.test(path)) throw new TypeError("path");');
+    expect(DASH_JS.indexOf("throw new TypeError")).toBeLessThan(DASH_JS.indexOf("fetch("));
     expect(DASH_JS).toContain('credentials: "same-origin"');
     expect(DASH_JS).toContain('referrerPolicy: "no-referrer"');
     expect(DASH_JS).toContain('redirect: "error"');
@@ -360,7 +400,7 @@ describe("the dashboard's pages and files", () => {
     expect(TOURS_JS).toContain("return Dash.api(method, path, body)");
     // Nothing is stored, no cookie is touched, and leaving a page goes only to /signin.
     const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location.href", "location.hash", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer"];
-    for (const js of [DASH_JS, TOURS_JS]) for (const api of forbidden) expect(js, api).not.toContain(api);
+    for (const js of SCRIPTS) for (const api of forbidden) expect(js, api).not.toContain(api);
     const navigations = [...(DASH_JS + TOURS_JS).matchAll(/location\.(replace|assign)\(([^)]*)\)/g)].map((m) => m[2]);
     expect(navigations).toEqual(['"/signin"']);
     expect(DASH_JS + TOURS_JS).not.toMatch(/\blocation\s*=(?!=)/);
@@ -372,10 +412,12 @@ describe("the dashboard's pages and files", () => {
     expect([...TOURS_JS.matchAll(/navigator\.[a-zA-Z]+/g)].map((m) => m[0])).toEqual(["navigator.clipboard", "navigator.clipboard", "navigator.clipboard"]);
   });
 
-  it("a link goes into an href only from the API's path, on https, this page's own origin, or http on a local name", () => {
+  it("a link goes into an href only from the API's strict path and a checked tours address", () => {
     expect(TOURS_JS).toContain("var TOUR_PATH = /^\\/t\\/[a-z0-9]{1,64}$/;");
     expect(TOURS_JS).toContain('if (base === null || t.status !== "published" || typeof t.url !== "string" || !TOUR_PATH.test(t.url)) return null;');
-    expect(TOURS_JS).toContain("return safe(link) ? link : null;");
+    expect(TOURS_JS).toContain("return base + t.url;");
+    // No second check that could never decide anything (what the runtime tests hold instead).
+    expect(TOURS_JS).not.toContain("function safe(");
     // The only href the script sets is that link, on a link that opens a new tab without the opener or a referrer.
     expect(TOURS_JS.match(/setAttribute\("href"/g)).toHaveLength(1);
     expect(TOURS_JS).toContain('open.setAttribute("href", link);');
@@ -392,11 +434,17 @@ describe("the dashboard's pages and files", () => {
       for (const a of all.filter((e) => e.tagName === "a")) expect(a.getAttribute("href"), s.path).toMatch(/^\//);
       for (const e of all) expect(["div", "span", "p", "li", "td"].includes(e.tagName) && (e.hasAttribute("tabindex") || e.getAttribute("role") === "button"), `${s.path} <${e.tagName}> as a control`).toBe(false);
       const messages = all.filter((e) => /\b(?:message|load)\b/.test(e.className) && e.parent?.tagName !== "noscript");
-      expect(messages.map((m) => m.id).sort(), s.path).toEqual(["dash-load", "delete-message", "tours-message"]);
+      expect(messages.map((m) => m.id), s.path).toContain("dash-load");
       for (const m of messages) expect([m.getAttribute("role"), m.getAttribute("aria-live")], `${s.path} #${m.id}`).toEqual(["status", "polite"]);
+      // A message line takes no room until it has a message.
+      for (const m of messages.filter((e) => e.id !== "dash-load")) expect(m.hidden, `${s.path} #${m.id}`).toBe(true);
       for (const h of all.filter((e) => e.tagName === "h1" || e.tagName === "h2")) expect(h.getAttribute("tabindex"), `${s.path} #${h.id}`).toBe("-1");
       expect(all.some((e) => e.tagName === "meta" && e.getAttribute("name") === "viewport" && e.getAttribute("content") === "width=device-width, initial-scale=1"), s.path).toBe(true);
     }
+    expect(new FakeDocument(TOURS_HTML).root.all().filter((e) => /\bmessage\b/.test(e.className) && e.parent?.tagName !== "noscript").map((m) => m.id).sort()).toEqual(["delete-message", "tours-message"]);
+    expect(DASH_CSS).not.toMatch(/\.message \{[^}]*min-height/);
+    // The last column's header has a name a screen reader reads and the eye does not see.
+    expect(DASH_CSS).toMatch(/\.vh \{[^}]*position: absolute;[^}]*clip: rect\(0 0 0 0\);/);
     // The question is a dialog with its title and text tied to it.
     const dialog = new FakeDocument(TOURS_HTML).body.all().find((e) => e.getAttribute("role") === "alertdialog")!;
     expect([dialog.getAttribute("aria-modal"), dialog.getAttribute("aria-labelledby"), dialog.getAttribute("aria-describedby")]).toEqual(["true", "delete-title", "delete-text"]);

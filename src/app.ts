@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { adminRoutes } from "./admin-api.ts";
 import { dashRoutes } from "./dash/routes.ts";
 import { docsRoutes } from "./docs/page.ts";
+import { emailChangeRoutes } from "./email-change.ts";
 import { hostGate } from "./host-gate.ts";
 import { requestHost, roleOf } from "./hosts.ts";
 import type { Deps } from "./ports.ts";
@@ -35,6 +36,7 @@ export function createApp(deps: Deps): Hono {
   tourRoutes(app, deps);
   usageRoutes(app, deps);
   signinRoutes(app, deps);
+  emailChangeRoutes(app, deps);
   adminRoutes(app, deps);
   pageRoutesForAccounts(app, deps);
   dashRoutes(app);

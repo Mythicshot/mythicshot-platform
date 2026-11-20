@@ -687,6 +687,43 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     expect((await api.call("POST", "/api/v1/signout", { headers: await withCookie((await signIn()).secret) })).status).toBe(204);
   });
 
+  it("every answer of changing the email address is as documented", async () => {
+    const { deps, mail } = await makeDeps({ siteHost: "tours.example.com" });
+    const api = client(deps);
+    await seedAccount(deps, { admin: true });
+    const a = await seedAccount(deps);
+    const made = await redeemSignInCode(deps, await createSignInCode(deps, a.userId), null, null);
+    if (made === null) throw new Error("the sign-in was refused");
+    const headers = { cookie: `${SESSION_COOKIE}=${made.secret}`, origin: "https://tours.example.com", "x-csrf-token": await csrfFor(made.secret), "content-type": JSON_TYPE };
+    const ask = (body: string) => api.call("POST", "/api/v1/account/email", { headers, body });
+    const confirm = (body: string) => api.call("POST", "/api/v1/account/email/confirm", { headers, body });
+
+    expect((await api.call("GET", "/api/v1/session", { headers: { cookie: headers.cookie } })).json.email_change).toBe(true);
+    expect((await ask(JSON.stringify({ email: "new@example.com" }))).json).toEqual({ ok: true });
+    const code = (mail.sent[0]?.text.match(/dpe_[0-9a-f]{40}/) ?? [""])[0];
+    refused(await ask("[]"), 400, "bad_request");
+    refused(await ask(JSON.stringify({ email: "not an address" })), 400, "bad_email");
+    refused(await confirm("{"), 400, "bad_request");
+    refused(await confirm(JSON.stringify({ code: "dpe_" + "0".repeat(40) })), 400, "bad_code");
+    expect((await confirm(JSON.stringify({ code }))).json).toEqual({ email: "new@example.com", previous_email: a.email });
+    for (let i = 0; i < 2; i++) expect((await ask(JSON.stringify({ email: `more-${i}@example.com` }))).status).toBe(200);
+    refused(await ask(JSON.stringify({ email: "one-too-many@example.com" })), 429, "rate_limited");
+    for (let i = 0; i < 18; i++) expect((await confirm(JSON.stringify({ code: "dpe_" + String(i).padStart(40, "1") }))).status).toBe(400);
+    refused(await confirm(JSON.stringify({ code })), 429, "rate_limited");
+    for (const path of ["/api/v1/account/email", "/api/v1/account/email/confirm"]) refused(await api.call("POST", path, { token: a.token, body: "{}", headers: JSON_HEADERS }), 401, "unauthorized");
+
+    // A site whose mail is off.
+    const off = await makeDeps({ siteHost: "tours.example.com" }, { mail: false });
+    const offApi = client(off.deps);
+    await seedAccount(off.deps, { admin: true });
+    const b = await seedAccount(off.deps);
+    const offMade = await redeemSignInCode(off.deps, await createSignInCode(off.deps, b.userId), null, null);
+    if (offMade === null) throw new Error("the sign-in was refused");
+    const offHeaders = { cookie: `${SESSION_COOKIE}=${offMade.secret}`, origin: "https://tours.example.com", "x-csrf-token": await csrfFor(offMade.secret), "content-type": JSON_TYPE };
+    expect((await offApi.call("GET", "/api/v1/session", { headers: { cookie: offHeaders.cookie } })).json.email_change).toBe(false);
+    refused(await offApi.call("POST", "/api/v1/account/email", { headers: offHeaders, body: JSON.stringify({ email: "new@example.com" }) }), 409, "mail_off");
+  });
+
   it("every answer of the admin routes is as documented", async () => {
     const { deps } = await makeDeps({ storageAllowanceBytes: 1_000_000 });
     const api = client(deps);
@@ -913,6 +950,15 @@ describe("the error codes in the code", () => {
     expect(signinPlain.length, "signin.ts: an error answer not built in place").toBe([...signin.matchAll(/\berror: "/g)].length);
     for (const m of signinPlain) inCode.add(`${m[1]} ${m[2]}`);
     expect([...inCode]).toEqual(expect.arrayContaining(["400 bad_email", "400 bad_code", "403 link_invalid", "429 rate_limited"]));
+    // Changing the email address answers the same way: apiError, and plain JSON for bad_email, which has no detail.
+    const email = source("email-change.ts");
+    const emailLiteral = [...email.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
+    expect(emailLiteral.length, "email-change.ts: an apiError call without a literal status and code").toBe([...email.matchAll(/\bapiError\(/g)].length);
+    for (const m of emailLiteral) inCode.add(`${m[1]} ${m[2]}`);
+    const emailPlain = [...email.matchAll(/\bjson\((\d{3}), \{ error: "([a-z_]+)"/g)];
+    expect(emailPlain.length, "email-change.ts: an error answer not built in place").toBe([...email.matchAll(/\berror: "/g)].length);
+    for (const m of emailPlain) inCode.add(`${m[1]} ${m[2]}`);
+    expect([...inCode]).toEqual(expect.arrayContaining(["409 mail_off"]));
     // The admin routes answer with apiError, and with plain JSON for their one 404, which has no detail.
     const admin = source("admin-api.ts");
     const adminLiteral = [...admin.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
@@ -922,9 +968,9 @@ describe("the error codes in the code", () => {
     expect(adminPlain.length, "admin-api.ts: an error answer not built in place").toBe([...admin.matchAll(/\berror: "/g)].length);
     for (const m of adminPlain) inCode.add(`${m[1]} ${m[2]}`);
     expect([...inCode]).toEqual(expect.arrayContaining(["400 bad_allowance", "404 not_found"]));
-    // These five are the only modules that answer with apiError (src/http.ts defines it).
+    // These six are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/admin-api.ts", "../src/http.ts", "../src/publish.ts", "../src/signin.ts", "../src/tours.ts", "../src/uploads.ts"]);
+    expect(callers).toEqual(["../src/admin-api.ts", "../src/email-change.ts", "../src/http.ts", "../src/publish.ts", "../src/signin.ts", "../src/tours.ts", "../src/uploads.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.

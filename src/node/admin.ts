@@ -2,6 +2,7 @@
 //
 //   node dist/node/admin.js first-admin --email <address> --username <name>
 //   node dist/node/admin.js signin-link --email <address>
+//   node dist/node/admin.js change-email --username <name> --email <address>
 //   node dist/node/admin.js mail-check [--send-to <address>]
 //   node dist/node/admin.js audit [--last <n>]
 //
@@ -16,15 +17,16 @@
 // the terminal: no line names a setting's value, a token, the setup code, a digest or a
 // cookie. The only secret it ever prints is a sign-in link, which is the point of it.
 //
-// Printing a link for an account that exists is a recovery tool, behind a gate that is
-// never read from this process's environment: app.cjs hands over what the settings file
-// says (RECOVERY_LINKS), and run as its own file the gate is what the environment of
-// process 1 says, which in the container is the app started from the stack's .env.
+// Printing a link for an account that exists, and changing an account's email address
+// without a mailed link, are recovery tools, behind a gate that is never read from this
+// process's environment: app.cjs hands over what the settings file says (RECOVERY_LINKS),
+// and run as its own file the gate is what the environment of process 1 says, which in
+// the container is the app started from the stack's .env.
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEmail } from "../accounts.ts";
-import { claimFirstAdmin, signInLinkFor, type ClaimProblem } from "../admin.ts";
+import { claimFirstAdmin, setEmailOnServer, signInLinkFor, type ClaimProblem, type EmailSetProblem } from "../admin.ts";
 import type { Mailer } from "../mail.ts";
 import type { Deps, FileStore } from "../ports.ts";
 import { parseUsername } from "../usernames.ts";
@@ -92,6 +94,8 @@ export function recoveryFromProcessOne(at: { pid: number; platform: NodeJS.Platf
 
 /** The migration that made the tables this command reads and writes. */
 const ACCOUNTS_MIGRATION = "0008_accounts.sql";
+/** The migration that made the table of email changes, which change-email also writes. */
+const EMAIL_CHANGE_MIGRATION = "0009_email_change.sql";
 
 /** How the usage names the command when nothing else is said: run as its own file. */
 const DIRECT_NAME = "node dist/node/admin.js";
@@ -113,6 +117,8 @@ const usage = (name: string): string[] => [
   "      Make the site's owner its admin, with this address and username, and print a sign-in link. Works once.",
   "  signin-link --email <address>",
   "      Recovery only, while the settings file holds RECOVERY_LINKS=on: print a sign-in link for the account with this address. It works once and for 15 minutes.",
+  "  change-email --username <name> --email <address>",
+  "      Recovery only, while the settings file holds RECOVERY_LINKS=on: change the email address of the account with this username at once, without a mailed link. For a site whose mail is off.",
   "  mail-check [--send-to <address>]",
   "      Say whether mail is set up, without showing any setting. With --send-to, send one test mail.",
   "  audit [--last <n>]",
@@ -138,6 +144,7 @@ const SAID = {
   madeNoLink: "The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.",
   recoveryOff: "Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.",
   recoveryRemind: "Remove the line RECOVERY_LINKS=on from the settings file now.",
+  changeOff: "Changing an email address here is off. To do it, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.",
   setupUnfinished: 'This site\'s setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.',
   mailOff: "Mail is off.",
   mailOn: "Mail is set to SMTP: host, port, user, password and sender are set.",
@@ -155,19 +162,29 @@ const REFUSED: Record<ClaimProblem, string> = {
   username_taken: "That username is taken.",
 };
 
+/** What change-email says when it changes nothing. */
+const NOT_CHANGED: Record<EmailSetProblem, string> = {
+  bad_email: "That is not an email address. Nothing was changed.",
+  no_account: "No account has that username. Nothing was changed.",
+  email_taken: "That email address belongs to another account. Nothing was changed.",
+  same_email: "That is already the account's email address. Nothing was changed.",
+};
+
 type Parsed =
   | { kind: "help" }
+  | { kind: "change-email"; username: string; email: string }
   | { kind: "first-admin"; email: string; username: string }
   | { kind: "signin-link"; email: string }
   | { kind: "mail-check"; sendTo: string | null }
   | { kind: "audit"; last: number };
 
-const COMMANDS = ["first-admin", "signin-link", "mail-check", "audit"] as const;
+const COMMANDS = ["first-admin", "signin-link", "change-email", "mail-check", "audit"] as const;
 type Command = (typeof COMMANDS)[number];
 const FLAGS: Record<Command | "", readonly string[]> = {
   "": ["--email", "--username"],
   "first-admin": ["--email", "--username"],
   "signin-link": ["--email"],
+  "change-email": ["--username", "--email"],
   "mail-check": ["--send-to"],
   audit: ["--last"],
 };
@@ -209,6 +226,8 @@ function parseArgs(argv: readonly string[]): Parsed | null {
       return email === undefined || username === undefined ? null : { kind: "first-admin", email, username };
     case "signin-link":
       return email === undefined ? null : { kind: "signin-link", email };
+    case "change-email":
+      return email === undefined || username === undefined ? null : { kind: "change-email", username, email };
     case "mail-check":
       return { kind: "mail-check", sendTo: values.get("--send-to") ?? null };
     case "audit": {
@@ -370,6 +389,26 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
           return 1;
         }
         for (const line of linkLines(link)) out(line);
+        out(SAID.recoveryRemind);
+        return 0;
+      }
+      case "change-email": {
+        // Changing an address without a mailed link is a recovery tool, off unless the
+        // settings file says so for this one run: nothing is read or written while it is off.
+        if (opts.recoveryLinks !== true) {
+          out(SAID.changeOff);
+          return 1;
+        }
+        if ((await db.first("SELECT 1 AS x FROM _migrations WHERE name = ?", [EMAIL_CHANGE_MIGRATION])) === null) {
+          out(SAID.older);
+          return 1;
+        }
+        const changed = await setEmailOnServer(deps, { username: parsed.username, email: parsed.email });
+        if (!changed.ok) {
+          out(NOT_CHANGED[changed.problem]);
+          return 1;
+        }
+        out(`The account "${parsed.username.trim().toLowerCase()}" now signs in with ${changed.email}.`);
         out(SAID.recoveryRemind);
         return 0;
       }

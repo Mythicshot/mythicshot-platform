@@ -78,6 +78,9 @@ const ROWS: Record<string, Row> = {
   "DELETE /api/v1/sessions/:id": session("DELETE", `/api/v1/sessions/${SESSION}`, 401),
   "POST /api/v1/signout": session("POST", "/api/v1/signout", 401),
   "POST /api/v1/signout/everywhere": session("POST", "/api/v1/signout/everywhere", 401),
+  // Changing the email address takes a session alone: 401 without one, and on the app address only.
+  "POST /api/v1/account/email": session("POST", "/api/v1/account/email", 401, { email: "new@example.com" }),
+  "POST /api/v1/account/email/confirm": session("POST", "/api/v1/account/email/confirm", 401, { code: "dpe_" + "0".repeat(40) }),
   // The site admin's routes: on the app address only, and nobody here is an admin.
   "GET /api/v1/admin/accounts": admin("GET", "/api/v1/admin/accounts"),
   "GET /api/v1/admin/summary": admin("GET", "/api/v1/admin/summary"),
@@ -95,6 +98,8 @@ const ROWS: Record<string, Row> = {
   "GET /dash/tours.js": page("/dash/tours.js"),
   "GET /dash/dash.css": page("/dash/dash.css"),
   "GET /dash/dash.js": page("/dash/dash.js"),
+  "GET /storage": page("/storage"),
+  "GET /dash/storage.js": page("/dash/storage.js"),
   "GET /admin": page("/admin"),
   "GET /dash/admin.js": page("/dash/admin.js"),
   "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421 },
@@ -112,7 +117,7 @@ const ROWS: Record<string, Row> = {
 const KEYS = Object.keys(ROWS);
 const DESCRIPTION_KEYS = KEYS.filter((k) => k.includes(" /api/v1/openapi."));
 /** Signing in and the session: the app address's own part of the API. */
-const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?)(?:\/|$)/.test(k));
+const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account)(?:\/|$)/.test(k));
 /** The site admin's routes. */
 const ADMIN_KEYS = KEYS.filter((k) => k.includes(" /api/v1/admin/"));
 /** The token API: everything under /api/v1/ but the description files, which need no token, the session's own routes and the admin's. */
@@ -121,7 +126,7 @@ const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 /** The sign-in pages and their stylesheet and script. */
 const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account)(?:\/|$)/.test(k));
 /** The dashboard's pages and their files (src/dash/), and the address that sends a browser on to them. */
-const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:tours|admin$|dash\/)/.test(k));
+const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:tours|storage|admin$|dash\/)/.test(k));
 const ROOT_KEY = "GET /";
 const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
 const DOCS_PAGE_KEY = "GET /docs";
@@ -227,8 +232,8 @@ describe("the host-routing matrix", () => {
     for (const key of DASH_KEYS) expect(HOST_RULES[key], key).toBe("app");
     expect(HOST_RULES[ROOT_KEY]).toBe("app-redirect");
     expect(PAGE_KEYS.length).toBe(5);
-    expect(DASH_KEYS.length).toBe(6);
-    expect(SESSION_KEYS.length).toBe(7);
+    expect(DASH_KEYS.length).toBe(8);
+    expect(SESSION_KEYS.length).toBe(9);
     expect(ADMIN_KEYS.length).toBe(3);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);

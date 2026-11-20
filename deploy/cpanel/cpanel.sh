@@ -90,8 +90,8 @@
 #   update that is not the new version's fault, so no commands to go back are printed.
 #
 # The admin command. `admin` runs the site's own admin command (dist/node/admin.js:
-# first-admin, signin-link, mail-check, audit) in the installed app, beside the running
-# app:
+# first-admin, signin-link, change-email, mail-check, audit) in the installed app, beside
+# the running app:
 # - Options of this script (--app-root, --node, --dry-run) go before the command's first
 #   argument; from there on every argument is the command's and reaches it unchanged.
 # - It runs `node app.cjs admin <arguments>` in the app folder, inside the app's Node.js

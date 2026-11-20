@@ -16,16 +16,16 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 ## The bar
 
 - [ ] `http://localhost:3000/` while signed in lands on `/tours`; in a private window (nobody signed in) it lands on `/signin`. In the network panel the first answer is a `302` with `cache-control: no-store` and no body.
-- [ ] The bar across the top shows "Mythicshot", the tabs "Tours", "Storage", "Account" and "Admin" in that order, and the username `checker` on the right. "Tours" is marked as the current tab. There is no "Images" or "GIFs" tab.
+- [ ] The bar across the top shows "Mythicshot", the tabs "Tours", "Storage", "Account" and "Admin" in that order, and the username `checker` on the right (an account without a username shows the word "Account" there, never an email address). "Tours" is marked as the current tab. There is no "Images" or "GIFs" tab.
 - [ ] View the page source: the Admin link is in it with `hidden` (the script shows it because `checker` is the admin), the username is not in it, and nothing else names an admin route. In a private window, `view-source:http://localhost:3000/tours` shows the very same text.
-- [ ] "Storage" and "Admin" lead to `/storage` and `/admin`, which answer `{"error":"not_found"}` until their pages are built. "Account" leads to today's account page.
+- [ ] "Storage" leads to `/storage` (checked below). "Admin" leads to `/admin`, which answers `{"error":"not_found"}` until its page is built. "Account" leads to today's account page.
 - [ ] The console shows no error and no policy violation ("Refused to …" or "Content Security Policy"); the network panel shows only requests to `localhost:3000`: the page, its stylesheet and its two scripts (all three under `/dash/`), and `GET /api/v1/session`, `/api/v1/me`, `/api/v1/tours` and `/api/v1/usage`.
 - [ ] The page's answer, the stylesheet and both scripts carry the same six headers as the sign-in pages: `content-security-policy: default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `x-frame-options: DENY`, `referrer-policy: no-referrer`, `cache-control: no-store`, `x-content-type-options: nosniff` and `cross-origin-opener-policy: same-origin`.
 
 ## The list
 
 - [ ] Under the heading "Tours" the line reads "3 tours in <workspace name> · <size> used", with the size written as everywhere else (at most one decimal, no trailing `.0`, 1024 to the next unit).
-- [ ] One row per tour, the most recently changed first. Each row has the title in bold and under it "<n> steps · localhost:3000/t/<slug>" for a published tour, or "<n> steps · no public link" for the other; then its tags, its size and the day it changed, such as "19 Nov".
+- [ ] One row per tour, the most recently changed first. Each row has the title in bold and under it "<n> steps · localhost:3000/t/" and the first four characters of the slug followed by "…" for a published tour (pointing at it shows the whole link), or "<n> steps · no public link" for the other; then its tags, its size and the day it changed, such as "19 Nov".
 - [ ] The tags: "Published" in green; "Published" and "Changes waiting" in amber for the tour with a new version; "Not published" in grey.
 - [ ] A published tour has "Copy link", "Open" and "More"; the unpublished one has "Publish" and "More".
 - [ ] Under the table: "\"Changes waiting\" means Mythicshot uploaded a newer version that visitors do not see yet. \"More\" holds: Publish changes, Unpublish, Delete."
@@ -48,18 +48,36 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 - [ ] "Publish changes" reads "Publishing…" on "More" while it runs, and afterwards the row has "Published" without "Changes waiting". The requests are `POST /api/v1/tours/tour_…/publish`, the later ones with the body `{"publish_id":"…"}`, each with an `X-Csrf-Token` header and `Origin: http://localhost:3000`.
 - [ ] "Unpublish" asks nothing, reads "Unpublishing…", and afterwards the row has "Not published", "no public link" and a "Publish" button with the focus on it. The old link answers 404.
 - [ ] "Publish" on that row reads "Publishing…" and brings the same link back.
-- [ ] Each button can be pressed only once while its request runs: a second press, or another row's button, sends nothing.
+- [ ] While a change runs, every row's buttons are greyed out and cannot be pressed; they come back when it ends.
+- [ ] A publish of a tour with no steps (if you can make one) says "This tour has no steps, so it cannot be published."
 
 ## Deleting a tour
 
 - [ ] "Delete" in the menu opens the question in the page, never a browser dialog: "Delete \"<title>\"?", "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched." and the buttons "Keep it" and "Delete tour". The focus is on "Keep it".
-- [ ] Tab and Shift+Tab stay on the two buttons. "Keep it" and Escape each close the question and put the focus back on that row's "More", with no request sent.
+- [ ] Tab and Shift+Tab stay on the two buttons, and the page behind cannot be clicked or reached with Tab. "Keep it", Escape and a click on the dimmed area around the question each close it and put the focus back on that row's "More", with no request sent.
 - [ ] "Delete tour" reads "Deleting…", sends `DELETE /api/v1/tours/tour_…` (again while it answers 202) with an `X-Csrf-Token` header, closes the question, and the row is gone, the line under the heading counts one tour fewer, and the focus is on the heading.
 - [ ] Delete every tour: the page shows "No tours yet" and "Record a tour in Mythicshot and choose Publish. It shows up here with a link to share." with no table and no hint.
+
+## The Storage page
+
+Do this part twice: first with the server started as in "Set up" (no allowance), then stopped and started again with the setting `STORAGE_ALLOWANCE_BYTES=5368709120` (5 GB) added to the same command. For the over-the-allowance step, restart it once more with `STORAGE_ALLOWANCE_BYTES=1024`.
+
+- [ ] "Storage" in the bar opens `/storage`, marked as the current tab. Under the heading "Storage" is the workspace's name. The network panel shows `GET /api/v1/session`, `/api/v1/usage` and `/api/v1/usage/largest`, and the page, its stylesheet and its two scripts under `/dash/` carry the six headers listed in "The bar".
+- [ ] Without an allowance: there is no bar, and the line reads "<size> used · <n> tours" (or "1 tour"), the size written as on the Tours page. Under it: "Tours and their pictures count. Deleting a tour frees its space within a few minutes."
+- [ ] With the 5 GB allowance: a bar in green above the line, filled to the share used (a thin sliver for a few megabytes), and the line reads "<size> of 5 GB used · <n> tours". The console shows no policy violation for the bar's width.
+- [ ] "What takes the room" lists "Tours", "Logos" and "Uploads in progress" with a size each; the three add up to the size in the line (to within rounding).
+- [ ] "Largest tours" lists the tours, largest first, each with a small bar (the first one full, the others in proportion), its size and a red "Delete". The title holding markup shows exactly as typed. Under the table: "All <n> tours are on the Tours page.", where "Tours page" is a link to `/tours` (with one tour: "Your tour is on the Tours page.").
+- [ ] With the 1024-byte allowance: the bar is full and amber, and under the line, on an amber background, "You are over your storage allowance. New uploads are refused until you delete tours or get more room.", then "Tours that are already online are not affected." The sentence about what counts is not shown. A published tour's link still plays.
+- [ ] "Delete" opens the same question as on the Tours page, with the tour's title, the same sentence and "Keep it" and "Delete tour"; the focus is on "Keep it". Tab and Shift+Tab stay on the two buttons, the bar and the page behind cannot be clicked or reached with Tab, and "Keep it", Escape and a click on the dimmed area each close it and put the focus back on that row's "Delete", with no request sent.
+- [ ] "Delete tour" reads "Deleting…", sends `DELETE /api/v1/tours/tour_…` (again while it answers 202) with an `X-Csrf-Token` header, closes the question, and the page reads `/api/v1/usage` and `/api/v1/usage/largest` again: the row is gone, the line counts one tour fewer and a smaller size, and the focus is on the heading.
+- [ ] With the server stopped, "Delete tour" gives "Something went wrong. Try again in a moment." in the question, which stays open with its buttons back. Start the server again.
+- [ ] Delete every tour: the line reads "0 bytes used · 0 tours" (or "0 bytes of 5 GB used · 0 tours"), "What takes the room" shows "0 bytes" three times, the hint is shown, and there is no "Largest tours" table.
+- [ ] At 380 pixels wide and at 320, the small bars in the table are left out, nothing scrolls sideways and a long title wraps; in dark mode the bars and the amber warning are readable.
 
 ## When something fails
 
 - [ ] With the server stopped, any button gives "Something went wrong. Try again in a moment." under the heading line (in the question, for "Delete tour") and comes back. Start the server again.
+- [ ] Make a change, and stop the server just after its request was answered (for example with the network panel's throttling at its slowest): the page says "The change was made, but the list could not be loaded again. Reload the page to see it." and keeps the list it had. Start the server again and reload.
 - [ ] Sign out in another tab, then press "Unpublish" here: the page goes to `/signin`.
 - [ ] Eleven fast requests from this machine are not limited (a loopback address is no network to count), so "Too many requests. Wait a few minutes and try again." cannot be seen here; note that it was not checked by hand.
 

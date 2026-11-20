@@ -206,6 +206,10 @@ export class FakeDocument {
     const t = this.root.all().find((e) => e.tagName === "title");
     if (t) t.textContent = String(v);
   }
+  /** Listeners on the document: events dispatched on any element bubble up to them. */
+  addEventListener(type: string, fn: (event: FakeEvent) => void): void {
+    this.root.addEventListener(type, fn);
+  }
   getElementById(id: string): FakeElement | null {
     this.log?.push("document");
     return this.root.all().find((e) => e.id === id) ?? null;
@@ -213,10 +217,6 @@ export class FakeDocument {
   createElement(tag: string): FakeElement {
     this.log?.push("document");
     return new FakeElement(tag.toLowerCase(), this);
-  }
-  /** A listener on the document: it hears every event that bubbles up from an element. */
-  addEventListener(type: string, fn: (event: FakeEvent) => void): void {
-    this.root.addEventListener(type, fn);
   }
   /** Writing a cookie fails the test: the pages' script never touches one. */
   get cookie(): string {

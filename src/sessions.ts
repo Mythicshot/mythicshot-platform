@@ -235,6 +235,28 @@ export async function createSignInCode(deps: Deps, userId: string): Promise<stri
 }
 
 /**
+ * As `createSignInCode`, for a link mailed to `email`: the code is stored only while that
+ * is still the account's address, decided inside the one statement that stores it, and null
+ * is returned when it is not (nothing is then stored). So a link asked for an address the
+ * account has just left, by an email change that committed between the request and this
+ * call, is never made, and none can reach the old mailbox. One call either way.
+ */
+export async function createSignInCodeFor(deps: Deps, userId: string, email: string): Promise<string | null> {
+  const code = "dpl_" + randomHex(20);
+  const now = deps.now();
+  const stored = await deps.db.run("INSERT INTO signin_code (id, user_id, hash, created_at, expires_at) SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM user WHERE id = ? AND email = ?)", [
+    newId("sic"),
+    userId,
+    await sha256Hex(code),
+    now,
+    now + SIGNIN_CODE_MS,
+    userId,
+    email,
+  ]);
+  return stored.changes === 1 ? code : null;
+}
+
+/**
  * Turns a sign-in code into a session, once. Returns the new session's secret (for the
  * cookie), its id and the account's id, or null when the code is malformed, unknown,
  * already used or expired, when the account is disabled or a member of no workspace, and

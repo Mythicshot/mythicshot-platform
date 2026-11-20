@@ -59,6 +59,9 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "DELETE /api/v1/sessions/:id": "app",
   "POST /api/v1/signout": "app",
   "POST /api/v1/signout/everywhere": "app",
+  // Changing the account's email address takes a session alone, so it lives where the cookie does.
+  "POST /api/v1/account/email": "app",
+  "POST /api/v1/account/email/confirm": "app",
 
   // The site admin's routes: they take an admin's session alone, so they answer only where
   // the session cookie lives.
@@ -82,6 +85,8 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /dash/tours.js": "app",
   "GET /dash/dash.css": "app",
   "GET /dash/dash.js": "app",
+  "GET /storage": "app",
+  "GET /dash/storage.js": "app",
   "GET /admin": "app",
   "GET /dash/admin.js": "app",
 

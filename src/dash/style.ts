@@ -79,8 +79,7 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 18px; margin: 0 0 14px; min-width: 0; }
 .load { margin: 0; color: var(--error); font-size: 0.9rem; }
 .load:empty { display: none; }
-.message { min-height: 1.5em; margin: 0 0 8px; color: var(--error); font-size: 0.9rem; line-height: 1.45; }
-noscript .message { min-height: 0; }
+.message { margin: 0 0 8px; color: var(--error); font-size: 0.9rem; line-height: 1.45; }
 .hint { margin: 6px 0 0; color: var(--muted); font-size: 0.86rem; }
 .tag { display: inline-block; border-radius: 6px; font-size: 0.76rem; padding: 2px 7px; background: var(--tag-bg); color: var(--tag-text); white-space: nowrap; }
 .tag.ok { background: var(--ok-bg); color: var(--ok-text); }
@@ -145,6 +144,7 @@ noscript .message { min-height: 0; }
 .tours .status .tag + .tag { margin-left: 4px; }
 .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; }
 .narrow-only { display: none; }
+.vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .more { position: relative; display: inline-block; }
 .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 10; min-width: 180px; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
 .menu button { display: block; width: 100%; min-height: 40px; padding: 8px 12px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font: inherit; font-size: 0.9rem; text-align: left; white-space: nowrap; cursor: pointer; }
@@ -166,6 +166,29 @@ noscript .message { min-height: 0; }
   .narrow-only { display: inline; }
 }
 
+/* The Storage page. */
+.total { margin: 0; }
+.meter { height: 10px; margin: 0 0 8px; border-radius: 8px; background: var(--line); overflow: hidden; }
+.meter-fill { width: 0; height: 100%; border-radius: inherit; background: var(--accent); }
+.meter.over .meter-fill { background: var(--warn-bar); }
+.over-box { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--warn-bg); color: var(--warn-text); font-size: 0.9rem; }
+.card-title { font-size: 1rem; line-height: 1.3; font-weight: 650; margin: 0 0 8px; }
+.room { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 11px 0; border-top: 1px solid var(--line); font-size: 0.93rem; }
+.room:first-of-type { border-top: 0; }
+.room .r { color: var(--muted); font-variant-numeric: tabular-nums; }
+.largest { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+.largest th { text-align: left; font-size: 0.76rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 0 10px 8px 0; white-space: nowrap; }
+.largest td { padding: 11px 10px 11px 0; border-top: 1px solid var(--line); vertical-align: middle; }
+.largest .t { font-weight: 600; }
+.largest .n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.largest .mini-cell { width: 30%; }
+.largest .del { text-align: right; padding-right: 0; }
+.mini { height: 6px; border-radius: 6px; background: var(--line); overflow: hidden; }
+.mini-fill { width: 0; height: 100%; border-radius: inherit; background: var(--accent); }
+@media (max-width: 720px) {
+  .largest .mini-cell { display: none; }
+}
+
 /* The Admin page. */
 .accounts { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
 .accounts th { text-align: left; font-size: 0.76rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 0 10px 8px 0; white-space: nowrap; }
@@ -176,9 +199,9 @@ noscript .message { min-height: 0; }
 .accounts .t .tag { margin-left: 6px; font-weight: 400; }
 .accounts .d { color: var(--muted); font-size: 0.85rem; }
 .accounts td.used .tag { margin-left: 6px; }
-.mini { height: 6px; border-radius: 6px; background: var(--line); overflow: hidden; min-width: 80px; }
-.mini i { display: block; width: 0; height: 100%; background: var(--accent); }
-.mini.over i { background: var(--warn-bar); }
+.accounts .mini { min-width: 80px; }
+.accounts .mini i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent); }
+.accounts .mini.over i { background: var(--warn-bar); }
 .show-more { margin: 0 0 14px; }
 .dialog label { display: block; font-weight: 600; font-size: 0.9rem; margin: 12px 0 6px; }
 .field { width: 100%; min-height: 40px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--field); color: var(--text); font: inherit; }
