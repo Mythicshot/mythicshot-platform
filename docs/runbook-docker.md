@@ -1145,6 +1145,7 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 
 | Symptom | Likely cause | What to do |
 |---|---|---|
+| The app log says `client address: requests come from a private or local address, which is how a proxy in front of the app looks; set CLIENT_ADDRESS_HEADER to the header your proxy writes the visitor's address in, or the limits per network (signing in, connecting the app) cannot tell visitors apart` | Caddy hands requests to the app from the stack's private network, so the app sees Caddy's address, not the visitor's, and the limits per network on signing in and on connecting Mythicshot cannot tell visitors apart | Add `CLIENT_ADDRESS_HEADER=` with the name of the header the proxy in front writes the visitor's address in to `.env`, then run `sudo bash install.sh` again. **Unconfirmed:** which header that is on your route; set only one your own proxy writes on every request, or a visitor could choose the address. Without it the site still works, and only that limit is not applied. |
 | `ERROR: this needs root` | Run without `sudo` | Run `sudo bash install.sh`. |
 | `ERROR: this system is ... Use --force to try anyway.` | Not Debian 13 or 12 | Use Debian 13. `--force` tries anyway, untested. |
 | `Docker is installed as a snap` | A snap of Docker cannot use `/opt/demo-platform` | Remove the snap (its images and containers go with it) and run the script again. |

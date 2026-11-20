@@ -96,7 +96,7 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   // session, so that part lives where the cookie does.
   "POST /api/v1/connect/start": "both",
   "POST /api/v1/connect/token": "both",
-  "GET /api/v1/connect/requests/:code": "app",
+  "POST /api/v1/connect/lookup": "app",
   "POST /api/v1/connect/confirm": "app",
   "POST /api/v1/connect/refuse": "app",
   // The workspace's tokens (src/tokens.ts) take a session alone, so they live where the cookie does.

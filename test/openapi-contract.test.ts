@@ -467,7 +467,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
 
     // Without a token, and with one no server knows: every request that needs one.
     const idFor = (path: string) => (path.includes("/uploads/") ? NO_UPLOAD : path.includes("/sessions/") ? "ses_" + "0".repeat(24) : path.includes("/workspaces/") ? NO_WORKSPACE : path.includes("/tokens/") ? "tok_" + "0".repeat(24) : NO_TOUR);
-    const example = (op: Op) => op.path.replace("{id}", idFor(op.path)).replace("{step_id}", NO_STEP).replace("{n}", "1").replace("{code}", "ABCD-EFGH");
+    const example = (op: Op) => op.path.replace("{id}", idFor(op.path)).replace("{step_id}", NO_STEP).replace("{n}", "1");
     const guarded = OPS.filter((op) => op.op.security.length > 0);
     // All but health, the two sign-in requests and the app's two requests while it connects.
     expect(guarded).toHaveLength(OPS.length - 5);
@@ -918,8 +918,8 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const fromNetwork = (address: string) => (d: Deps) => ({ fetch: (req: Request) => (setClientAddress(req, address), createApp(d).fetch(req)) });
     const start = (body: unknown, more: Opts = {}) => api.call("POST", "/api/v1/connect/start", { origin: TOURS, ...more, body: typeof body === "string" ? body : JSON.stringify(body), headers: { ...JSON_HEADERS, ...more.headers } });
     const poll = (body: unknown, more: Opts = {}) => api.call("POST", "/api/v1/connect/token", { origin: TOURS, ...more, body: typeof body === "string" ? body : JSON.stringify(body), headers: { ...JSON_HEADERS, ...more.headers } });
-    const lookup = (code: string, more: Opts = {}) => api.call("GET", `/api/v1/connect/requests/${code}`, { origin: APP, headers: { cookie }, ...more });
     const settle = (how: string, body: unknown, more: Opts = {}) => api.call("POST", `/api/v1/connect/${how}`, { origin: APP, headers: page, body: typeof body === "string" ? body : JSON.stringify(body), ...more });
+    const lookup = (code: string, more: Opts = {}) => settle("lookup", { user_code: code }, more);
 
     // Starting, and its refusals.
     const r = await start({ device_name: "Laptop" });
@@ -940,8 +940,9 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     refused(await poll({ device_code: r.json.device_code }, { app: fromNetwork("203.0.113.71") }), 429, "rate_limited");
 
     // The dashboard: lookup, confirm, and the token, with both addresses.
-    expect((await lookup(r.json.user_code)).json).toEqual({ device_name: "Laptop", asked_at: clock.now });
-    refused(await lookup(r.json.user_code, { headers: {}, token: a.token }), 401, "unauthorized");
+    expect((await lookup(r.json.user_code)).json).toEqual({ device_name: "Laptop", asked_at: clock.now, same_network: false });
+    refused(await lookup(r.json.user_code, { headers: JSON_HEADERS, token: a.token }), 401, "unauthorized");
+    refused(await settle("lookup", "{"), 400, "bad_request");
     refused(await settle("confirm", "{"), 400, "bad_request");
     refused(await settle("refuse", "{"), 400, "bad_request");
     refused(await settle("confirm", { user_code: r.json.user_code }, { headers: JSON_HEADERS, token: a.token }), 401, "unauthorized");
@@ -955,6 +956,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     clock.now += 5000;
     const got = await poll({ device_code: r.json.device_code });
     expect(got.json.addresses).toEqual(hosts);
+    expect(got.json.account).toEqual({ username: null });
     // A fifth wrong code: everything is 429 for the rest of the window.
     for (let i = 0; i < 2; i++) refused(await lookup("ABCD-EFGH"), 404, "not_found");
     for (const call of [await lookup("ABCD-EFGH"), await settle("confirm", { user_code: "ABCD-EFGH" }), await settle("refuse", { user_code: "ABCD-EFGH" })]) refused(call, 429, "rate_limited");

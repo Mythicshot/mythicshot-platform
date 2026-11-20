@@ -114,7 +114,7 @@ const ROWS: Record<string, Row> = {
   // addresses (a code nobody has is the one 410); typing the short code takes a session.
   "POST /api/v1/connect/start": { method: "POST", path: "/api/v1/connect/start", body: { device_name: "Laptop" }, one: 201, tours: 201, app: 201, unknown: 421, img: 404 },
   "POST /api/v1/connect/token": { method: "POST", path: "/api/v1/connect/token", body: { device_code: "dpd_" + "0".repeat(40) }, one: 410, tours: 410, app: 410, unknown: 421, img: 404 },
-  "GET /api/v1/connect/requests/:code": session("GET", "/api/v1/connect/requests/ABCD-EFGH", 401),
+  "POST /api/v1/connect/lookup": session("POST", "/api/v1/connect/lookup", 401, { user_code: "ABCD-EFGH" }),
   "POST /api/v1/connect/confirm": session("POST", "/api/v1/connect/confirm", 401, { user_code: "ABCD-EFGH" }),
   "POST /api/v1/connect/refuse": session("POST", "/api/v1/connect/refuse", 401, { user_code: "ABCD-EFGH" }),
   // The workspace's tokens: a session alone.
@@ -175,7 +175,7 @@ const ROWS: Record<string, Row> = {
 const KEYS = Object.keys(ROWS);
 const DESCRIPTION_KEYS = KEYS.filter((k) => k.includes(" /api/v1/openapi."));
 /** Signing in, the session, typing a short code and the workspace's tokens: the app address's own part of the API. */
-const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account|connect\/(?:requests|confirm|refuse)|tokens)(?:\/|$)/.test(k));
+const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account|connect\/(?:lookup|confirm|refuse)|tokens)(?:\/|$)/.test(k));
 /** The app's two requests while it connects: no credential, on both addresses. */
 const CONNECT_KEYS = ["POST /api/v1/connect/start", "POST /api/v1/connect/token"];
 /** The site admin's routes. */

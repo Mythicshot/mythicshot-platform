@@ -74,7 +74,8 @@ const poll = (deps: Deps, code: unknown, more: More = {}) => appPost(deps, "/api
 /** The headers the site's own page sends a change with. */
 const page = (s: Signed, origin = ORIGIN): Record<string, string> => ({ cookie: s.cookie, origin, "x-csrf-token": s.csrf, "sec-fetch-site": "same-origin", "content-type": "application/json" });
 
-const lookup = (deps: Deps, s: Signed, code: string, more: More = {}) => send(deps, "GET", `/api/v1/connect/requests/${encodeURIComponent(code)}`, { ...opts(more), headers: { cookie: s.cookie, ...more.headers } });
+const lookup = (deps: Deps, s: Signed, code: string, more: More = {}) =>
+  send(deps, "POST", "/api/v1/connect/lookup", { ...opts(more), body: JSON.stringify({ user_code: code }), headers: { ...page(s, more.origin), ...more.headers } });
 const settle = (how: "confirm" | "refuse") => (deps: Deps, s: Signed, code: unknown, more: More = {}) =>
   send(deps, "POST", `/api/v1/connect/${how}`, { ...opts(more), body: JSON.stringify({ user_code: code }), headers: { ...page(s, more.origin), ...more.headers } });
 const confirm = settle("confirm");
@@ -153,18 +154,18 @@ describe("the codes", () => {
 });
 
 describe("starting a request", () => {
-  it("answers both codes, the connect page from the settings, 600 seconds and 5; only digests of the codes are stored", async () => {
+  it("answers both codes, the Connections page from the settings, 600 seconds and 5; only digests of the codes are stored", async () => {
     const { deps } = await site(TWO);
     const r = await start(deps, "  Work laptop ", { origin: TOURS });
     expect(r.status, r.text).toBe(201);
     expect(Object.keys(r.json)).toEqual(["device_code", "user_code", "verify_url", "expires_in", "interval"]);
     expect(r.json.device_code).toMatch(DEVICE_CODE);
     expect(r.json.user_code).toMatch(USER_CODE);
-    expect(r.json).toMatchObject({ verify_url: `${APP}/connect`, expires_in: 600, interval: 5 });
+    expect(r.json).toMatchObject({ verify_url: `${APP}/connections`, expires_in: 600, interval: 5 });
     expect([...r.headers.entries()].sort()).toEqual(API_HEADERS);
     // The app address too answers it, with the same page.
     const onApp = await start(deps, "Other", { origin: APP });
-    expect([onApp.status, onApp.json.verify_url]).toEqual([201, `${APP}/connect`]);
+    expect([onApp.status, onApp.json.verify_url]).toEqual([201, `${APP}/connections`]);
 
     const rows = await deps.db.all<Record<string, unknown>>("SELECT * FROM connect_request ORDER BY created_at, device_name DESC");
     expect(rows[0]).toEqual({
@@ -178,6 +179,7 @@ describe("starting a request", () => {
       last_poll_at: null,
       confirmed_at: null,
       confirmed_by: null,
+      confirmed_session: null,
       workspace_id: null,
       token_id: null,
       refused_at: null,
@@ -193,14 +195,14 @@ describe("starting a request", () => {
     expect(await deps.db.first("SELECT key FROM connect_key")).toEqual({ key: expect.stringMatching(/^[0-9a-f]{64}$/) });
   });
 
-  it("the connect page comes from the settings, never from the request, and is a bare path without them", async () => {
+  it("the Connections page comes from the settings, never from the request, and is a bare path without them", async () => {
     const one = await site({ siteHost: "demo.example.com" });
     for (const origin of [ORIGIN, "https://evil.example.net", "http://localhost:8787"]) {
       const r = await start(one.deps, "x", { origin, headers: { host: "evil.example.net", "x-forwarded-host": "evil.example.net" } });
-      expect(r.json.verify_url, origin).toBe("https://demo.example.com/connect");
+      expect(r.json.verify_url, origin).toBe("https://demo.example.com/connections");
     }
     const bare = await site();
-    expect((await start(bare.deps, "x", { origin: "https://evil.example.net" })).json.verify_url).toBe("/connect");
+    expect((await start(bare.deps, "x", { origin: "https://evil.example.net" })).json.verify_url).toBe("/connections");
     // Never a code in it.
     const r = await start(bare.deps, "x");
     expect(r.json.verify_url).not.toContain(r.json.user_code);
@@ -301,7 +303,7 @@ describe("collecting the token", () => {
 
     // The dashboard: the name and when it asked, then confirm.
     const found = await lookup(deps, s, r.json.user_code);
-    expect(found.json).toEqual({ device_name: "Alice's laptop", asked_at: NOW });
+    expect(found.json).toEqual({ device_name: "Alice's laptop", asked_at: NOW, same_network: false });
     expect((await confirm(deps, s, r.json.user_code)).status).toBe(204);
     const row = (await deps.db.first<{ token_id: string; workspace_id: string; confirmed_by: string }>("SELECT token_id, workspace_id, confirmed_by FROM connect_request"))!;
     expect(row).toEqual({ token_id: expect.stringMatching(/^tok_[0-9a-f]{24}$/), workspace_id: a.workspaceId, confirmed_by: a.userId });
@@ -311,7 +313,7 @@ describe("collecting the token", () => {
     tick(POLL_GAP_MS);
     const got = await poll(deps, code);
     expect(got.status, got.text).toBe(200);
-    expect(got.json).toEqual({ status: "connected", token: expect.stringMatching(/^dp_[0-9a-f]{40}$/), workspace: { id: a.workspaceId, name: "Alice workspace" }, version: expect.any(String) });
+    expect(got.json).toEqual({ status: "connected", token: expect.stringMatching(/^dp_[0-9a-f]{40}$/), workspace: { id: a.workspaceId, name: "Alice workspace" }, account: { username: "alice" }, version: expect.any(String) });
     const token = got.json.token as string;
     // The token is the confirming workspace's, and nobody else's.
     const me = await send(deps, "GET", "/api/v1/me", { token });
@@ -445,6 +447,41 @@ describe("collecting the token", () => {
     expect(await countOf(deps, "api_token")).toBe(3);
   });
 
+  it("no token once the confirming session has ended: revoked, signed out everywhere or expired before the app collects", async () => {
+    const { deps, a, tick } = await site();
+    const endings: [string, (s: Signed) => Promise<void>][] = [
+      ["ended from another browser", async (s) => {
+        const other = await signIn(deps, a.userId);
+        expect((await send(deps, "DELETE", `/api/v1/sessions/${s.sessionId}`, { headers: page(other) })).status).toBe(204);
+      }],
+      ["signed out", async (s) => void expect((await send(deps, "POST", "/api/v1/signout", { headers: page(s) })).status).toBe(204)],
+      ["signed out everywhere", async (s) => void expect((await send(deps, "POST", "/api/v1/signout/everywhere", { headers: page(s) })).status).toBe(204)],
+      ["expired", async (s) => {
+        await deps.db.run("UPDATE session SET expires_at = ? WHERE id = ?", [deps.now() + 1000, s.sessionId]);
+        tick(1000);
+      }],
+      ["removed by a sweep", async (s) => void (await deps.db.run("DELETE FROM session WHERE id = ?", [s.sessionId]))],
+    ];
+    for (const [what, end] of endings) {
+      const s = await signIn(deps, a.userId);
+      const { deviceCode } = await confirmed(deps, s, what);
+      expect(await deps.db.first("SELECT confirmed_session FROM connect_request WHERE device_name = ?", [what])).toEqual({ confirmed_session: s.sessionId });
+      await end(s);
+      tick(POLL_GAP_MS);
+      const kinds = recordKinds(deps);
+      const r = await poll(deps, deviceCode);
+      expect(seen(r), what).toEqual({ status: 410, headers: API_HEADERS, body: EXPIRED });
+      // The one read and the one batch: the session is judged inside the statement that would make the token.
+      expect(kinds, what).toEqual(["first", "batch 3"]);
+      expect(await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM api_token WHERE kind = 'sign_in'"), what).toEqual({ n: 0 });
+    }
+    // With the confirming session live, the same steps give the token.
+    const s = await signIn(deps, a.userId);
+    const { deviceCode } = await confirmed(deps, s, "live");
+    tick(POLL_GAP_MS);
+    expect((await poll(deps, deviceCode)).json.status).toBe("connected");
+  });
+
   it("asking sooner than the interval is slow_down for an open request, and changes nothing", async () => {
     const { deps, a, tick } = await site();
     const s = await signIn(deps, a.userId);
@@ -496,7 +533,7 @@ describe("the dashboard's lookup, confirm and refusal", () => {
     const r = await start(deps, "Desk");
     const code = r.json.user_code as string;
     for (const spelling of [code, code.toLowerCase(), code.replace("-", ""), code.replace("-", "").toLowerCase()]) {
-      expect((await lookup(deps, sa, spelling)).json, spelling).toEqual({ device_name: "Desk", asked_at: NOW });
+      expect((await lookup(deps, sa, spelling)).json, spelling).toEqual({ device_name: "Desk", asked_at: NOW, same_network: false });
     }
     // Confirmed by A: nobody finds it any more, A included; a second confirm and a refusal change nothing.
     expect((await confirm(deps, sa, code.toLowerCase())).status).toBe(204);
@@ -527,19 +564,54 @@ describe("the dashboard's lookup, confirm and refusal", () => {
     const r = await start(deps);
     const sessions = await send(deps, "GET", "/api/v1/sessions", { token: a.token });
     for (const call of [
-      await send(deps, "GET", `/api/v1/connect/requests/${r.json.user_code}`, { token: a.token }),
+      await send(deps, "POST", "/api/v1/connect/lookup", { token: a.token, body: JSON.stringify({ user_code: r.json.user_code }), headers: { "content-type": "application/json" } }),
       await send(deps, "POST", "/api/v1/connect/confirm", { token: a.token, body: JSON.stringify({ user_code: r.json.user_code }), headers: { "content-type": "application/json" } }),
       await send(deps, "POST", "/api/v1/connect/refuse", { token: a.token, body: JSON.stringify({ user_code: r.json.user_code }), headers: { "content-type": "application/json" } }),
       await send(deps, "GET", "/api/v1/tokens", { token: a.token }),
       await send(deps, "PATCH", `/api/v1/tokens/tok_${"0".repeat(24)}`, { token: a.token, body: '{"name":"x"}', headers: { "content-type": "application/json" } }),
       await send(deps, "DELETE", `/api/v1/tokens/tok_${"0".repeat(24)}`, { token: a.token }),
-      await send(deps, "GET", `/api/v1/connect/requests/${r.json.user_code}`),
+      await send(deps, "POST", "/api/v1/connect/lookup", { body: JSON.stringify({ user_code: r.json.user_code }), headers: { "content-type": "application/json" } }),
     ]) {
       expect(seen(call)).toEqual(seen(sessions));
       expect(call.text).toBe(UNAUTHORIZED);
     }
     expect(await countOf(deps, "rate_counter")).toBe(0);
     expect(await deps.db.first("SELECT confirmed_at, refused_at FROM connect_request")).toEqual({ confirmed_at: null, refused_at: null });
+  });
+
+  it("the lookup is a POST with the code in its body, needing the anti-forgery header and an Origin of the site like a change; a GET with the code in the address is no route", async () => {
+    const { deps, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const r = await start(deps);
+    const code = r.json.user_code as string;
+    for (const path of [`/api/v1/connect/lookup/${code}`, `/api/v1/connect/requests/${code}`, `/api/v1/connect/lookup?user_code=${code}`]) {
+      const viaLink = await send(deps, "GET", path, { headers: { cookie: s.cookie } });
+      expect([viaLink.status, viaLink.text], path).toEqual([404, '{"error":"not_found"}']);
+    }
+    const noCsrf = await lookup(deps, s, code, { headers: { "x-csrf-token": "" } });
+    expect(noCsrf.json.error).toBe("bad_csrf");
+    const elsewhere = await lookup(deps, s, code, { headers: { origin: "https://evil.example.net" } });
+    expect(elsewhere.json.error).toBe("bad_origin");
+    const crossSite = await lookup(deps, s, code, { headers: { "sec-fetch-site": "cross-site" } });
+    expect(crossSite.json.error).toBe("bad_origin");
+    // None of them counted a try: a hostile page cannot spend the person's wrong tries.
+    expect(await countOf(deps, "rate_counter")).toBe(0);
+    expect((await lookup(deps, s, code)).status).toBe(200);
+  });
+
+  it("the lookup says whether the person is on the network the app asked from", async () => {
+    const { deps, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const fromA = await start(deps, "From A", { address: NET_A });
+    const unknown = await start(deps, "Unknown");
+    expect((await lookup(deps, s, fromA.json.user_code, { address: NET_A })).json.same_network).toBe(true);
+    // The same /64 of IPv6 counts as one network, as for the limits.
+    const v6 = await start(deps, "v6", { address: "2001:db8:1:2::10" });
+    expect((await lookup(deps, s, v6.json.user_code, { address: "2001:db8:1:2::99" })).json.same_network).toBe(true);
+    expect((await lookup(deps, s, fromA.json.user_code, { address: NET_B })).json.same_network).toBe(false);
+    expect((await lookup(deps, s, fromA.json.user_code)).json.same_network).toBe(false);
+    expect((await lookup(deps, s, unknown.json.user_code)).json.same_network).toBe(false);
+    expect((await lookup(deps, s, unknown.json.user_code, { address: NET_A })).json.same_network).toBe(false);
   });
 
   it("a change needs the anti-forgery header and an Origin of the site", async () => {

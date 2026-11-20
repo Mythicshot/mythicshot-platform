@@ -177,7 +177,6 @@ const stepId: OpenApiParameter = { name: "step_id", in: "path", required: true, 
 const workspaceId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The workspace's id, as the list of accounts gives it in workspace_id.", schema: { type: "string", pattern: "^ws_[0-9a-f]{24}$" } };
 const mediaId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The item's id, from the answer that started it.", schema: { type: "string", pattern: "^med_[0-9a-f]{24}$" } };
 const tokenIdParam: OpenApiParameter = { name: "id", in: "path", required: true, description: "The token's id, as the list of tokens gives it.", schema: { type: "string", pattern: "^tok_[0-9a-f]{24}$" } };
-const userCodeParam: OpenApiParameter = { name: "code", in: "path", required: true, description: "The short code the app shows, with or without its dash, in any case.", schema: { type: "string", minLength: 8, maxLength: 9 } };
 const sessionId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The session's id, as the list of sessions gives it.", schema: { type: "string", pattern: "^ses_[0-9a-f]{24}$" } };
 
 function introduction(): string {
@@ -208,7 +207,7 @@ function introduction(): string {
     "",
     "## Connecting the app",
     "",
-    `The desktop app gets its token with a pair of codes, so nobody has to copy one. It asks POST /api/v1/connect/start, with no credential, for a long secret device code and a short user code such as ABCD-EFGH, shows the short one and opens verify_url, the dashboard's connect page. A signed-in person types the short code there; the page shows the device's name (GET /api/v1/connect/requests/{code}) and the person confirms it (POST /api/v1/connect/confirm) or refuses it (POST /api/v1/connect/refuse). Meanwhile the app asks POST /api/v1/connect/token with the device code every ${POLL_INTERVAL_S} seconds: pending, until it is answered connected with a token for that person's workspace, once. The codes live ${CONNECT_MS / 60_000} minutes. Neither is ever put in an address.`,
+    `The desktop app gets its token with a pair of codes, so nobody has to copy one. It asks POST /api/v1/connect/start, with no credential, for a long secret device code and a short user code such as ABCD-EFGH, shows the short one and opens verify_url, the dashboard's Connections page. A signed-in person types the short code there; the page shows the device's name (POST /api/v1/connect/lookup, with the code in the body) and the person confirms it (POST /api/v1/connect/confirm) or refuses it (POST /api/v1/connect/refuse). Meanwhile the app asks POST /api/v1/connect/token with the device code every ${POLL_INTERVAL_S} seconds: pending, until it is answered connected with a token for that person's workspace, once. The codes live ${CONNECT_MS / 60_000} minutes. Neither is ever put in an address.`,
     "",
     "The workspace's tokens are listed, renamed and revoked with GET /api/v1/tokens, PATCH /api/v1/tokens/{id} and DELETE /api/v1/tokens/{id}. Like the requests that take a short code, they need the session: a token cannot list, rename or revoke tokens, its own included. A revoked token is refused from the next request on.",
     "",
@@ -466,8 +465,8 @@ function schemas(): Record<string, Schema> {
       ["device_code", "user_code", "verify_url", "expires_in", "interval"],
       {
         device_code: { type: "string", pattern: "^dpd_[0-9a-f]{40}$", description: "The secret the app asks for its token with. Keep it to the app: never show it or put it in an address." },
-        user_code: { type: "string", pattern: `^[${USER_CODE_ALPHABET}]{4}-[${USER_CODE_ALPHABET}]{4}$`, description: "The short code to show, for the person to type on the connect page. Its characters leave out the ones that look alike (0 and O, 1, I and L, and U)." },
-        verify_url: { type: "string", description: `The dashboard's connect page, ${VERIFY_PATH} on the address from the server's settings (the app address, or the one address), never from the request. When the server has no address in its settings it is the bare path: join it to the address the app is set up with. It holds neither code.` },
+        user_code: { type: "string", pattern: `^[${USER_CODE_ALPHABET}]{4}-[${USER_CODE_ALPHABET}]{4}$`, description: "The short code to show, for the person to type on the Connections page. Its characters leave out the ones that look alike (0 and O, 1, I and L, and U)." },
+        verify_url: { type: "string", description: `The dashboard's Connections page, ${VERIFY_PATH}, where the short code is typed, on the address from the server's settings (the app address, or the one address), never from the request. When the server has no address in its settings it is the bare path: join it to the address the app is set up with. It holds neither code.` },
         expires_in: { type: "integer", const: CONNECT_MS / 1000, description: "Seconds the codes live." },
         interval: { type: "integer", const: POLL_INTERVAL_S, description: "Seconds to wait between two asks for the token." },
       },
@@ -476,11 +475,12 @@ function schemas(): Record<string, Schema> {
     ConnectPoll: input(["device_code"], { device_code: { type: "string", description: "The device code POST /api/v1/connect/start gave." } }),
     ConnectPending: object(["status"], { status: { type: "string", const: "pending" } }, "Nobody has confirmed the request yet. Ask again after the interval."),
     ConnectConnected: object(
-      ["status", "token", "workspace", "version"],
+      ["status", "token", "workspace", "account", "version"],
       {
         status: { type: "string", const: "connected" },
         token: { type: "string", pattern: "^dp_[0-9a-f]{40}$", description: "The new token, given this once. Its name is the device's name." },
         workspace: object(["id", "name"], { id: { type: "string", pattern: "^ws_[0-9a-f]{24}$" }, name: { type: "string", description: "The workspace's name." } }, "The workspace of the person who confirmed, the one the token acts in."),
+        account: object(["username"], { username: { type: ["string", "null"], description: "The confirming account's username; null when it has none. Never its email address." } }, "Who confirmed. Show it, so a person whose code someone else confirmed notices."),
         version: { type: "string", description: "The server's version." },
         addresses: object(
           ["tours", "app"],
@@ -491,8 +491,12 @@ function schemas(): Record<string, Schema> {
       "Confirmed: the token, made now.",
     ),
     ConnectRequest: object(
-      ["device_name", "asked_at"],
-      { device_name: { type: "string", description: "What the app calls the computer. Show it as text only." }, asked_at: whole("When the app asked, in milliseconds since 1970.") },
+      ["device_name", "asked_at", "same_network"],
+      {
+        device_name: { type: "string", description: "What the app calls the computer. Show it as text only." },
+        asked_at: whole("When the app asked, in milliseconds since 1970."),
+        same_network: { type: "boolean", description: "true when the person looking it up is on the network the app asked from; false when the networks differ or either is not known. When it is false, the code may have come from someone else: warn before confirming." },
+      },
       "A request waiting for a person to confirm or refuse it.",
     ),
     UserCode: input(["user_code"], { user_code: { type: "string", maxLength: 32, description: "The short code the app shows, with or without its dash, in any case." } }),
@@ -1273,7 +1277,7 @@ function paths(): OpenApiDoc["paths"] {
       post: {
         tags: ["Connections"],
         summary: "Ask to connect the app",
-        description: `For the desktop app, which has no credential yet: starts a request and answers its two codes and the connect page to open. Send it with no token and no session cookie. The codes live ${CONNECT_MS / 60_000} minutes. A network may ask ${LIMITS_CONNECT.startNetwork.most} times in ${LIMITS_CONNECT.startNetwork.windowMs / 60_000} minutes and ${LIMITS_CONNECT.startNetworkDay.most} times in a day, and have ${OPEN_PER_NETWORK} requests waiting at once.`,
+        description: `For the desktop app, which has no credential yet: starts a request and answers its two codes and the Connections page to open. Send it with no token and no session cookie. The codes live ${CONNECT_MS / 60_000} minutes. A network may ask ${LIMITS_CONNECT.startNetwork.most} times in ${LIMITS_CONNECT.startNetwork.windowMs / 60_000} minutes and ${LIMITS_CONNECT.startNetworkDay.most} times in a day, and have ${OPEN_PER_NETWORK} requests waiting at once.`,
         operationId: "startConnection",
         security: [],
         requestBody: { required: true, content: json(ref("ConnectStart")) },
@@ -1288,7 +1292,7 @@ function paths(): OpenApiDoc["paths"] {
       post: {
         tags: ["Connections"],
         summary: "Ask for the app's token",
-        description: `For the desktop app: asks, with the device code, whether the request has been confirmed. pending until then; then connected, with a token for the workspace of the person who confirmed, given once: the token is made at this moment, and a request nobody collects in time leaves none. Ask every ${POLL_INTERVAL_S} seconds; asking a waiting request again sooner answers slow_down and changes nothing. Every code that cannot give a token, whether unknown, expired, refused, already used or not a device code, gets the one answer expired_code, so codes cannot be told apart. Send it with no token and no session cookie. A network may ask ${LIMITS_CONNECT.pollNetwork.most} times in ${LIMITS_CONNECT.pollNetwork.windowMs / 60_000} minutes.`,
+        description: `For the desktop app: asks, with the device code, whether the request has been confirmed. pending until then; then connected, with a token for the workspace of the person who confirmed, given once, and who that was: the token is made at this moment, and a request nobody collects in time, or whose confirming session has ended since (signed out, ended from another browser, or expired), leaves none. Ask every ${POLL_INTERVAL_S} seconds; asking a waiting request again sooner answers slow_down and changes nothing. Every code that cannot give a token, whether unknown, expired, refused, already used or not a device code, gets the one answer expired_code, so codes cannot be told apart. Send it with no token and no session cookie. A network may ask ${LIMITS_CONNECT.pollNetwork.most} times in ${LIMITS_CONNECT.pollNetwork.windowMs / 60_000} minutes.`,
         operationId: "getConnectionToken",
         security: [],
         requestBody: { required: true, content: json(ref("ConnectPoll")) },
@@ -1300,16 +1304,17 @@ function paths(): OpenApiDoc["paths"] {
         },
       },
     },
-    "/api/v1/connect/requests/{code}": {
-      get: {
+    "/api/v1/connect/lookup": {
+      post: {
         tags: ["Connections"],
         summary: "Look up a request by its short code",
-        description: `What the connect page shows before the person confirms: the device's name and when it asked. Only a request that is waiting (neither confirmed nor refused, and not expired) is found; every other code is the one 404. A code that finds nothing counts as a wrong try: ${LIMITS_CONNECT.wrongAccount.most} for an account in ${LIMITS_CONNECT.wrongAccount.windowMs / 60_000} minutes, ${LIMITS_CONNECT.wrongNetwork.most} for a network, counted together with confirm and refuse; past that every try answers 429 until the time is up. A right code is not counted. ${NOT_FROM_THE_PAGE}`,
-        operationId: "getConnectionRequest",
+        description: `What the Connections page shows before the person confirms: the device's name, when it asked, and whether the person is on the network the app asked from. The short code goes in the body, never in the address. Only a request that is waiting (neither confirmed nor refused, and not expired) is found; every other code is the one 404. A code that finds nothing counts as a wrong try: ${LIMITS_CONNECT.wrongAccount.most} for an account in ${LIMITS_CONNECT.wrongAccount.windowMs / 60_000} minutes, ${LIMITS_CONNECT.wrongNetwork.most} for a network, counted together with confirm and refuse; past that every try answers 429 until the time is up. A right code is not counted. Like every change made with a session, it must come from the site's own page with the anti-forgery header, so no other site can spend a person's tries. ${NOT_FROM_THE_PAGE}`,
+        operationId: "lookUpConnection",
         security: SESSION,
-        parameters: [userCodeParam],
+        requestBody: { required: true, content: json(ref("UserCode")) },
         responses: {
           "200": answer("The request.", ref("ConnectRequest")),
+          "400": refusal("The body is not a JSON object sent as application/json.", "bad_request"),
           "401": UNAUTHORIZED,
           "404": refusal("No request waiting under this code.", "not_found"),
           "429": { description: "Too many wrong codes from this account or this network. Nothing was looked at.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
@@ -1320,7 +1325,7 @@ function paths(): OpenApiDoc["paths"] {
       post: {
         tags: ["Connections"],
         summary: "Confirm a request to connect",
-        description: `Confirms the waiting request the short code names, once, for the caller's account and its workspace: the app's next ask for the token gets a token for that workspace. A request already confirmed or refused, also by someone else a moment ago, an expired one and a code nobody has all get the one 404, and nothing changes. Counted as lookups are. ${NOT_FROM_THE_PAGE}`,
+        description: `Confirms the waiting request the short code names, once, for the caller's account and its workspace: the app's next ask for the token gets a token for that workspace, as long as the session that confirmed is still signed in. A request already confirmed or refused, also by someone else a moment ago, an expired one and a code nobody has all get the one 404, and nothing changes. Counted as lookups are. ${NOT_FROM_THE_PAGE}`,
         operationId: "confirmConnection",
         security: SESSION,
         requestBody: { required: true, content: json(ref("UserCode")) },
