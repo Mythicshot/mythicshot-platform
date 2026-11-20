@@ -2,6 +2,14 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.27 (2026-11-20)
+
+- Dashboard, Connections page: a new tab between Storage and Account lists the computers where Mythicshot can publish to the workspace, each with "Signed in from Mythicshot" or "From setup", the day it was connected and the day it was last used ("Today", a date, or "Never"), and "Rename" and "Disconnect". Both ask first, and the list is read again however they end, so it always shows what is true.
+- The "Connect Mythicshot" card takes the code Mythicshot shows, in any case, with or without the dash. A code that cannot be one is refused in the page without a request. Continue names the computer and when it asked, and "Connect" or "Not me" settles that same code; closing the question leaves the request alone. After too many codes that did not work, Continue rests for the minutes the server gives. The code is only ever sent in a request body, never in an address, and is not stored.
+- After "Connect" the list is read again a few times over about half a minute, until the new computer shows up once Mythicshot has collected its token.
+- The question warns in one more line when the request came from a different network than the page's.
+- The dashboard's shared script hands a page the answer's retry-after header, and writes a date with the year on request.
+
 ## 0.1.26 (2026-11-20)
 
 - Connecting Mythicshot with a pair of codes, through the API. `POST /api/v1/connect/start`, sent with no credential, answers a long secret device code, a short code such as `ABCD-EFGH` and the dashboard's connect page (from the settings, never from the request). A signed-in person looks the short code up (`GET /api/v1/connect/requests/<code>`, which shows the device's name) and confirms it (`POST /api/v1/connect/confirm`) or refuses it (`POST /api/v1/connect/refuse`). Mythicshot asks `POST /api/v1/connect/token` with the device code every 5 seconds and, once confirmed, receives a token for that person's workspace, once. The codes live 10 minutes and are never put in an address. The dashboard's connect page comes in a later version.
