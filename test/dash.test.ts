@@ -198,7 +198,8 @@ describe("the dashboard's pages and files", () => {
       }
     }
     // The workspace's name ("Account" for these accounts) is fetched by the script, never in the page.
-    for (const s of PAGES) expect(textNodes(new FakeDocument(s.body).body).filter((t) => t.includes("Account") && t !== "Account"), s.path).toEqual([]);
+    // The Admin page's heading is the mockup's word "Accounts", on /admin alone; any other text holding "Account" still fails.
+    for (const s of PAGES) expect(textNodes(new FakeDocument(s.body).body).filter((t) => t.includes("Account") && t !== "Account" && !(s.path === "/admin" && t === "Accounts")), s.path).toEqual([]);
   });
 
   it("a member's page carries no admin data: the Admin tab is hidden, leads only to /admin, and only the script can show it", () => {
@@ -363,13 +364,13 @@ describe("the dashboard's pages and files", () => {
     expect(DASH_CSS).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
     // The scripts set no style attribute and add no handler attribute. The one style a page's
     // script may touch is a bar's width through the CSSOM, `.style.width = `, which the policy
-    // allows (the account page sizes its bar the same way); only the Storage page has bars, so
-    // every other script may touch no style at all. Any other .style use, a style attribute,
+    // allows (the account page sizes its bar the same way); only the Storage and Admin pages
+    // have bars, so every other script may touch no style at all. Any other .style use, a style attribute,
     // cssText, setProperty or style["..."] fails.
     for (const [path, js] of [["/dash/dash.js", DASH_JS], ...DASH_PAGES.map((p) => [p.path, p.script.body])]) {
       expect(js, path).not.toMatch(/setAttribute\(\s*["'](?:style|on[a-z]+|src|srcdoc)["']/);
       expect(js, path).not.toMatch(/cssText|setProperty\(|\[\s*["']style["']\s*\]/);
-      const widths = path === "/storage" ? js.replace(/\.style\.width = /g, "") : js;
+      const widths = path === "/storage" || path === "/admin" ? js.replace(/\.style\.width = /g, "") : js;
       expect(widths, path).not.toMatch(/\.style\b/);
       expect(js, path).not.toMatch(/\.on[a-z]+\s*=/);
     }

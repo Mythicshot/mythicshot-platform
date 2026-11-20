@@ -2,8 +2,9 @@
 // allowance of one workspace. The owner needs an overview of how each account uses its
 // room, and must not be able to open any of its links or content: an answer holds the
 // account's id, username, email, status, whether it is the admin, when it was made, its
-// workspace's id, its tour count, its usage with the breakdown GET /api/v1/usage gives the
-// account itself, and its allowance; never a tour, chapter, step, picture, token or session.
+// workspace's id and name, its tour count, its usage with the breakdown GET /api/v1/usage
+// gives the account itself, and its allowance; never a tour, chapter, step, picture, token
+// or session.
 //
 // Most tests run in the cross-workspace suite's world (test/isolation-world.ts): two
 // workspaces that each hold one of everything, the first one's account the site's admin.
@@ -28,7 +29,7 @@ const MAX = 9007199254740991;
 
 /** The keys of each answer, exactly. */
 const LIST_KEYS = ["accounts", "next"];
-const ACCOUNT_KEYS = ["admin", "allowance_bytes", "counted", "created_at", "email", "id", "over", "status", "storage_allowance_bytes", "tours", "used_bytes", "username", "workspace_id"];
+const ACCOUNT_KEYS = ["admin", "allowance_bytes", "counted", "created_at", "email", "id", "over", "status", "storage_allowance_bytes", "tours", "used_bytes", "username", "workspace_id", "workspace_name"];
 const COUNTED_KEYS = ["logos", "pictures", "uploads_in_progress"];
 const SUMMARY_KEYS = ["accounts", "standard_allowance_bytes", "used_bytes"];
 const SET_KEYS = ["allowance_bytes", "over", "storage_allowance_bytes", "used_bytes", "workspace_id"];
@@ -83,12 +84,13 @@ const usageOf = async (w: World, side: Side) => (await send(w.deps, "GET", "/api
  * Everything of a side an admin answer must never hold: its tours' ids, titles and slugs,
  * its chapters, steps and pictures by every name, its uploads, tokens, sessions and their
  * secrets, and its workspace's name. What an admin answer may name of it is left out: the
- * account's id and email and the workspace's id.
+ * account's id and email and the workspace's id, and for the list of accounts alone
+ * (`listed`), the workspace's name, which the admin page's Workspace column shows.
  */
-async function forbiddenOf(w: World, side: Side): Promise<string[]> {
+async function forbiddenOf(w: World, side: Side, opts: { listed?: true } = {}): Promise<string[]> {
   const s = await snapshotOf(w.deps, side, w.keys);
   const all = needlesOf(s, [side.token, side.revokedToken, side.tokenId, side.revokedTokenId, side.workspaceName, side.session.secret, side.session.csrf, side.session.id, ...namesIn(side.ids)]);
-  const allowed = [side.userId, side.workspaceId, side.email];
+  const allowed = [side.userId, side.workspaceId, side.email, ...(opts.listed ? [side.workspaceName] : [])];
   return all.filter((n) => !allowed.includes(n));
 }
 
@@ -122,6 +124,7 @@ describe("the admin's list of accounts", () => {
         admin: side === w.a,
         created_at: row!.created_at,
         workspace_id: side.workspaceId,
+        workspace_name: side.workspaceName,
         tours: own.tours,
         used_bytes: own.used_bytes,
         allowance_bytes: own.allowance_bytes,
@@ -133,17 +136,35 @@ describe("the admin's list of accounts", () => {
       expect(own.tours).toBe(3);
     }
 
-    // Nothing of either workspace's content: no tour, chapter, step, picture, upload, token,
-    // session or workspace name, by any of its names.
+    // Nothing of either workspace's content: no tour, chapter, step, picture, upload, token
+    // or session, by any of its names. The workspace's name is the one name it carries.
     for (const side of [w.a, w.b]) {
-      const needles = await forbiddenOf(w, side);
+      const needles = await forbiddenOf(w, side, { listed: true });
       // The needles are there to be found: ids, titles, slugs, picture names, secrets.
-      for (const n of [side.ids.published.tour, side.ids.published.slug, `${side.name} published tour`, side.ids.published.publicName, side.ids.draft.step, side.ids.draft.chapter, side.ids.upload, side.token, side.session.id, side.workspaceName]) {
+      for (const n of [side.ids.published.tour, side.ids.published.slug, `${side.name} published tour`, side.ids.published.publicName, side.ids.draft.step, side.ids.draft.chapter, side.ids.upload, side.token, side.session.id]) {
         expect(needles).toContain(n);
       }
+      expect(needles).not.toContain(side.workspaceName);
+      expect((await forbiddenOf(w, side)).includes(side.workspaceName), "every other admin answer is still checked for the name").toBe(true);
       expect(needles.length).toBeGreaterThan(80);
       expectNothingOf(r.text, needles, "the list");
     }
+  });
+
+  it("the workspace's name is the stored text as it is, markup and all, as a JSON string", async () => {
+    const { deps } = await makeDeps();
+    const admin = await seedAccount(deps, { admin: true });
+    const member = await seedAccount(deps);
+    const name = '<img src=x onerror="alert(1)"> & </td>';
+    await deps.db.run("UPDATE workspace SET name = ? WHERE id = ?", [name, member.workspaceId]);
+    const session = await signInAs(deps, admin.userId);
+    const r = await ask(deps, "GET", ACCOUNTS, { headers: page(session) });
+    expect(r.status, r.text).toBe(200);
+    expect((r.json.accounts as Json[]).map((a) => [a.id, a.workspace_id, a.workspace_name])).toEqual([
+      [admin.userId, admin.workspaceId, "Account"],
+      [member.userId, member.workspaceId, name],
+    ]);
+    expect(r.headers.get("content-type")).toBe("application/json");
   });
 
   it("the list pages by 100", SLOW, async () => {
@@ -356,6 +377,7 @@ describe("setting a workspace's allowance", () => {
     const touched = [a.session.id, a.tokenId, b.tokenId];
     // Read before the change: its audit row names the workspace changed beside the admin's account.
     const forbidden = [...(await forbiddenOf(w, a)), ...(await forbiddenOf(w, b))];
+    const forbiddenListed = [...(await forbiddenOf(w, a, { listed: true })), ...(await forbiddenOf(w, b, { listed: true }))];
     const before = await dumpOf(deps, w.keys, { files: true, touched });
     const usedB = (await usageOf(w, b)).used_bytes as number;
     const usageA = await usageOf(w, a);
@@ -402,7 +424,9 @@ describe("setting a workspace's allowance", () => {
     const listed = await list(w);
     expect(listed.json.accounts.map((x: Json) => x.storage_allowance_bytes)).toEqual([5, MAX]);
     expectNothingOf(r.text, forbidden, "the change");
-    expectNothingOf(listed.text, forbidden, "the list");
+    // The list names each workspace, and nothing more of either.
+    expectNothingOf(listed.text, forbiddenListed, "the list");
+    expect(listed.json.accounts.map((x: Json) => x.workspace_name)).toEqual([a.workspaceName, b.workspaceName]);
   });
 
   it("null goes back to the site's number", SLOW, async () => {

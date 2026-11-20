@@ -86,6 +86,8 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /dash/dash.js": "app",
   "GET /storage": "app",
   "GET /dash/storage.js": "app",
+  "GET /admin": "app",
+  "GET /dash/admin.js": "app",
   "GET /account": "app",
   "GET /dash/account.js": "app",
   "GET /account/email": "app",

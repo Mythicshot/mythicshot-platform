@@ -240,6 +240,8 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
   "GET /dash/dash.js": { reason: "the dashboard's shared script, fixed text", samples: () => [{ method: "GET", path: "/dash/dash.js" }] },
   "GET /storage": { reason: "the dashboard's Storage page, fixed text the same for everyone; the numbers it shows its script asks the API for", samples: () => [{ method: "GET", path: "/storage" }] },
   "GET /dash/storage.js": { reason: "the Storage page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/storage.js" }] },
+  "GET /admin": { reason: "the dashboard's Admin page, fixed text the same for everyone; its script asks the admin routes only for an admin's session, and they answer no one else", samples: () => [{ method: "GET", path: "/admin" }] },
+  "GET /dash/admin.js": { reason: "the Admin page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/admin.js" }] },
   "GET /dash/account.js": { reason: "the Account page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/account.js" }] },
   "GET /account/email": { reason: "the page an email-change link opens, fixed text; the code stays in the browser until the press sends it to the API, which takes it only from the account that asked", samples: () => [{ method: "GET", path: "/account/email" }] },
   "GET /dash/account-email.js": { reason: "the email-change link page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/account-email.js" }] },
@@ -268,7 +270,7 @@ const SELF_ENDS = Object.entries(SELF).filter(([, entry]) => entry.ends !== unde
 const SELF_CHANGES = Object.keys(SELF).filter((key) => SELF[key].changes !== undefined);
 
 /** The fields of one account in the admin's list: who it is, its counts and its allowance. */
-const ACCOUNT_FIELDS = ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "counted.pictures", "counted.logos", "counted.uploads_in_progress"];
+const ACCOUNT_FIELDS = ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "counted.pictures", "counted.logos", "counted.uploads_in_progress"];
 
 /**
  * Routes that cross workspaces on purpose, for the site's admin alone: why, a request the
@@ -1165,8 +1167,10 @@ describe("the admin routes", () => {
       expect(r.headers.get("cache-control"), key).toBe("no-store");
       // Exactly the listed fields: none more, none missing.
       expect([...new Set(keyPaths(r.json))].sort(), key).toEqual([...entry.fields].sort());
-      // And no name of either workspace's content, by any of its names.
-      for (const n of [...before.a, ...before.b]) expect(r.text.includes(n), `${key} told the admin ${n}`).toBe(false);
+      // And no name of either workspace's content, by any of its names. The list of accounts
+      // alone names each workspace, for the admin page's Workspace column.
+      const named = key === "GET /api/v1/admin/accounts" ? [w.a.workspaceName, w.b.workspaceName] : [];
+      for (const n of [...before.a, ...before.b]) if (!named.includes(n)) expect(r.text.includes(n), `${key} told the admin ${n}`).toBe(false);
     }
   });
 

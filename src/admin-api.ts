@@ -7,7 +7,7 @@
 // number of accounts, the bytes all workspaces use together and the site's standard
 // allowance. The list answers only this, per account: its
 // id, username, email, status, whether it is the admin, when it was made, its workspace's
-// id, its tour count, the bytes it uses with the breakdown GET /api/v1/usage gives the
+// id and name (the admin page's Workspace column), its tour count, the bytes it uses with the breakdown GET /api/v1/usage gives the
 // account itself, and its allowance (the workspace's own number or null for the site's,
 // and the number in force). Never a tour's id, title, slug or link, a chapter or step, a
 // picture's address or file name, a token, a session, or anything a tour's address could
@@ -92,7 +92,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
 
   /**
    * Every account, in the order they were made, ADMIN_PAGE at a time: who it is, its
-   * workspace's id, its tour count, its usage and its allowance. `?after=<account id>`
+   * workspace's id and name, its tour count, its usage and its allowance. `?after=<account id>`
    * starts after that account; `next` is the id to pass for the page after this one, or
    * null when there is none. A cursor that is not an account id is refused; one that names
    * no account lists nobody. It only reads.
@@ -111,6 +111,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       is_admin: number;
       created_at: number;
       workspace_id: string;
+      workspace_name: string;
       own: number | null;
       allowance: number | null;
       pictures: number;
@@ -129,8 +130,8 @@ export function adminRoutes(app: Hono, deps: Deps): void {
     // nobody, and the list is cut short there. Such a phase must page by the cursor's
     // (created_at, id) values themselves, or keep deleted accounts' positions.
     const rows = await deps.db.all<Row>(
-      `SELECT p.id, p.username, p.email, p.status, p.is_admin, p.created_at, p.ws AS workspace_id, p.own, p.allowance, ${USAGE_COLUMNS}
-         FROM (SELECT u.id, u.username, u.email, u.status, u.is_admin, u.created_at, m.workspace_id AS ws,
+      `SELECT p.id, p.username, p.email, p.status, p.is_admin, p.created_at, p.ws AS workspace_id, p.ws_name AS workspace_name, p.own, p.allowance, ${USAGE_COLUMNS}
+         FROM (SELECT u.id, u.username, u.email, u.status, u.is_admin, u.created_at, m.workspace_id AS ws, workspace.name AS ws_name,
                       workspace.storage_allowance_bytes AS own, ${ALLOWANCE_SQL} AS allowance
                  FROM user u
                  JOIN membership m ON m.user_id = u.id
@@ -151,6 +152,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       admin: r.is_admin === 1,
       created_at: r.created_at,
       workspace_id: r.workspace_id,
+      workspace_name: r.workspace_name,
       ...numbers(usageFromRow(r)),
       storage_allowance_bytes: r.own,
     }));

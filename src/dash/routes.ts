@@ -15,6 +15,7 @@ import { DASH_JS } from "./script.ts";
 import { DASH_CSS } from "./style.ts";
 import { TOURS_HTML, TOURS_JS } from "./tours.ts";
 import { STORAGE_HTML, STORAGE_JS } from "./storage.ts";
+import { ADMIN_HTML, ADMIN_JS } from "./admin.ts";
 import { ACCOUNT_HTML, ACCOUNT_JS } from "./account.ts";
 import { ACCOUNT_EMAIL_HTML, ACCOUNT_EMAIL_JS } from "./account-email.ts";
 
@@ -25,6 +26,7 @@ export type DashPage = { path: string; html: string; script: { path: string; bod
 export const DASH_PAGES: readonly DashPage[] = [
   { path: "/tours", html: TOURS_HTML, script: { path: "/dash/tours.js", body: TOURS_JS } },
   { path: "/storage", html: STORAGE_HTML, script: { path: "/dash/storage.js", body: STORAGE_JS } },
+  { path: "/admin", html: ADMIN_HTML, script: { path: "/dash/admin.js", body: ADMIN_JS } },
   { path: "/account", html: ACCOUNT_HTML, script: { path: "/dash/account.js", body: ACCOUNT_JS } },
 ];
 
