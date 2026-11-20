@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { accountRemovalRoutes } from "./account-removal.ts";
 import { adminRoutes } from "./admin-api.ts";
 import { connectRoutes } from "./connect.ts";
 import { dashRoutes } from "./dash/routes.ts";
@@ -47,6 +48,7 @@ export function createApp(deps: Deps): Hono {
   tokenRoutes(app, deps);
   adminRoutes(app, deps);
   inviteRoutes(app, deps);
+  accountRemovalRoutes(app, deps);
   pageRoutesForAccounts(app, deps);
   dashRoutes(app);
   publishRoutes(app, deps);

@@ -3,8 +3,10 @@
 // the page needs no inline script or style at all).
 //
 // Only the snapshot is ever read here, never the draft. An unknown slug, a draft tour, an
-// unpublished tour and a broken snapshot row all run the same single query and answer
-// the same 404 page, so the answer says nothing about which it was.
+// unpublished tour, a tour of a workspace with a disabled account and a broken snapshot
+// row all run the same single query and answer the same 404 page, so the answer says
+// nothing about which it was. The page is cached for a minute (PAGE_CACHE), so a page
+// fetched just before its account was disabled can still be shown from a cache that long.
 //
 // Untrusted text reaches this page in two places, and neither can become markup: the
 // title is HTML-escaped into <title> and the no-script heading, and the snapshot is JSON
@@ -17,6 +19,7 @@
 // public page only when it is added here on purpose. A part of the wrong type makes the
 // whole snapshot malformed, which answers the same 404 as an unknown slug.
 import type { Hono } from "hono";
+import { beforeAccountsToo, noDisabledAccount } from "./accounts.ts";
 import type { Autoplay, Box, Card, EndCard, Link, Note, Point, Theme, Zoom } from "./manifest.ts";
 import { PLAYER_CSS, PLAYER_CSS_ETAG, PLAYER_CSS_PATH, PLAYER_JS, PLAYER_JS_ETAG, PLAYER_JS_PATH } from "./player/assets.ts";
 import type { Deps } from "./ports.ts";
@@ -170,7 +173,12 @@ export function pageTour(snapshot: unknown): PageTour {
 /** A slug as newSlug makes it. Anything else is looked up as "" so it costs the same query and finds nothing. */
 const SLUG = /^[a-z2-7]{10}$/;
 
-const PAGE_SQL = "SELECT s.data FROM snapshot s JOIN tour t ON t.id = s.tour_id WHERE t.slug = ? AND t.status = 'published'";
+/**
+ * The one lookup of the page. A tour of a workspace with a disabled account is not found,
+ * in this same statement, so it costs no call more and answers exactly as an unknown slug.
+ */
+const PAGE_SQL_BEFORE_ACCOUNTS = "SELECT s.data FROM snapshot s JOIN tour t ON t.id = s.tour_id WHERE t.slug = ? AND t.status = 'published'";
+const PAGE_SQL = `${PAGE_SQL_BEFORE_ACCOUNTS} AND ${noDisabledAccount("t.workspace_id")}`;
 
 const HTML_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 
@@ -347,7 +355,11 @@ export function pageRoutes(app: Hono, deps: Deps): void {
   app.get("/t/:slug", async (c) => {
     const base = deps.config.publicImageBase;
     const raw = c.req.param("slug");
-    const row = await deps.db.first<{ data: string }>(PAGE_SQL, [SLUG.test(raw) ? raw : ""]);
+    const slug = SLUG.test(raw) ? raw : "";
+    const row = await beforeAccountsToo(
+      () => deps.db.first<{ data: string }>(PAGE_SQL, [slug]),
+      () => deps.db.first<{ data: string }>(PAGE_SQL_BEFORE_ACCOUNTS, [slug]),
+    );
     if (row === null) return notFoundPage(base);
     let tour: PageTour;
     try {

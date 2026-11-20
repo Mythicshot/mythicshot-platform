@@ -36,7 +36,19 @@ const PUBLIC = ["GET /healthz", "POST /api/v1/signin/request", "POST /api/v1/sig
 /** The operations that take a session and no token. */
 const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "POST /api/v1/connect/lookup", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id"];
 /** The site admin's operations: an admin's session alone, and a 404 (never a 401) to everyone else. */
-const ADMIN_ONLY = ["GET /api/v1/admin/summary", "GET /api/v1/admin/accounts", "PATCH /api/v1/admin/workspaces/:id", "POST /api/v1/admin/invites", "GET /api/v1/admin/invites", "POST /api/v1/admin/invites/:id/resend", "DELETE /api/v1/admin/invites/:id"];
+const ADMIN_ONLY = [
+  "GET /api/v1/admin/summary",
+  "GET /api/v1/admin/accounts",
+  "PATCH /api/v1/admin/workspaces/:id",
+  "POST /api/v1/admin/accounts/:id/disable",
+  "POST /api/v1/admin/accounts/:id/enable",
+  "GET /api/v1/admin/accounts/:id/removal",
+  "DELETE /api/v1/admin/accounts/:id",
+  "POST /api/v1/admin/invites",
+  "GET /api/v1/admin/invites",
+  "POST /api/v1/admin/invites/:id/resend",
+  "DELETE /api/v1/admin/invites/:id",
+];
 
 /** Every operation of the description, with its key in the form of the route table. */
 function operations(doc: OpenApiDoc): { key: string; path: string; method: string; op: Json }[] {
@@ -271,6 +283,10 @@ describe("the API description", () => {
       "Every account's storage use in all",
       "List every account's storage use",
       "Set a workspace's storage allowance",
+      "Disable an account",
+      "Enable a disabled account",
+      "What deleting an account removes",
+      "Delete a disabled account, in steps",
       "Invite an address",
       "List the invites",
       "Send an invite again",

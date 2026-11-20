@@ -95,6 +95,62 @@ export async function workspaceOf(deps: Deps, userId: string): Promise<string | 
 }
 
 /**
+ * True when `err` is the database's report that the status column or the membership
+ * table a lookup names does not exist: a database the accounts migration (0008) has not
+ * reached yet, as when a build is started before its migrations ran. The exact texts,
+ * which the tests take from each target's own database:
+ * - Node (node:sqlite): `no such table: membership` and `no such column: u.status`,
+ *   the whole message;
+ * - Workers (D1): `D1_ERROR: no such table: membership: SQLITE_ERROR` and
+ *   `D1_ERROR: no such column: u.status at offset <n>: SQLITE_ERROR`.
+ * The column is named by the alias the lookup gives the account table: `u` (the token
+ * lookup) or `du` (noDisabledAccount). The name must end where the text does, at a colon
+ * or at ` at offset`, so no longer name matches, and no other failure (a lock, a missing
+ * table of another name) is this one.
+ */
+export function isBeforeAccounts(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
+    if (/(?:^|: )no such (?:table: membership|column: d?u\.status)(?:$|:| at offset )/.test(e.message)) return true;
+  }
+  return false;
+}
+
+/**
+ * Runs a public route's one lookup with the disabled-account condition, and on a database
+ * the accounts migration has not reached (which has no account that could be disabled) the
+ * same lookup without it. Any other failure is a failure. One call, or two only on such a
+ * database.
+ */
+export async function beforeAccountsToo<T>(withCondition: () => Promise<T>, without: () => Promise<T>): Promise<T> {
+  try {
+    return await withCondition();
+  } catch (err) {
+    if (!isBeforeAccounts(err)) throw err;
+    return without();
+  }
+}
+
+/**
+ * The SQL condition that no account of the workspace `ws` names is disabled, for a public
+ * route to fold into the one lookup it already makes: an account belongs to a workspace by
+ * its membership or, for a row an older build wrote without one, by the workspace its own
+ * row names (the rule the token lookup in src/auth.ts holds). `ws` is a column of the
+ * query, such as `t.workspace_id`, never a value from a request. Two index lookups (the
+ * account table's workspace index and the membership's key), no added call.
+ *
+ * It hides a whole workspace when ANY account of it is disabled. That is today's rule,
+ * where a workspace has exactly one account, and the rule the token lookup holds; it must
+ * be revisited when a workspace can have several members (teams), so that disabling one
+ * member does not take the others' links down.
+ */
+export function noDisabledAccount(ws: string): string {
+  return (
+    `NOT EXISTS (SELECT 1 FROM user du WHERE du.workspace_id = ${ws} AND du.status = 'disabled')` +
+    ` AND NOT EXISTS (SELECT 1 FROM membership dm JOIN user du ON du.id = dm.user_id WHERE dm.workspace_id = ${ws} AND du.status = 'disabled')`
+  );
+}
+
+/**
  * The statements that give every account lacking them its membership (owner of the
  * workspace its own row names) and its sign-in method (a link sent by mail), for the
  * caller to run in a batch. An account lacks them when a build from before accounts made

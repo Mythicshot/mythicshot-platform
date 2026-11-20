@@ -369,6 +369,30 @@ An allowance that leaves the workspace no room is taken only after a warning, an
 
 A workspace is over its allowance when it uses more than the allowance; using exactly the allowance is not over. Being over deletes and unpublishes nothing: its tours, links and pictures stay online, and listing, publishing, unpublishing, renaming and deleting work. Only uploads that need room are refused, as described in [Storage allowance](#storage-allowance), until tours are deleted or the allowance is raised. The Storage page then shows "You are over your storage allowance. New uploads are refused until you delete tours or get more room.", and the Admin page marks the row.
 
+### Disabling and deleting an account
+
+The admin can disable, enable and delete another account through the admin API (the Admin page's buttons for it come in a later version). An admin cannot do any of the three to their own account, and the site's last active admin cannot be disabled or deleted.
+
+| Request | What it does |
+|---|---|
+| `POST /api/v1/admin/accounts/<id>/disable` | The account cannot sign in. At once, every session of it ends, its unused sign-in links and its open email change stop working, and every token of its workspace is refused (the tokens are kept, not revoked). A request to connect Mythicshot that it confirmed can no longer be collected. Its tour pages, published pictures (also those a re-publish replaced, during their grace) and shared images and clips answer exactly as ones that never existed. Nothing is deleted. Recorded as `account_disabled` |
+| `POST /api/v1/admin/accounts/<id>/enable` | The account can sign in again, and nothing else changes: its tours, pictures, items and tokens work as before. The person signs in again for the dashboard. Recorded as `account_enabled` |
+| `GET /api/v1/admin/accounts/<id>/removal` | What a delete would remove: the username and address, the number of tours, of shared images and clips, of connected computers (tokens not revoked), and the bytes it uses |
+| `DELETE /api/v1/admin/accounts/<id>` with `{"username": "<its username>"}` | Only for a disabled account. Removes the account and everything of its workspace: tours with their draft and published pictures, unfinished uploads, shared items, tokens, requests to connect, sessions, sign-in links and the workspace. An account with no username is confirmed with its email address instead, exactly as the list shows it. Recorded as `account_deleted`, with the ids of the admin, the workspace and the account only |
+
+A delete of a large workspace takes several requests, each within the call budget a request may make: the answer is `202` with how many files are removed out of how many until it is `200`. A delete that is stopped at any point leaves the account disabled and listed (the list says `deleting`), and sending it again finishes it; until then it cannot be enabled. Files always go before the rows that name them, so a delete that is asked again to the end leaves nothing behind. As with deleting a tour, a request cut off in a narrow window, in the middle of a store's delete of a page of files, can leave a file in the store that no row names any more. Afterwards the email address and the username are free for a new account. Invites to its address are removed, and invites it sent stay valid. The rows the audit record already holds about the account stay.
+
+Only an account alone in its workspace can be deleted: a delete removes the whole workspace, so one that another account belongs to is refused (`409 shared_workspace`). Every workspace has one account in this version. Disabling an account hides its whole workspace, which matters only once a workspace can have several members.
+
+Deleting, like disabling, cannot take back pictures already held in browsers or caches (for up to a year) or served from a bucket's own domain until their files are gone.
+
+The account the site was set up with (the owner of the workspace the setup wizard made) cannot be deleted: the site needs that record. It can be disabled.
+
+> [!warning] Disabling stops new fetches only
+> A tour page may stay in a browser's or a cache's copy for up to a minute and a published picture for up to a year, since its address never changes; disabling stops every new request, not those copies.
+
+With `PUBLIC_IMAGE_BASE` set to a public bucket's own domain (possible on Cloudflare), published pictures are fetched from the bucket and never reach the app, so disabling an account cannot stop them: they stay reachable at their addresses, for anyone who has one, until the tour is unpublished or the account is deleted. Tour pages and shared items are always served by the app and are stopped either way. Leave `PUBLIC_IMAGE_BASE` empty if a disabled account's pictures must stop at once.
+
 ## Changing an email address
 
 On a site whose mail is on, a signed-in person changes their own address on the Account page:
@@ -522,7 +546,7 @@ Nothing in the code is tied to a hostname, account or bucket name.
 | Setting | Target | What it is |
 |---|---|---|
 | `SETUP_CODE` | both | Opens the setup wizard once. At least 16 characters, generated, never committed. A Worker secret on Cloudflare; a line in the root-only `.env` in the container. |
-| `PUBLIC_IMAGE_BASE` | both | Empty (the default on both targets): the app serves published images itself on `/p/<name>`. Optionally, on Cloudflare, the address of the public bucket's own custom domain, such as `https://images.example.com`. |
+| `PUBLIC_IMAGE_BASE` | both | Empty (the default on both targets): the app serves published images itself on `/p/<name>`. Optionally, on Cloudflare, the address of the public bucket's own custom domain, such as `https://images.example.com`; the pictures then never pass through the app, so a disabled account's pictures stay reachable (see [Disabling and deleting an account](#disabling-and-deleting-an-account)). |
 | `TOURS_HOST` | both | Optional, and only together with `APP_HOST`: the host name of the tours address, such as `tours.example.com`, without `https://` and without a path. Both empty or unset (the default) is one address, and no host name is checked. See [One address or two](#one-address-or-two). |
 | `APP_HOST` | both | Optional, and only together with `TOURS_HOST`: the host name of the app address, such as `app.example.com`, in the same form. It must be a different name than the tours address. |
 | `IMG_HOST` | both | Optional, and only beside both `TOURS_HOST` and `APP_HOST`: the host name of a third address for shared images and clips, such as `img.example.com`, in the same form and a name of its own. Unset or empty (the default): they answer on the tours address. It is not `PUBLIC_IMAGE_BASE`, which is about published tour pictures. See [An optional third address for images and clips](#an-optional-third-address-for-images-and-clips). |

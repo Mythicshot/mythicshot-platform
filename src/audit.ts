@@ -32,6 +32,9 @@ export const AUDIT_EVENTS = [
   "invite_resent",
   "invite_cancelled",
   "invite_accepted",
+  "account_disabled",
+  "account_enabled",
+  "account_deleted",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 

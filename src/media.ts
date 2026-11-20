@@ -260,7 +260,7 @@ type ClaimRow = { n: number; claim: string; ext: ImageType | null; stored_at: nu
  * call), and an item holds at most parts + 1 + MAX_LOOSE_CLAIMS rows. True when the item
  * is gone.
  */
-async function removeClosing(deps: Deps, workspaceId: string, id: string): Promise<boolean> {
+export async function removeClosing(deps: Deps, workspaceId: string, id: string): Promise<boolean> {
   const floor = deps.now() - CLAIM_LIFETIME_MS;
   const rows = await deps.db.all<ClaimRow>(
     "SELECT o.n, o.claim, o.ext, o.stored_at, o.claimed_at FROM media_object o JOIN media m ON m.id = o.media_id WHERE o.media_id = ? AND m.workspace_id = ? AND m.state = 'closing'",
