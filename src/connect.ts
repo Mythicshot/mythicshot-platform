@@ -45,6 +45,7 @@ import type { Hono } from "hono";
 import { auditStatement } from "./audit.ts";
 import { hashToken, newId, newToken, requireAuth } from "./auth.ts";
 import { clientAddressOf } from "./client.ts";
+import { mailConnection } from "./connect-mail.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
 import { linkOrigin } from "./mail.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps } from "./ports.ts";
@@ -386,6 +387,8 @@ export function connectRoutes(app: Hono, deps: Deps): void {
       if (isNotNullViolation(err) || isUniqueViolation(err)) return expired();
       throw err;
     }
+    // Committed, by this collection alone: the confirming account is told, after the answer.
+    mailConnection(deps, { requestId: row.id, userId: row.confirmed_by, workspaceId: row.workspace_id, tokenId: row.token_id });
     const hosts = deps.config.hosts ?? null;
     return json(200, {
       status: "connected",

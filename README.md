@@ -65,7 +65,7 @@ It is built to run on Cloudflare's Free plan, which allows 50 subrequests and 10
 
 The setup wizard's last step shows the server address. In Mythicshot, open Settings › Output › Tour publishing, paste the server address and the API token from the wizard, and press Test connection. The token is shown once, by the wizard; keep it in a password manager.
 
-The server can also give Mythicshot a token of its own without copying one, with a pair of codes. Mythicshot asks the server for them (`POST /api/v1/connect/start`, with no credential), shows a short code such as `ABCD-EFGH` and opens the dashboard's Connections page (`/connections`); a person signed in to the site types the short code there, sees the device's name and whether they are on the network Mythicshot asked from, and confirms it, and Mythicshot, which keeps asking with its long secret code, then receives a token for that person's workspace, once, with the username of whoever confirmed. Signing out before Mythicshot collects the token cancels it. The codes live 10 minutes, are never put in an address, and are stored only as digests. Signed-in people list, rename and revoke their workspace's tokens with `GET /api/v1/tokens`, `PATCH /api/v1/tokens/<id>` and `DELETE /api/v1/tokens/<id>`; a token cannot do any of that, and a revoked token is refused from its next request on. The dashboard pages for this come in a later version; the requests are described at `/docs`.
+The server can also give Mythicshot a token of its own without copying one, with a pair of codes. Mythicshot asks the server for them (`POST /api/v1/connect/start`, with no credential), shows a short code such as `ABCD-EFGH` and opens the dashboard's Connections page (`/connections`); a person signed in to the site types the short code there, sees the device's name and whether they are on the network Mythicshot asked from, and confirms it, and Mythicshot, which keeps asking with its long secret code, then receives a token for that person's workspace, once, with the username of whoever confirmed. Once it has, the account that confirmed gets one mail at its address naming the computer and the time and linking to the Connections page, so a connection nobody meant to make is noticed; the token's answer is the same whether or not that mail goes. Signing out before Mythicshot collects the token cancels it. The codes live 10 minutes, are never put in an address, and are stored only as digests. Signed-in people list, rename and revoke their workspace's tokens with `GET /api/v1/tokens`, `PATCH /api/v1/tokens/<id>` and `DELETE /api/v1/tokens/<id>`; a token cannot do any of that, and a revoked token is refused from its next request on. The dashboard pages for this come in a later version; the requests are described at `/docs`.
 
 ## API documentation
 
@@ -329,9 +329,13 @@ Each printed link is recorded in the audit record as `signin_link_printed`. The 
 > [!warning] A printed link is a key for 15 minutes
 > Whoever opens it first is signed in as that account: hand it only to its owner, by a way nobody else reads.
 
+### Inviting people
+
+The site's admin invites a person by email address through the API (`POST /api/v1/admin/invites`; the Admin page and the page the link opens come in a later version). The person gets a mail with a link that works once and for 7 days; inviting the same address again, or resending, sends a new link and the older one stops working. Opening the link and choosing a username makes the account, an empty workspace of its own with the site's standard allowance, and signs that browser in. An address that already has an account cannot be invited. Sending an invite needs mail: on a site whose mail is off it is refused and nothing is stored. When a mail cannot be handed over, the invite stays and the admin is told to resend it. An admin sends at most 20 invites an hour, resends included, the site sends at most 30 invite mails an hour, on a cap of their own apart from sign-in's, and holds at most 100 open invites (one that ran out does not count); one that ran out is listed until it is cancelled or replaced, and removed 30 days later. The requests are described at `/docs`.
+
 ### Who to ask for an invite
 
-Nobody can be invited in this version, and the sign-in page says "Mythicshot is invite-only for now." The optional setting `INVITE_CONTACT` adds who to ask: an email address, shown after "Ask for an invite:" as a mail link, or an `https://` address, shown as the link "Ask for an invite". Anything else, unset included, shows the sentence alone and never stops the site. It goes where the other settings go: the settings file, `.env`, or on Cloudflare a var in `wrangler.deploy.jsonc`, which `npm run setup:cloudflare -- update` keeps. On Cloudflare a change takes effect with the next `npm run setup:cloudflare -- update` or deploy.
+Until the invite pages come, the sign-in page says "Mythicshot is invite-only for now." The optional setting `INVITE_CONTACT` adds who to ask: an email address, shown after "Ask for an invite:" as a mail link, or an `https://` address, shown as the link "Ask for an invite". Anything else, unset included, shows the sentence alone and never stops the site. It goes where the other settings go: the settings file, `.env`, or on Cloudflare a var in `wrangler.deploy.jsonc`, which `npm run setup:cloudflare -- update` keeps. On Cloudflare a change takes effect with the next `npm run setup:cloudflare -- update` or deploy.
 
 ## The dashboard
 
@@ -421,7 +425,7 @@ A site whose mail is off cannot mail the link, so the Account page shows no "Cha
 
 ## Mail
 
-The Node target sends two kinds of mail: sign-in links, and the link and notice of an email change. Mail is off until it is switched on. A Cloudflare install sends no mail in this version.
+The Node target sends three kinds of mail: sign-in links, the link and notice of an email change, and a notice to the account that confirmed a new connection of Mythicshot once Mythicshot has collected its token (at most 5 a day per account and 30 an hour for the site, apart from sign-in's limit). Mail is off until it is switched on. A Cloudflare install sends no mail in this version.
 
 ### Switch mail on
 

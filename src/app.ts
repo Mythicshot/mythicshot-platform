@@ -7,6 +7,7 @@ import { docsRoutes } from "./docs/page.ts";
 import { emailChangeRoutes } from "./email-change.ts";
 import { hostGate } from "./host-gate.ts";
 import { requestHost, roleOf } from "./hosts.ts";
+import { inviteRoutes } from "./invites.ts";
 import { mediaRoutes } from "./media.ts";
 import { sharePageRoutes } from "./media-page.ts";
 import type { Deps } from "./ports.ts";
@@ -46,6 +47,7 @@ export function createApp(deps: Deps): Hono {
   connectRoutes(app, deps);
   tokenRoutes(app, deps);
   adminRoutes(app, deps);
+  inviteRoutes(app, deps);
   accountRemovalRoutes(app, deps);
   pageRoutesForAccounts(app, deps);
   dashRoutes(app);

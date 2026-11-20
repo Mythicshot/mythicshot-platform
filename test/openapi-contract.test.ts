@@ -470,8 +470,8 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const idFor = (path: string) => (path.includes("/uploads/") ? NO_UPLOAD : path.includes("/sessions/") ? "ses_" + "0".repeat(24) : path.includes("/workspaces/") ? NO_WORKSPACE : path.includes("/tokens/") ? "tok_" + "0".repeat(24) : NO_TOUR);
     const example = (op: Op) => op.path.replace("{id}", idFor(op.path)).replace("{step_id}", NO_STEP).replace("{n}", "1");
     const guarded = OPS.filter((op) => op.op.security.length > 0);
-    // All but health, the two sign-in requests and the app's two requests while it connects.
-    expect(guarded).toHaveLength(OPS.length - 5);
+    // All but health, the two sign-in requests, the two requests of an invite and the app's two requests while it connects.
+    expect(guarded).toHaveLength(OPS.length - 7);
     for (const op of guarded) {
       for (const token of [null, NO_TOKEN]) {
         const r = await api.call(op.method, example(op), { token });
@@ -850,6 +850,108 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     // Anyone else: the one 404.
     refused(await api.call("POST", account(other.userId, "/enable"), { token: member.token }), 404, "not_found");
     refused(await api.call("GET", account(other.userId, "/removal"), { token: admin.token }), 404, "not_found");
+  });
+
+  it("every answer of invites is as documented", async () => {
+    // One address, with the host name links use.
+    const { deps, mail } = await makeDeps({ siteHost: "tours.example.com" });
+    const api = client(deps);
+    const admin = await seedAccount(deps, { admin: true, username: "boss" });
+    const member = await seedAccount(deps, { username: "member" });
+    const made = await redeemSignInCode(deps, await createSignInCode(deps, admin.userId), null, null);
+    if (made === null) throw new Error("the sign-in was refused");
+    const SITE = "https://tours.example.com";
+    const headers = { cookie: `${SESSION_COOKIE}=${made.secret}`, origin: SITE, "x-csrf-token": await csrfFor(made.secret), "content-type": JSON_TYPE };
+    const send1 = (email: unknown) => api.call("POST", "/api/v1/admin/invites", { headers, body: JSON.stringify({ email }) });
+    const codeOf = () => (mail.sent[mail.sent.length - 1]?.text.match(/dpi_[0-9a-f]{40}/) ?? [""])[0];
+    const page = { "content-type": JSON_TYPE, origin: SITE };
+    const network = (d: Deps) => ({ fetch: (req: Request) => (setClientAddress(req, "203.0.113.60"), createApp(d).fetch(req)) });
+    const check = (body: unknown, more: Opts = {}) => api.call("POST", "/api/v1/invite/check", { ...more, body: typeof body === "string" ? body : JSON.stringify(body), headers: { ...page, ...more.headers } });
+    const accept = (body: unknown, more: Opts = {}) => api.call("POST", "/api/v1/invite/accept", { ...more, body: typeof body === "string" ? body : JSON.stringify(body), headers: { ...page, ...more.headers } });
+
+    // The admin's routes.
+    const sent = await send1("first@example.com");
+    expect(sent.status).toBe(201);
+    const id = sent.json.id as string;
+    refused(await send1("not an address"), 400, "bad_email");
+    refused(await api.call("POST", "/api/v1/admin/invites", { headers, body: JSON.stringify({ email: "x@example.com", more: 1 }) }), 400, "bad_request");
+    refused(await send1(member.email), 409, "has_account");
+    expect((await api.call("GET", "/api/v1/admin/invites", { headers })).json.invites.map((i: Json) => i.id)).toEqual([id]);
+    expect((await api.call("POST", `/api/v1/admin/invites/${id}/resend`, { headers })).status).toBe(200);
+    refused(await api.call("POST", `/api/v1/admin/invites/inv_${"0".repeat(24)}/resend`, { headers }), 404, "not_found");
+    mail.failNext();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    refused(await send1("failed@example.com"), 502, "mail_failed");
+    mail.failNext();
+    refused(await api.call("POST", `/api/v1/admin/invites/${id}/resend`, { headers }), 502, "mail_failed");
+    expect((await api.call("POST", `/api/v1/admin/invites/${id}/resend`, { headers })).status).toBe(200);
+    const code = codeOf();
+    // An address that got an account meanwhile.
+    const late = await send1("late@example.com");
+    await deps.db.run("UPDATE user SET email = 'late@example.com' WHERE id = ?", [member.userId]);
+    refused(await api.call("POST", `/api/v1/admin/invites/${late.json.id}/resend`, { headers }), 409, "has_account");
+    expect((await api.call("DELETE", `/api/v1/admin/invites/${late.json.id}`, { headers })).status).toBe(204);
+    refused(await api.call("DELETE", `/api/v1/admin/invites/${late.json.id}`, { headers }), 404, "not_found");
+    for (const [method, path] of [["GET", "/api/v1/admin/invites"], ["POST", "/api/v1/admin/invites"], ["POST", `/api/v1/admin/invites/${id}/resend`], ["DELETE", `/api/v1/admin/invites/${id}`]]) {
+      refused(await api.call(method, path, { token: admin.token, body: method === "POST" ? "{}" : undefined, headers: JSON_HEADERS }), 404, "not_found");
+    }
+    // The site's cap of invites.
+    await deps.db.batch(Array.from({ length: 100 }, (_, i) => ({ sql: "INSERT INTO invite (id, email, code_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)", params: [`inv_${String(i).padStart(24, "a")}`, `cap${i}@example.com`, String(i).padStart(64, "c"), Date.now(), Date.now() + 86_400_000] })));
+    refused(await send1("over@example.com"), 409, "too_many_invites");
+    // Resending one that ran out would open it again: refused at the cap too.
+    await deps.db.run("UPDATE invite SET created_at = 1, expires_at = 2 WHERE id = ?", [id]);
+    refused(await api.call("POST", `/api/v1/admin/invites/${id}/resend`, { headers }), 409, "too_many_invites");
+    await deps.db.run("UPDATE invite SET created_at = ?, expires_at = ? WHERE id = ?", [Date.now(), Date.now() + 86_400_000, id]);
+    await deps.db.run("DELETE FROM invite WHERE email LIKE 'cap%'");
+    // The admin's hourly number: 11 sends were counted so far, the refused ones too.
+    for (let i = 0; i < 9; i++) expect((await send1(`n${i}@example.com`)).status).toBe(201);
+    refused(await send1("one-too-many@example.com"), 429, "rate_limited");
+    refused(await api.call("POST", `/api/v1/admin/invites/${id}/resend`, { headers }), 429, "rate_limited");
+
+    // The person's requests.
+    const found = await check({ code });
+    expect(found.json).toEqual({ email: "first@example.com", invited_by: "boss", expires_at: expect.any(Number) });
+    refused(await check("{"), 400, "bad_request");
+    refused(await check({ code }, { token: admin.token }), 400, "credentials_not_allowed");
+    refused(await check({ code }, { headers: { origin: "https://evil.example.net" } }), 403, "bad_origin");
+    refused(await check({ code: "dpi_" + "0".repeat(40) }), 404, "invite_invalid");
+    refused(await check({ code }, { headers: { cookie: headers.cookie } }), 409, "signed_in");
+    refused(await accept("[]"), 400, "bad_request");
+    refused(await accept({ code, username: "x" }, { token: admin.token }), 400, "credentials_not_allowed");
+    refused(await accept({ code, username: "Bad_Name" }), 400, "bad_username");
+    refused(await accept({ code, username: "fresh" }, { headers: { origin: "https://evil.example.net" } }), 403, "bad_origin");
+    refused(await accept({ code: "dpi_" + "0".repeat(40), username: "fresh" }), 404, "invite_invalid");
+    refused(await accept({ code, username: "fresh" }, { headers: { cookie: headers.cookie } }), 409, "signed_in");
+    refused(await accept({ code, username: "member" }), 409, "username_taken");
+    const other = await deps.db.first<{ id: string }>("SELECT id FROM invite WHERE email = 'n0@example.com'");
+    expect(other).not.toBeNull();
+    const accepted = await accept({ code, username: "fresh" });
+    expect(accepted.json).toEqual({ ok: true });
+    expect(accepted.headers.get("set-cookie")).toMatch(/^__Host-dp_session=dps_[0-9a-f]{64};/);
+    // An invite whose address got an account since: resend it to get its code, from a second admin.
+    const second = await seedAccount(deps, { admin: true });
+    const secondMade = await redeemSignInCode(deps, await createSignInCode(deps, second.userId), null, null);
+    if (secondMade === null) throw new Error("the sign-in was refused");
+    const secondHeaders = { cookie: `${SESSION_COOKIE}=${secondMade.secret}`, origin: SITE, "x-csrf-token": await csrfFor(secondMade.secret), "content-type": JSON_TYPE };
+    expect((await api.call("POST", `/api/v1/admin/invites/${other!.id}/resend`, { headers: secondHeaders })).status).toBe(200);
+    const otherCode = codeOf();
+    await deps.db.run("UPDATE user SET email = 'n0@example.com' WHERE id = ?", [member.userId]);
+    refused(await accept({ code: otherCode, username: "someone" }), 409, "has_account");
+    // The network's number.
+    for (let i = 0; i < 30; i++) await check({ code: otherCode }, { app: network });
+    refused(await check({ code: otherCode }, { app: network }), 429, "rate_limited");
+    refused(await accept({ code: otherCode, username: "someone" }, { app: network }), 429, "rate_limited");
+
+    // A site whose mail is off.
+    const off = await makeDeps({ siteHost: "tours.example.com" }, { mail: false });
+    const offApi = client(off.deps);
+    const offAdmin = await seedAccount(off.deps, { admin: true });
+    const offMade = await redeemSignInCode(off.deps, await createSignInCode(off.deps, offAdmin.userId), null, null);
+    if (offMade === null) throw new Error("the sign-in was refused");
+    const offHeaders = { cookie: `${SESSION_COOKIE}=${offMade.secret}`, origin: SITE, "x-csrf-token": await csrfFor(offMade.secret), "content-type": JSON_TYPE };
+    refused(await offApi.call("POST", "/api/v1/admin/invites", { headers: offHeaders, body: JSON.stringify({ email: "x@example.com" }) }), 409, "mail_off");
+    await off.deps.db.run("INSERT INTO invite (id, email, code_hash, created_at, expires_at) VALUES (?, 'x@example.com', ?, 1, 2)", ["inv_" + "1".repeat(24), "d".repeat(64)]);
+    refused(await offApi.call("POST", `/api/v1/admin/invites/inv_${"1".repeat(24)}/resend`, { headers: offHeaders }), 409, "mail_off");
   });
 
   it("every answer of shared items is as documented", async () => {
@@ -1334,6 +1436,15 @@ describe("the error codes in the code", () => {
     expect(removalPlain.length, "account-removal.ts: an error answer not built in place").toBe([...removal.matchAll(/\berror: "/g)].length);
     for (const m of removalPlain) inCode.add(`${m[1]} ${m[2]}`);
     expect([...inCode]).toEqual(expect.arrayContaining(["409 own_account", "409 last_admin", "409 not_disabled", "409 deleting", "409 site_owner", "400 username_mismatch"]));
+    // Invites answer with apiError, and with plain JSON for bad_email and the admin routes' one 404, which have no detail.
+    const invites = source("invites.ts");
+    const invitesLiteral = [...invites.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
+    expect(invitesLiteral.length, "invites.ts: an apiError call without a literal status and code").toBe([...invites.matchAll(/\bapiError\(/g)].length);
+    for (const m of invitesLiteral) inCode.add(`${m[1]} ${m[2]}`);
+    const invitesPlain = [...invites.matchAll(/\bjson\((\d{3}), \{ error: "([a-z_]+)"/g)];
+    expect(invitesPlain.length, "invites.ts: an error answer not built in place").toBe([...invites.matchAll(/\berror: "/g)].length);
+    for (const m of invitesPlain) inCode.add(`${m[1]} ${m[2]}`);
+    expect([...inCode]).toEqual(expect.arrayContaining(["404 invite_invalid", "409 signed_in", "409 has_account", "409 too_many_invites", "502 mail_failed", "400 bad_username", "409 username_taken"]));
     // Shared items answer with apiError, and with plain JSON for the one refusal that carries the limits.
     const media = source("media.ts");
     const mediaLiteral = [...media.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
@@ -1352,9 +1463,9 @@ describe("the error codes in the code", () => {
       for (const m of literal) inCode.add(`${m[1]} ${m[2]}`);
     }
     expect([...inCode]).toEqual(expect.arrayContaining(["410 expired_code", "429 slow_down", "400 credentials_not_allowed", "400 bad_device_name", "400 bad_name"]));
-    // These eleven are the only modules that answer with apiError (src/http.ts defines it).
+    // These twelve are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/account-removal.ts", "../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts"]);
+    expect(callers).toEqual(["../src/account-removal.ts", "../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.

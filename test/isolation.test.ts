@@ -21,8 +21,12 @@
 //   belongs to the confirming workspace alone, which a test of its own checks.
 // - ADMIN: routes that cross workspaces on purpose, for the site's admin alone, each with
 //   the list of fields it may answer. Only an admin's session reaches them; everyone else
-//   gets one 404. They answer counts and the allowance, never a tour, picture, token or
-//   session, which the suite checks by scanning each answer for every name of both sides.
+//   gets one 404. They answer counts, the allowance and the site's invites, never a tour,
+//   picture, token or session, which the suite checks by scanning each answer for every
+//   name of both sides.
+// - INVITE: looking up and accepting an invite, which take no credential and belong to no
+//   workspace; accepting makes a new workspace, which a test of its own checks is new and
+//   separate from every other.
 // A route in none of them, or in two, fails the first test below; so does a table key no
 // route has. The route list is the router's own, as in test/openapi.test.ts, so the
 // tables cannot drift from the app.
@@ -426,6 +430,39 @@ const ADMIN: Record<string, { reason: string; request: (w: World) => Sample; fie
     fields: ["status", "done", "total"],
     answers: { 202: ["status", "done", "total"], 200: ["deleted"] },
   },
+  // The invites: an address, an id and two times each, never anything of a workspace.
+  "POST /api/v1/admin/invites": {
+    reason: "the admin invites an address; it answers the invite, which belongs to no workspace until it is accepted",
+    request: () => ({ method: "POST", path: "/api/v1/admin/invites", json: { email: "another-newcomer@example.com" } }),
+    fields: ["id", "email", "created_at", "expires_at", "state"],
+    status: 201,
+  },
+  "GET /api/v1/admin/invites": {
+    reason: "the admin's list of the site's open and expired invites: addresses and times, nothing of any workspace",
+    request: () => ({ method: "GET", path: "/api/v1/admin/invites" }),
+    fields: ["invites", "invites[].id", "invites[].email", "invites[].created_at", "invites[].expires_at", "invites[].state"],
+  },
+  "POST /api/v1/admin/invites/:id/resend": {
+    reason: "the admin sends an invite again with a new link; it answers the invite",
+    request: (w) => ({ method: "POST", path: `/api/v1/admin/invites/${w.invite.id}/resend` }),
+    fields: ["id", "email", "created_at", "expires_at", "state"],
+  },
+  "DELETE /api/v1/admin/invites/:id": {
+    reason: "the admin cancels an invite; it answers nothing",
+    request: (w) => ({ method: "DELETE", path: `/api/v1/admin/invites/${w.invite.id}` }),
+    fields: [],
+    status: 204,
+  },
+};
+
+/**
+ * Looking up and accepting an invite: no credential (one that carries any is refused), and
+ * no workspace until the accept makes a new one. Each with its reason; the test "an
+ * accepted invite's workspace is new and separate from every other" sends them.
+ */
+const INVITE: Record<string, { reason: string }> = {
+  "POST /api/v1/invite/check": { reason: "shows the invited address and the inviter's username to whoever holds the 160-bit code; it changes nothing and reads no workspace" },
+  "POST /api/v1/invite/accept": { reason: "makes a new account in a new workspace of its own for whoever holds the 160-bit code; it reaches no existing workspace" },
 };
 
 /**
@@ -439,7 +476,7 @@ const CONNECT: Record<string, { reason: string }> = {
 };
 
 type Tables = Record<string, Record<string, unknown>>;
-const TABLES: Tables = { CASES, BODY_IDS, LISTS, CREATES, OPEN, SELF, ADMIN, CONNECT };
+const TABLES: Tables = { CASES, BODY_IDS, LISTS, CREATES, OPEN, SELF, ADMIN, CONNECT, INVITE };
 
 // ---- The route list against the tables ----
 
@@ -601,9 +638,11 @@ describe("the tables against the route table", () => {
     for (const [key, entry] of Object.entries(LISTS)) expect(entry.holds.length, `${key} must say what it holds`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(CREATES)) expect(entry.makes.length, `${key} must say what it makes`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(SELF)) expect((entry.ends ?? entry.changes ?? "").length, `${key} must say what it ends or changes`).toBeGreaterThan(10);
+    for (const [key, entry] of Object.entries(CONNECT)) expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
+    for (const [key, entry] of Object.entries(INVITE)) expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(ADMIN)) {
       expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
-      // A route that answers nothing (204) lists no field, and says so with its status.
+      // Only an answer with no body has no field.
       if (entry.status !== 204) expect(entry.fields.length, `${key} must list the fields it may answer`).toBeGreaterThan(0);
     }
     // The admin routes are there, and are in ADMIN.
@@ -1131,6 +1170,70 @@ describe("one workspace against another", () => {
     }
   });
 
+  it("an accepted invite's workspace is new and separate from every other, and its account reaches nothing of either workspace", SLOW, async () => {
+    const w = await build();
+    const { deps, a, b } = w;
+    expect(Object.keys(INVITE).sort()).toEqual(["POST /api/v1/invite/accept", "POST /api/v1/invite/check"]);
+    const invite = (path: string, json: unknown, credential: Credential = { token: null }) => fire(deps, { method: "POST", path, json, headers: { origin: ORIGIN, "user-agent": "Mozilla/5.0 Firefox/132.0" } }, credential);
+    const before = { a: await snapshotOf(deps, a, w.keys), b: await snapshotOf(deps, b, w.keys) };
+    // Any credential is refused, the inviting admin's own too, and nothing is made.
+    for (const [credential, code] of [[BY_TOKEN.of(a), 400], [BY_TOKEN.of(b), 400], [BY_SESSION.of(a), 409], [BY_SESSION.of(b), 409]] as const) {
+      for (const path of Object.keys(INVITE).map((k) => k.split(" ")[1])) {
+        w.tick();
+        const refused = await invite(path, { code: w.invite.code, username: "newcomer" }, credential);
+        expect([refused.status, refused.json.error], path).toEqual([code, code === 400 ? "credentials_not_allowed" : "signed_in"]);
+      }
+    }
+    expect(await deps.db.first("SELECT count(*) AS n FROM invite")).toEqual({ n: 1 });
+    // The look-up answers the address and the inviter, nothing of the inviter's workspace.
+    const looked = await invite("/api/v1/invite/check", { code: w.invite.code });
+    expect(Object.keys(looked.json).sort()).toEqual(["email", "expires_at", "invited_by"]);
+    for (const n of namesIn(a.ids)) expect(looked.text.includes(n), n).toBe(false);
+    for (const n of [a.workspaceId, a.workspaceName, a.email, a.userId]) expect(looked.text.includes(n), n).toBe(false);
+
+    const accepted = await invite("/api/v1/invite/accept", { code: w.invite.code, username: "newcomer" });
+    expect(accepted.status, accepted.text).toBe(200);
+    const secret = /^__Host-dp_session=(dps_[0-9a-f]{64});/.exec(accepted.headers.getSetCookie()[0] ?? "")?.[1] ?? "";
+    const made = (await deps.db.first<{ id: string; is_admin: number; workspace_id: string }>("SELECT u.id, u.is_admin, m.workspace_id FROM user u JOIN membership m ON m.user_id = u.id WHERE u.email = ?", [w.invite.email]))!;
+    // A new workspace of its own: neither side's, the only member its own account, no admin flag, no allowance of its own.
+    expect([a.workspaceId, b.workspaceId]).not.toContain(made.workspace_id);
+    expect(made.is_admin).toBe(0);
+    expect(await deps.db.all("SELECT user_id FROM membership WHERE workspace_id = ?", [made.workspace_id])).toEqual([{ user_id: made.id }]);
+    expect(await deps.db.first("SELECT storage_allowance_bytes FROM workspace WHERE id = ?", [made.workspace_id])).toEqual({ storage_allowance_bytes: null });
+    expect(await deps.db.first("SELECT count(*) AS n FROM membership WHERE user_id = ?", [made.id])).toEqual({ n: 1 });
+    expect(await snapshotOf(deps, a, w.keys)).toEqual(before.a);
+    expect(await snapshotOf(deps, b, w.keys)).toEqual(before.b);
+
+    // The new account's session, against every case of each side: each side's ids answer
+    // exactly as ids that never existed, and nothing of either side changes.
+    const newcomer: Credential = { token: null, headers: { cookie: `${SESSION_COOKIE}=${secret}`, "x-csrf-token": await csrfFor(secret), "sec-fetch-site": "same-origin" }, page: true };
+    const mine = inventedIds();
+    for (const theirs of [a, b]) {
+      const real = everyCase(theirs.ids, mine);
+      const invented = everyCase(inventedIds(theirs.ids), mine);
+      expect(real.length).toBeGreaterThan(40);
+      for (let i = 0; i < real.length; i++) {
+        w.tick();
+        const what = label(real[i].key, real[i].req, "the new account's session", theirs);
+        const answer = await fire(deps, real[i].req, newcomer);
+        expect(seen(answer), what).toEqual(seen(await fire(deps, invented[i].req, newcomer)));
+        expect(answer.status, what).toBeGreaterThanOrEqual(204);
+      }
+    }
+    expect(w.writes()).toEqual([]);
+    expect(await snapshotOf(deps, a, w.keys)).toEqual(before.a);
+    expect(await snapshotOf(deps, b, w.keys)).toEqual(before.b);
+    // Its lists hold nothing of either side, and its session is no admin's.
+    const needles = [...needlesOf(before.a, [a.token, a.workspaceName, a.email]), ...needlesOf(before.b, [b.token, b.workspaceName, b.email])].filter((n) => n !== "First token");
+    for (const [key, list] of Object.entries(LISTS)) {
+      if (list.only === "token") continue;
+      const r = await fire(deps, { method: "GET", path: list.path }, newcomer);
+      expect(r.status, key).toBe(200);
+      for (const n of needles) expect(r.text.includes(n), `${key} told the new account ${n}`).toBe(false);
+    }
+    for (const [key, entry] of Object.entries(ADMIN)) expect((await fire(deps, entry.request(w), newcomer)).text, key).toBe('{"error":"not_found"}');
+  });
+
   it("an upload cannot target another workspace's tour or chapter", SLOW, async () => {
     const w = await build();
     const { deps, a, b } = w;
@@ -1433,7 +1536,8 @@ describe("the admin routes", () => {
   }
 
   it("every admin route is in the ADMIN table and answers no field outside its list", SLOW, async () => {
-    const w = await build();
+    // A site that can mail an invite's link.
+    const w = await build({ siteHost: "app.example.com" });
     const before = { a: await forbiddenOf(w, w.a), b: await forbiddenOf(w, w.b) };
     // The names are there to be found.
     for (const side of [w.a, w.b]) for (const n of [side.ids.published.tour, side.ids.published.slug, side.ids.published.publicName, side.ids.draft.step, side.token, side.session.id, side.workspaceName]) expect(before[side === w.a ? "a" : "b"]).toContain(n);

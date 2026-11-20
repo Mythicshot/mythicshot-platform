@@ -10,7 +10,7 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 ## Set up
 
 1. Set up the scratch site, sign in as the admin `checker` and keep the wizard's token, exactly as in "Set up" of [the sign-in pages' check](signin-browser-check.md), steps 1 to 4, using the prefix `dashboard-check-` for the folder.
-2. Nobody can be invited in this version, so a scratch site has no second account that is not an admin. What a member sees of the Admin tab is held by the tests; here only the page source is looked at.
+2. Nobody can be invited from the dashboard in this version, so a scratch site has no second account that is not an admin. What a member sees of the Admin tab is held by the tests; here only the page source is looked at.
 3. Upload three tours with the owner's token, as the site's documentation page `http://localhost:3000/docs` shows in its guide "Upload and publish a tour" (or with Mythicshot). Publish two of them. Then upload a new version into one of the two published tours and do not publish it, so that it has changes waiting. Give one tour a title holding markup, such as `<b>bold</b> & "quoted"`.
 4. Share items with the owner's token through the shared item requests on the documentation page (`POST /api/v1/media`, then its parts, an optional preview, and the commit): three PNG or JPEG images, one of them without a title, one with the title `<b>bold</b> & "quoted"`, and two of them with a preview; and two GIFs and one MP4 clip, one of them without a title and one with a preview. For "Show more", share 51 small images more (a loop over the same requests).
 

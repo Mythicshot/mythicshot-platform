@@ -32,7 +32,7 @@ const EXAMPLE_ORIGIN = "https://YOUR-SITE";
 const METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "trace"];
 
 /** The operations anyone may call, with no credential at all. */
-const PUBLIC = ["GET /healthz", "POST /api/v1/signin/request", "POST /api/v1/signin/complete", "POST /api/v1/connect/start", "POST /api/v1/connect/token"];
+const PUBLIC = ["GET /healthz", "POST /api/v1/signin/request", "POST /api/v1/signin/complete", "POST /api/v1/invite/check", "POST /api/v1/invite/accept", "POST /api/v1/connect/start", "POST /api/v1/connect/token"];
 /** The operations that take a session and no token. */
 const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "POST /api/v1/connect/lookup", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id"];
 /** The site admin's operations: an admin's session alone, and a 404 (never a 401) to everyone else. */
@@ -44,6 +44,10 @@ const ADMIN_ONLY = [
   "POST /api/v1/admin/accounts/:id/enable",
   "GET /api/v1/admin/accounts/:id/removal",
   "DELETE /api/v1/admin/accounts/:id",
+  "POST /api/v1/admin/invites",
+  "GET /api/v1/admin/invites",
+  "POST /api/v1/admin/invites/:id/resend",
+  "DELETE /api/v1/admin/invites/:id",
 ];
 
 /** Every operation of the description, with its key in the form of the route table. */
@@ -259,6 +263,8 @@ describe("the API description", () => {
       "The workspace's ten largest tours, images and GIFs",
       "Ask for a sign-in link",
       "Finish signing in",
+      "Look up an invite",
+      "Accept an invite",
       "The session and who it is",
       "List the account's sessions",
       "End one of the account's sessions",
@@ -281,6 +287,10 @@ describe("the API description", () => {
       "Enable a disabled account",
       "What deleting an account removes",
       "Delete a disabled account, in steps",
+      "Invite an address",
+      "List the invites",
+      "Send an invite again",
+      "Cancel an invite",
       "Whether the server is up",
     ]);
   });
