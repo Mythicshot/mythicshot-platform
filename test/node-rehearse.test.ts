@@ -4,10 +4,11 @@
 // difference fails. The address modes are checked on build folders made here and against a
 // stand-in server on 127.0.0.1. The full rehearsal starts the builds themselves and is run
 // on its own: npm run rehearse:upgrade.
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { transformSync } from "esbuild";
 import { describe, expect, it } from "vitest";
 import {
@@ -24,7 +25,31 @@ import {
   type Recorded,
   type StoreListing,
 } from "../scripts/rehearse-compare.ts";
-import { buildModes, healthHosts, healthRoles, knowsImgRole, modeSettings, parseArgs, pictureAddresses, readTokens, recordSite, resultLine, waitReady, type Mode, type Running } from "../scripts/rehearse-upgrade.ts";
+import {
+  buildModes,
+  CLIENT_ADDRESS,
+  errorLineProblems,
+  fetchAnswer,
+  freePort,
+  healthHosts,
+  healthRoles,
+  KNOWN_ERROR_LINES,
+  knowsImgRole,
+  modeSettings,
+  parseArgs,
+  pictureAddresses,
+  PROXY_SETTINGS,
+  readTokens,
+  recordSite,
+  resultLine,
+  spawnBuild,
+  startPair,
+  stopBuild,
+  waitReady,
+  type Mode,
+  type Running,
+} from "../scripts/rehearse-upgrade.ts";
+import { PROXY_HINT } from "../src/node/config.ts";
 
 const enc = new TextEncoder();
 
@@ -628,5 +653,117 @@ describe("the address modes", () => {
         }
       }
     });
+  });
+});
+
+describe("the race check and the client address", () => {
+  /**
+   * A stand-in build: a dist/node/entry.js that answers every request with 200 and an empty
+   * JSON object on 127.0.0.1 (through the rehearsal's own preload) and, as the Node entry does
+   * since 0.1.26, writes PROXY_HINT once to its error output when CLIENT_ADDRESS_HEADER is not
+   * set and a request comes in. `alsoSays` is one more line it writes on its first request.
+   */
+  function standInBuild(alsoSays: string | null = null): string {
+    const dir = mkdtempSync(join(tmpdir(), "rehearse-standin-"));
+    mkdirSync(join(dir, "dist", "node"), { recursive: true });
+    mkdirSync(join(dir, "migrations"));
+    writeFileSync(join(dir, "package.json"), '{"version":"9.9.9","type":"module"}');
+    writeFileSync(
+      join(dir, "dist", "node", "entry.js"),
+      `import { createServer } from "node:http";
+const HINT = ${JSON.stringify(PROXY_HINT)};
+const ALSO = ${JSON.stringify(alsoSays)};
+let said = false;
+createServer((req, res) => {
+  if (!said) {
+    said = true;
+    if ((process.env.CLIENT_ADDRESS_HEADER ?? "").trim() === "") console.error(HINT);
+    if (ALSO !== null) console.error(ALSO);
+  }
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(req.url === "/healthz" ? JSON.stringify({ ok: true, seen: req.headers["x-forwarded-for"] ?? null }) : "{}");
+}).listen(Number(process.env.PORT));
+`,
+    );
+    return dir;
+  }
+
+  async function race(build: string, extra: Record<string, string> = {}) {
+    const work = mkdtempSync(join(tmpdir(), "rehearse-work-"));
+    const data = join(work, "data");
+    mkdirSync(data);
+    try {
+      return await startPair(build, data, "one", work, [], extra);
+    } finally {
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  }
+
+  it("the builds run as behind a proxy: CLIENT_ADDRESS_HEADER is set, and every request carries a documentation address in it", () => {
+    expect(PROXY_SETTINGS).toEqual({ CLIENT_ADDRESS_HEADER: "X-Forwarded-For" });
+    expect(CLIENT_ADDRESS).toBe("203.0.113.7");
+  });
+
+  it("without the setting each build writes the proxy hint, which the check names; with it (as the rehearsal runs) there is none", async () => {
+    const build = standInBuild();
+    try {
+      // Today's failure, reproduced: the setting left empty, as before this fix.
+      const without = await race(build, { CLIENT_ADDRESS_HEADER: "" });
+      expect(without.startProblems).toEqual([]);
+      expect(without.errors).toEqual([PROXY_HINT, PROXY_HINT]);
+      expect(errorLineProblems(without.errors)).toEqual([`a known message: ${PROXY_HINT}`]);
+      // As the rehearsal runs the builds now.
+      const fixed = await race(build);
+      expect(fixed.startProblems).toEqual([]);
+      expect(fixed.errors).toEqual([]);
+    } finally {
+      rmSync(build, { recursive: true, force: true });
+    }
+  });
+
+  it("the requests carry the documentation address in X-Forwarded-For", async () => {
+    const build = standInBuild();
+    const work = mkdtempSync(join(tmpdir(), "rehearse-work-"));
+    try {
+      const port = await freePort();
+      const r = spawnBuild(build, work, "one", work, port);
+      try {
+        await waitReady(r, healthHosts("one"), healthRoles("one"));
+        const a = await fetchAnswer(port, "GET", "/healthz", "localhost");
+        expect(JSON.parse(new TextDecoder().decode(a.body))).toEqual({ ok: true, seen: "203.0.113.7" });
+      } finally {
+        await stopBuild(r);
+      }
+    } finally {
+      rmSync(build, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  it("an unexpected error line still fails the check, and is named by its length only, never its text", async () => {
+    const secret = "upload failed for owner@example.com, token dp_" + "1".repeat(40);
+    const build = standInBuild(secret);
+    try {
+      const got = await race(build);
+      expect(got.errors).toEqual([secret, secret]);
+      const problems = errorLineProblems(got.errors);
+      expect(problems).toEqual([`an error line that is not one of the known messages (${secret.length} characters)`]);
+      expect(problems.join(" ")).not.toContain("example.com");
+      expect(problems.join(" ")).not.toContain("dp_");
+    } finally {
+      rmSync(build, { recursive: true, force: true });
+    }
+  });
+
+  it("each distinct line is named once; the known messages are the app's own, word for word", () => {
+    expect(errorLineProblems([])).toEqual([]);
+    expect(errorLineProblems([PROXY_HINT, "x", PROXY_HINT, "yy", "x"])).toEqual([`a known message: ${PROXY_HINT}`, "an error line that is not one of the known messages (1 character)", "an error line that is not one of the known messages (2 characters)"]);
+    // A known message with anything added is not one of them.
+    expect(errorLineProblems([PROXY_HINT + " 127.0.0.1"])).toEqual([`an error line that is not one of the known messages (${PROXY_HINT.length + 10} characters)`]);
+    expect(KNOWN_ERROR_LINES).toContain(PROXY_HINT);
+    // Every known message is a fixed line of the app's own source, word for word, so none can hold a value.
+    const source = (dir: string): string => readdirSync(dir, { withFileTypes: true }).map((e) => (e.isDirectory() ? source(join(dir, e.name)) : e.name.endsWith(".ts") && !e.name.endsWith("-assets.ts") ? readFileSync(join(dir, e.name), "utf8") : "")).join(" ");
+    const src = source(fileURLToPath(new URL("../src", import.meta.url)));
+    for (const line of KNOWN_ERROR_LINES) expect(src.includes(JSON.stringify(line)) || src.includes(`"${line}"`), line).toBe(true);
   });
 });

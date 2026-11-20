@@ -2,6 +2,11 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.28 (2026-11-20)
+
+- Upgrade rehearsal: the check of two new builds started at the same moment no longer fails on every update to 0.1.26 or later. Every build now runs with `CLIENT_ADDRESS_HEADER=X-Forwarded-For`, and every request the rehearsal sends carries that header with a documentation address, as behind a site's proxy, so a build no longer writes its line asking for the setting. Builds before the setting (0.1.7, 0.1.8) read neither, so nothing changes for them.
+- Upgrade rehearsal: when that check fails, the report names each distinct error line once: one of the app's own fixed messages word for word, any other line only by its length, since it could hold data.
+
 ## 0.1.27 (2026-11-20)
 
 - Dashboard, Connections page: a new tab between Storage and Account lists the computers where Mythicshot can publish to the workspace, each with "Signed in from Mythicshot" or "From setup", the day it was connected and the day it was last used ("Today", a date, or "Never"), and "Rename" and "Disconnect". Both ask first, and the list is read again however they end, so it always shows what is true.
