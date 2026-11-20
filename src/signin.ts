@@ -28,7 +28,7 @@ import { apiError, json, noContent, readCapped } from "./http.ts";
 import { NO_MAIL, linkOrigin, signInLink, signInMail } from "./mail.ts";
 import { canMailLinks, deferOf, mailOf, type Deps, type Stmt } from "./ports.ts";
 import { LIMITS_SIGNIN, SITE_KEY, SITE_QUIET_KEY, hitLimit, networkKey, recipientKey, sweepCounters, type Limit } from "./rate.ts";
-import { clearedCookie, createSignInCode, csrfFor, readSessionCookie, redeemSignInCode, revokeAll, revokeSession, sameOriginChange, sessionCookie, sessionHost, sweepSessions } from "./sessions.ts";
+import { clearedCookie, createSignInCodeFor, csrfFor, readSessionCookie, redeemSignInCode, revokeAll, revokeSession, sameOriginChange, sessionCookie, sessionHost, sweepSessions } from "./sessions.ts";
 
 /** The longest body the two sign-in requests read: an address is at most 254 characters, a code 44. */
 export const MAX_BODY_BYTES = 2048;
@@ -163,7 +163,14 @@ async function linkJob(deps: Deps, job: LinkJob): Promise<void> {
   const { userId, workspaceId, to, origin } = job.link;
   let link: string;
   try {
-    const code = await createSignInCode(deps, userId);
+    // Stored only while `to` is still the account's address: an email change may have
+    // committed since the request read the account.
+    const code = await createSignInCodeFor(deps, userId, to);
+    if (code === null) {
+      // No link, and the same one batch the job always writes: one more pad row.
+      await deps.db.batch([padStatement(deps)]);
+      return;
+    }
     await deps.db.batch([auditStatement(deps, { event: "signin_link_sent", userId, workspaceId })]);
     link = signInLink(origin, code);
   } catch {
