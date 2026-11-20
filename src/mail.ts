@@ -136,13 +136,15 @@ export function emailChangeMail(to: string, link: string, siteName: string = DEF
 
 /**
  * An address with most of it hidden: the first character of the part before the @, "…",
- * and the @ with everything after it, so `new@example.com` is `n…@example.com`. Takes
+ * and the @ with everything after it, so `new@example.com` is `n…@example.com`. A part
+ * before the @ of one or two characters is not shown at all (`jo@example.com` is
+ * `…@example.com`), since its first character would be half of it or all of it. Takes
  * what parseEmail returned; anything without an @ after its first character is all "…".
  */
 export function maskEmail(email: string): string {
   const at = typeof email === "string" ? email.lastIndexOf("@") : -1;
   if (at < 1) return "…";
-  return `${email[0]}…${email.slice(at)}`;
+  return `${at < 3 ? "" : email[0]}…${email.slice(at)}`;
 }
 
 /**

@@ -681,10 +681,13 @@ describe("confirming an email change", () => {
 });
 
 describe("the mail texts", () => {
-  it("hides the new address in the notice: its first character, then …, then the @ and the domain", () => {
+  it("hides the new address in the notice: its first character, then …, then the @ and the domain; a part before the @ of one or two characters is never shown", () => {
+    expect(maskEmail("n@example.com")).toBe("…@example.com");
+    expect(maskEmail("ne@example.com")).toBe("…@example.com");
     expect(maskEmail("new@example.com")).toBe("n…@example.com");
-    expect(maskEmail("n@example.com")).toBe("n…@example.com");
     expect(maskEmail("first.last+tag@sub.example.co.uk")).toBe("f…@sub.example.co.uk");
+    // In the notice itself.
+    expect(emailChangedMail("old@example.com", "solex", "jo@example.com").text.split("\n")[0]).toBe('The email address of the Mythicshot account "solex" was changed to …@example.com.');
     expect(maskEmail("@example.com")).toBe("…");
     expect(maskEmail("no-at-sign")).toBe("…");
   });
