@@ -20,6 +20,8 @@ export type Auth = { workspaceId: string; tokenId: string; session?: { id: strin
  * The roles whose address takes any credential, a token or a session: the tours and the
  * app address (a session only the app address: SESSION_ROLES). The img address serves
  * shared media to anyone and takes none, nor does a role added later until it is listed.
+ * The viewer cookie of the tours address (VIEWER_ROLES, src/viewers.ts) is no credential
+ * here: `requireAuth` reads the session cookie by its own name alone and never looks at it.
  */
 export const CREDENTIAL_ROLES: readonly HostRole[] = ["tours", "app"];
 
@@ -51,7 +53,7 @@ export async function hashToken(token: string): Promise<string> {
 }
 
 /** A new row id: the prefix, "_" and 24 lowercase hex characters (96 random bits). */
-export function newId(prefix: "ws" | "usr" | "tok" | "tour" | "ch" | "st" | "up" | "ses" | "sic" | "emc" | "med" | "crq" | "inv"): string {
+export function newId(prefix: "ws" | "usr" | "tok" | "tour" | "ch" | "st" | "up" | "ses" | "sic" | "emc" | "med" | "crq" | "inv" | "vco" | "vse"): string {
   return prefix + "_" + hex(randomBytes(12));
 }
 

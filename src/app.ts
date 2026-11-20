@@ -21,6 +21,7 @@ import { tokenRoutes } from "./tokens.ts";
 import { tourRoutes } from "./tours.ts";
 import { uploadRoutes } from "./uploads.ts";
 import { usageRoutes } from "./usage.ts";
+import { viewerRoutes } from "./viewers.ts";
 
 /** The route table and error handling. Routes reach data only through `deps`. */
 export function createApp(deps: Deps): Hono {
@@ -50,6 +51,7 @@ export function createApp(deps: Deps): Hono {
   tokenRoutes(app, deps);
   adminRoutes(app, deps);
   inviteRoutes(app, deps);
+  viewerRoutes(app, deps);
   accountRemovalRoutes(app, deps);
   pageRoutesForAccounts(app, deps);
   dashRoutes(app);

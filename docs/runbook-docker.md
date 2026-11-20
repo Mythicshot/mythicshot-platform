@@ -1114,7 +1114,7 @@ An upload that was started and never finished holds its room until it is removed
 
 ### Read the audit record
 
-The audit record lists what was done with accounts: sign-ins, sign-outs, links printed, allowances set, email changes, connections of the app, tokens renamed or revoked, and accounts disabled, enabled or deleted. It holds ids, never an email address, a code or a token.
+The audit record lists what was done with accounts: sign-ins, sign-outs, links printed, allowances set, email changes, connections of the app, tokens renamed or revoked, and accounts disabled, enabled or deleted; and, for tours shared with a list of addresses, the links mailed to visitors and their sign-ins. It holds ids, never an email address, a code or a token.
 
 ```sh
 docker compose exec app node dist/node/admin.js audit --last 50
@@ -1149,6 +1149,8 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `account_enabled` | The admin enabled a disabled account again; the account is the admin, the subject the enabled account |
 | `account_deleted` | The admin's delete of a disabled account finished: the account, its workspace and everything in it are gone. The account is the admin who sent the last delete request, the workspace and the subject are the deleted workspace's and account's ids. Nothing else of the person is recorded, and the rows recorded about the account before stay |
 | `tour_access_changed` | Who may view a tour changed, or its list of addresses did; the subject is the tour, the account is the one signed in (none when a token made the change), and the detail holds the settings and the list's sizes, such as `{"from":"public","to":"people","viewers_before":0,"viewers":3,"by":"session"}`. Made public from a published tour, it is written when the move of its pictures finishes. No address is recorded |
+| `viewer_link_sent` | A link for a visitor to view a tour shared with their address was made to be mailed; the mail itself may still have failed. Only the subject is set, the link's own id: no account, workspace, tour or address is recorded |
+| `viewer_signin` | A visitor used such a link and this browser now views tours as that address; the subject is the viewer session. No account, workspace or address is recorded |
 
 ## Troubleshooting by symptom
 

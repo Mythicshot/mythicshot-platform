@@ -120,6 +120,13 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   // the new account in, so both live where the session cookie does, as signing in does.
   "POST /api/v1/invite/check": "app",
   "POST /api/v1/invite/accept": "app",
+  // A visitor proving an address (src/viewers.ts): the viewer cookie belongs to the tours
+  // address alone, where tours are shown, so none of these answers on the app or img address.
+  "POST /api/v1/view/request": "tours",
+  "POST /api/v1/view/check": "tours",
+  "POST /api/v1/view/complete": "tours",
+  "POST /api/v1/view/signout": "tours",
+  "GET /api/v1/view/session": "tours",
   "POST /api/v1/admin/accounts/:id/disable": "app",
   "POST /api/v1/admin/accounts/:id/enable": "app",
   "GET /api/v1/admin/accounts/:id/removal": "app",

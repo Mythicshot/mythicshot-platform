@@ -56,6 +56,8 @@ const wizard = (method: string, path: string, status: number, body?: unknown): R
 const session = (method: string, path: string, status: number, body?: unknown): Row => ({ method, path, body, one: status, tours: 404, app: status, unknown: 421, img: 404 });
 /** A sign-in page or one of its files: static, on the app address only (on any host in one-address mode). */
 const page = (path: string): Row => ({ method: "GET", path, one: 200, tours: 404, app: 200, unknown: 421, img: 404 });
+/** A visitor proving an address (src/viewers.ts): on the tours address only (on any host in one-address mode). */
+const viewer = (method: string, path: string, status: number, body?: unknown): Row => ({ method, path, body, one: status, tours: status, app: 404, unknown: 421, img: 404 });
 /** An admin route: the one 404 to anyone but an admin's session, and on the app address only. */
 const admin = (method: string, path: string, body?: unknown): Row => ({ method, path, body, one: 404, tours: 404, app: 404, unknown: 421, img: 404 });
 
@@ -141,6 +143,14 @@ const ROWS: Record<string, Row> = {
   // accept's session cookie belongs. A code nobody was given is the one 404.
   "POST /api/v1/invite/check": session("POST", "/api/v1/invite/check", 404, { code: "dpi_" + "0".repeat(40) }),
   "POST /api/v1/invite/accept": session("POST", "/api/v1/invite/accept", 404, { code: "dpi_" + "0".repeat(40), username: "newcomer" }),
+  // A visitor proving an address: no credential, on the tours address only, where the viewer
+  // cookie belongs. Asking for a link answers 202 whatever the tour; a code nobody was given
+  // is the one 404; signing out answers 204 with or without a viewer session; the session 401 without one.
+  "POST /api/v1/view/request": viewer("POST", "/api/v1/view/request", 202, { email: "nobody@example.com", slug: "nosuchtour" }),
+  "POST /api/v1/view/check": viewer("POST", "/api/v1/view/check", 404, { code: "dpv_" + "0".repeat(40) }),
+  "POST /api/v1/view/complete": viewer("POST", "/api/v1/view/complete", 404, { code: "dpv_" + "0".repeat(40) }),
+  "POST /api/v1/view/signout": viewer("POST", "/api/v1/view/signout", 204, {}),
+  "GET /api/v1/view/session": viewer("GET", "/api/v1/view/session", 401),
   // The sign-in pages and their two files: on the app address only, like the session they lead to.
   "GET /signin": page("/signin"),
   "GET /signin/link": page("/signin/link"),
@@ -199,8 +209,10 @@ const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|se
 const CONNECT_KEYS = ["POST /api/v1/connect/start", "POST /api/v1/connect/token"];
 /** The site admin's routes. */
 const ADMIN_KEYS = KEYS.filter((k) => k.includes(" /api/v1/admin/"));
+/** A visitor proving an address: the tours address's own part of the API. */
+const VIEWER_KEYS = KEYS.filter((k) => k.includes(" /api/v1/view/"));
 /** The token API: everything under /api/v1/ but the description files, which need no token, the session's own routes and the admin's. */
-const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k) && !SESSION_KEYS.includes(k) && !ADMIN_KEYS.includes(k) && !CONNECT_KEYS.includes(k));
+const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k) && !SESSION_KEYS.includes(k) && !ADMIN_KEYS.includes(k) && !CONNECT_KEYS.includes(k) && !VIEWER_KEYS.includes(k));
 const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 /** The sign-in pages and their stylesheet and script, the invite page and its script, and the dashboard's account pages (/account, /account/email). */
 const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account|invite)(?:\/|$)/.test(k));
@@ -314,6 +326,8 @@ describe("the host-routing matrix", () => {
     expect(HOST_RULES[DOCS_PAGE_KEY]).toBe("app-redirect");
     for (const key of DOCS_FILE_KEYS) expect(HOST_RULES[key], key).toBe("app");
     for (const key of SESSION_KEYS) expect(HOST_RULES[key], key).toBe("app");
+    for (const key of VIEWER_KEYS) expect(HOST_RULES[key], key).toBe("tours");
+    expect(VIEWER_KEYS.length).toBe(5);
     for (const key of ADMIN_KEYS) expect(HOST_RULES[key], key).toBe("app");
     for (const key of PAGE_KEYS) expect(HOST_RULES[key], key).toBe("app");
     for (const key of DASH_KEYS) expect(HOST_RULES[key], key).toBe("app");

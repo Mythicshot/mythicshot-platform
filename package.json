@@ -1,6 +1,6 @@
 {
   "name": "demo-platform",
-  "version": "0.1.36",
+  "version": "0.1.38",
   "private": true,
   "description": "Hosted platform for interactive product tours, on Cloudflare or in a container.",
   "type": "module",

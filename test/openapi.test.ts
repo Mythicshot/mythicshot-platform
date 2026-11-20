@@ -32,7 +32,21 @@ const EXAMPLE_ORIGIN = "https://YOUR-SITE";
 const METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "trace"];
 
 /** The operations anyone may call, with no credential at all. */
-const PUBLIC = ["GET /healthz", "POST /api/v1/signin/request", "POST /api/v1/signin/complete", "POST /api/v1/invite/check", "POST /api/v1/invite/accept", "POST /api/v1/connect/start", "POST /api/v1/connect/token"];
+const PUBLIC = [
+  "GET /healthz",
+  "POST /api/v1/signin/request",
+  "POST /api/v1/signin/complete",
+  "POST /api/v1/invite/check",
+  "POST /api/v1/invite/accept",
+  "POST /api/v1/connect/start",
+  "POST /api/v1/connect/token",
+  "POST /api/v1/view/request",
+  "POST /api/v1/view/check",
+  "POST /api/v1/view/complete",
+  "POST /api/v1/view/signout",
+];
+/** The one operation that takes the viewer cookie alone (src/viewers.ts): which address the browser proved. */
+const VIEWER_ONLY = ["GET /api/v1/view/session"];
 /** The operations that take a session and no token. */
 const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "POST /api/v1/connect/lookup", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id"];
 /** The site admin's operations: an admin's session alone, and a 404 (never a 401) to everyone else. */
@@ -213,7 +227,7 @@ describe("the API description", () => {
 
   it("every operation has a tag, a one-line summary, a description, an operationId that is unique, and a 401 unless it is public", () => {
     const doc = openapi();
-    expect(doc.tags.map((t) => t.name)).toEqual(["Tours", "Uploads", "Items", "Workspace", "Accounts", "Connections", "Admin", "Server"]);
+    expect(doc.tags.map((t) => t.name)).toEqual(["Tours", "Uploads", "Items", "Workspace", "Accounts", "Connections", "Admin", "Viewers", "Server"]);
     for (const t of doc.tags) expect(t.description.length, t.name).toBeGreaterThan(10);
     const ids: string[] = [];
     const summaries: string[] = [];
@@ -293,6 +307,11 @@ describe("the API description", () => {
       "List the invites",
       "Send an invite again",
       "Cancel an invite",
+      "Ask for a link to view a shared tour",
+      "Look up a viewer link",
+      "Prove the address of a viewer link",
+      "End this browser's viewer session",
+      "The address this browser proved",
       "Whether the server is up",
     ]);
   });
@@ -361,12 +380,18 @@ describe("the API description", () => {
   it("health, the description and the two sign-in requests are the only public operations", async () => {
     const doc = openapi();
     // The session cookie is the second way to call, beside the token.
-    expect(doc.components.securitySchemes).toEqual({ token: { type: "http", scheme: "bearer" }, session: { type: "apiKey", in: "cookie", name: "__Host-dp_session" } });
+    // The viewer cookie is a third, for the one request that says which address a visitor proved, and no credential of any other.
+    expect(doc.components.securitySchemes).toEqual({
+      token: { type: "http", scheme: "bearer" },
+      session: { type: "apiKey", in: "cookie", name: "__Host-dp_session" },
+      viewer: { type: "apiKey", in: "cookie", name: "__Host-dp_viewer" },
+    });
     const keys = operations(doc).map((o) => o.key);
-    for (const key of [...PUBLIC, ...SESSION_ONLY, ...ADMIN_ONLY]) expect(keys, key).toContain(key);
+    for (const key of [...PUBLIC, ...SESSION_ONLY, ...ADMIN_ONLY, ...VIEWER_ONLY]) expect(keys, key).toContain(key);
     for (const { key, op } of operations(doc)) {
       const sessionOnly = SESSION_ONLY.includes(key) || ADMIN_ONLY.includes(key);
-      const want = PUBLIC.includes(key) ? [] : sessionOnly ? [{ session: [] }] : [{ token: [] }, { session: [] }];
+      const want = PUBLIC.includes(key) ? [] : VIEWER_ONLY.includes(key) ? [{ viewer: [] }] : sessionOnly ? [{ session: [] }] : [{ token: [] }, { session: [] }];
+      if (VIEWER_ONLY.includes(key)) expect(op.description, key).toContain("cannot be tried from the documentation page");
       expect(op.security, key).toEqual(want);
       // An operation a session may call says that the documentation page cannot try it with one.
       if (sessionOnly) expect(op.description, key).toContain("cannot be tried from the documentation page");
