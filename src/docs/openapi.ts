@@ -14,6 +14,7 @@ import { LIMITS } from "../manifest.ts";
 import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../publish.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
 import { DELETE_FILES_PER_CALL } from "../tours.ts";
+import { EMAIL_CHANGE_MS } from "../email-change.ts";
 import { SESSION_COOKIE, SESSION_MS, SIGNIN_CODE_MS } from "../sessions.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS, UPLOAD_MAX_AGE_MS } from "../uploads.ts";
 import { LARGEST_TOURS } from "../usage.ts";
@@ -173,6 +174,8 @@ function introduction(): string {
     "",
     `The site's own pages sign a person in with a link sent by mail: POST /api/v1/signin/request mails the link, and POST /api/v1/signin/complete turns the code in it into a session. The link works once and for ${SIGNIN_CODE_MS / 60_000} minutes. The session is a cookie, ${SESSION_COOKIE}, on the app address only (on a server with one address, on that address); it lasts ${SESSION_MS / 86_400_000} days from its last use. Every request that lists the session can be sent with it instead of a token, and acts in the account's one workspace.`,
     "",
+    `A signed-in person changes the account's email address in two steps: POST /api/v1/account/email mails a link to the new address, and POST /api/v1/account/email/confirm, sent with the code in that link from the same account's session, makes the change, once and within ${EMAIL_CHANGE_MS / 60_000} minutes. The old address is then sent a notice. Both need the session; a token cannot change an address.`,
+    "",
     "A request with a session that changes anything (any method but GET and HEAD) must come from the site's own pages: its Origin must be the address it is sent to, and it must carry the session's anti-forgery value in the header `X-Csrf-Token`, which GET /api/v1/session gives. A token and a session cookie together are refused.",
     "",
     "The documentation page never sends a cookie, so a session cannot be tried from it; with a token, try the requests that take one.",
@@ -331,9 +334,16 @@ function schemas(): Record<string, Schema> {
     ),
     SignInRequest: input(["email"], { email: text(254, "The address to send the link to. Spaces around it are dropped and capitals do not count.", 3) }),
     SignInComplete: input(["code"], { code: { type: "string", pattern: "^dpl_[0-9a-f]{40}$", description: "The code of the link, the part after #c= in its address." } }),
+    EmailChangeRequest: input(["email"], { email: text(254, "The new address, which the link is mailed to. Spaces around it are dropped and capitals do not count.", 3) }),
+    EmailChangeConfirm: input(["code"], { code: { type: "string", pattern: "^dpe_[0-9a-f]{40}$", description: "The code of the link mailed to the new address, the part after #c= in its address." } }),
+    EmailChanged: object(
+      ["email", "previous_email"],
+      { email: { type: "string", description: "The account's address from now on." }, previous_email: { type: "string", description: "The address it had, which was sent a notice." } },
+      "The change was made.",
+    ),
     Ok: object(["ok"], { ok: { type: "boolean", const: true } }),
     Session: object(
-      ["account", "workspace", "session", "csrf"],
+      ["account", "workspace", "session", "csrf", "email_change"],
       {
         account: object(
           ["id", "username", "email", "admin"],
@@ -352,6 +362,7 @@ function schemas(): Record<string, Schema> {
           "This session.",
         ),
         csrf: { type: "string", pattern: "^[0-9a-f]{64}$", description: "The anti-forgery value: send it in the X-Csrf-Token header of every change made with this session." },
+        email_change: { type: "boolean", description: "true when the site can mail the link an email change needs; false when its mail is off, and POST /api/v1/account/email then answers mail_off." },
       },
     ),
     SessionList: object(["sessions"], {
@@ -927,6 +938,39 @@ function paths(): OpenApiDoc["paths"] {
         responses: { "204": { ...empty("Every session of the account has ended."), headers: setCookie("Clears the session cookie.") }, "401": UNAUTHORIZED },
       },
     },
+    "/api/v1/account/email": {
+      post: {
+        tags: ["Accounts"],
+        summary: "Ask to change the email address",
+        description: `Mails a link to the new address; the account's address changes only when that link is opened (POST /api/v1/account/email/confirm), once and within ${EMAIL_CHANGE_MS / 60_000} minutes. Asking again replaces the earlier link. The answer is the same whether the new address is free, belongs to another account or is the account's own, so it does not tell who has an account; only a free address is sent a link, and no other mail is sent. It does not wait for the mail. Each account, each account for one address, and each address from all accounts together, can be asked for only a few times in a quarter hour and in a day; an account that asks too often for one address limits only itself, not others asking for it. ${NOT_FROM_THE_PAGE}`,
+        operationId: "requestEmailChange",
+        security: SESSION,
+        requestBody: { required: true, content: json(ref("EmailChangeRequest")) },
+        responses: {
+          "200": answer("The same for every well-formed address.", ref("Ok")),
+          "400": answer("bad_request: the body is not a JSON object sent as application/json. bad_email, with no detail: email is not an email address.", someDetail("bad_request", "bad_email")),
+          "401": UNAUTHORIZED,
+          "409": refusal("This site cannot send mail, so the address cannot be changed here. Nothing was stored.", "mail_off"),
+          "429": { description: "Too many requests for this account or this address. Nothing was stored or sent.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/account/email/confirm": {
+      post: {
+        tags: ["Accounts"],
+        summary: "Finish changing the email address",
+        description: `Makes the change the code of the link names, once: the account's address becomes the new one, its open sign-in links stop working, and the old address is sent a notice that shows the new one partly hidden. It must be sent with a session of the account that asked. The account stays signed in everywhere. A code that is unknown, already used, more than ${EMAIL_CHANGE_MS / 60_000} minutes old, replaced by a later request or of another account, and one for an address another account has taken since, all get the one answer bad_code. ${NOT_FROM_THE_PAGE}`,
+        operationId: "confirmEmailChange",
+        security: SESSION,
+        requestBody: { required: true, content: json(ref("EmailChangeConfirm")) },
+        responses: {
+          "200": answer("The address was changed.", ref("EmailChanged")),
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. bad_code: the link no longer works; ask for a new one.", "bad_request", "bad_code"),
+          "401": UNAUTHORIZED,
+          "429": { description: "Too many tries for this account. Nothing was looked at.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
+        },
+      },
+    },
     "/api/v1/admin/summary": {
       get: {
         tags: ["Admin"],
@@ -993,7 +1037,7 @@ export function openapi(): OpenApiDoc {
       { name: "Tours", description: "List, rename, publish, unpublish and delete tours, and read a draft step's image." },
       { name: "Uploads", description: "Send a tour, a new chapter or a chapter's replacement: start, one request per image, finish." },
       { name: "Workspace", description: "The workspace a token or a session belongs to." },
-      { name: "Accounts", description: "Signing in with a link sent by mail, and the browser sessions of an account. The site's own pages use these." },
+      { name: "Accounts", description: "Signing in with a link sent by mail, the browser sessions of an account, and changing its email address. The site's own pages use these." },
       { name: "Admin", description: "For the site's admin alone: the site's storage in all, how each account uses its storage, and each workspace's allowance. To anyone else these answer 404." },
       { name: "Server", description: "Whether the server is up. Needs no token." },
     ],

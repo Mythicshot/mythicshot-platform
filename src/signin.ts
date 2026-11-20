@@ -26,18 +26,18 @@ import { requireAuth } from "./auth.ts";
 import { clientAddressOf } from "./client.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
 import { NO_MAIL, linkOrigin, signInLink, signInMail } from "./mail.ts";
-import { deferOf, mailOf, type Deps, type Stmt } from "./ports.ts";
+import { canMailLinks, deferOf, mailOf, type Deps, type Stmt } from "./ports.ts";
 import { LIMITS_SIGNIN, SITE_KEY, SITE_QUIET_KEY, hitLimit, networkKey, recipientKey, sweepCounters, type Limit } from "./rate.ts";
-import { clearedCookie, createSignInCode, csrfFor, readSessionCookie, redeemSignInCode, revokeAll, revokeSession, sameOriginChange, sessionCookie, sessionHost, sweepSessions } from "./sessions.ts";
+import { clearedCookie, createSignInCodeFor, csrfFor, readSessionCookie, redeemSignInCode, revokeAll, revokeSession, sameOriginChange, sessionCookie, sessionHost, sweepSessions } from "./sessions.ts";
 
 /** The longest body the two sign-in requests read: an address is at most 254 characters, a code 44. */
-const MAX_BODY_BYTES = 2048;
+export const MAX_BODY_BYTES = 2048;
 /** The most sessions the list answers. The caller's own is always among them. */
 const MAX_SESSIONS_LISTED = 100;
 
 const CODE_PATTERN = /^dpl_[0-9a-f]{40}$/;
 /** What a mail client says went wrong: the only words of a failure that reach a log line. */
-const MAIL_REASONS: readonly string[] = ["connect", "tls", "auth", "refused", "timeout"];
+export const MAIL_REASONS: readonly string[] = ["connect", "tls", "auth", "refused", "timeout"];
 
 const NEEDS_EMAIL = 'the body must be JSON such as {"email": "name@example.com"}';
 const NEEDS_CODE = 'the body must be JSON such as {"code": "…"}';
@@ -71,7 +71,7 @@ const PAD_WINDOW_MS = 3_600_000;
  * it, and a counter row costs no new table. No limit reads the pad bucket; it is in no
  * entry of LIMITS_SIGNIN, and `sweepCounters` removes its old rows with every other counter's.
  */
-function padStatement(deps: Deps): Stmt {
+export function padStatement(deps: Deps): Stmt {
   const now = deps.now();
   return {
     sql: "INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, 1) ON CONFLICT (bucket, key, window_start) DO UPDATE SET count = count + 1",
@@ -80,12 +80,12 @@ function padStatement(deps: Deps): Stmt {
 }
 
 /** Resolves once the current task is over, so work started now runs only after the answer has been handed back. */
-function afterTheAnswer(): Promise<void> {
+export function afterTheAnswer(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 /** A copy of the answer with one more header. */
-function withHeader(res: Response, name: string, value: string): Response {
+export function withHeader(res: Response, name: string, value: string): Response {
   const headers = new Headers(res.headers);
   headers.set(name, value);
   return new Response(res.body, { status: res.status, headers });
@@ -97,7 +97,7 @@ function withHeader(res: Response, name: string, value: string): Response {
  * page of this address, and its body is labelled JSON and is a JSON object of at most
  * MAX_BODY_BYTES. Answers that object, or the refusal.
  */
-async function ownJsonBody(req: Request, deps: Deps, needs: string): Promise<Record<string, unknown> | Response> {
+export async function ownJsonBody(req: Request, deps: Deps, needs: string): Promise<Record<string, unknown> | Response> {
   // The host gate answers this for the tours address already. Checked again here: no
   // link is asked for, and nobody signed in, on an address that takes no session.
   if (!sessionHost(req, deps)) return json(404, { error: "not_found" });
@@ -163,7 +163,14 @@ async function linkJob(deps: Deps, job: LinkJob): Promise<void> {
   const { userId, workspaceId, to, origin } = job.link;
   let link: string;
   try {
-    const code = await createSignInCode(deps, userId);
+    // Stored only while `to` is still the account's address: an email change may have
+    // committed since the request read the account.
+    const code = await createSignInCodeFor(deps, userId, to);
+    if (code === null) {
+      // No link, and the same one batch the job always writes: one more pad row.
+      await deps.db.batch([padStatement(deps)]);
+      return;
+    }
     await deps.db.batch([auditStatement(deps, { event: "signin_link_sent", userId, workspaceId })]);
     link = signInLink(origin, code);
   } catch {
@@ -259,7 +266,7 @@ export function signinRoutes(app: Hono, deps: Deps): void {
     return withHeader(json(200, { ok: true }), "set-cookie", sessionCookie(made.secret));
   });
 
-  /** Who the session is: the account, its workspace, this session, and the anti-forgery value a change needs. Sets the cookie again. */
+  /** Who the session is: the account, its workspace, this session, the anti-forgery value a change needs, and whether the email address can be changed. Sets the cookie again. */
   app.get("/api/v1/session", async (c) => {
     const req = c.req.raw;
     const auth = await requireAuth(req, deps, { only: "session" });
@@ -282,6 +289,9 @@ export function signinRoutes(app: Hono, deps: Deps): void {
       workspace: { id: auth.workspaceId, name: row.name },
       session: { id: auth.session.id, created_at: row.created_at, expires_at: row.expires_at },
       csrf: await csrfFor(secret),
+      // Whether the account page may offer to change the email address: only a site that
+      // can mail the link to the new address can.
+      email_change: canMailLinks(deps),
     });
     return withHeader(answer, "set-cookie", sessionCookie(secret));
   });

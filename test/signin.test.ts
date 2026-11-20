@@ -267,6 +267,35 @@ describe("asking for a sign-in link", () => {
     expect(left).toEqual([{ window_start: clock.now - (clock.now % hour) }]);
   });
 
+  it("an address that stops being the account's between the answer and the job gets no link: no code, no record, no mail, the same calls", async () => {
+    const { deps, mail, a } = await site();
+    const statements: string[] = [];
+    recordKinds(deps, statements);
+    // An email change commits after the request read the account and before its job stores the code.
+    const db = deps.db;
+    deps.db = {
+      ...db,
+      all: (sql, params) => db.all(sql, params),
+      first: (sql, params) => db.first(sql, params),
+      run: async (sql, params) => {
+        if (sql.includes("INSERT INTO signin_code")) await db.run("UPDATE user SET email = ? WHERE id = ?", ["moved-on@example.com", a.userId]);
+        return db.run(sql, params);
+      },
+      batch: (stmts) => db.batch(stmts),
+    };
+    const r = await ask(deps, a.email, { app: answered([statements]) });
+    expect(seen(r)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
+    const calls = split(statements);
+    expect(calls.before.map((x) => x.split(" ")[0])).toEqual(AWAITED);
+    // The job made the same kinds of calls as always: one write, then one batch.
+    const ownCalls = calls.after.filter((x) => !x.startsWith("run UPDATE user"));
+    expect(ownCalls.map((x) => x.split(" ")[0])).toEqual(JOB);
+    expect(ownCalls[0]).toMatch(/^run INSERT INTO signin_code/);
+    expect(mail.sent).toEqual([]);
+    expect(await countOf(deps, "signin_code")).toBe(0);
+    expect(await countOf(deps, "audit")).toBe(0);
+  });
+
   it("the job starts only after the answer, also when nothing in it has to wait", async () => {
     const { deps } = await site();
     const kinds = recordKinds(deps);
@@ -765,8 +794,9 @@ describe("the session", () => {
       workspace: { id: a.workspaceId, name: "Account" },
       session: { id: s.sessionId, created_at: NOW, expires_at: NOW + 2_592_000_000 },
       csrf: s.csrf,
+      email_change: true,
     });
-    expect(Object.keys(r.json)).toEqual(["account", "workspace", "session", "csrf"]);
+    expect(Object.keys(r.json)).toEqual(["account", "workspace", "session", "csrf", "email_change"]);
     expect(Object.keys(r.json.account)).toEqual(["id", "username", "email", "admin"]);
     expect(r.json.csrf).toMatch(/^[0-9a-f]{64}$/);
     expect(r.text).not.toMatch(SECRET);

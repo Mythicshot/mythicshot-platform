@@ -19,6 +19,9 @@ export const AUDIT_EVENTS = [
   "signout_everywhere",
   "session_revoked",
   "allowance_set",
+  "email_change_requested",
+  "email_changed",
+  "email_changed_on_server",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 
@@ -48,8 +51,8 @@ const ROW_ID = /^[a-z]{2,4}_[0-9a-f]{24}$/;
 /** A detail key or text value: a lowercase letter, then at most 39 lowercase letters, digits and underscores. */
 const WORD = /^[a-z][a-z0-9_]{0,39}$/;
 
-/** The prefix of a token (`dp_`), a sign-in code (`dpl_`) or a session secret (`dps_`) with hex after it: a word can be most of one. */
-const SECRET_PREFIX = /dp[ls]?_[0-9a-f]{8}/;
+/** The prefix of a token (`dp_`), a sign-in code (`dpl_`), an email-change code (`dpe_`) or a session secret (`dps_`) with hex after it: a word can be most of one. */
+const SECRET_PREFIX = /dp[lse]?_[0-9a-f]{8}/;
 
 /** 32 or more hex characters in a row: a digest, or the random part of a secret. */
 const LONG_HEX = /[0-9a-f]{32}/;
@@ -113,7 +116,9 @@ function newAuditId(): string {
 /**
  * The statement that records one event, for the caller to run in the same batch as the
  * action itself, so the record and the action are written together or not at all.
- * Nothing is written by calling this. The time is `deps.now()`.
+ * Nothing is written by calling this. The time is `deps.now()`. With `onlyAfterOneChange`,
+ * the row also guards the batch: placed right after another statement, it fails (and so
+ * undoes the batch) unless that statement changed exactly one row.
  *
  * Throws `Error("audit: unknown event")` for an event outside `AUDIT_EVENTS`, and
  * `Error("audit: a value that must not be recorded")` when:
@@ -131,14 +136,21 @@ function newAuditId(): string {
  * repeats the value. The JSON of the largest detail is under 1000 bytes, the most the
  * table takes.
  */
-export function auditStatement(deps: Deps, e: AuditEntry): Stmt {
+export function auditStatement(deps: Deps, e: AuditEntry, opts: { onlyAfterOneChange?: boolean } = {}): Stmt {
   if (typeof e.event !== "string" || !(AUDIT_EVENTS as readonly string[]).includes(e.event)) throw new Error("audit: unknown event");
   const userId = idField(e.userId);
   const workspaceId = idField(e.workspaceId);
   const subject = idField(e.subject);
   const detail = detailText(e.detail);
   return {
-    sql: "INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    // With onlyAfterOneChange the row is the guard of a batch: it must come right after the
+    // statement it judges, and unless that statement changed exactly one row its time is
+    // NULL, which the column refuses, so the whole batch is undone. changes() is the count
+    // of the last statement that finished on the connection, on both targets.
+    sql:
+      opts.onlyAfterOneChange === true
+        ? "INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES (?, CASE WHEN changes() = 1 THEN ? END, ?, ?, ?, ?, ?)"
+        : "INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
     params: [newAuditId(), deps.now(), e.event, userId, workspaceId, subject, detail],
   };
 }

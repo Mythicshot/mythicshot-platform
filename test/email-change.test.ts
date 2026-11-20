@@ -1,0 +1,792 @@
+// Changing an account's email address (src/email-change.ts): asking for a change, which
+// mails a link to the new address, and confirming it, which changes the address once and
+// mails a notice to the old one. Runs on both targets. No mail is sent: every mailer here is
+// the fake one, or one made in the test.
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { makeDeps, seedAccount, type MakeOptions } from "#harness";
+import { setEmailOnServer } from "../src/admin.ts";
+import { createApp } from "../src/app.ts";
+import { EMAIL_CHANGE_LINES, EMAIL_CHANGE_MS, confirmEmailChange } from "../src/email-change.ts";
+import { emailChangedMail, emailChangeLink, emailChangeMail, maskEmail } from "../src/mail.ts";
+import type { Config, Db, Deps } from "../src/ports.ts";
+import { LIMITS_EMAIL_CHANGE, LIMITS_SIGNIN, SITE_KEY, accountKey, pairKey, recipientKey } from "../src/rate.ts";
+import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
+import { PAD_BUCKET } from "../src/signin.ts";
+import { send, type Call, type SendOptions } from "./bundle.ts";
+
+const NOW = 1_800_000_000_000;
+const APP = "https://app.example.com";
+const TOURS = "https://tours.example.com";
+const TWO: Partial<Config> = { hosts: { tours: "tours.example.com", app: "app.example.com" } };
+const FIREFOX = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
+const NEW = "new-address@example.com";
+
+const OK = '{"ok":true}';
+const UNAUTHORIZED = '{"error":"unauthorized"}';
+const BAD_EMAIL = '{"error":"bad_email"}';
+const BAD_CODE = '{"error":"bad_code","detail":"This link no longer works. Ask for a new one from your account page."}';
+const MAIL_OFF = '{"error":"mail_off","detail":"This site cannot send mail, so an email address cannot be changed here."}';
+const RATE_LIMITED = '{"error":"rate_limited","detail":"Too many requests. Wait a few minutes and try again."}';
+const BAD_CSRF = '{"error":"bad_csrf","detail":"the anti-forgery header is missing or wrong"}';
+const BAD_ORIGIN = '{"error":"bad_origin","detail":"this request must come from the site\'s own pages"}';
+const API_HEADERS = [
+  ["cache-control", "no-store"],
+  ["content-type", "application/json"],
+  ["x-content-type-options", "nosniff"],
+];
+const EMAIL_CODE = /dpe_[0-9a-f]{40}/g;
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+/** A site with a clock the test moves, an admin and two more accounts. */
+async function site(config: Partial<Config> = TWO, opts: MakeOptions = {}) {
+  const made = await makeDeps(config, opts);
+  const clock = { now: NOW };
+  made.deps.now = () => clock.now;
+  const admin = await seedAccount(made.deps, { admin: true, username: "boss" });
+  const a = await seedAccount(made.deps, { username: "alice" });
+  const b = await seedAccount(made.deps);
+  return { ...made, clock, admin, a, b };
+}
+
+type Signed = { secret: string; sessionId: string; userId: string; cookie: string; csrf: string };
+
+/** A session made as the server makes one. */
+async function signIn(deps: Deps, userId: string): Promise<Signed> {
+  const made = await redeemSignInCode(deps, await createSignInCode(deps, userId), FIREFOX, null);
+  if (made === null) throw new Error("the sign-in was refused");
+  return { ...made, cookie: `${SESSION_COOKIE}=${made.secret}`, csrf: await csrfFor(made.secret) };
+}
+
+/** The headers the site's own page on `origin` sends a change with. */
+const page = (s: Signed, origin = APP): Record<string, string> => ({ cookie: s.cookie, origin, "x-csrf-token": s.csrf, "sec-fetch-site": "same-origin", "content-type": "application/json" });
+
+function post(deps: Deps, path: string, body: unknown, s: Signed | null, more: SendOptions & { origin?: string } = {}): Promise<Call> {
+  const origin = more.origin ?? APP;
+  return send(deps, "POST", path, {
+    ...more,
+    origin,
+    body: typeof body === "string" ? body : JSON.stringify(body),
+    headers: { ...(s === null ? { "content-type": "application/json", origin } : page(s, origin)), ...more.headers },
+  });
+}
+
+const ask = (deps: Deps, s: Signed | null, email: unknown, more: SendOptions = {}) => post(deps, "/api/v1/account/email", { email }, s, more);
+const confirm = (deps: Deps, s: Signed | null, code: unknown, more: SendOptions = {}) => post(deps, "/api/v1/account/email/confirm", { code }, s, more);
+
+/** Everything a client can see of an answer. */
+const seen = (c: Call) => ({ status: c.status, headers: [...c.headers.entries()].sort(), body: c.text });
+
+/** The one email-change code in a mail. */
+function codeIn(text: string): string {
+  const found = text.match(EMAIL_CODE) ?? [];
+  expect(found, "a mail holds its code once").toHaveLength(1);
+  return found[0] ?? "";
+}
+
+const emailOf = async (deps: Deps, userId: string) => (await deps.db.first<{ email: string }>("SELECT email FROM user WHERE id = ?", [userId]))!.email;
+const countOf = async (deps: Deps, table: string) => (await deps.db.first<{ n: number }>(`SELECT count(*) AS n FROM ${table}`))!.n;
+const changes = (deps: Deps) => deps.db.all<Record<string, unknown>>("SELECT * FROM email_change ORDER BY user_id");
+const padCount = async (deps: Deps) => (await deps.db.first<{ n: number }>("SELECT coalesce(sum(count), 0) AS n FROM rate_counter WHERE bucket = ?", [PAD_BUCKET]))!.n;
+
+/** Records the kind of every database call made through `deps.db` from now on. */
+function recordKinds(deps: Deps): string[] {
+  const kinds: string[] = [];
+  const db = deps.db;
+  const wrapped: Db = {
+    all: (sql, params) => (kinds.push("all"), db.all(sql, params)),
+    first: (sql, params) => (kinds.push("first"), db.first(sql, params)),
+    run: (sql, params) => (kinds.push("run"), db.run(sql, params)),
+    batch: (stmts) => (kinds.push(`batch ${stmts.length}: ${stmts.map((x) => x.sql.replace(/\s+/g, " ").trim()).join(" | ")}`), db.batch(stmts)),
+  };
+  deps.db = wrapped;
+  return kinds;
+}
+
+const ANSWER = "| answer";
+/** The app that puts ANSWER into the list the moment the answer is handed back. */
+const answered = (list: string[]) => (deps: Deps) => ({
+  fetch: async (req: Request) => {
+    const res = await createApp(deps).fetch(req);
+    list.push(ANSWER);
+    return res;
+  },
+});
+function split(list: string[]): { before: string[]; after: string[] } {
+  const all = list.splice(0);
+  const at = all.indexOf(ANSWER);
+  expect(at, "the answer was marked").toBeGreaterThanOrEqual(0);
+  return { before: all.slice(0, at), after: all.slice(at + 1) };
+}
+
+/** Asks for a change to `email` as `s` and returns the code the mail to it holds. */
+async function askedCode(deps: Deps, mail: { sent: { to: string; text: string }[] }, s: Signed, email: string): Promise<string> {
+  const before = mail.sent.length;
+  const r = await ask(deps, s, email);
+  expect(r.text).toBe(OK);
+  expect(mail.sent.length, "one link was mailed").toBe(before + 1);
+  const sent = mail.sent[mail.sent.length - 1];
+  expect(sent.to).toBe(email);
+  return codeIn(sent.text);
+}
+
+describe("asking for an email change", () => {
+  it("mails a link to the new address and stores only the digest of its code; the address does not change yet", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const r = await ask(deps, s, `  ${NEW.toUpperCase()} `);
+    expect(seen(r)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
+    expect(r.headers.getSetCookie()).toEqual([]);
+    expect(mail.sent).toHaveLength(1);
+    const code = codeIn(mail.sent[0].text);
+    expect(mail.sent[0]).toEqual({
+      to: NEW,
+      subject: "Confirm your new Mythicshot email address",
+      text: [
+        "Open this link to make this the email address of your Mythicshot account:",
+        "",
+        `${APP}/account/email#c=${code}`,
+        "",
+        "It works once and for 15 minutes, in the browser where you are signed in. Until it is opened, nothing changes. If you did not ask for this, ignore this mail.",
+        "",
+      ].join("\n"),
+    });
+    // The mail names neither the account nor its present address.
+    expect(mail.sent[0].text).not.toContain(a.email);
+    expect(mail.sent[0].text).not.toContain("alice");
+    const rows = await changes(deps);
+    expect(rows).toEqual([{ id: expect.stringMatching(/^emc_[0-9a-f]{24}$/), user_id: a.userId, new_email: NEW, code_hash: expect.stringMatching(/^[0-9a-f]{64}$/), created_at: NOW, used_at: null }]);
+    expect(JSON.stringify(rows)).not.toContain(code.slice(4));
+    expect(await emailOf(deps, a.userId)).toBe(a.email);
+    expect(await deps.db.all("SELECT event, user_id, workspace_id, subject, detail FROM audit WHERE event LIKE 'email%'")).toEqual([
+      { event: "email_change_requested", user_id: a.userId, workspace_id: a.workspaceId, subject: a.userId, detail: null },
+    ]);
+  });
+
+  it("answers the same for a free address, another account's and the caller's own: status, body, headers and database calls", async () => {
+    const { deps, mail, a, b } = await site();
+    const s = await signIn(deps, a.userId);
+    const kinds = recordKinds(deps);
+    const app = answered(kinds);
+
+    const free = await ask(deps, s, NEW, { app });
+    const freeCalls = split(kinds);
+    const taken = await ask(deps, s, b.email, { app });
+    const takenCalls = split(kinds);
+    const own = await ask(deps, s, a.email, { app });
+    const ownCalls = split(kinds);
+
+    expect(seen(free)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
+    expect(seen(taken)).toEqual(seen(free));
+    expect(seen(own)).toEqual(seen(free));
+    // Before the answer: the session, the six counts (two per account, two per account and
+    // address, two per address), the one read, the mail cap, the sweep.
+    expect(freeCalls.before).toEqual(["all", "first", "first", "first", "first", "first", "first", "first", "first", "run"]);
+    expect(takenCalls.before).toEqual(freeCalls.before);
+    expect(ownCalls.before).toEqual(freeCalls.before);
+    // After it, one batch of the very same two statements each way, statement for statement:
+    // the account's change replaced (for a taken or own address by one nobody can confirm), and the audit row.
+    expect(freeCalls.after).toHaveLength(1);
+    expect(freeCalls.after[0]).toMatch(/^batch 2: INSERT INTO email_change .* \| INSERT INTO audit /);
+    expect(takenCalls.after).toEqual(freeCalls.after);
+    expect(ownCalls.after).toEqual(freeCalls.after);
+    // No pad is needed: every path writes the same rows.
+    expect(await padCount(deps)).toBe(0);
+
+    // A taken address: no link and no mail, neither to it nor to anyone. The free one did get its link.
+    expect(mail.sent.map((m) => m.to)).toEqual([NEW]);
+    // The account's one row is now the last request's, ended at once: it can never be confirmed.
+    expect(await changes(deps)).toEqual([expect.objectContaining({ user_id: a.userId, new_email: a.email, used_at: NOW })]);
+    expect(await emailOf(deps, a.userId)).toBe(a.email);
+    expect(await emailOf(deps, b.userId)).toBe(b.email);
+    // Each request is in the audit record, by ids alone.
+    expect(await countOf(deps, "audit WHERE event = 'email_change_requested'")).toBe(3);
+  });
+
+  it("asking for a taken address ends the change the account asked for before, as asking for a free one does", async () => {
+    const { deps, mail, a, b } = await site();
+    const s = await signIn(deps, a.userId);
+    const code = await askedCode(deps, mail, s, NEW);
+    expect((await ask(deps, s, b.email)).text).toBe(OK);
+    expect(seen(await confirm(deps, s, code))).toEqual({ status: 400, headers: API_HEADERS, body: BAD_CODE });
+    expect(await emailOf(deps, a.userId)).toBe(a.email);
+  });
+
+  it("a pending change tells nothing of a later request: ask for a mailbox of one's own, ask for another address, confirm the first; the same refusal whoever has it", async () => {
+    const answers: string[] = [];
+    for (const which of ["free", "taken", "own"] as const) {
+      const { deps, mail, a, b } = await site();
+      const s = await signIn(deps, a.userId);
+      const code = await askedCode(deps, mail, s, "mine-too@example.com");
+      const probe = which === "free" ? "nobody-here@example.com" : which === "taken" ? b.email : a.email;
+      expect((await ask(deps, s, probe)).text, which).toBe(OK);
+      const r = await confirm(deps, s, code);
+      expect(seen(r), which).toEqual({ status: 400, headers: API_HEADERS, body: BAD_CODE });
+      answers.push(JSON.stringify(seen(r)));
+      expect(await emailOf(deps, a.userId), which).toBe(a.email);
+    }
+    expect(new Set(answers).size).toBe(1);
+  });
+
+  it("refuses an address that is not one: a NUL, a line break, too long, odd unicode", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const bad = [
+      "",
+      "not an address",
+      "a\u0000@example.com",
+      "a@example.com\u0000",
+      "a@example.com\n",
+      "a@exa\nmple.com",
+      `${"a".repeat(65)}@example.com`,
+      `a@${"b".repeat(250)}.com`,
+      "\u00e4@example.com",
+      "a@ex\u00e4mple.com",
+      "\uff41@example.com",
+      "a\u200b@example.com",
+      "a@example.com\u202e",
+      "a@@example.com",
+      "a@localhost",
+      "<a@example.com>",
+      42,
+      null,
+      ["a@example.com"],
+    ];
+    for (const email of bad) {
+      const r = await ask(deps, s, email);
+      expect([r.status, r.text], JSON.stringify(email)).toEqual([400, BAD_EMAIL]);
+    }
+    expect(mail.sent).toEqual([]);
+    expect(await countOf(deps, "email_change")).toBe(0);
+    // Refused before anything was counted.
+    expect(await countOf(deps, "rate_counter WHERE bucket LIKE 'email%'")).toBe(0);
+  });
+
+  it("takes a session only: a token, no credential and both are refused, and nothing is stored", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const byToken = await send(deps, "POST", "/api/v1/account/email", { origin: APP, token: a.token, body: JSON.stringify({ email: NEW }), headers: { "content-type": "application/json" } });
+    expect([byToken.status, byToken.text]).toEqual([401, UNAUTHORIZED]);
+    const nobody = await ask(deps, null, NEW);
+    expect([nobody.status, nobody.text]).toEqual([401, UNAUTHORIZED]);
+    const both = await ask(deps, s, NEW, { token: a.token });
+    expect(both.status).toBe(400);
+    const tokenConfirm = await send(deps, "POST", "/api/v1/account/email/confirm", { origin: APP, token: a.token, body: JSON.stringify({ code: "dpe_" + "0".repeat(40) }), headers: { "content-type": "application/json" } });
+    expect([tokenConfirm.status, tokenConfirm.text]).toEqual([401, UNAUTHORIZED]);
+    expect(mail.sent).toEqual([]);
+    expect(await countOf(deps, "email_change")).toBe(0);
+  });
+
+  it("refuses a change without the anti-forgery header or from another origin, on both routes", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const code = await askedCode(deps, mail, s, NEW);
+    for (const path of ["/api/v1/account/email", "/api/v1/account/email/confirm"]) {
+      const body = path.endsWith("confirm") ? { code } : { email: "other@example.com" };
+      const noCsrf = await post(deps, path, body, s, { headers: { "x-csrf-token": "" } });
+      expect([noCsrf.status, noCsrf.text], path).toEqual([403, BAD_CSRF]);
+      const wrongCsrf = await post(deps, path, body, s, { headers: { "x-csrf-token": "0".repeat(64) } });
+      expect([wrongCsrf.status, wrongCsrf.text], path).toEqual([403, BAD_CSRF]);
+      const elsewhere = await post(deps, path, body, s, { headers: { origin: "https://evil.example.net" } });
+      expect([elsewhere.status, elsewhere.text], path).toEqual([403, BAD_ORIGIN]);
+      const crossSite = await post(deps, path, body, s, { headers: { "sec-fetch-site": "cross-site" } });
+      expect([crossSite.status, crossSite.text], path).toEqual([403, BAD_ORIGIN]);
+    }
+    expect(mail.sent).toHaveLength(1);
+    expect(await emailOf(deps, a.userId)).toBe(a.email);
+    expect((await changes(deps))[0].used_at).toBeNull();
+  });
+
+  it("answers only on the app address: the tours address says not found, and stores nothing", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    for (const path of ["/api/v1/account/email", "/api/v1/account/email/confirm"]) {
+      const r = await post(deps, path, { email: NEW, code: "dpe_" + "0".repeat(40) }, s, { origin: TOURS });
+      expect([r.status, r.text], path).toEqual([404, '{"error":"not_found"}']);
+    }
+    expect(mail.sent).toEqual([]);
+    expect(await countOf(deps, "email_change")).toBe(0);
+  });
+
+  it("with mail off, or no address for links, answers mail_off, counts and stores nothing, and the session says so", async () => {
+    for (const [what, config, opts] of [
+      ["no mailer", TWO, { mail: false }],
+      ["no address for links", {}, {}],
+    ] as const) {
+      const { deps, mail, a } = await site(config, opts);
+      const s = await signIn(deps, a.userId);
+      const r = await ask(deps, s, NEW);
+      expect(seen(r), what).toEqual({ status: 409, headers: API_HEADERS, body: MAIL_OFF });
+      expect(mail.sent, what).toEqual([]);
+      expect(await countOf(deps, "email_change"), what).toBe(0);
+      expect(await countOf(deps, "rate_counter"), what).toBe(0);
+      const session = await send(deps, "GET", "/api/v1/session", { origin: config === TWO ? APP : "https://one.example.com", headers: { cookie: s.cookie } });
+      expect(session.json.email_change, what).toBe(false);
+    }
+    const { deps, a } = await site();
+    const s = await signIn(deps, a.userId);
+    expect((await send(deps, "GET", "/api/v1/session", { origin: APP, headers: { cookie: s.cookie } })).json.email_change).toBe(true);
+    // One address with SITE_HOST: links can be mailed.
+    const one = await site({ siteHost: "demo.example.com" });
+    const t = await signIn(one.deps, one.a.userId);
+    expect((await send(one.deps, "GET", "/api/v1/session", { origin: "https://demo.example.com", headers: { cookie: t.cookie } })).json.email_change).toBe(true);
+    const asked = await ask(one.deps, t, NEW, { origin: "https://demo.example.com" });
+    expect(asked.text).toBe(OK);
+    expect(codeIn(one.mail.sent[0].text)).toMatch(EMAIL_CODE);
+    expect(one.mail.sent[0].text).toContain("https://demo.example.com/account/email#c=dpe_");
+  });
+
+  it("counts per account: three in a quarter hour, ten in a day; over that, 429 with the sentence and nothing sent", async () => {
+    const { deps, mail, clock, a } = await site();
+    const s = await signIn(deps, a.userId);
+    for (let i = 0; i < 3; i++) expect((await ask(deps, s, `free-${i}@example.com`)).text).toBe(OK);
+    const over = await ask(deps, s, "free-3@example.com");
+    expect([over.status, over.text]).toEqual([429, RATE_LIMITED]);
+    expect(Number(over.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(Number(over.headers.get("retry-after"))).toBeLessThanOrEqual(900);
+    expect(mail.sent).toHaveLength(3);
+    // The next quarter hours count again, up to ten tries in the day; the refused one counted too.
+    for (const quarter of [1, 2]) {
+      clock.now = NOW + quarter * 900_000;
+      for (let i = 0; i < 3; i++) expect((await ask(deps, s, `later-${quarter}-${i}@example.com`)).text).toBe(OK);
+    }
+    clock.now = NOW + 3 * 900_000;
+    const day = await ask(deps, s, "one-more@example.com");
+    expect([day.status, day.text]).toEqual([429, RATE_LIMITED]);
+    expect(mail.sent).toHaveLength(9);
+    // The counters hold digests, never the account's id or an address.
+    const keys = await deps.db.all<{ key: string }>("SELECT key FROM rate_counter WHERE bucket LIKE 'email%' AND bucket <> ?", [LIMITS_EMAIL_CHANGE.mailSite.bucket]);
+    for (const { key } of keys) expect(key).toMatch(/^[0-9a-f]{64}$/);
+    expect(keys.map((k) => k.key)).toContain(await accountKey(a.userId));
+  });
+
+  it("counts per account and address: one account using up its tries for an address limits only itself", async () => {
+    const { deps, mail, a, b } = await site();
+    const sa = await signIn(deps, a.userId);
+    const sb = await signIn(deps, b.userId);
+    expect((await ask(deps, sa, NEW)).text).toBe(OK);
+    expect((await ask(deps, sa, NEW)).text).toBe(OK);
+    const over = await ask(deps, sa, NEW);
+    expect([over.status, over.text]).toEqual([429, RATE_LIMITED]);
+    // The other account's first request for that address is not refused, and gets its link.
+    const first = await ask(deps, sb, NEW);
+    expect(seen(first)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
+    expect(mail.sent.map((m) => m.to)).toEqual([NEW, NEW, NEW]);
+    // The pair's counter holds a digest of the two, never the account's id or the address.
+    const pair = await deps.db.all<{ key: string }>("SELECT key FROM rate_counter WHERE bucket = ?", [LIMITS_EMAIL_CHANGE.requestPair.bucket]);
+    expect(pair.map((r) => r.key).sort()).toEqual([await pairKey(a.userId, NEW), await pairKey(b.userId, NEW)].sort());
+    for (const { key } of pair) expect(key).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("counts per address across all accounts, higher, and whether or not the address is taken", async () => {
+    const { deps, mail, b } = await site();
+    const sessions: Signed[] = [];
+    for (let i = 0; i < 7; i++) sessions.push(await signIn(deps, (await seedAccount(deps)).userId));
+    for (const s of sessions.slice(0, 6)) expect((await ask(deps, s, NEW)).text).toBe(OK);
+    const over = await ask(deps, sessions[6], NEW);
+    expect([over.status, over.text]).toEqual([429, RATE_LIMITED]);
+    expect(mail.sent).toHaveLength(6);
+    // A taken address is counted the same, so the 429 says nothing about it.
+    for (const s of sessions.slice(0, 6)) expect((await ask(deps, s, b.email)).text).toBe(OK);
+    expect((await ask(deps, sessions[6], b.email)).text).toBe(RATE_LIMITED);
+    expect(await deps.db.first("SELECT count FROM rate_counter WHERE bucket = ? AND key = ?", [LIMITS_EMAIL_CHANGE.requestRecipient.bucket, await recipientKey(b.email)])).toEqual({ count: 7 });
+    expect(LIMITS_EMAIL_CHANGE.requestRecipient.most).toBeGreaterThan(LIMITS_EMAIL_CHANGE.requestPair.most);
+    expect(LIMITS_EMAIL_CHANGE.requestRecipientDay.most).toBeGreaterThan(LIMITS_EMAIL_CHANGE.requestPairDay.most);
+  });
+
+  it("email change has its own hourly mail cap: when it is reached the answer is the same, nothing is sent, one fixed line is written, and sign-in mail still goes", async () => {
+    const { deps, mail, a, b } = await site();
+    const s = await signIn(deps, a.userId);
+    const cap = LIMITS_EMAIL_CHANGE.mailSite;
+    expect(cap.bucket).not.toBe(LIMITS_SIGNIN.mailSite.bucket);
+    expect(cap.most).toBeLessThan(LIMITS_SIGNIN.mailSite.most);
+    await deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?)", [cap.bucket, SITE_KEY, NOW - (NOW % cap.windowMs), cap.most]);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const r = await ask(deps, s, NEW);
+    expect(seen(r)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
+    expect(mail.sent).toEqual([]);
+    // No change is left open: the request ended any earlier one, as every request does.
+    expect(await countOf(deps, "email_change WHERE used_at IS NULL")).toBe(0);
+    expect(errors.mock.calls).toEqual([[EMAIL_CHANGE_LINES.hour]]);
+    // Sign-in mail is not counted against it, and is not stopped by it.
+    expect(await countOf(deps, `rate_counter WHERE bucket = '${LIMITS_SIGNIN.mailSite.bucket}'`)).toBe(0);
+    const link = await send(deps, "POST", "/api/v1/signin/request", { origin: APP, body: JSON.stringify({ email: b.email }), headers: { "content-type": "application/json", origin: APP, "sec-fetch-site": "same-origin" } });
+    expect(link.text).toBe(OK);
+    expect(mail.sent.map((m) => m.to)).toEqual([b.email]);
+  });
+
+  it("the sign-in mail cap does not stop an email-change link, and a link is counted under email change's own cap only", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const signinCap = LIMITS_SIGNIN.mailSite;
+    await deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?)", [signinCap.bucket, SITE_KEY, NOW - (NOW % signinCap.windowMs), signinCap.most]);
+    expect((await ask(deps, s, NEW)).text).toBe(OK);
+    expect(mail.sent.map((m) => m.to)).toEqual([NEW]);
+    expect(await deps.db.first("SELECT count FROM rate_counter WHERE bucket = ? AND key = ?", [signinCap.bucket, SITE_KEY])).toEqual({ count: signinCap.most });
+    expect(await deps.db.first("SELECT count FROM rate_counter WHERE bucket = ? AND key = ?", [LIMITS_EMAIL_CHANGE.mailSite.bucket, SITE_KEY])).toEqual({ count: 1 });
+  });
+
+  it("a mail that cannot be sent is one fixed line without the address, and the change waits for a new request", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    mail.failNext();
+    const r = await ask(deps, s, NEW);
+    expect(r.text).toBe(OK);
+    expect(errors.mock.calls).toEqual([["mail: an email-change mail could not be sent (failed)"]]);
+    expect(JSON.stringify(errors.mock.calls)).not.toContain(NEW);
+  });
+});
+
+describe("confirming an email change", () => {
+  it("changes the address once, keeps the sessions signed in, mails the notice to the old address and records it by ids", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const other = await signIn(deps, a.userId);
+    const code = await askedCode(deps, mail, s, NEW);
+    const r = await confirm(deps, s, code);
+    expect(seen(r)).toEqual({ status: 200, headers: API_HEADERS, body: JSON.stringify({ email: NEW, previous_email: a.email }) });
+    expect(await emailOf(deps, a.userId)).toBe(NEW);
+    expect(mail.sent[1]).toEqual({
+      to: a.email,
+      subject: "Your Mythicshot email address was changed",
+      text: ['The email address of the Mythicshot account "alice" was changed to n…@example.com.', "", "If this was you, there is nothing to do.", "If it was not, answer this mail or contact the person who runs this site.", ""].join("\n"),
+    });
+    expect(mail.sent).toHaveLength(2);
+    // Both sessions are still signed in, and the session shows the new address.
+    for (const t of [s, other]) {
+      const session = await send(deps, "GET", "/api/v1/session", { origin: APP, headers: { cookie: t.cookie } });
+      expect(session.status).toBe(200);
+      expect(session.json.account.email).toBe(NEW);
+    }
+    expect((await changes(deps))[0].used_at).toBe(NOW);
+    expect(await deps.db.all("SELECT event, user_id, workspace_id, subject, detail FROM audit WHERE event = 'email_changed'")).toEqual([
+      { event: "email_changed", user_id: a.userId, workspace_id: a.workspaceId, subject: a.userId, detail: null },
+    ]);
+  });
+
+  it("a link opened twice changes nothing the second time, and gets the one refusal", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const code = await askedCode(deps, mail, s, NEW);
+    expect((await confirm(deps, s, code)).status).toBe(200);
+    const again = await confirm(deps, s, code);
+    expect(seen(again)).toEqual({ status: 400, headers: API_HEADERS, body: BAD_CODE });
+    expect(mail.sent).toHaveLength(2);
+    expect(await countOf(deps, "audit WHERE event = 'email_changed'")).toBe(1);
+  });
+
+  it("a link works for 15 minutes and not a moment longer", async () => {
+    const { deps, mail, clock, a, b } = await site();
+    const sa = await signIn(deps, a.userId);
+    const sb = await signIn(deps, b.userId);
+    const late = await askedCode(deps, mail, sa, NEW);
+    const inTime = await askedCode(deps, mail, sb, "in-time@example.com");
+    clock.now = NOW + EMAIL_CHANGE_MS;
+    const r = await confirm(deps, sa, late);
+    expect(seen(r)).toEqual({ status: 400, headers: API_HEADERS, body: BAD_CODE });
+    expect(await emailOf(deps, a.userId)).toBe(a.email);
+    clock.now = NOW + EMAIL_CHANGE_MS - 1;
+    expect((await confirm(deps, sb, inTime)).status).toBe(200);
+    expect(await emailOf(deps, b.userId)).toBe("in-time@example.com");
+  });
+
+  it("asking again replaces the earlier change: its link no longer works, the new one does", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const first = await askedCode(deps, mail, s, NEW);
+    const second = await askedCode(deps, mail, s, "second@example.com");
+    expect(await countOf(deps, "email_change")).toBe(1);
+    expect(seen(await confirm(deps, s, first))).toEqual({ status: 400, headers: API_HEADERS, body: BAD_CODE });
+    expect(await emailOf(deps, a.userId)).toBe(a.email);
+    expect((await confirm(deps, s, second)).json).toEqual({ email: "second@example.com", previous_email: a.email });
+  });
+
+  it("another account's code gets the one refusal and changes nothing of either account", async () => {
+    const { deps, mail, a, b } = await site();
+    const sa = await signIn(deps, a.userId);
+    const sb = await signIn(deps, b.userId);
+    const code = await askedCode(deps, mail, sa, NEW);
+    const before = await changes(deps);
+    const r = await confirm(deps, sb, code);
+    expect(seen(r)).toEqual(seen(await confirm(deps, sb, "dpe_" + "0".repeat(40))));
+    expect(r.text).toBe(BAD_CODE);
+    expect(await emailOf(deps, a.userId)).toBe(a.email);
+    expect(await emailOf(deps, b.userId)).toBe(b.email);
+    expect(await changes(deps)).toEqual(before);
+    // The account that asked can still use it.
+    expect((await confirm(deps, sa, code)).status).toBe(200);
+    expect(await emailOf(deps, a.userId)).toBe(NEW);
+  });
+
+  it("a sign-in code is never an email-change code, and an email-change code is never a sign-in code", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const emailCode = await askedCode(deps, mail, s, NEW);
+    const signInCode = await createSignInCode(deps, a.userId);
+    const hex = (code: string) => code.slice(4);
+    // A sign-in code, as it is and with the other prefix, to the confirm route.
+    for (const code of [signInCode, "dpe_" + hex(signInCode)]) {
+      expect(seen(await confirm(deps, s, code)), code.slice(0, 4)).toEqual({ status: 400, headers: API_HEADERS, body: BAD_CODE });
+    }
+    // The email-change code, as it is and with the sign-in prefix, to the sign-in route.
+    const asIs = await send(deps, "POST", "/api/v1/signin/complete", { origin: APP, body: JSON.stringify({ code: emailCode }), headers: { "content-type": "application/json", origin: APP, "sec-fetch-site": "same-origin" } });
+    expect([asIs.status, asIs.text]).toEqual([400, '{"error":"bad_code"}']);
+    const swapped = await send(deps, "POST", "/api/v1/signin/complete", { origin: APP, body: JSON.stringify({ code: "dpl_" + hex(emailCode) }), headers: { "content-type": "application/json", origin: APP, "sec-fetch-site": "same-origin" } });
+    expect(swapped.status).toBe(403);
+    expect(swapped.json.error).toBe("link_invalid");
+    expect(await emailOf(deps, a.userId)).toBe(a.email);
+    // Both still work where they belong.
+    expect((await confirm(deps, s, emailCode)).status).toBe(200);
+    expect(await redeemSignInCode(deps, signInCode, null, null)).toBeNull(); // spent by the change: it went to the old address
+  });
+
+  it("malformed codes and bodies get the refusals they always get, and store nothing", async () => {
+    const { deps, a } = await site();
+    const s = await signIn(deps, a.userId);
+    for (const code of ["", "dpe_", "dpe_" + "0".repeat(39), "dpe_" + "0".repeat(41), "DPE_" + "0".repeat(40), "dpe_" + "G".repeat(40), " dpe_" + "0".repeat(40), "dpe_" + "0".repeat(39) + "\u0000", 7, null]) {
+      expect((await confirm(deps, s, code)).text, JSON.stringify(code)).toBe(BAD_CODE);
+    }
+    const notJson = await post(deps, "/api/v1/account/email/confirm", "{", s);
+    expect([notJson.status, notJson.json.error]).toEqual([400, "bad_request"]);
+    const notObject = await post(deps, "/api/v1/account/email", "[]", s);
+    expect([notObject.status, notObject.json.error]).toEqual([400, "bad_request"]);
+    const asForm = await post(deps, "/api/v1/account/email", `email=${NEW}`, s, { headers: { "content-type": "application/x-www-form-urlencoded" } });
+    expect([asForm.status, asForm.json.error]).toEqual([400, "bad_request"]);
+    expect(await countOf(deps, "email_change")).toBe(0);
+  });
+
+  it("of two confirms at once, exactly one changes the address", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const code = await askedCode(deps, mail, s, NEW);
+    const both = await Promise.all([confirm(deps, s, code), confirm(deps, s, code)]);
+    expect(both.map((r) => r.status).sort()).toEqual([200, 400]);
+    expect(both.find((r) => r.status === 400)?.text).toBe(BAD_CODE);
+    expect(await emailOf(deps, a.userId)).toBe(NEW);
+    expect(await countOf(deps, "audit WHERE event = 'email_changed'")).toBe(1);
+    expect(mail.sent.filter((m) => m.to === a.email)).toHaveLength(1);
+  });
+
+  it("an address another account took in the meantime is refused, and the link is spent", async () => {
+    const { deps, mail, a, b } = await site();
+    const sa = await signIn(deps, a.userId);
+    const sb = await signIn(deps, b.userId);
+    const codeA = await askedCode(deps, mail, sa, NEW);
+    const codeB = await askedCode(deps, mail, sb, NEW);
+    // The other account confirms first.
+    expect((await confirm(deps, sb, codeB)).status).toBe(200);
+    const r = await confirm(deps, sa, codeA);
+    expect(seen(r)).toEqual({ status: 400, headers: API_HEADERS, body: BAD_CODE });
+    expect(await emailOf(deps, a.userId)).toBe(a.email);
+    expect(await emailOf(deps, b.userId)).toBe(NEW);
+    expect((await changes(deps)).find((x) => x.user_id === a.userId)?.used_at).toBe(NOW);
+    expect(await countOf(deps, "audit WHERE event = 'email_changed'")).toBe(1);
+  });
+
+  it("of two accounts confirming the same address at once, exactly one gets it", async () => {
+    const { deps, mail, a, b } = await site();
+    const sa = await signIn(deps, a.userId);
+    const sb = await signIn(deps, b.userId);
+    const codeA = await askedCode(deps, mail, sa, NEW);
+    const codeB = await askedCode(deps, mail, sb, NEW);
+    const both = await Promise.all([confirm(deps, sa, codeA), confirm(deps, sb, codeB)]);
+    expect(both.map((r) => r.status).sort()).toEqual([200, 400]);
+    const owners = await deps.db.all<{ id: string }>("SELECT id FROM user WHERE email = ?", [NEW]);
+    expect(owners).toHaveLength(1);
+    expect(owners[0].id).toBe(both[0].status === 200 ? a.userId : b.userId);
+    expect(await countOf(deps, "audit WHERE event = 'email_changed'")).toBe(1);
+  });
+
+  /** Deps whose database runs `between` right after the confirm's one read, before its batch. Returns the database it wrapped. */
+  function betweenReadAndBatch(deps: Deps, between: (db: Db) => Promise<unknown>): Db {
+    const db = deps.db;
+    deps.db = {
+      ...db,
+      all: (sql, params) => db.all(sql, params),
+      first: async (sql, params) => {
+        const row = await db.first(sql, params);
+        if (sql.includes("FROM email_change e")) await between(db);
+        return row as never;
+      },
+      run: (sql, params) => db.run(sql, params),
+      batch: (stmts) => db.batch(stmts),
+    };
+    return db;
+  }
+
+  it("a code used or replaced between the read and the batch changes nothing: the one refusal, no notice, no record", async () => {
+    for (const what of ["used", "replaced"] as const) {
+      const { deps, mail, a } = await site();
+      const s = await signIn(deps, a.userId);
+      const code = await askedCode(deps, mail, s, NEW);
+      betweenReadAndBatch(deps, (db) =>
+        what === "used"
+          ? db.run("UPDATE email_change SET used_at = ? WHERE user_id = ?", [NOW, a.userId])
+          : db.run("UPDATE email_change SET code_hash = ?, new_email = ? WHERE user_id = ?", ["f".repeat(64), "other@example.com", a.userId]),
+      );
+      const r = await confirm(deps, s, code);
+      expect(seen(r), what).toEqual({ status: 400, headers: API_HEADERS, body: BAD_CODE });
+      expect(mail.sent.map((m) => m.to), what).toEqual([NEW]);
+      expect(await emailOf(deps, a.userId), what).toBe(a.email);
+      expect(await countOf(deps, "audit WHERE event = 'email_changed'"), what).toBe(0);
+    }
+  });
+
+  it("success is reported only when the account's row was changed: an account gone between the read and the batch is refused", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const code = await askedCode(deps, mail, s, NEW);
+    const db = betweenReadAndBatch(deps, async (raw) => {
+      for (const table of ["email_change", "signin_code", "session", "signin_method", "membership"]) await raw.run(`DELETE FROM ${table} WHERE user_id = ?`, [a.userId]);
+      await raw.run("DELETE FROM user WHERE id = ?", [a.userId]);
+    });
+    expect(await confirmEmailChange(deps, a.userId, code)).toBeNull();
+    deps.db = db;
+    expect(await countOf(deps, "audit WHERE event = 'email_changed'")).toBe(0);
+    expect(mail.sent.map((m) => m.to)).toEqual([NEW]);
+  });
+
+  it("the batch decides: a change read as usable but taken before the batch runs is refused on both targets", async () => {
+    const { deps, mail, a, b } = await site();
+    const sa = await signIn(deps, a.userId);
+    const code = await askedCode(deps, mail, sa, NEW);
+    // Between the read and the batch, another account takes the address.
+    const db = deps.db;
+    deps.db = {
+      ...db,
+      all: (sql, params) => db.all(sql, params),
+      first: async (sql, params) => {
+        const row = await db.first(sql, params);
+        if (sql.includes("FROM email_change e")) await db.run("UPDATE user SET email = ? WHERE id = ?", [NEW, b.userId]);
+        return row as never;
+      },
+      run: (sql, params) => db.run(sql, params),
+      batch: (stmts) => db.batch(stmts),
+    };
+    expect(await confirmEmailChange(deps, a.userId, code)).toBeNull();
+    deps.db = db;
+    expect(await emailOf(deps, a.userId)).toBe(a.email);
+    expect(await countOf(deps, "audit WHERE event = 'email_changed'")).toBe(0);
+  });
+
+  it("the changed address signs in from now on, the old one does not, and open sign-in links to the old one are spent", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const open = await createSignInCode(deps, a.userId);
+    const code = await askedCode(deps, mail, s, NEW);
+    expect((await confirm(deps, s, code)).status).toBe(200);
+    expect(await redeemSignInCode(deps, open, null, null)).toBeNull();
+    const askLink = (email: string) => send(deps, "POST", "/api/v1/signin/request", { origin: APP, body: JSON.stringify({ email }), headers: { "content-type": "application/json", origin: APP, "sec-fetch-site": "same-origin" } });
+    mail.sent.length = 0;
+    expect((await askLink(a.email)).text).toBe(OK);
+    expect(mail.sent).toEqual([]);
+    expect((await askLink(NEW)).text).toBe(OK);
+    expect(mail.sent.map((m) => m.to)).toEqual([NEW]);
+    const link = (mail.sent[0].text.match(/dpl_[0-9a-f]{40}/) ?? [""])[0];
+    expect(await redeemSignInCode(deps, link, null, null)).not.toBeNull();
+  });
+
+  it("counts code tries per account: twenty in a quarter hour, then 429 with the sentence", async () => {
+    const { deps, a } = await site();
+    const s = await signIn(deps, a.userId);
+    for (let i = 0; i < 20; i++) expect((await confirm(deps, s, "dpe_" + String(i).padStart(40, "0"))).text).toBe(BAD_CODE);
+    const over = await confirm(deps, s, "dpe_" + "f".repeat(40));
+    expect([over.status, over.text]).toEqual([429, RATE_LIMITED]);
+    expect(Number(over.headers.get("retry-after"))).toBeGreaterThan(0);
+  });
+
+  it("the notice goes out also when every site mail cap is reached: it is one mail per change actually made, and must not be stoppable", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const code = await askedCode(deps, mail, s, NEW);
+    for (const cap of [LIMITS_SIGNIN.mailSite, LIMITS_EMAIL_CHANGE.mailSite]) {
+      await deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?) ON CONFLICT (bucket, key, window_start) DO UPDATE SET count = excluded.count", [cap.bucket, SITE_KEY, NOW - (NOW % cap.windowMs), cap.most + 5]);
+    }
+    expect((await confirm(deps, s, code)).status).toBe(200);
+    expect(mail.sent.map((m) => m.to)).toEqual([NEW, a.email]);
+  });
+
+  it("with mail off by the time the link is opened, the change is made and one fixed line says no notice was sent", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const code = await askedCode(deps, mail, s, NEW);
+    delete deps.mail;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect((await confirm(deps, s, code)).status).toBe(200);
+    expect(errors.mock.calls).toEqual([[EMAIL_CHANGE_LINES.noticeOff]]);
+  });
+
+  it("no audit row, counter or log line holds an address or a code", async () => {
+    const { deps, mail, a, b } = await site();
+    const sa = await signIn(deps, a.userId);
+    const lines: unknown[][] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => void lines.push(args));
+    await ask(deps, sa, b.email);
+    const code = await askedCode(deps, mail, sa, NEW);
+    await confirm(deps, sa, "dpe_" + "1".repeat(40));
+    await confirm(deps, sa, code);
+    const audit = JSON.stringify(await deps.db.all("SELECT * FROM audit"));
+    const counters = JSON.stringify(await deps.db.all("SELECT * FROM rate_counter"));
+    for (const secret of [NEW, a.email, b.email, "@", code, code.slice(4)]) {
+      expect(audit.includes(secret), secret).toBe(false);
+      expect(counters.includes(secret), secret).toBe(false);
+      expect(JSON.stringify(lines).includes(secret), secret).toBe(false);
+    }
+    expect(audit).toContain("email_change_requested");
+    expect(audit).toContain("email_changed");
+  });
+});
+
+describe("the mail texts", () => {
+  it("hides the new address in the notice: its first character, then …, then the @ and the domain; a part before the @ of one or two characters is never shown", () => {
+    expect(maskEmail("n@example.com")).toBe("…@example.com");
+    expect(maskEmail("ne@example.com")).toBe("…@example.com");
+    expect(maskEmail("new@example.com")).toBe("n…@example.com");
+    expect(maskEmail("first.last+tag@sub.example.co.uk")).toBe("f…@sub.example.co.uk");
+    // In the notice itself.
+    expect(emailChangedMail("old@example.com", "solex", "jo@example.com").text.split("\n")[0]).toBe('The email address of the Mythicshot account "solex" was changed to …@example.com.');
+    expect(maskEmail("@example.com")).toBe("…");
+    expect(maskEmail("no-at-sign")).toBe("…");
+  });
+
+  it("an account without a username is called your account in the notice", () => {
+    expect(emailChangedMail("old@example.com", null, "new@example.com").text.split("\n")[0]).toBe("The email address of your Mythicshot account was changed to n…@example.com.");
+    expect(emailChangedMail("old@example.com", 'x"\nBcc: y', "new@example.com").text.split("\n")[0]).toBe("The email address of your Mythicshot account was changed to n…@example.com.");
+    expect(emailChangedMail("old@example.com", "solex", "new@example.com", "Harbor Tours").subject).toBe("Your Harbor Tours email address was changed");
+  });
+
+  it("the link takes only an origin and a code, and puts the code after the #", () => {
+    expect(emailChangeLink("https://app.example.com", "dpe_" + "a".repeat(40))).toBe(`https://app.example.com/account/email#c=dpe_${"a".repeat(40)}`);
+    expect(() => emailChangeLink("https://app.example.com/x", "dpe_a")).toThrow("bad origin");
+    expect(() => emailChangeLink("http://app.example.com", "dpe_a")).toThrow("bad origin");
+    expect(() => emailChangeLink("https://app.example.com", "dpe a")).toThrow("bad code");
+    expect(emailChangeMail("x@example.com", "LINK", "Site\nBcc: y").subject).toBe("Confirm your new Mythicshot email address");
+  });
+});
+
+describe("the server's change-email", () => {
+  it("changes the address at once, ends the account's open change and sign-in links, and records it by ids", async () => {
+    const { deps, mail, a, b } = await site();
+    const s = await signIn(deps, a.userId);
+    const code = await askedCode(deps, mail, s, NEW);
+    const open = await createSignInCode(deps, a.userId);
+    expect(await setEmailOnServer(deps, { username: " Alice ", email: "Fixed@Example.com" })).toEqual({ ok: true, userId: a.userId, email: "fixed@example.com" });
+    expect(await emailOf(deps, a.userId)).toBe("fixed@example.com");
+    expect((await confirm(deps, s, code)).text).toBe(BAD_CODE);
+    expect(await redeemSignInCode(deps, open, null, null)).toBeNull();
+    expect(await deps.db.all("SELECT event, user_id, workspace_id, subject, detail FROM audit WHERE event = 'email_changed_on_server'")).toEqual([
+      { event: "email_changed_on_server", user_id: a.userId, workspace_id: a.workspaceId, subject: a.userId, detail: null },
+    ]);
+    // Refusals change nothing.
+    expect(await setEmailOnServer(deps, { username: "alice", email: b.email })).toEqual({ ok: false, problem: "email_taken" });
+    expect(await setEmailOnServer(deps, { username: "alice", email: "fixed@example.com" })).toEqual({ ok: false, problem: "same_email" });
+    expect(await setEmailOnServer(deps, { username: "nobody", email: "x@example.com" })).toEqual({ ok: false, problem: "no_account" });
+    expect(await setEmailOnServer(deps, { username: "a\u0000lice", email: "x@example.com" })).toEqual({ ok: false, problem: "no_account" });
+    expect(await setEmailOnServer(deps, { username: "alice", email: "x\u0000@example.com" })).toEqual({ ok: false, problem: "bad_email" });
+    expect(await emailOf(deps, a.userId)).toBe("fixed@example.com");
+    expect(await countOf(deps, "audit WHERE event = 'email_changed_on_server'")).toBe(1);
+  });
+});

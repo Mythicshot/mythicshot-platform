@@ -15,7 +15,9 @@
 // - a second token that was revoked (written by SQL: no route revokes a token yet);
 // - two live sessions of its account, signed in as the server signs a browser in; the
 //   first is the one the suite sends requests with. The first side's account is the site's
-//   admin, since nobody can sign in on a site without one.
+//   admin, since nobody can sign in on a site without one;
+// - an open change of its account's email address, as asking for one leaves it (written by
+//   SQL, since asking needs a site that can mail), with the code its link would carry.
 // The two sides differ in every title, every picture's bytes and every size, so a value of
 // one can never be mistaken for the other's.
 //
@@ -71,6 +73,8 @@ export type Side = {
   revokedTokenId: string;
   /** The account's session: its secret, the Cookie header that carries it, and its anti-forgery value. */
   session: { id: string; secret: string; cookie: string; csrf: string };
+  /** The code of the account's open email change, as the mail to the new address carries it. */
+  emailCode: string;
   ids: Ids;
 };
 
@@ -287,7 +291,11 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
   const session = await signIn(deps, account.userId);
   ids.session = session.id;
   ids.otherSession = (await signIn(deps, account.userId)).id;
-  return { name, workspaceId, workspaceName, userId: account.userId, email: account.email, token, tokenId, revokedToken, revokedTokenId, session, ids };
+  const emailCode = "dpe_" + randomHex(40);
+  await deps.db.run("INSERT INTO email_change (id, user_id, new_email, code_hash, created_at) VALUES (?, ?, ?, ?, ?)", [
+    newId("emc"), account.userId, `${name.toLowerCase()}-next@example.com`, await hashToken(emailCode), deps.now(),
+  ]);
+  return { name, workspaceId, workspaceName, userId: account.userId, email: account.email, token, tokenId, revokedToken, revokedTokenId, session, emailCode, ids };
 }
 
 /**
@@ -335,6 +343,7 @@ export const OWNED: Readonly<Record<string, string>> = {
   signin_method: BY_USER,
   signin_code: BY_USER,
   session: BY_USER,
+  email_change: BY_USER,
   api_token: "workspace_id = ?",
   setup: "workspace_id = ?",
   audit: `workspace_id = ? OR ${BY_USER}`,
@@ -422,7 +431,7 @@ export async function dumpOf(deps: Deps, keys: StoreKeys, opts: { touched?: stri
 }
 
 /** Columns whose value names one row, one file or one person. */
-const NAMING = /^(id|slug|title|name|email|username|hash|sha256|revision|claim)$|_id$|_key$/;
+const NAMING = /^(id|slug|title|name|email|new_email|username|hash|code_hash|sha256|revision|claim)$|_id$|_key$/;
 
 /**
  * The values that would give a side away in another workspace's answer: every id, slug,

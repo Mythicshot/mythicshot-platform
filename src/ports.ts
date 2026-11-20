@@ -2,7 +2,7 @@
 // share. Nothing in this file, or in any file outside src/cloudflare/ and src/node/,
 // may import a platform API.
 import type { Hosts } from "./hosts.ts";
-import { NO_MAIL, type Mailer } from "./mail.ts";
+import { NO_MAIL, linkOrigin, type Mailer } from "./mail.ts";
 
 /**
  * A bound parameter. Both back ends bind every JS number as REAL, so a TEXT column
@@ -150,6 +150,15 @@ export type Deps = {
 /** The mailer of these deps: the one they carry, or the one that is off and sends nothing. */
 export function mailOf(deps: Deps): Mailer {
   return deps.mail ?? NO_MAIL;
+}
+
+/**
+ * True when the site can mail a link: it has a mailer and an address for links, which come
+ * from the settings alone. Without either, nothing that depends on a mailed link (a sign-in
+ * link, an email change) can work.
+ */
+export function canMailLinks(deps: Deps): boolean {
+  return mailOf(deps) !== NO_MAIL && linkOrigin(deps.config) !== null;
 }
 
 /**
