@@ -186,14 +186,17 @@ export function mediaRole(hosts: Hosts): "img" | "tours" {
 }
 
 /**
- * The origin an item's public address starts with, without a trailing slash: the img
- * address when it is set, else the tours address. In one-address mode (`hosts` null or
- * absent) it is the host the request was sent to, with the scheme originOf gives a
- * configured host (so an install behind a proxy that ends HTTPS still gets https), or,
- * for a host that is not a plain name, the request's own origin. Never a header.
+ * The origin an item's public address starts with, without a trailing slash, from
+ * configuration only and never from a request, as sign-in links are (linkOrigin in
+ * src/mail.ts): the img address when it is set, else the tours address. In one-address
+ * mode (`hosts` null or absent) it is the origin of SITE_HOST when that is a host name,
+ * and otherwise the empty string: the caller then builds a relative link, as tour links
+ * are. On Node the request's host is the client's Host header, so reading it here could
+ * make the server put another site's name into a link.
  */
-export function mediaOrigin(hosts: Hosts | null | undefined, req: Request): string {
-  if (hosts !== null && hosts !== undefined) return originOf(hosts.img ?? hosts.tours);
-  const host = requestHost(req);
-  return host === null ? new URL(req.url).origin : originOf(host);
+export function mediaOrigin(config: { hosts?: Hosts | null; siteHost?: string }): string {
+  const hosts = config.hosts ?? null;
+  if (hosts !== null) return originOf(hosts.img ?? hosts.tours);
+  const site = typeof config.siteHost === "string" ? normaliseHost(config.siteHost) : null;
+  return site === null ? "" : originOf(site);
 }

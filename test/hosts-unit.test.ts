@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { HOST_ROLES, mediaOrigin, mediaRole, normaliseHost, onRole, OPTIONAL_HOST_ROLES, originOf, requestHost, resolveHosts, roleOf, type Hosts } from "../src/hosts.ts";
+import { linkOrigin } from "../src/mail.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
 const THREE: Hosts = { ...HOSTS, img: "img.example.com" };
@@ -218,20 +219,26 @@ describe("host names", () => {
     expect(mediaRole(HOSTS)).toBe("tours");
   });
 
-  it("mediaOrigin is the img address, else the tours address, else the request's own address", () => {
-    const req = (url: string) => new Request(url, { headers: { "x-forwarded-host": "evil.example.net", "x-forwarded-proto": "http" } });
-    expect(mediaOrigin(THREE, req("https://app.example.com/api/v1/tours"))).toBe("https://img.example.com");
-    expect(mediaOrigin(HOSTS, req("https://app.example.com/api/v1/tours"))).toBe("https://tours.example.com");
-    expect(mediaOrigin({ tours: "tours.localhost:8787", app: "app.localhost:8787", img: "img.localhost:8787" }, req("http://app.localhost:8787/"))).toBe("http://img.localhost:8787");
-    expect(mediaOrigin({ tours: "tours.example.com:8443", app: "app.example.com" }, req("https://app.example.com/"))).toBe("https://tours.example.com:8443");
-    // One address: the host the request was sent to, with the scheme originOf gives it,
-    // so a proxy that ends HTTPS in front of the app still gives an https address.
+  it("mediaOrigin is the img address, else the tours address, else SITE_HOST, else empty for a relative link, from configuration only", () => {
+    expect(mediaOrigin({ hosts: THREE })).toBe("https://img.example.com");
+    expect(mediaOrigin({ hosts: THREE, siteHost: "site.example.com" })).toBe("https://img.example.com");
+    expect(mediaOrigin({ hosts: HOSTS })).toBe("https://tours.example.com");
+    expect(mediaOrigin({ hosts: { tours: "tours.localhost:8787", app: "app.localhost:8787", img: "img.localhost:8787" } })).toBe("http://img.localhost:8787");
+    expect(mediaOrigin({ hosts: { tours: "tours.example.com:8443", app: "app.example.com" } })).toBe("https://tours.example.com:8443");
+    // One address: the origin of SITE_HOST by the rule sign-in links use, else nothing,
+    // so the caller builds a relative link as tour links are.
     for (const hosts of [null, undefined]) {
-      expect(mediaOrigin(hosts, req("http://tours.example.com/api/v1/tours"))).toBe("https://tours.example.com");
-      expect(mediaOrigin(hosts, req("https://Tours.Example.com:443/x"))).toBe("https://tours.example.com");
-      expect(mediaOrigin(hosts, req("http://localhost:3000/x"))).toBe("http://localhost:3000");
-      expect(mediaOrigin(hosts, req("https://tours.example.com:8443/x"))).toBe("https://tours.example.com:8443");
+      expect(mediaOrigin({ hosts })).toBe("");
+      expect(mediaOrigin({ hosts, siteHost: "tours.example.com" })).toBe("https://tours.example.com");
+      expect(mediaOrigin({ hosts, siteHost: "localhost:3000" })).toBe("http://localhost:3000");
+      expect(mediaOrigin({ hosts, siteHost: "https://not-a-host.example.com/" })).toBe("");
+      for (const siteHost of ["tours.example.com", "localhost:3000", "192.168.1.10:8080"]) {
+        expect(mediaOrigin({ hosts, siteHost }), siteHost).toBe(linkOrigin({ publicImageBase: "", setupCode: null, hosts: null, siteHost }));
+      }
     }
+    expect(mediaOrigin({})).toBe("");
+    // It takes no request, so nothing a client sends (Host, X-Forwarded-Host, Forwarded) can reach it.
+    expect(mediaOrigin.length).toBe(1);
   });
 
   it("originOf is https, and http only for localhost names and 127.0.0.1", () => {
