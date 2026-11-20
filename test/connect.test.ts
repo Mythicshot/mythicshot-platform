@@ -223,7 +223,7 @@ describe("starting a request", () => {
     expect(tooLong.json.error).toBe("bad_request");
     // A token, a session cookie, or anything in Authorization: refused before anything is read.
     const refused = '{"error":"credentials_not_allowed","detail":"send no token and no session cookie with this request"}';
-    for (const headers of [{ authorization: `Bearer ${a.token}` }, { authorization: "Basic eA==" }, { cookie: s.cookie }, { cookie: `${SESSION_COOKIE}=nonsense` }]) {
+    for (const headers of [{ authorization: `Bearer ${a.token}` } as Record<string, string>, { authorization: "Basic eA==" }, { cookie: s.cookie }, { cookie: `${SESSION_COOKIE}=nonsense` }]) {
       for (const path of ["/api/v1/connect/start", "/api/v1/connect/token"]) {
         const r = await appPost(deps, path, { device_name: "x", device_code: "dpd_" + "0".repeat(40) }, { headers });
         expect([r.status, r.text], `${path} ${JSON.stringify(headers)}`).toEqual([400, refused]);

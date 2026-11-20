@@ -715,7 +715,7 @@ describe("the documentation page's parts", () => {
         const url = path.replace("{id}", "ses_" + "0".repeat(24)).replace("{step_id}", "st_" + "0".repeat(24)).replace("{n}", "1");
         requests.push({ url, method: method.toUpperCase(), credentials: "include", headers: { Accept: "application/json" } });
         // The operations a session may call are described with it, so the viewer knows of the cookie.
-        if (path !== "/healthz" && !path.startsWith("/api/v1/signin/")) expect(JSON.stringify(op.security), `${method} ${path}`).toContain("session");
+        if (path !== "/healthz" && !path.startsWith("/api/v1/signin/") && path !== "/api/v1/connect/start" && path !== "/api/v1/connect/token") expect(JSON.stringify(op.security), `${method} ${path}`).toContain("session");
       }
     }
     const sessionRoutes = requests.filter((r) => /\/api\/v1\/(?:session|sessions|signout)/.test(r.url));

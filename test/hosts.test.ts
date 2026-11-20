@@ -28,6 +28,7 @@ const MEDIA = "med_0123456789abcdef01234567";
 const STEP = "st_0123456789abcdef01234567";
 const SESSION = "ses_0123456789abcdef01234567";
 const WORKSPACE = "ws_0123456789abcdef01234567";
+const TOKEN = "tok_0123456789abcdef01234567";
 
 type Row = {
   method: string;
@@ -109,6 +110,17 @@ const ROWS: Record<string, Row> = {
   // Changing the email address takes a session alone: 401 without one, and on the app address only.
   "POST /api/v1/account/email": session("POST", "/api/v1/account/email", 401, { email: "new@example.com" }),
   "POST /api/v1/account/email/confirm": session("POST", "/api/v1/account/email/confirm", 401, { code: "dpe_" + "0".repeat(40) }),
+  // Connecting the app: the app's two requests take no credential and answer on both
+  // addresses (a code nobody has is the one 410); typing the short code takes a session.
+  "POST /api/v1/connect/start": { method: "POST", path: "/api/v1/connect/start", body: { device_name: "Laptop" }, one: 201, tours: 201, app: 201, unknown: 421, img: 404 },
+  "POST /api/v1/connect/token": { method: "POST", path: "/api/v1/connect/token", body: { device_code: "dpd_" + "0".repeat(40) }, one: 410, tours: 410, app: 410, unknown: 421, img: 404 },
+  "GET /api/v1/connect/requests/:code": session("GET", "/api/v1/connect/requests/ABCD-EFGH", 401),
+  "POST /api/v1/connect/confirm": session("POST", "/api/v1/connect/confirm", 401, { user_code: "ABCD-EFGH" }),
+  "POST /api/v1/connect/refuse": session("POST", "/api/v1/connect/refuse", 401, { user_code: "ABCD-EFGH" }),
+  // The workspace's tokens: a session alone.
+  "GET /api/v1/tokens": session("GET", "/api/v1/tokens", 401),
+  "PATCH /api/v1/tokens/:id": session("PATCH", `/api/v1/tokens/${TOKEN}`, 401, { name: "Laptop" }),
+  "DELETE /api/v1/tokens/:id": session("DELETE", `/api/v1/tokens/${TOKEN}`, 401),
   // The site admin's routes: on the app address only, and nobody here is an admin.
   "GET /api/v1/admin/accounts": admin("GET", "/api/v1/admin/accounts"),
   "GET /api/v1/admin/summary": admin("GET", "/api/v1/admin/summary"),
@@ -160,12 +172,14 @@ const ROWS: Record<string, Row> = {
 
 const KEYS = Object.keys(ROWS);
 const DESCRIPTION_KEYS = KEYS.filter((k) => k.includes(" /api/v1/openapi."));
-/** Signing in and the session: the app address's own part of the API. */
-const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account)(?:\/|$)/.test(k));
+/** Signing in, the session, typing a short code and the workspace's tokens: the app address's own part of the API. */
+const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account|connect\/(?:requests|confirm|refuse)|tokens)(?:\/|$)/.test(k));
+/** The app's two requests while it connects: no credential, on both addresses. */
+const CONNECT_KEYS = ["POST /api/v1/connect/start", "POST /api/v1/connect/token"];
 /** The site admin's routes. */
 const ADMIN_KEYS = KEYS.filter((k) => k.includes(" /api/v1/admin/"));
 /** The token API: everything under /api/v1/ but the description files, which need no token, the session's own routes and the admin's. */
-const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k) && !SESSION_KEYS.includes(k) && !ADMIN_KEYS.includes(k));
+const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k) && !SESSION_KEYS.includes(k) && !ADMIN_KEYS.includes(k) && !CONNECT_KEYS.includes(k));
 const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 /** The sign-in pages and their stylesheet and script, and the dashboard's account pages (/account, /account/email). */
 const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account)(?:\/|$)/.test(k));
@@ -275,6 +289,7 @@ describe("the host-routing matrix", () => {
     for (const key of [...WIZARD_KEYS, PLAYER_KEY]) expect(HOST_RULES[key], key).toBe("tours");
     for (const key of ["GET /t/:slug", "GET /p/:name"]) expect(HOST_RULES[key], key).toBe("tours-redirect");
     for (const key of DESCRIPTION_KEYS) expect(HOST_RULES[key], key).toBe("both");
+    for (const key of CONNECT_KEYS) expect(HOST_RULES[key], key).toBe("both");
     expect(HOST_RULES[DOCS_PAGE_KEY]).toBe("app-redirect");
     for (const key of DOCS_FILE_KEYS) expect(HOST_RULES[key], key).toBe("app");
     for (const key of SESSION_KEYS) expect(HOST_RULES[key], key).toBe("app");
@@ -287,7 +302,8 @@ describe("the host-routing matrix", () => {
     // Every dashboard page and its script is in one of the two lists, and nothing is in both.
     for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES]) for (const key of [`GET ${p.path}`, `GET ${p.script.path}`]) expect([PAGE_KEYS.includes(key), DASH_KEYS.includes(key)].filter(Boolean), key).toEqual([true]);
     for (const key of ["GET /dash/dash.css", "GET /dash/dash.js"]) expect(DASH_KEYS, key).toContain(key);
-    expect(SESSION_KEYS.length).toBe(9);
+    // 9, the three requests that take a short code and the three of the token list.
+    expect(SESSION_KEYS.length).toBe(15);
     expect(ADMIN_KEYS.length).toBe(3);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
@@ -431,7 +447,9 @@ describe("the host-routing matrix", () => {
       for (const key of KEYS.filter((k) => !MEDIA_KEYS.includes(k))) {
         const what = `${origin} ${key}`;
         expect(after[key].status, what).toBe(before[key].status);
-        expect(after[key].text, what).toBe(before[key].text);
+        // A request to connect answers fresh codes each time; the rest of it is the same.
+        if (key === "POST /api/v1/connect/start") expect({ ...after[key].json, device_code: "", user_code: "" }, what).toEqual({ ...before[key].json, device_code: "", user_code: "" });
+        else expect(after[key].text, what).toBe(before[key].text);
         expect(after[key].headers.get("location"), what).toBe(before[key].headers.get("location"));
         expect(after[key].headers.get("content-type"), what).toBe(before[key].headers.get("content-type"));
         expect(after[key].calls, what).toBe(before[key].calls);

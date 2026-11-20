@@ -19,7 +19,10 @@
 // - an open change of its account's email address, as asking for one leaves it (written by
 //   SQL, since asking needs a site that can mail), with the code its link would carry;
 // - three shared items: an online image with a preview, an online GIF clip, and an
-//   unfinished image whose one part and preview are sent but which is not committed.
+//   unfinished image whose one part and preview are sent but which is not committed;
+// - three requests to connect the app, each started by the app and settled by the side's
+//   session: one confirmed and not collected, one confirmed and collected (so the side has a
+//   token made by connecting), and one refused.
 // The two sides differ in every title, every picture's bytes and every size, so a value of
 // one can never be mistaken for the other's.
 //
@@ -28,9 +31,12 @@
 //
 import { seedAccount } from "#harness";
 import { hashToken, newId, newLinkId, newSlug, newToken } from "../src/auth.ts";
+import { formatUserCode, newUserCode } from "../src/connect.ts";
+import { originOf } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import type { Deps, FileStore } from "../src/ports.ts";
-import { clone, commit, createUpload, fixtures, gif, logoPng, png, putStep, send, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
+import { LIMITS_CONNECT } from "../src/rate.ts";
+import { ORIGIN, clone, commit, createUpload, fixtures, gif, logoPng, png, putStep, send, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 
 /** The harness's listing of both stores (`makeDeps()` returns it beside `deps`). */
 export type StoreKeys = { draftKeys: () => Promise<string[]>; publicKeys: () => Promise<string[]> };
@@ -66,6 +72,10 @@ export type Ids = {
   /** The session the suite sends the side's requests with, and a second live session of the same account. */
   session: string;
   otherSession: string;
+  /** The side's tokens: the workspace's first, the revoked one, and the one connecting the app made. */
+  tokens: { live: string; revoked: string; connected: string };
+  /** The short codes of the side's requests to connect: confirmed by it and not collected, confirmed and collected, refused by it. */
+  connect: { confirmed: string; collected: string; refused: string };
 };
 
 export type Side = {
@@ -154,6 +164,8 @@ export function inventedIds(like?: Ids): Ids {
     fill: like?.fill ?? 0,
     session: newId("ses"),
     otherSession: newId("ses"),
+    tokens: { live: newId("tok"), revoked: newId("tok"), connected: newId("tok") },
+    connect: { confirmed: formatUserCode(newUserCode()), collected: formatUserCode(newUserCode()), refused: formatUserCode(newUserCode()) },
   };
 }
 
@@ -235,7 +247,7 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
   // Every account's workspace is seeded with the same name; these two must differ.
   const workspaceName = `${name} workspace`;
   await deps.db.run("UPDATE workspace SET name = ? WHERE id = ?", [workspaceName, workspaceId]);
-  const tokenId = (await need(deps.db.first<{ id: string }>("SELECT id FROM api_token WHERE workspace_id = ?", [workspaceId]), "token")).id;
+  const tokenId = (await need(deps.db.first<{ id: string }>("SELECT id FROM api_token WHERE workspace_id = ? AND kind = 'setup'", [workspaceId]), "token")).id;
   const revokedToken = newToken();
   const revokedTokenId = newId("tok");
   await deps.db.run("INSERT INTO api_token (id, workspace_id, name, hash, created_at, last_used_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [
@@ -323,10 +335,30 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
     fill,
     session: "",
     otherSession: "",
+    tokens: { live: tokenId, revoked: revokedTokenId, connected: "" },
+    connect: { confirmed: "", collected: "", refused: "" },
   };
   const session = await signIn(deps, account.userId);
   ids.session = session.id;
   ids.otherSession = (await signIn(deps, account.userId)).id;
+
+  // Three requests to connect the app: the app starts each on the tours address with no
+  // credential, the side's session settles it on the app address, and one is collected.
+  const hosts = deps.config.hosts ?? null;
+  const toursOrigin = hosts === null ? ORIGIN : originOf(hosts.tours);
+  const appOrigin = hosts === null ? ORIGIN : originOf(hosts.app);
+  const page = { cookie: session.cookie, origin: appOrigin, "x-csrf-token": session.csrf, "sec-fetch-site": "same-origin", ...JSON_HEADERS };
+  const startConnect = async (device: string) => must(await send(deps, "POST", "/api/v1/connect/start", { origin: toursOrigin, body: JSON.stringify({ device_name: device }), headers: JSON_HEADERS }), 201, `the request to connect ${device}`).json;
+  const settleConnect = async (how: "confirm" | "refuse", code: string) => must(await send(deps, "POST", `/api/v1/connect/${how}`, { origin: appOrigin, body: JSON.stringify({ user_code: code }), headers: page }), 204, `the ${how} of ${code}`);
+  const confirmed = await startConnect(`${name} laptop`);
+  await settleConnect("confirm", confirmed.user_code);
+  const collected = await startConnect(`${name} connected device`);
+  await settleConnect("confirm", collected.user_code);
+  must(await send(deps, "POST", "/api/v1/connect/token", { origin: toursOrigin, body: JSON.stringify({ device_code: collected.device_code }), headers: JSON_HEADERS }), 200, "the collection of the connected device's token");
+  const refused = await startConnect(`${name} refused device`);
+  await settleConnect("refuse", refused.user_code);
+  ids.connect = { confirmed: confirmed.user_code, collected: collected.user_code, refused: refused.user_code };
+  ids.tokens.connected = (await need(deps.db.first<{ id: string }>("SELECT id FROM api_token WHERE workspace_id = ? AND kind = 'sign_in'", [workspaceId]), "token made by connecting")).id;
   const emailCode = "dpe_" + randomHex(40);
   await deps.db.run("INSERT INTO email_change (id, user_id, new_email, code_hash, created_at) VALUES (?, ?, ?, ?, ?)", [
     newId("emc"), account.userId, `${name.toLowerCase()}-next@example.com`, await hashToken(emailCode), deps.now(),
@@ -397,12 +429,25 @@ export const OWNED: Readonly<Record<string, string>> = {
   deleted_object: "tour_id IN (SELECT tour_id FROM tour_deletion WHERE workspace_id = ?)",
   media: "workspace_id = ?",
   media_object: "media_id IN (SELECT id FROM media WHERE workspace_id = ?)",
+  // A request to connect belongs to no workspace until it is confirmed, and then to the confirming one.
+  connect_request: "workspace_id = ?",
 };
 
 /** Tables whose rows belong to no workspace, each with the reason. */
 export const SHARED: Readonly<Record<string, string>> = {
   rate_counter: "counters for the whole site's sign-in requests; a key is a hash and names no workspace",
+  connect_key: "the install's one key for the short codes' HMAC, made by the migration; no workspace has a part in it",
 };
+
+/**
+ * The counters of wrong short codes (src/connect.ts). A lookup, confirm or refusal with a
+ * code that names no waiting request is counted against the caller's own account and
+ * network, keyed by digests that name no workspace: that count is the one write such a
+ * refused request makes, so `dumpOf` leaves these rows out, and the suite clears them before
+ * each request to a connect route, so its many refused tries are never cut short by the
+ * limit, whose own tests are in test/connect.test.ts.
+ */
+export const TRY_BUCKETS: readonly string[] = [LIMITS_CONNECT.wrongAccount.bucket, LIMITS_CONNECT.wrongNetwork.bucket];
 
 const byText = (rows: Json[]) => [...rows].sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1));
 
@@ -451,8 +496,8 @@ export type Dump = { rows: Record<string, Json[]>; drafts: string[]; public: str
  * The whole database and the key lists of both stores, whoever anything belongs to.
  * `touched` names tokens whose `last_used_at`, and sessions whose `last_used_at` and
  * `expires_at`, are left out: an accepted token or session records its use, and that is
- * the one write a refused request may make. With `files`, also the length, hash and type
- * of every stored file.
+ * the one write a refused request may make. The counters of wrong short codes (TRY_BUCKETS)
+ * are left out too. With `files`, also the length, hash and type of every stored file.
  */
 export async function dumpOf(deps: Deps, keys: StoreKeys, opts: { touched?: string[]; files?: boolean } = {}): Promise<Dump> {
   const rows: Record<string, Json[]> = {};
@@ -460,7 +505,7 @@ export async function dumpOf(deps: Deps, keys: StoreKeys, opts: { touched?: stri
     const found = await deps.db.all<Json>(`SELECT * FROM "${table}"`);
     if (table === "api_token") for (const row of found) if (opts.touched?.includes(row.id)) row.last_used_at = "(its own use)";
     if (table === "session") for (const row of found) if (opts.touched?.includes(row.id)) row.last_used_at = row.expires_at = "(its own use)";
-    rows[table] = byText(found);
+    rows[table] = byText(table === "rate_counter" ? found.filter((row) => !TRY_BUCKETS.includes(row.bucket as string)) : found);
   }
   const dump: Dump = { rows, drafts: await keys.draftKeys(), public: await keys.publicKeys() };
   if (opts.files) {

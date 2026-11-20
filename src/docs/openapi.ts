@@ -12,11 +12,13 @@
 import { ADMIN_PAGE, MAX_ALLOWANCE_BYTES } from "../admin-api.ts";
 import { LIMITS } from "../manifest.ts";
 import { CLIP_MAX_DURATION_MS, CLIP_MAX_SIDE, DEFAULT_MEDIA_LIMITS, LIST_PAGE, MAX_LOOSE_CLAIMS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, TITLE_MAX } from "../media.ts";
-import { LIMITS_MEDIA } from "../rate.ts";
+import { LIMITS_CONNECT, LIMITS_MEDIA } from "../rate.ts";
 import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../publish.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
 import { DELETE_FILES_PER_CALL } from "../tours.ts";
 import { EMAIL_CHANGE_MS } from "../email-change.ts";
+import { CONNECT_MS, DEVICE_NAME_MAX, OPEN_PER_NETWORK, POLL_INTERVAL_S, USER_CODE_ALPHABET, VERIFY_PATH } from "../connect.ts";
+import { MAX_TOKENS_LISTED } from "../tokens.ts";
 import { SESSION_COOKIE, SESSION_MS, SIGNIN_CODE_MS } from "../sessions.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS, UPLOAD_MAX_AGE_MS } from "../uploads.ts";
 import { LARGEST_TOURS } from "../usage.ts";
@@ -172,6 +174,8 @@ const uploadId: OpenApiParameter = { name: "id", in: "path", required: true, des
 const stepId: OpenApiParameter = { name: "step_id", in: "path", required: true, description: "The step's id.", schema: { type: "string", pattern: "^st_[0-9a-f]{24}$" } };
 const workspaceId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The workspace's id, as the list of accounts gives it in workspace_id.", schema: { type: "string", pattern: "^ws_[0-9a-f]{24}$" } };
 const mediaId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The item's id, from the answer that started it.", schema: { type: "string", pattern: "^med_[0-9a-f]{24}$" } };
+const tokenIdParam: OpenApiParameter = { name: "id", in: "path", required: true, description: "The token's id, as the list of tokens gives it.", schema: { type: "string", pattern: "^tok_[0-9a-f]{24}$" } };
+const userCodeParam: OpenApiParameter = { name: "code", in: "path", required: true, description: "The short code the app shows, with or without its dash, in any case.", schema: { type: "string", minLength: 8, maxLength: 9 } };
 const sessionId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The session's id, as the list of sessions gives it.", schema: { type: "string", pattern: "^ses_[0-9a-f]{24}$" } };
 
 function introduction(): string {
@@ -182,7 +186,7 @@ function introduction(): string {
     "",
     "## Get connected",
     "",
-    'Every request except the health check and the two sign-in requests carries a token, as the header `Authorization: Bearer YOUR_TOKEN`, or a session cookie (see below). A token starts with "dp_" and is 43 characters long. It acts only inside its own workspace: another workspace\'s tour answers 404, the same as one that does not exist.',
+    'Every request except the health check, the two sign-in requests and the app\'s two requests while it connects carries a token, as the header `Authorization: Bearer YOUR_TOKEN`, or a session cookie (see below). A token starts with "dp_" and is 43 characters long. It acts only inside its own workspace: another workspace\'s tour answers 404, the same as one that does not exist.',
     "",
     "The first request to try answers with your workspace's name and the server's version:",
     "",
@@ -199,6 +203,12 @@ function introduction(): string {
     "A request with a session that changes anything (any method but GET and HEAD) must come from the site's own pages: its Origin must be the address it is sent to, and it must carry the session's anti-forgery value in the header `X-Csrf-Token`, which GET /api/v1/session gives. A token and a session cookie together are refused.",
     "",
     "The documentation page never sends a cookie, so a session cannot be tried from it; with a token, try the requests that take one.",
+    "",
+    "## Connecting the app",
+    "",
+    `The desktop app gets its token with a pair of codes, so nobody has to copy one. It asks POST /api/v1/connect/start, with no credential, for a long secret device code and a short user code such as ABCD-EFGH, shows the short one and opens verify_url, the dashboard's connect page. A signed-in person types the short code there; the page shows the device's name (GET /api/v1/connect/requests/{code}) and the person confirms it (POST /api/v1/connect/confirm) or refuses it (POST /api/v1/connect/refuse). Meanwhile the app asks POST /api/v1/connect/token with the device code every ${POLL_INTERVAL_S} seconds: pending, until it is answered connected with a token for that person's workspace, once. The codes live ${CONNECT_MS / 60_000} minutes. Neither is ever put in an address.`,
+    "",
+    "The workspace's tokens are listed, renamed and revoked with GET /api/v1/tokens, PATCH /api/v1/tokens/{id} and DELETE /api/v1/tokens/{id}. Like the requests that take a short code, they need the session: a token cannot list, rename or revoke tokens, its own included. A revoked token is refused from the next request on.",
     "",
     "## Errors",
     "",
@@ -217,6 +227,8 @@ function introduction(): string {
     "",
     "The admin routes (under /api/v1/admin/) answer every refusal, the 400 and the two 403s above included, with the one `404 {\"error\":\"not_found\"}`.",
     "",
+    "The app's two requests while it connects take no credential at all: one that carries a token or a session cookie answers `400 credentials_not_allowed`. Every device code that cannot give a token, whether unknown, expired, refused, already used or not a device code at all, answers the one `410 expired_code`, and asking again sooner than the interval answers `429 slow_down`.",
+    "",
     "## Requests that work in steps",
     "",
     "Publish, unpublish and delete may need several requests for a large tour. Each is safe to send again: send the same request until it answers 200 or 204.",
@@ -233,6 +245,7 @@ function introduction(): string {
     `- ${DEFAULT_MAX_OPEN_UPLOADS} open uploads per workspace.`,
     `- An upload that is not finished is removed after ${hours} hours.`,
     `- A shared image: ${n(DEFAULT_MEDIA_LIMITS.imageMaxBytes)} bytes and ${n(DEFAULT_MEDIA_LIMITS.imageMaxSide)} pixels on a side, PNG or JPEG. A shared clip: ${n(DEFAULT_MEDIA_LIMITS.clipMaxBytes)} bytes, GIF or MP4, at most ${n(CLIP_MAX_SIDE)} pixels on a side and ${CLIP_MAX_DURATION_MS / 60_000} minutes long. These numbers are fixed in this version: no setting changes them. Each is sent in parts of ${n(PART_BYTES)} bytes. An item's preview: ${n(PREVIEW_RULE.maxBytes)} bytes and ${n(PREVIEW_RULE.maxSide)} pixels on a side, PNG or JPEG. A workspace starts at most ${LIMITS_MEDIA.create.most} items, sends at most ${n(LIMITS_MEDIA.part.most)} parts and ${LIMITS_MEDIA.preview.most} previews an hour, and an item that is not finished within ${MEDIA_MAX_AGE_MS / 3_600_000} hours is removed and can no longer be finished.`,
+    `- Connecting the app: a network asks for at most ${LIMITS_CONNECT.startNetwork.most} pairs of codes in ${LIMITS_CONNECT.startNetwork.windowMs / 60_000} minutes and ${LIMITS_CONNECT.startNetworkDay.most} in a day, and has at most ${OPEN_PER_NETWORK} waiting at once; it asks for tokens at most ${LIMITS_CONNECT.pollNetwork.most} times in ${LIMITS_CONNECT.pollNetwork.windowMs / 60_000} minutes. An account may type ${LIMITS_CONNECT.wrongAccount.most} short codes that name no waiting request in ${LIMITS_CONNECT.wrongAccount.windowMs / 60_000} minutes, and a network ${LIMITS_CONNECT.wrongNetwork.most}; a right code is not counted.`,
     "- A workspace may have a storage allowance, set by the server's settings or its admin. An upload or a shared item that would take the workspace over it is refused when it is started, with 413 `storage_full` and the numbers, before anything is stored. Nothing is ever deleted because of an allowance.",
     `- A publish that makes no progress for ${minutes} minutes counts as abandoned.`,
     "",
@@ -446,6 +459,54 @@ function schemas(): Record<string, Schema> {
       { email: { type: "string", description: "The account's address from now on." }, previous_email: { type: "string", description: "The address it had, which was sent a notice." } },
       "The change was made.",
     ),
+    ConnectStart: input(["device_name"], { device_name: text(DEVICE_NAME_MAX * 4 + 64, `What the app calls this computer, shown to the person who confirms and as the token's name: ${DEVICE_NAME_MAX} characters at most once spaces around it are dropped, with no control or formatting characters.`, 1) }),
+    ConnectStarted: object(
+      ["device_code", "user_code", "verify_url", "expires_in", "interval"],
+      {
+        device_code: { type: "string", pattern: "^dpd_[0-9a-f]{40}$", description: "The secret the app asks for its token with. Keep it to the app: never show it or put it in an address." },
+        user_code: { type: "string", pattern: `^[${USER_CODE_ALPHABET}]{4}-[${USER_CODE_ALPHABET}]{4}$`, description: "The short code to show, for the person to type on the connect page. Its characters leave out the ones that look alike (0 and O, 1, I and L, and U)." },
+        verify_url: { type: "string", description: `The dashboard's connect page, ${VERIFY_PATH} on the address from the server's settings (the app address, or the one address), never from the request. When the server has no address in its settings it is the bare path: join it to the address the app is set up with. It holds neither code.` },
+        expires_in: { type: "integer", const: CONNECT_MS / 1000, description: "Seconds the codes live." },
+        interval: { type: "integer", const: POLL_INTERVAL_S, description: "Seconds to wait between two asks for the token." },
+      },
+      "A request to connect, waiting for a person to confirm it.",
+    ),
+    ConnectPoll: input(["device_code"], { device_code: { type: "string", description: "The device code POST /api/v1/connect/start gave." } }),
+    ConnectPending: object(["status"], { status: { type: "string", const: "pending" } }, "Nobody has confirmed the request yet. Ask again after the interval."),
+    ConnectConnected: object(
+      ["status", "token", "workspace", "version"],
+      {
+        status: { type: "string", const: "connected" },
+        token: { type: "string", pattern: "^dp_[0-9a-f]{40}$", description: "The new token, given this once. Its name is the device's name." },
+        workspace: object(["id", "name"], { id: { type: "string", pattern: "^ws_[0-9a-f]{24}$" }, name: { type: "string", description: "The workspace's name." } }, "The workspace of the person who confirmed, the one the token acts in."),
+        version: { type: "string", description: "The server's version." },
+        addresses: object(
+          ["tours", "app"],
+          { tours: { type: "string", description: "The host name tour links use." }, app: { type: "string", description: "The host name of the app address." } },
+          "Only on a server with two addresses: both host names, as GET /api/v1/me gives them.",
+        ),
+      },
+      "Confirmed: the token, made now.",
+    ),
+    ConnectRequest: object(
+      ["device_name", "asked_at"],
+      { device_name: { type: "string", description: "What the app calls the computer. Show it as text only." }, asked_at: whole("When the app asked, in milliseconds since 1970.") },
+      "A request waiting for a person to confirm or refuse it.",
+    ),
+    UserCode: input(["user_code"], { user_code: { type: "string", maxLength: 32, description: "The short code the app shows, with or without its dash, in any case." } }),
+    TokenEntry: object(
+      ["id", "name", "created_at", "last_used_at", "kind"],
+      {
+        id: { type: "string", pattern: "^tok_[0-9a-f]{24}$" },
+        name: { type: "string", description: "The token's name: First token for the one made with the workspace, the device's name for one made by connecting the app, or what it was renamed to." },
+        created_at: whole("When it was made, in milliseconds since 1970."),
+        last_used_at: { type: ["integer", "null"], minimum: 0, description: "When it was last used, in milliseconds since 1970; null until then." },
+        kind: { type: "string", enum: ["setup", "sign_in"], description: "How it was made: setup by the setup wizard or with a new account; sign_in by connecting the app while signed in." },
+      },
+      "One token. Never the token itself, nor any part of it.",
+    ),
+    TokenList: object(["tokens"], { tokens: { type: "array", description: `The workspace's tokens that are not revoked, newest first, at most ${MAX_TOKENS_LISTED}.`, items: ref("TokenEntry") } }),
+    TokenRename: input(["name"], { name: text(DEVICE_NAME_MAX * 4 + 64, `The new name: ${DEVICE_NAME_MAX} characters at most once spaces around it are dropped, with no control or formatting characters.`, 1) }),
     Ok: object(["ok"], { ok: { type: "boolean", const: true } }),
     Session: object(
       ["account", "workspace", "session", "csrf", "email_change"],
@@ -1206,6 +1267,123 @@ function paths(): OpenApiDoc["paths"] {
         },
       },
     },
+    "/api/v1/connect/start": {
+      post: {
+        tags: ["Connections"],
+        summary: "Ask to connect the app",
+        description: `For the desktop app, which has no credential yet: starts a request and answers its two codes and the connect page to open. Send it with no token and no session cookie. The codes live ${CONNECT_MS / 60_000} minutes. A network may ask ${LIMITS_CONNECT.startNetwork.most} times in ${LIMITS_CONNECT.startNetwork.windowMs / 60_000} minutes and ${LIMITS_CONNECT.startNetworkDay.most} times in a day, and have ${OPEN_PER_NETWORK} requests waiting at once.`,
+        operationId: "startConnection",
+        security: [],
+        requestBody: { required: true, content: json(ref("ConnectStart")) },
+        responses: {
+          "201": answer("The request, waiting for a person to confirm it.", ref("ConnectStarted")),
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. bad_device_name: the device name breaks its rule. credentials_not_allowed: the request carries a token or a session cookie.", "bad_request", "bad_device_name", "credentials_not_allowed"),
+          "429": { description: "Too many requests from this network, or too many of its requests are waiting. Nothing was stored.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/connect/token": {
+      post: {
+        tags: ["Connections"],
+        summary: "Ask for the app's token",
+        description: `For the desktop app: asks, with the device code, whether the request has been confirmed. pending until then; then connected, with a token for the workspace of the person who confirmed, given once: the token is made at this moment, and a request nobody collects in time leaves none. Ask every ${POLL_INTERVAL_S} seconds; asking a waiting request again sooner answers slow_down and changes nothing. Every code that cannot give a token, whether unknown, expired, refused, already used or not a device code, gets the one answer expired_code, so codes cannot be told apart. Send it with no token and no session cookie. A network may ask ${LIMITS_CONNECT.pollNetwork.most} times in ${LIMITS_CONNECT.pollNetwork.windowMs / 60_000} minutes.`,
+        operationId: "getConnectionToken",
+        security: [],
+        requestBody: { required: true, content: json(ref("ConnectPoll")) },
+        responses: {
+          "200": answer("Waiting, or connected with the token.", { oneOf: [ref("ConnectPending"), ref("ConnectConnected")] }),
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token or a session cookie.", "bad_request", "credentials_not_allowed"),
+          "410": refusal("This code can give no token: start again with POST /api/v1/connect/start.", "expired_code"),
+          "429": { description: `slow_down: asked again within the interval; wait ${POLL_INTERVAL_S} seconds more. rate_limited: too many asks from this network.`, headers: retryAfter, content: json(refusalSchema("slow_down", "rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/connect/requests/{code}": {
+      get: {
+        tags: ["Connections"],
+        summary: "Look up a request by its short code",
+        description: `What the connect page shows before the person confirms: the device's name and when it asked. Only a request that is waiting (neither confirmed nor refused, and not expired) is found; every other code is the one 404. A code that finds nothing counts as a wrong try: ${LIMITS_CONNECT.wrongAccount.most} for an account in ${LIMITS_CONNECT.wrongAccount.windowMs / 60_000} minutes, ${LIMITS_CONNECT.wrongNetwork.most} for a network, counted together with confirm and refuse; past that every try answers 429 until the time is up. A right code is not counted. ${NOT_FROM_THE_PAGE}`,
+        operationId: "getConnectionRequest",
+        security: SESSION,
+        parameters: [userCodeParam],
+        responses: {
+          "200": answer("The request.", ref("ConnectRequest")),
+          "401": UNAUTHORIZED,
+          "404": refusal("No request waiting under this code.", "not_found"),
+          "429": { description: "Too many wrong codes from this account or this network. Nothing was looked at.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/connect/confirm": {
+      post: {
+        tags: ["Connections"],
+        summary: "Confirm a request to connect",
+        description: `Confirms the waiting request the short code names, once, for the caller's account and its workspace: the app's next ask for the token gets a token for that workspace. A request already confirmed or refused, also by someone else a moment ago, an expired one and a code nobody has all get the one 404, and nothing changes. Counted as lookups are. ${NOT_FROM_THE_PAGE}`,
+        operationId: "confirmConnection",
+        security: SESSION,
+        requestBody: { required: true, content: json(ref("UserCode")) },
+        responses: {
+          "204": empty("Confirmed."),
+          "400": refusal("The body is not a JSON object sent as application/json.", "bad_request"),
+          "401": UNAUTHORIZED,
+          "404": refusal("No request waiting under this code.", "not_found"),
+          "429": { description: "Too many wrong codes from this account or this network. Nothing was looked at.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/connect/refuse": {
+      post: {
+        tags: ["Connections"],
+        summary: "Refuse a request to connect",
+        description: `Refuses the waiting request the short code names, once: the app's next ask answers expired_code. The same 404 and counting as confirming. ${NOT_FROM_THE_PAGE}`,
+        operationId: "refuseConnection",
+        security: SESSION,
+        requestBody: { required: true, content: json(ref("UserCode")) },
+        responses: {
+          "204": empty("Refused."),
+          "400": refusal("The body is not a JSON object sent as application/json.", "bad_request"),
+          "401": UNAUTHORIZED,
+          "404": refusal("No request waiting under this code.", "not_found"),
+          "429": { description: "Too many wrong codes from this account or this network. Nothing was looked at.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/tokens": {
+      get: {
+        tags: ["Connections"],
+        summary: "List the workspace's tokens",
+        description: `The tokens of the caller's workspace that are not revoked, newest first: each one's id, name, when it was made and last used, and how it was made. Never a token or any part of one. A token cannot call this. ${NOT_FROM_THE_PAGE}`,
+        operationId: "listTokens",
+        security: SESSION,
+        responses: { "200": answer("The tokens.", ref("TokenList")), "401": UNAUTHORIZED },
+      },
+    },
+    "/api/v1/tokens/{id}": {
+      patch: {
+        tags: ["Connections"],
+        summary: "Rename a token",
+        description: `Renames one of the workspace's tokens that is not revoked, and answers it. Another workspace's token, a revoked one and one that does not exist answer 404. A token cannot call this, not even to rename itself. ${NOT_FROM_THE_PAGE}`,
+        operationId: "renameToken",
+        security: SESSION,
+        parameters: [tokenIdParam],
+        requestBody: { required: true, content: json(ref("TokenRename")) },
+        responses: {
+          "200": answer("The token, renamed.", ref("TokenEntry")),
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. bad_name: the name breaks its rule.", "bad_request", "bad_name"),
+          "401": UNAUTHORIZED,
+          "404": refusal("No such token in this workspace.", "not_found"),
+        },
+      },
+      delete: {
+        tags: ["Connections"],
+        summary: "Revoke a token",
+        description: `Revokes one of the workspace's tokens, for good: every request whose token is looked up after this answer is refused with 401 (a request already under way finishes). Another workspace's token, one already revoked and one that does not exist answer 404. A token cannot call this. ${NOT_FROM_THE_PAGE}`,
+        operationId: "revokeToken",
+        security: SESSION,
+        parameters: [tokenIdParam],
+        responses: { "204": empty("Revoked."), "401": UNAUTHORIZED, "404": refusal("No such token in this workspace.", "not_found") },
+      },
+    },
     "/api/v1/admin/summary": {
       get: {
         tags: ["Admin"],
@@ -1274,6 +1452,7 @@ export function openapi(): OpenApiDoc {
       { name: "Items", description: "Share a single image or a short clip: start, one request per part, an optional preview, finish; then list, read and delete." },
       { name: "Workspace", description: "The workspace a token or a session belongs to." },
       { name: "Accounts", description: "Signing in with a link sent by mail, the browser sessions of an account, and changing its email address. The site's own pages use these." },
+      { name: "Connections", description: "Connecting the desktop app with a short code a signed-in person confirms, and the workspace's tokens: list, rename and revoke. The app's two requests take no credential; the rest take the session." },
       { name: "Admin", description: "For the site's admin alone: the site's storage in all, how each account uses its storage, and each workspace's allowance. To anyone else these answer 404." },
       { name: "Server", description: "Whether the server is up. Needs no token." },
     ],

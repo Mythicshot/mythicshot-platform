@@ -1114,7 +1114,7 @@ An upload that was started and never finished holds its room until it is removed
 
 ### Read the audit record
 
-The audit record lists what was done with accounts: sign-ins, sign-outs, links printed, allowances set and email changes. It holds ids, never an email address, a code or a token.
+The audit record lists what was done with accounts: sign-ins, sign-outs, links printed, allowances set, email changes, connections of the app and tokens renamed or revoked. It holds ids, never an email address, a code or a token.
 
 ```sh
 docker compose exec app node dist/node/admin.js audit --last 50
@@ -1135,6 +1135,11 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `email_change_requested` | The account asked to change its address. It is recorded for every request, whether a link was sent or not, so it does not tell whether the new address was free |
 | `email_changed` | The account's address was changed by its confirmed link |
 | `email_changed_on_server` | The account's address was changed with `change-email` |
+| `connection_confirmed` | The account confirmed a request to connect the app, for its workspace; the subject is the id the app's token will have, and the detail names the request, such as `{"request":"crq_…"}`. The device's name is not recorded: it is the token's name in the token list |
+| `connection_refused` | The account refused a request to connect the app; the subject is the request |
+| `connection_collected` | The app collected the token of a confirmed request, and the token was made; the subject is the token, and the account is the one that confirmed |
+| `token_renamed` | A token of the workspace was renamed; the subject is the token |
+| `token_revoked` | A token of the workspace was revoked; the subject is the token |
 
 ## Troubleshooting by symptom
 

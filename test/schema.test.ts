@@ -10,6 +10,8 @@ const TABLES = [
   "api_token",
   "audit",
   "chapter",
+  "connect_key",
+  "connect_request",
   "deleted_object",
   "email_change",
   "media",

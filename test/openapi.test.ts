@@ -32,9 +32,9 @@ const EXAMPLE_ORIGIN = "https://YOUR-SITE";
 const METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "trace"];
 
 /** The operations anyone may call, with no credential at all. */
-const PUBLIC = ["GET /healthz", "POST /api/v1/signin/request", "POST /api/v1/signin/complete"];
+const PUBLIC = ["GET /healthz", "POST /api/v1/signin/request", "POST /api/v1/signin/complete", "POST /api/v1/connect/start", "POST /api/v1/connect/token"];
 /** The operations that take a session and no token. */
-const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm"];
+const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "GET /api/v1/connect/requests/:code", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id"];
 /** The site admin's operations: an admin's session alone, and a 404 (never a 401) to everyone else. */
 const ADMIN_ONLY = ["GET /api/v1/admin/summary", "GET /api/v1/admin/accounts", "PATCH /api/v1/admin/workspaces/:id"];
 
@@ -113,7 +113,7 @@ describe("the API description", () => {
       expect(declared, key).toEqual(inPath);
       for (const name of inPath) seen.add(name);
     }
-    expect([...seen].sort()).toEqual(["id", "n", "step_id"]);
+    expect([...seen].sort()).toEqual(["code", "id", "n", "step_id"]);
   });
 
   it("the version and every limit come from the code", () => {
@@ -201,7 +201,7 @@ describe("the API description", () => {
 
   it("every operation has a tag, a one-line summary, a description, an operationId that is unique, and a 401 unless it is public", () => {
     const doc = openapi();
-    expect(doc.tags.map((t) => t.name)).toEqual(["Tours", "Uploads", "Items", "Workspace", "Accounts", "Admin", "Server"]);
+    expect(doc.tags.map((t) => t.name)).toEqual(["Tours", "Uploads", "Items", "Workspace", "Accounts", "Connections", "Admin", "Server"]);
     for (const t of doc.tags) expect(t.description.length, t.name).toBeGreaterThan(10);
     const ids: string[] = [];
     const summaries: string[] = [];
@@ -258,6 +258,14 @@ describe("the API description", () => {
       "Sign out everywhere",
       "Ask to change the email address",
       "Finish changing the email address",
+      "Ask to connect the app",
+      "Ask for the app's token",
+      "Look up a request by its short code",
+      "Confirm a request to connect",
+      "Refuse a request to connect",
+      "List the workspace's tokens",
+      "Rename a token",
+      "Revoke a token",
       "Every account's storage use in all",
       "List every account's storage use",
       "Set a workspace's storage allowance",
