@@ -329,9 +329,13 @@ Each printed link is recorded in the audit record as `signin_link_printed`. The 
 > [!warning] A printed link is a key for 15 minutes
 > Whoever opens it first is signed in as that account: hand it only to its owner, by a way nobody else reads.
 
+### Inviting people
+
+The site's admin invites a person by email address through the API (`POST /api/v1/admin/invites`; the Admin page and the page the link opens come in a later version). The person gets a mail with a link that works once and for 7 days; inviting the same address again, or resending, sends a new link and the older one stops working. Opening the link and choosing a username makes the account, an empty workspace of its own with the site's standard allowance, and signs that browser in. An address that already has an account cannot be invited. Sending an invite needs mail: on a site whose mail is off it is refused and nothing is stored. When a mail cannot be handed over, the invite stays and the admin is told to resend it. An admin sends at most 20 invites an hour, resends included, the site sends at most 30 invite mails an hour, on a cap of their own apart from sign-in's, and holds at most 100 invites; one that ran out is listed until it is cancelled or replaced, and removed 30 days later. The requests are described at `/docs`.
+
 ### Who to ask for an invite
 
-Nobody can be invited in this version, and the sign-in page says "Mythicshot is invite-only for now." The optional setting `INVITE_CONTACT` adds who to ask: an email address, shown after "Ask for an invite:" as a mail link, or an `https://` address, shown as the link "Ask for an invite". Anything else, unset included, shows the sentence alone and never stops the site. It goes where the other settings go: the settings file, `.env`, or on Cloudflare a var in `wrangler.deploy.jsonc`, which `npm run setup:cloudflare -- update` keeps. On Cloudflare a change takes effect with the next `npm run setup:cloudflare -- update` or deploy.
+Until the invite pages come, the sign-in page says "Mythicshot is invite-only for now." The optional setting `INVITE_CONTACT` adds who to ask: an email address, shown after "Ask for an invite:" as a mail link, or an `https://` address, shown as the link "Ask for an invite". Anything else, unset included, shows the sentence alone and never stops the site. It goes where the other settings go: the settings file, `.env`, or on Cloudflare a var in `wrangler.deploy.jsonc`, which `npm run setup:cloudflare -- update` keeps. On Cloudflare a change takes effect with the next `npm run setup:cloudflare -- update` or deploy.
 
 ## The dashboard
 

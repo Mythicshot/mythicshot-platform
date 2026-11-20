@@ -14,6 +14,7 @@ const TABLES = [
   "connect_request",
   "deleted_object",
   "email_change",
+  "invite",
   "media",
   "media_object",
   "membership",
@@ -710,6 +711,53 @@ describe("schema", () => {
     for (const id of ["", "emc_1", "EMC_" + "0".repeat(24), "emc-" + "0".repeat(24), "emc_" + "0".repeat(23) + "g", "e_" + "0".repeat(24), "emcxx_" + "0".repeat(24), SECRET]) await rejection(row({ id }));
     await rejection(deps.db.run("INSERT INTO email_change (id, user_id, new_email, code_hash, created_at) VALUES (? || char(0) || 'x', ?, 'a@example.com', ?, 1)", ["emc_" + "0".repeat(24), user, HASH_B]));
     expect(await count(deps, "email_change")).toBe(0);
+  });
+  // Invites (migration 0012).
+
+  it("an invite is strict, one per address, found by its digest alone, and names its inviter by no foreign key", async () => {
+    const { deps } = await makeDeps();
+    const t = (await appTables(deps)).find((x) => x.name === "invite");
+    expect(t?.sql).toMatch(/\)\s*STRICT$/);
+    expect(t?.sql).not.toMatch(/references|cascade|set null|set default/i);
+    const indexes = await deps.db.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'invite' AND sql IS NOT NULL ORDER BY name");
+    expect(indexes.map((i) => i.name)).toEqual(["invite_created", "invite_expires"]);
+    const add = (id: string, email: string, hash: string, by: string | null = null, created = NOW, expires = NOW + 1) =>
+      deps.db.run("INSERT INTO invite (id, email, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)", [id, email, hash, by, created, expires]);
+    await add("inv_" + "0".repeat(24), "a@example.com", HASH_A, "usr_" + "0".repeat(24));
+    // A second invite to the same address, or the same digest for another, is refused.
+    expect(isUniqueViolation(await rejection(add("inv_" + "1".repeat(24), "a@example.com", HASH_B)))).toBe(true);
+    expect(isUniqueViolation(await rejection(add("inv_" + "1".repeat(24), "b@example.com", HASH_A)))).toBe(true);
+    // It must end after it starts.
+    await rejection(add("inv_" + "1".repeat(24), "b@example.com", HASH_B, null, NOW, NOW));
+    // The inviter is an account id or null, and need not be an account that exists.
+    for (const by of ["", "usr_1", "tok_" + "0".repeat(24), "usr_" + "0".repeat(23) + "g", SECRET]) await rejection(add("inv_" + "1".repeat(24), "b@example.com", HASH_B, by));
+    await add("inv_" + "1".repeat(24), "b@example.com", HASH_B);
+    expect(await count(deps, "invite")).toBe(2);
+  });
+
+  it("an invite holds an address of the stored form, a digest and an id, and nothing can hide behind a NUL", async () => {
+    const { deps } = await makeDeps();
+    let n = 0;
+    const row = (cols: { id?: string; email?: string; hash?: string }, emailSql = "?") => {
+      n += 1;
+      const id = cols.id ?? "inv_" + n.toString(16).padStart(24, "0");
+      const hash = cols.hash ?? n.toString(16).padStart(64, "0");
+      return deps.db.run(`INSERT INTO invite (id, email, code_hash, created_at, expires_at) VALUES (?, ${emailSql}, ?, 1, 2)`, [id, cols.email ?? "a@example.com", hash]);
+    };
+    const reset = () => deps.db.run("DELETE FROM invite");
+    for (const email of ["a@example.com", "first.last+tag@sub.example.co.uk", "x@" + "y".repeat(249) + ".zz"]) {
+      await row({ email });
+      await reset();
+    }
+    for (const email of ["", "ab", "A@example.com", "a@Example.com", "@example.com", "noatsign", "a@b@example.com", "a b@example.com", "a@example.com\n", "ä@example.com", "x@" + "y".repeat(250) + ".zz", "a\t@example.com"]) {
+      await rejection(row({ email }));
+    }
+    await rejection(row({}, "'a@example.com' || char(0) || 'x'"));
+    for (const hash of ["", HASH_A.slice(1), HASH_A + "a", HASH_A.toUpperCase(), "g".repeat(64), SECRET]) await rejection(row({ hash }));
+    await rejection(deps.db.run("INSERT INTO invite (id, email, code_hash, created_at, expires_at) VALUES ('inv_' || ?, 'a@example.com', ? || char(0) || 'x', 1, 2)", ["9".repeat(24), HASH_A.slice(2)]));
+    for (const id of ["", "inv_1", "INV_" + "0".repeat(24), "inv-" + "0".repeat(24), "inv_" + "0".repeat(23) + "g", "emc_" + "0".repeat(24), SECRET]) await rejection(row({ id }));
+    await rejection(deps.db.run("INSERT INTO invite (id, email, code_hash, created_at, expires_at) VALUES (? || char(0) || 'x', 'a@example.com', ?, 1, 2)", ["inv_" + "0".repeat(24), HASH_B]));
+    expect(await count(deps, "invite")).toBe(0);
   });
   // Shared items (migration 0010).
 

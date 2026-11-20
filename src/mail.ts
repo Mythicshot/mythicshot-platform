@@ -1,5 +1,5 @@
-// Mail as the core sees it: one port, the mailer that is off, the texts of the sign-in and
-// email-change mails, and the address their links start with. No platform API here: the
+// Mail as the core sees it: one port, the mailer that is off, the texts of the sign-in,
+// email-change and invite mails, and the address their links start with. No platform API here: the
 // SMTP client lives in src/node/smtp.ts, and tests use test/fake-mail.ts.
 import { normaliseHost, originOf } from "./hosts.ts";
 import type { Config } from "./ports.ts";

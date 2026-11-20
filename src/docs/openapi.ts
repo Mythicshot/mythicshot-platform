@@ -12,12 +12,13 @@
 import { ADMIN_PAGE, MAX_ALLOWANCE_BYTES } from "../admin-api.ts";
 import { LIMITS } from "../manifest.ts";
 import { CLIP_MAX_DURATION_MS, CLIP_MAX_SIDE, DEFAULT_MEDIA_LIMITS, LIST_PAGE, MAX_LOOSE_CLAIMS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, TITLE_MAX } from "../media.ts";
-import { LIMITS_CONNECT, LIMITS_MEDIA } from "../rate.ts";
+import { LIMITS_CONNECT, LIMITS_INVITE, LIMITS_MEDIA } from "../rate.ts";
 import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../publish.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
 import { DELETE_FILES_PER_CALL } from "../tours.ts";
 import { EMAIL_CHANGE_MS } from "../email-change.ts";
 import { CONNECT_MS, DEVICE_NAME_MAX, OPEN_PER_NETWORK, POLL_INTERVAL_S, USER_CODE_ALPHABET, VERIFY_PATH } from "../connect.ts";
+import { INVITE_KEPT_MS, INVITE_MS, MAX_INVITES } from "../invites.ts";
 import { MAX_TOKENS_LISTED } from "../tokens.ts";
 import { SESSION_COOKIE, SESSION_MS, SIGNIN_CODE_MS } from "../sessions.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS, UPLOAD_MAX_AGE_MS } from "../uploads.ts";
@@ -179,6 +180,7 @@ const stepId: OpenApiParameter = { name: "step_id", in: "path", required: true, 
 const workspaceId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The workspace's id, as the list of accounts gives it in workspace_id.", schema: { type: "string", pattern: "^ws_[0-9a-f]{24}$" } };
 const mediaId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The item's id, from the answer that started it.", schema: { type: "string", pattern: "^med_[0-9a-f]{24}$" } };
 const tokenIdParam: OpenApiParameter = { name: "id", in: "path", required: true, description: "The token's id, as the list of tokens gives it.", schema: { type: "string", pattern: "^tok_[0-9a-f]{24}$" } };
+const inviteId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The invite's id, as the list of invites gives it.", schema: { type: "string", pattern: "^inv_[0-9a-f]{24}$" } };
 const sessionId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The session's id, as the list of sessions gives it.", schema: { type: "string", pattern: "^ses_[0-9a-f]{24}$" } };
 
 function introduction(): string {
@@ -202,6 +204,8 @@ function introduction(): string {
     `The site's own pages sign a person in with a link sent by mail: POST /api/v1/signin/request mails the link, and POST /api/v1/signin/complete turns the code in it into a session. The link works once and for ${SIGNIN_CODE_MS / 60_000} minutes. The session is a cookie, ${SESSION_COOKIE}, on the app address only (on a server with one address, on that address); it lasts ${SESSION_MS / 86_400_000} days from its last use. Every request that lists the session can be sent with it instead of a token, and acts in the account's one workspace.`,
     "",
     `A signed-in person changes the account's email address in two steps: POST /api/v1/account/email mails a link to the new address, and POST /api/v1/account/email/confirm, sent with the code in that link from the same account's session, makes the change, once and within ${EMAIL_CHANGE_MS / 60_000} minutes. The old address is then sent a notice. Both need the session; a token cannot change an address.`,
+    "",
+    `Nobody signs up: the site's admin invites an address (POST /api/v1/admin/invites), which mails a link that works once and for ${INVITE_MS / 86_400_000} days. The page the link opens looks the code up (POST /api/v1/invite/check) and accepts it with the username the person chooses (POST /api/v1/invite/accept), which makes the account, an empty workspace of its own and a session, and sets the session cookie as finishing a sign-in does. The code is only ever sent in a request body, never in an address. Both requests take no credential: one that carries a token answers \`400 credentials_not_allowed\`, and a browser signed in to any account answers \`409 signed_in\`. Every code that cannot be used, whether unknown, used, cancelled, replaced by a newer invite or expired, answers the one \`404 invite_invalid\`.`,
     "",
     "A request with a session that changes anything (any method but GET and HEAD) must come from the site's own pages: its Origin must be the address it is sent to, and it must carry the session's anti-forgery value in the header `X-Csrf-Token`, which GET /api/v1/session gives. A token and a session cookie together are refused.",
     "",
@@ -249,6 +253,7 @@ function introduction(): string {
     `- An upload that is not finished is removed after ${hours} hours.`,
     `- A shared image: ${n(DEFAULT_MEDIA_LIMITS.imageMaxBytes)} bytes and ${n(DEFAULT_MEDIA_LIMITS.imageMaxSide)} pixels on a side, PNG or JPEG. A shared clip: ${n(DEFAULT_MEDIA_LIMITS.clipMaxBytes)} bytes, GIF or MP4, at most ${n(CLIP_MAX_SIDE)} pixels on a side and ${CLIP_MAX_DURATION_MS / 60_000} minutes long. These numbers are fixed in this version: no setting changes them. Each is sent in parts of ${n(PART_BYTES)} bytes. An item's preview: ${n(PREVIEW_RULE.maxBytes)} bytes and ${n(PREVIEW_RULE.maxSide)} pixels on a side, PNG or JPEG. A workspace starts at most ${LIMITS_MEDIA.create.most} items, sends at most ${n(LIMITS_MEDIA.part.most)} parts and ${LIMITS_MEDIA.preview.most} previews an hour, and an item that is not finished within ${MEDIA_MAX_AGE_MS / 3_600_000} hours is removed and can no longer be finished.`,
     `- Connecting the app: a network asks for at most ${LIMITS_CONNECT.startNetwork.most} pairs of codes in ${LIMITS_CONNECT.startNetwork.windowMs / 60_000} minutes and ${LIMITS_CONNECT.startNetworkDay.most} in a day, and has at most ${OPEN_PER_NETWORK} waiting at once; it asks for tokens at most ${LIMITS_CONNECT.pollNetwork.most} times in ${LIMITS_CONNECT.pollNetwork.windowMs / 60_000} minutes. An account may type ${LIMITS_CONNECT.wrongAccount.most} short codes that name no waiting request in ${LIMITS_CONNECT.wrongAccount.windowMs / 60_000} minutes, and a network ${LIMITS_CONNECT.wrongNetwork.most}; a right code is not counted.`,
+    `- Invites: an admin sends at most ${LIMITS_INVITE.sendAdmin.most} an hour, resends included; the site sends at most ${LIMITS_INVITE.mailSite.most} invite mails an hour and holds at most ${MAX_INVITES} invites, open or expired. A network looks up and accepts invites at most ${LIMITS_INVITE.codeNetwork.most} times in ${LIMITS_INVITE.codeNetwork.windowMs / 60_000} minutes.`,
     "- A workspace may have a storage allowance, set by the server's settings or its admin. An upload or a shared item that would take the workspace over it is refused when it is started, with 413 `storage_full` and the numbers, before anything is stored. Nothing is ever deleted because of an allowance.",
     `- A publish that makes no progress for ${minutes} minutes counts as abandoned.`,
     "",
@@ -455,6 +460,35 @@ function schemas(): Record<string, Schema> {
     ),
     SignInRequest: input(["email"], { email: text(254, "The address to send the link to. Spaces around it are dropped and capitals do not count.", 3) }),
     SignInComplete: input(["code"], { code: { type: "string", pattern: "^dpl_[0-9a-f]{40}$", description: "The code of the link, the part after #c= in its address." } }),
+    InviteCheck: input(["code"], { code: { type: "string", pattern: "^dpi_[0-9a-f]{40}$", description: "The code of the invite's link, the part after # in its address." } }),
+    InviteAccept: input(["code", "username"], {
+      code: { type: "string", pattern: "^dpi_[0-9a-f]{40}$", description: "The code of the invite's link, the part after # in its address." },
+      username: { type: "string", description: "The username the person chooses: 3 to 30 lowercase letters, digits and hyphens, a letter first, no hyphen last and no two in a row, and not one the site holds back. Spaces around it are dropped and capitals become small letters. It cannot be changed later." },
+    }),
+    InviteFound: object(
+      ["email", "invited_by", "expires_at"],
+      {
+        email: { type: "string", description: "The invited address, which the account will have." },
+        invited_by: { type: ["string", "null"], description: "The username of the admin who sent the invite. null when that account has none or is gone." },
+        expires_at: whole("When the link stops working, in milliseconds since 1970."),
+      },
+      "What the page shows before the account is made.",
+    ),
+    InviteSend: object(["email"], { email: text(254, "The address to invite. Spaces around it are dropped and capitals do not count.", 3) }),
+    Invite: object(
+      ["id", "email", "created_at", "expires_at", "state"],
+      {
+        id: { type: "string", pattern: "^inv_[0-9a-f]{24}$" },
+        email: { type: "string", description: "The invited address, as stored: in small letters." },
+        created_at: whole("When it was sent, or last sent again, in milliseconds since 1970."),
+        expires_at: whole("When its link stops working, in milliseconds since 1970."),
+        state: { type: "string", enum: ["open", "expired"], description: "open while the link works; expired once its time ran out." },
+      },
+      "One invite that is open or ran out. An accepted or cancelled invite is gone.",
+    ),
+    InviteList: object(["invites"], {
+      invites: { type: "array", maxItems: MAX_INVITES, description: `The site's invites, newest first: every one, since there are at most ${MAX_INVITES}.`, items: ref("Invite") },
+    }),
     EmailChangeRequest: input(["email"], { email: text(254, "The new address, which the link is mailed to. Spaces around it are dropped and capitals do not count.", 3) }),
     EmailChangeConfirm: input(["code"], { code: { type: "string", pattern: "^dpe_[0-9a-f]{40}$", description: "The code of the link mailed to the new address, the part after #c= in its address." } }),
     EmailChanged: object(
@@ -1191,6 +1225,42 @@ function paths(): OpenApiDoc["paths"] {
         },
       },
     },
+    "/api/v1/invite/check": {
+      post: {
+        tags: ["Accounts"],
+        summary: "Look up an invite",
+        description: `For the page an invite's link opens: the invited address, who sent the invite and when its link stops working. It changes nothing, so opening the link uses nothing up. Needs no credential, but must come from a page of the address it is sent to, as JSON; a token is refused, and so is a browser signed in to any account. Every code that cannot be used gets the one answer invite_invalid. A network may look up and accept invites ${LIMITS_INVITE.codeNetwork.most} times in ${LIMITS_INVITE.codeNetwork.windowMs / 60_000} minutes.`,
+        operationId: "checkInvite",
+        security: [],
+        requestBody: { required: true, content: json(ref("InviteCheck")) },
+        responses: {
+          "200": answer("The invite.", ref("InviteFound")),
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token.", "bad_request", "credentials_not_allowed"),
+          "403": refusal("The request did not come from a page of this address.", "bad_origin"),
+          "404": refusal("The invite cannot be used: unknown, already used, cancelled, replaced by a newer invite, or expired. They cannot be told apart.", "invite_invalid"),
+          "409": refusal("The browser is signed in. Sign out first, then open the link again.", "signed_in"),
+          "429": { description: "Too many tries from this network. Nothing was looked at.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/invite/accept": {
+      post: {
+        tags: ["Accounts"],
+        summary: "Accept an invite",
+        description: "Makes the account the invite is for, with the username chosen: the invited address, an empty workspace of its own named after the username with the site's standard storage allowance, and a session, at once, and sets the session cookie as finishing a sign-in does. It is all made together or not at all, and of two accepts of one invite only one makes an account. A refused accept uses nothing up: the invite still works. Needs no credential, but must come from a page of the address it is sent to, as JSON; a token is refused, and so is a browser signed in to any account, which is never switched to another. The answer never repeats the code.",
+        operationId: "acceptInvite",
+        security: [],
+        requestBody: { required: true, content: json(ref("InviteAccept")) },
+        responses: {
+          "200": { ...answer("The account is made, and this browser is signed in to it.", ref("Ok")), headers: setCookie("The session cookie: host-only, Secure, HttpOnly and SameSite=Lax.") },
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token. bad_username: the username breaks the rule, or is one the site holds back.", "bad_request", "credentials_not_allowed", "bad_username"),
+          "403": refusal("The request did not come from a page of this address.", "bad_origin"),
+          "404": refusal("The invite cannot be used: unknown, already used, cancelled, replaced by a newer invite, or expired. They cannot be told apart.", "invite_invalid"),
+          "409": refusal("signed_in: the browser is signed in; sign out first. has_account: the address has an account by now; sign in instead. username_taken: another account has the username; choose another. Nothing was made.", "signed_in", "has_account", "username_taken"),
+          "429": { description: "Too many tries from this network. Nothing was looked at.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
+        },
+      },
+    },
     "/api/v1/session": {
       get: {
         tags: ["Accounts"],
@@ -1442,6 +1512,60 @@ function paths(): OpenApiDoc["paths"] {
         },
       },
     },
+    "/api/v1/admin/invites": {
+      post: {
+        tags: ["Admin"],
+        summary: "Invite an address",
+        description: `For the site's admin: mails the address a link that lets its owner make an account, once and for ${INVITE_MS / 86_400_000} days, and answers the invite. An address that already has an invite gets a new link in that same invite, and the older link stops working at once. The mail is sent before the answer: when it could not be handed over the invite stays and the answer is mail_failed, and resending it tries again. Nothing is counted or stored on a site that cannot send mail. An admin sends at most ${LIMITS_INVITE.sendAdmin.most} invites an hour, resends included, and the site sends at most ${LIMITS_INVITE.mailSite.most} invite mails an hour and holds at most ${MAX_INVITES} invites. Every refusal of the caller is the one 404. ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminInvite",
+        security: SESSION,
+        requestBody: { required: true, content: json(ref("InviteSend")) },
+        responses: {
+          "201": answer("The invite; its mail is on its way.", ref("Invite")),
+          "400": answer("bad_request: the body is not a JSON object holding email and nothing else. bad_email, with no detail: email is not an email address.", someDetail("bad_request", "bad_email")),
+          "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
+          "409": refusal(`mail_off: the site cannot send mail. has_account: the address already has an account. too_many_invites: the site holds ${MAX_INVITES} invites already; cancel one. Nothing was stored.`, "mail_off", "has_account", "too_many_invites"),
+          "429": { description: "The admin sent its invites for this hour, or the site its invite mails. Nothing was stored.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
+          "502": refusal("The invite is stored, but its mail could not be handed over. Resend it to try again.", "mail_failed"),
+        },
+      },
+      get: {
+        tags: ["Admin"],
+        summary: "List the invites",
+        description: `For the site's admin: every invite that is open or ran out, newest first. An accepted or cancelled invite is gone, and one that ran out is removed ${INVITE_KEPT_MS / 86_400_000} days later. It works whether or not the site can send mail. Every refusal is the one 404. ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminListInvites",
+        security: SESSION,
+        responses: { "200": answer("The invites.", ref("InviteList")), "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")) },
+      },
+    },
+    "/api/v1/admin/invites/{id}/resend": {
+      post: {
+        tags: ["Admin"],
+        summary: "Send an invite again",
+        description: `For the site's admin: mails the invite again with a new link, for ${INVITE_MS / 86_400_000} days from now, from the admin who asks; the older link stops working at once. It counts as an invite in the admin's and the site's hourly numbers. Answers the refreshed invite. ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminResendInvite",
+        security: SESSION,
+        parameters: [inviteId],
+        responses: {
+          "200": answer("The refreshed invite; its mail is on its way.", ref("Invite")),
+          "404": answer("No such invite, or anything other than the site's admin, signed in on this address, with a correct request. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
+          "409": refusal("mail_off: the site cannot send mail. has_account: the address has an account by now; cancel the invite. Nothing changed.", "mail_off", "has_account"),
+          "429": { description: "The admin sent its invites for this hour, or the site its invite mails. Nothing changed.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
+          "502": refusal("The invite has its new link, but the mail could not be handed over. Resend it to try again.", "mail_failed"),
+        },
+      },
+    },
+    "/api/v1/admin/invites/{id}": {
+      delete: {
+        tags: ["Admin"],
+        summary: "Cancel an invite",
+        description: `For the site's admin: ends the invite, and its link stops working at once. The address can be invited again. It works whether or not the site can send mail. ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminCancelInvite",
+        security: SESSION,
+        parameters: [inviteId],
+        responses: { "204": empty("Cancelled."), "404": answer("No such invite, or anything other than the site's admin, signed in on this address, with a correct request. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")) },
+      },
+    },
     "/healthz": {
       get: {
         tags: ["Server"],
@@ -1466,9 +1590,9 @@ export function openapi(): OpenApiDoc {
       { name: "Uploads", description: "Send a tour, a new chapter or a chapter's replacement: start, one request per image, finish." },
       { name: "Items", description: "Share a single image or a short clip: start, one request per part, an optional preview, finish; then list, read and delete." },
       { name: "Workspace", description: "The workspace a token or a session belongs to." },
-      { name: "Accounts", description: "Signing in with a link sent by mail, the browser sessions of an account, and changing its email address. The site's own pages use these." },
+      { name: "Accounts", description: "Signing in with a link sent by mail, accepting an invite, the browser sessions of an account, and changing its email address. The site's own pages use these." },
       { name: "Connections", description: "Connecting the desktop app with a short code a signed-in person confirms, and the workspace's tokens: list, rename and revoke. The app's two requests take no credential; the rest take the session." },
-      { name: "Admin", description: "For the site's admin alone: the site's storage in all, how each account uses its storage, and each workspace's allowance. To anyone else these answer 404." },
+      { name: "Admin", description: "For the site's admin alone: the site's storage in all, how each account uses its storage, each workspace's allowance, and inviting people. To anyone else these answer 404." },
       { name: "Server", description: "Whether the server is up. Needs no token." },
     ],
     paths: paths(),
