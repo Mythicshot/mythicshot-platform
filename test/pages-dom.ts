@@ -14,13 +14,14 @@ export class FakeText {
 
 type Listener = (event: FakeEvent) => void;
 
-/** What a keyboard event carries besides its type: the key, and whether Shift was held. */
-export type KeyInit = { key?: string; shiftKey?: boolean };
+/** What a keyboard event carries besides its type: the key, whether Shift was held, and whether it is a held key's repeat. */
+export type KeyInit = { key?: string; shiftKey?: boolean; repeat?: boolean };
 
 export class FakeEvent {
   defaultPrevented = false;
   readonly key: string;
   readonly shiftKey: boolean;
+  readonly repeat: boolean;
   constructor(
     public type: string,
     public target: FakeElement,
@@ -28,6 +29,7 @@ export class FakeEvent {
   ) {
     this.key = init.key ?? "";
     this.shiftKey = init.shiftKey === true;
+    this.repeat = init.repeat === true;
   }
   preventDefault(): void {
     this.defaultPrevented = true;

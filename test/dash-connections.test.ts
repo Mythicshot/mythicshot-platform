@@ -67,7 +67,7 @@ const WORDING = [
   "Asked",
   "Workspace",
   // Proposed in the security review: shown only when the request came from another network.
-  "This request came from a different network than the one you are on now. If you are not sure it is yours, press Not me.",
+  "This request may have come from a different network than the one you are on now. If you are not sure it is yours, press Not me.",
   "Confirm only if you pressed Sign in in Mythicshot on this computer just now. It will be able to publish, change and delete everything in this workspace.",
   "Not me",
   "Connect",
@@ -114,6 +114,8 @@ const TEXT: Record<string, string> = {
   alreadyGone: "That connection was already disconnected.",
   // Proposed in review: when no answer came to Connect or Not me and the code is no longer open.
   lostAnswer: "The answer was lost on the way. If the computer was connected, it shows in the list below within a few seconds; if not, press Sign in in Mythicshot again.",
+  // Proposed in review: the same for Not me.
+  lostRefuse: "The answer was lost on the way. The code no longer works, so nothing can be connected with it.",
   notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
 };
 

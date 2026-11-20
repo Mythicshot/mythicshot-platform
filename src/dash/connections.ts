@@ -78,7 +78,7 @@ const CONNECTIONS_MAIN = `  <div id="connections-page">
     <div class="dialog" id="confirm-box" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-facts confirm-warn">
       <h2 id="confirm-title" tabindex="-1">Connect this computer?</h2>
       <dl class="kv" id="confirm-facts"><dt>Computer</dt><dd><b class="name" id="confirm-device"></b></dd><dt>Asked</dt><dd id="confirm-asked"></dd><dt>Workspace</dt><dd id="confirm-workspace"></dd></dl>
-      <p class="warn-box" id="confirm-elsewhere" hidden>This request came from a different network than the one you are on now. If you are not sure it is yours, press Not me.</p>
+      <p class="warn-box" id="confirm-elsewhere" hidden>This request may have come from a different network than the one you are on now. If you are not sure it is yours, press Not me.</p>
       <p class="warn-box" id="confirm-warn">Confirm only if you pressed Sign in in Mythicshot on this computer just now. It will be able to publish, change and delete everything in this workspace.</p>
       <p class="message" id="confirm-message" role="status" aria-live="polite" hidden></p>
       <div class="two">
@@ -147,6 +147,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
     badName: "A name is 1 to 60 characters, with no hidden characters.",
     alreadyGone: "That connection was already disconnected.",
     lostAnswer: "The answer was lost on the way. If the computer was connected, it shows in the list below within a few seconds; if not, press Sign in in Mythicshot again.",
+    lostRefuse: "The answer was lost on the way. The code no longer works, so nothing can be connected with it.",
     notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
   };
   var TOKENS = "/api/v1/tokens";
@@ -221,7 +222,10 @@ export const CONNECTIONS_JS = String.raw`(function () {
     return confirmQ.isOpen() || renameQ.isOpen() || disconnectQ.isOpen();
   }
 
-  function rowsDisabled(on) {
+  // The rows' buttons are disabled while a rename or a disconnect runs, and while a lookup
+  // runs (its answer opens the confirm question): one question at a time.
+  function syncRows() {
+    var on = working || looking;
     rowButtons.forEach(function (b) { b.el.disabled = on; });
   }
 
@@ -303,6 +307,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
     go.disabled = on || blocked();
     if (on) go.setAttribute("aria-busy", "true");
     else go.removeAttribute("aria-busy");
+    syncRows();
   }
 
   // "just now" under a minute, then whole minutes.
@@ -330,6 +335,8 @@ export const CONNECTIONS_JS = String.raw`(function () {
       lookingUp(false);
       var d = res !== null ? res.data : null;
       if (res !== null && res.status === 200 && d !== null && typeof d === "object" && typeof d.device_name === "string" && isTime(d.asked_at)) {
+        // Another question opened meanwhile: this one is not asked on top of it.
+        if (anyOpen()) return;
         ask({ code: code, device: d.device_name, asked: d.asked_at, elsewhere: d.same_network === false });
         return;
       }
@@ -384,8 +391,12 @@ export const CONNECTIONS_JS = String.raw`(function () {
           confirmQ.close(false);
           $("connect-code").value = "";
           codeSays("");
-          note(null, TEXT.lostAnswer);
-          watch();
+          // After Connect the computer may have been connected, so the list is watched; after
+          // Not me the code no longer works either way, and there is nothing to watch for.
+          if (how === "confirm") {
+            note(null, TEXT.lostAnswer);
+            watch();
+          } else note(null, TEXT.lostRefuse);
           $("connect-code").focus();
           return;
         }
@@ -507,7 +518,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
     var rows = $("connections-rows");
     rows.textContent = "";
     for (var i = 0; i < list.length; i++) rows.appendChild(row(list[i], i));
-    rowsDisabled(working);
+    syncRows();
     $("connections-list").hidden = list.length === 0;
     $("connections-hint").hidden = list.length === 0;
     $("connections-empty").hidden = list.length !== 0;
@@ -569,7 +580,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
   }
 
   function askRename(t) {
-    if (working || anyOpen()) return;
+    if (working || looking || anyOpen()) return;
     var input = $("rename-input");
     input.value = t.name;
     input.removeAttribute("aria-invalid");
@@ -600,7 +611,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
     complain("");
     say("");
     working = true;
-    rowsDisabled(true);
+    syncRows();
     renameQ.busy(true, "rename-save", TEXT.saving);
     function settle(res) {
       if (res !== null && res.status === 401) { Dash.signedOut(); return; }
@@ -611,7 +622,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
         if (r === false) return;
         working = false;
         renameQ.busy(false, "rename-save");
-        rowsDisabled(false);
+        syncRows();
         if (done || gone) {
           renameQ.close(false);
           say(gone ? TEXT.alreadyGone : got(r) ? "" : TEXT.notReloaded);
@@ -635,9 +646,15 @@ export const CONNECTIONS_JS = String.raw`(function () {
   // ---- Disconnect ----
 
   function askDisconnect(t) {
-    if (working || anyOpen()) return;
+    if (working || looking || anyOpen()) return;
+    // The name in its own bidi-isolated element, as in the list, so right-to-left letters
+    // cannot reorder the quote marks around it.
+    var title = $("disconnect-title");
+    title.textContent = "";
+    title.appendChild(el("span", "", TEXT.askBefore));
+    title.appendChild(el("span", "name", t.name));
+    title.appendChild(el("span", "", TEXT.askAfter));
     var opened = disconnectQ.open({
-      title: TEXT.askBefore + t.name + TEXT.askAfter,
       focus: "disconnect-keep",
       back: function () { return disconnectOf[t.id]; },
       fallback: "h-page",
@@ -652,7 +669,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
     disconnectQ.say("");
     say("");
     working = true;
-    rowsDisabled(true);
+    syncRows();
     disconnectQ.busy(true, "disconnect-go", TEXT.disconnecting);
     // res: the answer, or null when none came.
     function settle(res) {
@@ -669,7 +686,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
         }
         working = false;
         disconnectQ.busy(false, "disconnect-go");
-        rowsDisabled(false);
+        syncRows();
         if (done) {
           disconnectQ.close(false);
           say(got(r) ? "" : TEXT.notReloaded);
@@ -689,13 +706,20 @@ export const CONNECTIONS_JS = String.raw`(function () {
       regroup();
       if (!blocked()) codeSays("");
     });
-    // Enter in the field is Continue.
+    // Enter in the field is Continue; a held Enter's repeats do nothing.
     $("connect-code").addEventListener("keydown", function (ev) {
       if (ev.key !== "Enter") return;
+      if (ev.repeat === true) { ev.preventDefault(); return; }
       ev.preventDefault();
       lookUp();
     });
     $("confirm-go").addEventListener("click", function () { settleCode("confirm"); });
+    // A held key's repeats never press Connect or Not me (the first Enter may have been the field's).
+    ["confirm-go", "confirm-refuse"].forEach(function (id) {
+      $(id).addEventListener("keydown", function (ev) {
+        if (ev.repeat === true && (ev.key === "Enter" || ev.key === " ")) ev.preventDefault();
+      });
+    });
     $("confirm-refuse").addEventListener("click", function () { settleCode("refuse"); });
     $("rename-cancel").addEventListener("click", function () { renameQ.dismiss(); });
     $("rename-save").addEventListener("click", saveRename);

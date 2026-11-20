@@ -34,7 +34,7 @@ const TOO_MANY_REQUESTS = "Too many requests. Wait a few minutes and try again."
 const BAD_CODE = "That code does not work. Codes last 10 minutes and work once. Press Sign in in Mythicshot again for a new one.";
 const NOT_RELOADED = "The change was made, but the list could not be loaded again. Reload the page to see it.";
 const BAD_NAME = "A name is 1 to 60 characters, with no hidden characters.";
-const ELSEWHERE = "This request came from a different network than the one you are on now. If you are not sure it is yours, press Not me.";
+const ELSEWHERE = "This request may have come from a different network than the one you are on now. If you are not sure it is yours, press Not me.";
 const WARN = "Confirm only if you pressed Sign in in Mythicshot on this computer just now. It will be able to publish, change and delete everything in this workspace.";
 const HINT = "A connection lets Mythicshot on that computer publish, change and delete everything in this workspace. Disconnect one you no longer use or do not recognise.";
 
@@ -276,6 +276,23 @@ describe("the Connections page: the list", () => {
     expect(tab.$("disconnect-title").textContent).toBe(`Disconnect "${names[0]}"?`);
   });
 
+  it("the Disconnect title holds a right-to-left name in its own bidi-isolated element, between the quote marks", async () => {
+    const rtl = "מחשב עבודה العمل";
+    const tab = openPage(standard({ "GET /api/v1/tokens": list([token(T1, rtl)]) }));
+    await tab.settle();
+    button(rows(tab)[0], "Disconnect").click();
+    const title = tab.$("disconnect-title");
+    const parts = title.children.map((c) => (c instanceof FakeElement ? [c.tagName, c.className, c.textContent] : ["#text", "", c.text]));
+    expect(parts).toEqual([["span", "", 'Disconnect "'], ["span", "name", rtl], ["span", "", '"?']]);
+    expect(title.textContent).toBe(`Disconnect "${rtl}"?`);
+    // The same class as the list's names, which the stylesheet isolates.
+    expect(nameOf(rows(tab)[0]).className.split(" ")).toContain("name");
+    // Asked again for another row, the title is rebuilt, not added to.
+    tab.$("disconnect-keep").click();
+    button(rows(tab)[0], "Disconnect").click();
+    expect(title.children).toHaveLength(3);
+  });
+
   it("leaves out entries it cannot trust: an id of another shape, a name that is not text", async () => {
     const tab = openPage(standard({ "GET /api/v1/tokens": list([token("tok_../x", "A"), token(T2, 7 as unknown as string), { ...token(T3, "Good"), created_at: "x" }, token(T4, "Kept")]) }));
     await tab.settle();
@@ -460,30 +477,101 @@ describe("the Connections page: connecting with a code", () => {
     }
   });
 
-  it("a lost answer to Connect or Not me looks the code up once: 404 closes with the neutral note and watches the list", async () => {
-    for (const [path, button] of [["/api/v1/connect/confirm", "confirm-go"], ["/api/v1/connect/refuse", "confirm-refuse"]]) {
-      const lists = [list(MOCKUP), list(MOCKUP), list([token(T4, "ALEX-DESKTOP-2", { created_at: NOW, last_used_at: null }), ...MOCKUP])];
-      const tab = await lookedUp(standard({ [LOOKUP]: [found(), NO_REQUEST], [`POST ${path}`]: "network", "GET /api/v1/tokens": lists }));
-      tab.$(button).click();
+  it("a lost answer to Connect looks the code up once: 404 closes with the neutral note and watches the list", async () => {
+    const lists = [list(MOCKUP), list(MOCKUP), list([token(T4, "ALEX-DESKTOP-2", { created_at: NOW, last_used_at: null }), ...MOCKUP])];
+    const tab = await lookedUp(standard({ [LOOKUP]: [found(), NO_REQUEST], "POST /api/v1/connect/confirm": "network", "GET /api/v1/tokens": lists }));
+    tab.$("confirm-go").click();
+    await tab.settle();
+    expect(of(tab, "POST", "/api/v1/connect/lookup").map((f) => f.body)).toEqual([{ user_code: "K7QM2HXD" }, { user_code: "K7QM2HXD" }]);
+    expect(of(tab, "POST", "/api/v1/connect/confirm")).toHaveLength(1);
+    expect([tab.$("confirm-dialog").shown, tab.$("connect-note").shown, tab.$("connect-note").textContent, tab.$("connect-note").className, tab.$("connect-code").value, tab.$("connect-message").shown, tab.doc.activeElement?.id]).toEqual([
+      false,
+      true,
+      "The answer was lost on the way. If the computer was connected, it shows in the list below within a few seconds; if not, press Sign in in Mythicshot again.",
+      "note plain",
+      "",
+      false,
+      "connect-code",
+    ]);
+    // Watched as after a confirm: read now, then after the pauses until the new computer shows up.
+    expect(tab.pendingDelays()).toEqual([3000]);
+    tab.tick();
+    await tab.settle();
+    expect(rows(tab).map((r) => nameOf(r).textContent)[0]).toBe("ALEX-DESKTOP-2");
+    expect(tab.pendingDelays()).toEqual([]);
+  });
+
+  it("a lost answer to Not me whose lookup answers 404: its own note, and no watching of the list", async () => {
+    const tab = await lookedUp(standard({ [LOOKUP]: [found(), NO_REQUEST], "POST /api/v1/connect/refuse": "network" }));
+    tab.$("confirm-refuse").click();
+    await tab.settle();
+    expect(of(tab, "POST", "/api/v1/connect/lookup")).toHaveLength(2);
+    expect([tab.$("confirm-dialog").shown, tab.$("connect-note").textContent, tab.$("connect-note").className, tab.$("connect-code").value, tab.doc.activeElement?.id]).toEqual([false, "The answer was lost on the way. The code no longer works, so nothing can be connected with it.", "note plain", "", "connect-code"]);
+    expect([of(tab, "GET", "/api/v1/tokens").length, tab.pendingDelays()]).toEqual([1, []]);
+  });
+
+  it("one question at a time, lookup first: the row buttons rest while a lookup runs and open nothing", async () => {
+    const h = holding((r) => r.path === "/api/v1/connect/lookup", standard());
+    const tab = openPage(h.respond);
+    await tab.settle();
+    type(tab, "K7QM2HXD");
+    tab.$("connect-go").click();
+    await tab.settle();
+    const rowControls = () => rows(tab).flatMap((r) => r.all().filter((e) => e.tagName === "button"));
+    expect(rowControls().every((b) => b.disabled)).toBe(true);
+    // Even forced past the disabled state, a row's button opens nothing while the lookup runs.
+    for (const text of ["Rename", "Disconnect"]) button(rows(tab)[0], text).dispatch("click");
+    expect([tab.$("rename-dialog").shown, tab.$("disconnect-dialog").shown]).toEqual([false, false]);
+    h.answer(found());
+    await tab.settle();
+    expect(tab.$("confirm-dialog").shown).toBe(true);
+    // With the confirm question open, a row's button opens nothing either.
+    for (const text of ["Rename", "Disconnect"]) button(rows(tab)[0], text).dispatch("click");
+    expect([tab.$("rename-dialog").shown, tab.$("disconnect-dialog").shown, tab.$("confirm-dialog").shown]).toEqual([false, false, true]);
+    key(tab.$("confirm-go"), "Escape");
+    expect(rowControls().every((b) => !b.disabled)).toBe(true);
+    // A lookup that ends without opening the question gives the buttons back too.
+    const miss = await lookedUp(standard({ [LOOKUP]: NO_REQUEST }));
+    expect(rows(miss).flatMap((r) => r.all().filter((e) => e.tagName === "button")).every((b) => !b.disabled)).toBe(true);
+  });
+
+  it("one question at a time, question first: with a rename or disconnect question open, no lookup starts and no confirm question opens", async () => {
+    for (const which of ["Rename", "Disconnect"]) {
+      const tab = openPage(standard({ [LOOKUP]: found() }));
       await tab.settle();
-      expect(of(tab, "POST", "/api/v1/connect/lookup").map((f) => f.body), path).toEqual([{ user_code: "K7QM2HXD" }, { user_code: "K7QM2HXD" }]);
-      expect(of(tab, "POST", path), path).toHaveLength(1);
-      expect([tab.$("confirm-dialog").shown, tab.$("connect-note").shown, tab.$("connect-note").textContent, tab.$("connect-note").className, tab.$("connect-code").value, tab.$("connect-message").shown, tab.doc.activeElement?.id], path).toEqual([
-        false,
-        true,
-        "The answer was lost on the way. If the computer was connected, it shows in the list below within a few seconds; if not, press Sign in in Mythicshot again.",
-        "note plain",
-        "",
-        false,
-        "connect-code",
-      ]);
-      // Watched as after a confirm: read now, then after the pauses until the new computer shows up.
-      expect(tab.pendingDelays(), path).toEqual([3000]);
-      tab.tick();
+      type(tab, "K7QM2HXD");
+      button(rows(tab)[1], which).click();
+      // The field and Continue are behind the question; even reached, they ask nothing.
+      key(tab.$("connect-code"), "Enter");
+      tab.$("connect-go").dispatch("click");
       await tab.settle();
-      expect(rows(tab).map((r) => nameOf(r).textContent)[0], path).toBe("ALEX-DESKTOP-2");
-      expect(tab.pendingDelays(), path).toEqual([]);
+      expect([of(tab, "POST", "/api/v1/connect/lookup").length, tab.$("confirm-dialog").shown], which).toEqual([0, false]);
     }
+    // The page's guard in the lookup's answer: it opens nothing over a question that is open.
+    expect(CONNECTIONS_JS).toContain("if (anyOpen()) return;\n        ask({");
+  });
+
+  it("a held Enter neither refuses nor confirms: its repeats do nothing in the field or on the question's buttons", async () => {
+    const tab = await lookedUp(standard({ [LOOKUP]: found() }));
+    expect(tab.doc.activeElement?.id).toBe("confirm-refuse");
+    for (const id of ["confirm-refuse", "confirm-go"]) {
+      for (const k of ["Enter", " "]) {
+        const ev = tab.$(id).dispatch("keydown", { key: k, repeat: true });
+        expect(ev.defaultPrevented, `${id} ${JSON.stringify(k)}`).toBe(true);
+      }
+      // A fresh press is left to the button.
+      expect(tab.$(id).dispatch("keydown", { key: "Enter" }).defaultPrevented, id).toBe(false);
+    }
+    await tab.settle();
+    expect(tab.fetched.filter((f) => /confirm|refuse/.test(f.path))).toEqual([]);
+    expect(tab.$("confirm-dialog").shown).toBe(true);
+    // In the field, a repeated Enter sends no lookup.
+    const field = openPage(standard({ [LOOKUP]: found() }));
+    await field.settle();
+    type(field, "K7QM2HXD");
+    const ev = field.$("connect-code").dispatch("keydown", { key: "Enter", repeat: true });
+    await field.settle();
+    expect([ev.defaultPrevented, of(field, "POST", "/api/v1/connect/lookup").length]).toEqual([true, 0]);
   });
 
   it("a lost answer whose lookup says the code is still open (or gets no answer either) keeps the question open with the failure", async () => {
