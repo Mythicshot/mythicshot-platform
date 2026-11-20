@@ -623,8 +623,8 @@ describe("the numbers and the remaining sentences the guides state are the code'
   it("the remaining quoted sentences", () => {
     expect(signinPageTs).toContain('If <span class="address" id="sent-to"></span> has an account, a sign-in link is on its way.');
     expect(docs[README]).toContain('("If <address> has an account, a sign-in link is on its way.")');
-    for (const said of ["You see how much each workspace uses, never what is in it.", 'askTitle: "Storage allowance for "']) expect(dashAdminTs, said).toContain(said);
-    expect(docs[README]).toContain('"You see how much each workspace uses, never what is in it."');
+    for (const said of ["You see totals only. What is in another person's workspace is never shown here.", 'askTitle: "Storage allowance for "']) expect(dashAdminTs, said).toContain(said);
+    expect(docs[README]).toContain(`"You see totals only. What is in another person's workspace is never shown here."`);
     expect(docs[README]).toContain('in the question "Storage allowance for" and the workspace');
     const over = "You are over your storage allowance. New uploads are refused until you delete tours or get more room.";
     expect(dashStorageTs).toContain(over);

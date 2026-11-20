@@ -2,6 +2,16 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.35 (2026-11-20)
+
+- The Admin page invites people. The card "Invite someone" takes an address and sends the invite; the page says it is on its way and until which day the link works, or, in plain words, that the address already has an account, does not look like an address, cannot be mailed from this site, or that 100 invites are open already. When the mail could not be sent the invite stays and the page says to press Resend. After too many invites in a short time, "Send invite" and every "Resend" rest for as long as the site says.
+- "Open invites" lists the invites, newest first, with the day each was sent and the day it works until, or an amber "Ran out" tag. "Resend" sends a fresh link at once and the earlier one stops working; "Cancel" asks first. On a phone each invite is a card.
+- Each account row has one "More" menu instead of its button: "Set allowance", then "Disable" or "Enable", then "Delete" for a disabled account. The admin's own row offers only "Set allowance", and an account whose delete has started shows an amber "Deleting" tag and offers only "Delete", to finish it.
+- "Disable" asks first and says what stops and that nothing is deleted; "Enable" asks nothing. "Delete" shows what goes (tours, images and GIFs, connected computers, the storage freed) and works only once the username is typed exactly (the email address for an account without one). A large delete shows its progress while the page sends it again; a refusal stops it at once, and a store that keeps failing or answers that keep getting lost stop it after three tries in a row. An interrupted delete is finished from the same row; the page remembers the typed name until it is reloaded, never in storage.
+- When an answer is lost on the way, the page reads the list again and says what is true: a disabled or enabled account by its status, a cancelled or resent invite by whether it is still listed and its dates, a deleted account by whether it is still listed.
+- The page's heading is "Admin", with the accounts in a card of their own, and its line under the table reads "You see totals only. What is in another person's workspace is never shown here."
+- The dashboard's shared script hands each page the account's own id, so the Admin page knows the admin's own row.
+
 ## 0.1.33 (2026-11-20)
 
 - Admin API: disabling, enabling and deleting an account. `POST /api/v1/admin/accounts/<id>/disable` ends every session of the account at once, spends its unused sign-in links and its open email change, and refuses every token of its workspace while it is disabled (the tokens are kept, and work again once it is enabled); a request to connect Mythicshot that it confirmed can no longer be collected. `POST /api/v1/admin/accounts/<id>/enable` changes the status back and nothing else; the person signs in again. Both answer 204, also for an account already in that state. The Admin page's buttons come in a later version.

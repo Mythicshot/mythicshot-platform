@@ -331,7 +331,7 @@ Each printed link is recorded in the audit record as `signin_link_printed`. The 
 
 ### Inviting people
 
-The site's admin invites a person by email address through the API (`POST /api/v1/admin/invites`; the Admin page and the page the link opens come in a later version). The person gets a mail with a link that works once and for 7 days; inviting the same address again, or resending, sends a new link and the older one stops working. Opening the link and choosing a username makes the account, an empty workspace of its own with the site's standard allowance, and signs that browser in. An address that already has an account cannot be invited. Sending an invite needs mail: on a site whose mail is off it is refused and nothing is stored. When a mail cannot be handed over, the invite stays and the admin is told to resend it. An admin sends at most 20 invites an hour, resends included, the site sends at most 30 invite mails an hour, on a cap of their own apart from sign-in's, and holds at most 100 open invites (one that ran out does not count); one that ran out is listed until it is cancelled or replaced, and removed 30 days later. The requests are described at `/docs`.
+The site's admin invites a person by email address on the Admin page, in the card "Invite someone", or through the API (`POST /api/v1/admin/invites`; the page the link opens comes in a later version). The page lists the open invites, and those that ran out with an amber "Ran out" tag, each with "Resend" (a fresh link at once, no question) and "Cancel" (which asks first). The person gets a mail with a link that works once and for 7 days; inviting the same address again, or resending, sends a new link and the older one stops working. Opening the link and choosing a username makes the account, an empty workspace of its own with the site's standard allowance, and signs that browser in. An address that already has an account cannot be invited. Sending an invite needs mail: on a site whose mail is off it is refused and nothing is stored. When a mail cannot be handed over, the invite stays and the admin is told to resend it. An admin sends at most 20 invites an hour, resends included, the site sends at most 30 invite mails an hour, on a cap of their own apart from sign-in's, and holds at most 100 open invites (one that ran out does not count); one that ran out is listed until it is cancelled or replaced, and removed 30 days later. The requests are described at `/docs`.
 
 ### Who to ask for an invite
 
@@ -348,11 +348,11 @@ The dashboard is the set of pages a signed-in person uses on the app address (or
 | Tours, `/tours` | Lists the workspace's tours, most recently changed first, each with its steps, size, the day it changed and whether it is published or has changes waiting. "Copy link" and "Open" for a published tour; "Publish", "Publish changes", "Unpublish" and "Delete". Delete asks first and cannot be undone; the recording on the computer is not touched |
 | Storage, `/storage` | What the workspace uses: against its allowance with a bar when it has one, with its numbers of images, GIFs and tours; what takes the room (tours, GIFs, images, logos, uploads in progress); and its largest items of every kind, each marked Tour, Image or GIF, with "Delete". A workspace over its allowance sees a warning |
 | Account, `/account` | The username, the email address and the workspace; where the account is signed in, with the sign-outs of [Sessions](#sessions); and, on a site whose mail is on, changing the email address (see [Changing an email address](#changing-an-email-address)). The username cannot be changed in this version |
-| Admin, `/admin` | For the site's admin only: every account and its storage, and each workspace's allowance. The tab is shown only to the admin, and everyone else gets "not found" from the routes behind it |
+| Admin, `/admin` | For the site's admin only: inviting people and the open invites, every account and its storage, and each account's "More" menu: its workspace's allowance, disabling or enabling it, and deleting a disabled one. The tab is shown only to the admin, and everyone else gets "not found" from the routes behind it |
 
 ### What the admin sees
 
-The Admin page shows one line for the whole site (the number of accounts, what all workspaces use together, and the standard allowance) and one row per account: its username, email address, status and whether it is the admin, its workspace's name, its number of tours, the bytes it uses and its allowance. It never shows a tour's title, link, pictures or anything else in a workspace, and it has no way into one: the admin's own session reaches other workspaces only through these figures. The page says so itself: "You see how much each workspace uses, never what is in it."
+The Admin page shows one line for the whole site (the number of accounts, what all workspaces use together, and the standard allowance) and one row per account: its username, email address, status and whether it is the admin, its workspace's name, its number of tours, the bytes it uses and its allowance. It never shows a tour's title, link, pictures or anything else in a workspace, and it has no way into one: the admin's own session reaches other workspaces only through these figures. The page says so itself: "You see totals only. What is in another person's workspace is never shown here."
 
 ### Allowances
 
@@ -371,7 +371,9 @@ A workspace is over its allowance when it uses more than the allowance; using ex
 
 ### Disabling and deleting an account
 
-The admin can disable, enable and delete another account through the admin API (the Admin page's buttons for it come in a later version). An admin cannot do any of the three to their own account, and the site's last active admin cannot be disabled or deleted.
+The admin can disable, enable and delete another account on the Admin page, from the account's "More" menu, or through the admin API. An admin cannot do any of the three to their own account (the page does not offer them on the admin's own row), and the site's last active admin cannot be disabled or deleted.
+
+On the page, "Disable" asks first and says what stops; "Enable" asks nothing. "Delete" is offered only for a disabled account: it shows what goes (tours, images and GIFs, connected computers, the storage freed) and works only once the username is typed exactly (the email address, for an account without one). A large workspace shows its progress while the page sends the delete again. Keep the page open; when it is interrupted, the account stays listed with a "Deleting" tag, and "Delete" on it finishes the job (the page asks for the username again after it is reloaded).
 
 | Request | What it does |
 |---|---|
