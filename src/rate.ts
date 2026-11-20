@@ -128,6 +128,34 @@ export const LIMITS_CONNECT = {
 } as const satisfies Record<string, Limit>;
 
 /**
+ * The limits on invites (src/invites.ts).
+ *
+ * Sending one, and "resend", are an admin's: counted per admin, keyed by `accountKey`, for
+ * every request whose address is well formed, also one that is then refused. The invite
+ * mail has a cap of its own, apart from sign-in's (LIMITS_SIGNIN.mailSite) and email
+ * change's and well below sign-in's, so invites can never use up the mail sign-in needs.
+ * It is counted under SITE_KEY only for a mail about to be sent. Over either: 429, and
+ * nothing is stored or sent.
+ *
+ * Looking up and accepting an invite come from a person who is not signed in, so they are
+ * counted together per network, keyed by `networkKey`, as trying a sign-in code is. A
+ * caller whose network is not known has no count of its own; all such callers together are
+ * counted under SITE_KEY in a bucket of their own, so the work their requests make is
+ * bounded too, while a person on a known network is never held up by them. An invite code
+ * is 160 random bits, so neither count is there against guessing; they bound the work.
+ */
+export const LIMITS_INVITE = {
+  /** Invites sent and resent by one admin, keyed by `accountKey`. */
+  sendAdmin: { bucket: "invite_admin", windowMs: 3_600_000, most: 20 },
+  /** Invite mails sent by the whole site in an hour, under SITE_KEY only for a mail about to be sent. */
+  mailSite: { bucket: "invite_mail_site", windowMs: 3_600_000, most: 30 },
+  /** Lookups and accepts from one network, keyed by `networkKey`; not counted when that is null. */
+  codeNetwork: { bucket: "invite_network", windowMs: 900_000, most: 30 },
+  /** Lookups and accepts from every caller whose network is not known, together, under SITE_KEY. */
+  codeUnknownNetwork: { bucket: "invite_unknown_network", windowMs: 900_000, most: 300 },
+} as const satisfies Record<string, Limit>;
+
+/**
  * The caps on the mail an account gets once Mythicshot on a computer has collected its token
  * (src/connect-mail.ts), in buckets of their own, apart from sign-in's (LIMITS_SIGNIN.mailSite)
  * and email change's, so these notices can neither use up the mail sign-in needs nor be held

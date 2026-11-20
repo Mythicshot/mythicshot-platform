@@ -18,7 +18,9 @@ const ASCII_LETTERS_DIGITS_HYPHENS = /^[A-Za-z0-9-]+$/;
 
 /**
  * Names nobody can choose: they read as staff or as the site itself, or they are a route,
- * a host label, a mailbox or a word a program prints for "no one". Sorted, lowercase, and
+ * a host label, a mailbox or a word a program prints for "no one". Every top-level path of
+ * the app is here too (test/usernames.test.ts reads them from HOST_RULES), so no name can be
+ * read as a page of the site. Sorted, lowercase, and
  * each one passes the shape rule, so a name is only here if it could otherwise be chosen
  * (`me` is refused by its length). A name cannot be freed for someone later without the
  * owner's say.
@@ -26,19 +28,19 @@ const ASCII_LETTERS_DIGITS_HYPHENS = /^[A-Za-z0-9-]+$/;
 const RESERVED_NAMES = [
   "abuse", "account", "accounts", "admin", "administrator", "admins", "anonymous", "api", "app",
   "assets", "auth", "autoconfig", "autodiscover", "beta", "billing", "blog", "bot", "cdn",
-  "contact", "copyright", "cpanel", "dashboard", "deleted", "demo", "dev", "dmca", "docs",
-  "email", "embed", "ember", "everyone", "example", "false", "feedback", "ftp", "guest",
-  "healthz", "hello", "help", "helpdesk", "home", "hostmaster", "imap", "img", "info", "invite",
-  "invites", "legal", "localhost", "login", "logout", "mail", "media", "mod", "moderator",
-  "moderators", "mods", "mythic", "mythic-lab", "mythiclab", "mythicshot", "nan", "new",
-  "no-reply", "nobody", "none", "noreply", "notifications", "null", "oauth", "official", "owner",
-  "player", "postmaster", "press", "pricing", "privacy", "public", "register", "removed",
-  "report", "root", "safety", "sales", "search", "security", "service", "session", "sessions",
-  "settings", "setup", "share", "sign-in", "sign-out", "sign-up", "signin", "signout", "signup",
-  "smtp", "staff", "staging", "static", "status", "superuser", "support", "sysadmin", "system",
-  "team", "teams", "terms", "test", "tour", "tours", "true", "trust", "undefined", "unknown",
-  "upload", "uploads", "user", "users", "web", "webmail", "webmaster", "workspace", "workspaces",
-  "www", "you",
+  "connect", "connections", "contact", "copyright", "cpanel", "dash", "dashboard", "deleted",
+  "demo", "dev", "dmca", "docs", "email", "embed", "ember", "everyone", "example", "false",
+  "feedback", "ftp", "gifs", "guest", "healthz", "hello", "help", "helpdesk", "home", "hostmaster",
+  "images", "imap", "img", "info", "invite", "invites", "legal", "localhost", "login", "logout",
+  "mail", "media", "mod", "moderator", "moderators", "mods", "mythic", "mythic-lab", "mythiclab",
+  "mythicshot", "nan", "new", "no-reply", "nobody", "none", "noreply", "notifications", "null",
+  "oauth", "official", "openapi", "owner", "player", "postmaster", "press", "pricing", "privacy",
+  "public", "register", "removed", "report", "root", "safety", "sales", "search", "security",
+  "service", "session", "sessions", "settings", "setup", "share", "sign-in", "sign-out", "sign-up",
+  "signin", "signout", "signup", "smtp", "staff", "staging", "static", "status", "storage",
+  "superuser", "support", "sysadmin", "system", "team", "teams", "terms", "test", "tokens", "tour",
+  "tours", "true", "trust", "undefined", "unknown", "upload", "uploads", "usage", "user", "users",
+  "web", "webmail", "webmaster", "workspace", "workspaces", "www", "you",
 ] as const;
 
 export const RESERVED: ReadonlySet<string> = new Set<string>(RESERVED_NAMES);

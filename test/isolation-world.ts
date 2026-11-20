@@ -23,6 +23,10 @@
 // - three requests to connect the app, each started by the app and settled by the side's
 //   session: one confirmed and not collected, one confirmed and collected (so the side has a
 //   token made by connecting), and one refused.
+// Beside the two sides, the site holds one open invite the first side's account (the
+// admin) sent, written by SQL as sending one leaves it, with the code its link would carry.
+// An invite belongs to no workspace (SHARED) until it is accepted, which makes a new one.
+//
 // The two sides differ in every title, every picture's bytes and every size, so a value of
 // one can never be mistaken for the other's.
 //
@@ -100,6 +104,8 @@ export type World = {
   keys: StoreKeys;
   a: Side;
   b: Side;
+  /** The open invite the first side's account sent: its id, its address and the code its link carries. */
+  invite: { id: string; email: string; code: string };
   /** Moves the clock on. */
   tick: (ms?: number) => void;
   /** Every put and delete made on either store since the world was built or `forgetWrites` was called. */
@@ -380,9 +386,13 @@ export async function world(deps: Deps, keys: StoreKeys): Promise<World> {
   const a = await side(deps, "Alpha", 300, 0xa1, true);
   now += 1000;
   const b = await side(deps, "Bravo", 500, 0xb2, false);
+  const invite = { id: newId("inv"), email: "invited-newcomer@example.com", code: "dpi_" + randomHex(40) };
+  await deps.db.run("INSERT INTO invite (id, email, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)", [
+    invite.id, invite.email, await hashToken(invite.code), a.userId, now, now + 7 * 86_400_000,
+  ]);
   now += 60_000;
   log.length = 0;
-  return { deps, keys, a, b, tick: (ms = 100) => void (now += ms), writes: () => [...log], forgetWrites: () => void (log.length = 0) };
+  return { deps, keys, a, b, invite, tick: (ms = 100) => void (now += ms), writes: () => [...log], forgetWrites: () => void (log.length = 0) };
 }
 
 // ---- What is stored ----
@@ -437,6 +447,9 @@ export const OWNED: Readonly<Record<string, string>> = {
 export const SHARED: Readonly<Record<string, string>> = {
   rate_counter: "counters for the whole site's sign-in requests; a key is a hash and names no workspace",
   connect_key: "the install's one key for the short codes' HMAC, made by the migration; no workspace has a part in it",
+  // An invite names no workspace today. Should invites ever gain a workspace column (inviting
+  // someone into an existing workspace), this entry must move to OWNED with that column.
+  invite: "the site's invites, which the admin alone lists and changes: an address and the digest of a code, until accepting one makes a new workspace for it",
 };
 
 /**
