@@ -7,6 +7,7 @@ import { parseUsername } from "../src/usernames.ts";
 const ACCOUNT_TABLES = ["audit", "membership", "rate_counter", "session", "signin_code", "signin_method"];
 
 const TABLES = [
+  "account_removal",
   "api_token",
   "audit",
   "chapter",

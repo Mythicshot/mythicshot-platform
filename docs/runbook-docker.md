@@ -1114,7 +1114,7 @@ An upload that was started and never finished holds its room until it is removed
 
 ### Read the audit record
 
-The audit record lists what was done with accounts: sign-ins, sign-outs, links printed, allowances set, email changes, connections of the app and tokens renamed or revoked. It holds ids, never an email address, a code or a token.
+The audit record lists what was done with accounts: sign-ins, sign-outs, links printed, allowances set, email changes, connections of the app, tokens renamed or revoked, and accounts disabled, enabled or deleted. It holds ids, never an email address, a code or a token.
 
 ```sh
 docker compose exec app node dist/node/admin.js audit --last 50
@@ -1145,6 +1145,9 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `invite_resent` | The admin sent an invite again with a new link; the subject is the invite |
 | `invite_cancelled` | The admin cancelled an invite; the subject is the invite |
 | `invite_accepted` | An invite was accepted and its account made; the account and the workspace are the new ones, and the subject is the invite. A `signin` row for the new session comes with it |
+| `account_disabled` | The admin disabled an account; the account is the admin, the subject the disabled account |
+| `account_enabled` | The admin enabled a disabled account again; the account is the admin, the subject the enabled account |
+| `account_deleted` | The admin's delete of a disabled account finished: the account, its workspace and everything in it are gone. The account is the admin who sent the last delete request, the workspace and the subject are the deleted workspace's and account's ids. Nothing else of the person is recorded, and the rows recorded about the account before stay |
 
 ## Troubleshooting by symptom
 

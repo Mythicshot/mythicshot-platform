@@ -49,7 +49,7 @@
 import { describe, expect, it } from "vitest";
 import { makeDeps } from "#harness";
 import { createApp } from "../src/app.ts";
-import { hashToken, newToken } from "../src/auth.ts";
+import { hashToken, newId, newToken } from "../src/auth.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { openapi, type OpenApiDoc } from "../src/docs/openapi.ts";
 import type { Hosts } from "../src/hosts.ts";
@@ -381,16 +381,19 @@ const SELF_ENDS = Object.entries(SELF).filter(([, entry]) => entry.ends !== unde
 const SELF_CHANGES = Object.keys(SELF).filter((key) => SELF[key].changes !== undefined);
 
 /** The fields of one account in the admin's list: who it is, its counts and its allowance. */
-const ACCOUNT_FIELDS = ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "counted.pictures", "counted.logos", "counted.uploads_in_progress", "counted.images", "counted.gifs"];
+const ACCOUNT_FIELDS = ["id", "username", "email", "status", "admin", "created_at", "deleting", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "counted.pictures", "counted.logos", "counted.uploads_in_progress", "counted.images", "counted.gifs"];
 
 /**
  * Routes that cross workspaces on purpose, for the site's admin alone: why, a request the
  * admin is answered (sent with the first side's session, the admin's), and every field the
  * answer may hold, as key paths. An answer holds exactly these, and nothing of any
  * workspace's content: an account's id, username and email and its workspace's id are the
- * only names it may carry.
+ * only names it may carry. The requests are sent in this order, so a later one may rely on
+ * an earlier one (the delete on the disable before it). `status` is the answer's status when
+ * it is not 200; `answers` gives the fields per status for a route whose answer may be
+ * either of two (a delete that finishes in one request or takes more).
  */
-const ADMIN: Record<string, { reason: string; request: (w: World) => Sample; fields: string[]; status?: number }> = {
+const ADMIN: Record<string, { reason: string; request: (w: World) => Sample; fields: string[]; status?: number; answers?: Record<number, string[]> }> = {
   "GET /api/v1/admin/accounts": {
     reason: "the admin's overview of how each account uses its storage: counts and the allowance, nothing of any tour",
     request: () => ({ method: "GET", path: "/api/v1/admin/accounts" }),
@@ -405,6 +408,29 @@ const ADMIN: Record<string, { reason: string; request: (w: World) => Sample; fie
     reason: "the admin sets or clears one workspace's storage allowance, by the workspace's id; it answers the numbers only",
     request: (w) => ({ method: "PATCH", path: `/api/v1/admin/workspaces/${w.b.workspaceId}`, json: { storage_allowance_bytes: 1_000_000 } }),
     fields: ["workspace_id", "allowance_bytes", "storage_allowance_bytes", "used_bytes", "over"],
+  },
+  "GET /api/v1/admin/accounts/:id/removal": {
+    reason: "the counts the admin's delete question shows for one account, by its id: its username and address, and how many tours, items and connections it has and the bytes it uses",
+    request: (w) => ({ method: "GET", path: `/api/v1/admin/accounts/${w.b.userId}/removal` }),
+    fields: ["username", "email", "tours", "items", "connections", "used_bytes"],
+  },
+  "POST /api/v1/admin/accounts/:id/enable": {
+    reason: "the admin enables a disabled account, by its id; it answers nothing",
+    request: (w) => ({ method: "POST", path: `/api/v1/admin/accounts/${w.b.userId}/enable` }),
+    fields: [],
+    status: 204,
+  },
+  "POST /api/v1/admin/accounts/:id/disable": {
+    reason: "the admin disables an account, by its id, which stops everything of its workspace being served; it answers nothing",
+    request: (w) => ({ method: "POST", path: `/api/v1/admin/accounts/${w.b.userId}/disable` }),
+    fields: [],
+    status: 204,
+  },
+  "DELETE /api/v1/admin/accounts/:id": {
+    reason: "the admin deletes a disabled account and its workspace, by the account's id, in steps; it answers the progress in numbers only",
+    request: (w) => ({ method: "DELETE", path: `/api/v1/admin/accounts/${w.b.userId}`, json: { username: w.b.email } }),
+    fields: ["status", "done", "total"],
+    answers: { 202: ["status", "done", "total"], 200: ["deleted"] },
   },
   // The invites: an address, an id and two times each, never anything of a workspace.
   "POST /api/v1/admin/invites": {
@@ -1520,10 +1546,11 @@ describe("the admin routes", () => {
     for (const [key, entry] of Object.entries(ADMIN)) {
       w.tick();
       const r = await fire(w.deps, entry.request(w), BY_SESSION.of(w.a));
-      expect(r.status, `${key}: ${r.text}`).toBe(entry.status ?? 200);
+      if (entry.answers === undefined) expect(r.status, `${key}: ${r.text}`).toBe(entry.status ?? 200);
+      else expect(Object.keys(entry.answers), `${key}: ${r.text}`).toContain(String(r.status));
       expect(r.headers.get("cache-control"), key).toBe("no-store");
       // Exactly the listed fields: none more, none missing.
-      expect([...new Set(keyPaths(r.json))].sort(), key).toEqual([...entry.fields].sort());
+      expect([...new Set(keyPaths(r.json))].sort(), key).toEqual([...(entry.answers?.[r.status] ?? entry.fields)].sort());
       // And no name of either workspace's content, by any of its names. The list of accounts
       // alone names each workspace, for the admin page's Workspace column.
       const named = key === "GET /api/v1/admin/accounts" ? [w.a.workspaceName, w.b.workspaceName] : [];
@@ -1581,5 +1608,79 @@ describe("the admin routes", () => {
       expect(r.status, key).toBe(200);
       for (const n of needles) expect(r.text.includes(n), `${key} told the admin ${n} of the other workspace`).toBe(false);
     }
+  });
+});
+
+describe("deleting an account", () => {
+  /** The admin's request, with the first side's session. */
+  const asAdmin = (w: World, method: string, path: string, json?: unknown) => fire(w.deps, { method, path, ...(json === undefined ? {} : { json }) }, BY_SESSION.of(w.a));
+
+  it("removes every row of its workspace from every table of the schema and every file of it from both stores, and nothing of the other workspace", SLOW, async () => {
+    const w = await build();
+    const { deps, a, b } = w;
+    expect((await asAdmin(w, "POST", `/api/v1/admin/accounts/${b.userId}/disable`)).status).toBe(204);
+
+    // Every table of the schema, read from the database itself, says whose its rows are; a
+    // table added later without that fails here as it does in the snapshot test above.
+    const tables = await tablesOf(deps);
+    expect(tables.filter((t) => !Object.hasOwn(OWNED, t) && !Object.hasOwn(SHARED, t))).toEqual([]);
+    const beforeA = await snapshotOf(deps, a, w.keys);
+    const beforeB = await snapshotOf(deps, b, w.keys);
+    // The second side holds rows in most tables that belong to a workspace, and files in both stores.
+    expect(Object.entries(beforeB.rows).filter(([, rows]) => rows.length > 0).map(([t]) => t).length).toBeGreaterThan(15);
+    const filesB = Object.entries(beforeB.files).filter(([, v]) => v !== "missing").map(([k]) => k);
+    expect(filesB.some((k) => k.startsWith("p/")) && filesB.some((k) => k.startsWith("u/")) && filesB.some((k) => k.startsWith("m/"))).toBe(true);
+    // Everything that names the second side: its ids, keys, slugs, hashes, titles and address; a value the first side has too (such as a token's default name) names neither.
+    const ofA = new Set(needlesOf(beforeA, [a.workspaceId, a.userId, a.email]));
+    const needles = needlesOf(beforeB, [b.workspaceId, b.userId, b.email, b.session.id, ...namesIn(b.ids)]).filter((n) => !ofA.has(n));
+    const auditBefore = await deps.db.all<Json>("SELECT * FROM audit ORDER BY id");
+    // Invites belong to no workspace (SHARED). The site holds the first side's open invite; one
+    // sent by the second side's account and one to its address are written here, as an admin's
+    // and a stale one would be.
+    await deps.db.run("INSERT INTO invite (id, email, code_hash, invited_by, created_at, expires_at) VALUES (?, 'from-bravo@example.com', ?, ?, ?, ?)", [newId("inv"), "b".repeat(64), b.userId, deps.now(), deps.now() + 86_400_000]);
+    await deps.db.run("INSERT INTO invite (id, email, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)", [newId("inv"), b.email, "c".repeat(64), a.userId, deps.now(), deps.now() + 86_400_000]);
+    const invitesBefore = await deps.db.all<Json>("SELECT * FROM invite ORDER BY id");
+
+    let r = await asAdmin(w, "DELETE", `/api/v1/admin/accounts/${b.userId}`, { username: b.email });
+    for (let i = 0; r.status === 202 && i < 20; i++) {
+      w.tick();
+      r = await asAdmin(w, "DELETE", `/api/v1/admin/accounts/${b.userId}`, { username: b.email });
+    }
+    expect([r.status, r.json]).toEqual([200, { deleted: true }]);
+
+    for (const table of tables) {
+      const rows = await deps.db.all<Json>(`SELECT * FROM "${table}"`);
+      if (table === "audit") continue;
+      // No row of any table names anything of the deleted side, in any column.
+      for (const row of rows) for (const [column, value] of Object.entries(row)) if (typeof value === "string") expect(needles.includes(value), `${table}.${column} still holds ${value}`).toBe(false);
+      // And no row is the deleted workspace's by the table's own rule.
+      const where = OWNED[table];
+      if (where !== undefined) expect(await deps.db.all(`SELECT * FROM "${table}" WHERE ${where}`, Array(where.split("?").length - 1).fill(b.workspaceId)), table).toEqual([]);
+    }
+    // Invites: the one to the deleted address is gone, the one it sent stays with no sender, and the first side's is untouched.
+    const invitesAfter = await deps.db.all<Json>("SELECT * FROM invite ORDER BY id");
+    expect(invitesAfter).toEqual(invitesBefore.filter((i) => i.email !== b.email).map((i) => (i.invited_by === b.userId ? { ...i, invited_by: null } : i)));
+    expect(invitesAfter.find((i) => i.id === w.invite.id)).toEqual(invitesBefore.find((i) => i.id === w.invite.id));
+    // The audit record keeps what it had, and one row more: who deleted which account, by ids alone.
+    const auditAfter = await deps.db.all<Json>("SELECT * FROM audit ORDER BY id");
+    const added = auditAfter.filter((row) => !auditBefore.some((x) => x.id === row.id));
+    expect(added.map(({ event, user_id, workspace_id, subject, detail }) => ({ event, user_id, workspace_id, subject, detail }))).toEqual([
+      { event: "account_deleted", user_id: a.userId, workspace_id: b.workspaceId, subject: b.userId, detail: null },
+    ]);
+    expect(auditAfter.filter((row) => auditBefore.some((x) => x.id === row.id))).toEqual(auditBefore);
+    expect(JSON.stringify(auditAfter).includes(b.email)).toBe(false);
+
+    // No file of the deleted side is in either store, and every file left is the first side's.
+    const stored = [...(await w.keys.draftKeys()), ...(await w.keys.publicKeys())];
+    expect(filesB.filter((k) => stored.includes(k))).toEqual([]);
+    const afterA = await snapshotOf(deps, a, w.keys);
+    const filesA = Object.entries(afterA.files).filter(([, v]) => v !== "missing").map(([k]) => k);
+    expect(stored.filter((k) => !filesA.includes(k))).toEqual([]);
+    // Nothing of the first side changed but its record of the delete.
+    expect({ ...afterA, rows: { ...afterA.rows, audit: [] } }).toEqual({ ...beforeA, rows: { ...beforeA.rows, audit: [] } });
+    // The deleted account is gone from the admin's list, and its id answers as an unknown one.
+    const listed = (await asAdmin(w, "GET", "/api/v1/admin/accounts")).json.accounts as Json[];
+    expect(listed.map((x) => x.id)).toEqual([a.userId]);
+    expect(seen(await asAdmin(w, "GET", `/api/v1/admin/accounts/${b.userId}/removal`))).toEqual(seen(await asAdmin(w, "GET", `/api/v1/admin/accounts/${inventedIds().tokens.live.replace("tok_", "usr_")}/removal`)));
   });
 });

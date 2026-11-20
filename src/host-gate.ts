@@ -117,6 +117,10 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   // the new account in, so both live where the session cookie does, as signing in does.
   "POST /api/v1/invite/check": "app",
   "POST /api/v1/invite/accept": "app",
+  "POST /api/v1/admin/accounts/:id/disable": "app",
+  "POST /api/v1/admin/accounts/:id/enable": "app",
+  "GET /api/v1/admin/accounts/:id/removal": "app",
+  "DELETE /api/v1/admin/accounts/:id": "app",
 
   // The sign-in pages and their two files. They lead to the session, whose cookie belongs
   // to the app address alone, so none of them answers on the tours address.

@@ -441,6 +441,8 @@ export const OWNED: Readonly<Record<string, string>> = {
   media_object: "media_id IN (SELECT id FROM media WHERE workspace_id = ?)",
   // A request to connect belongs to no workspace until it is confirmed, and then to the confirming one.
   connect_request: "workspace_id = ?",
+  // A delete of the workspace's account that has started and not finished.
+  account_removal: "workspace_id = ?",
 };
 
 /** Tables whose rows belong to no workspace, each with the reason. */
@@ -449,6 +451,8 @@ export const SHARED: Readonly<Record<string, string>> = {
   connect_key: "the install's one key for the short codes' HMAC, made by the migration; no workspace has a part in it",
   // An invite names no workspace today. Should invites ever gain a workspace column (inviting
   // someone into an existing workspace), this entry must move to OWNED with that column.
+  // Deleting an account (src/account-removal.ts) removes an invite to its address and clears
+  // its id from the invites it sent; test/isolation.test.ts checks both.
   invite: "the site's invites, which the admin alone lists and changes: an address and the digest of a code, until accepting one makes a new workspace for it",
 };
 
