@@ -62,6 +62,20 @@ const ADMIN_WORDING = [
   "Account",
   "Admin",
   "This page needs JavaScript.",
+  // The invites set's mockup 1: the page's heading is "Admin", and the accounts are a card of their own.
+  "Admin",
+  "Invite someone",
+  "They get a mail with a link that works once and for 7 days. They pick their own username and get an empty workspace of their own.",
+  // Proposed: the field's name for a screen reader; the eye sees the placeholder.
+  "Email address",
+  "Send invite",
+  "Open invites",
+  "Address",
+  "Sent",
+  "Works until",
+  "Actions",
+  // Proposed: the open invites card with none.
+  "No open invites.",
   "Accounts",
   "Account",
   "Workspace",
@@ -72,12 +86,25 @@ const ADMIN_WORDING = [
   "Allowance",
   "Actions",
   "Show more",
-  "You see how much each workspace uses, never what is in it. Inviting people comes in a later phase.",
+  "You see totals only. What is in another person's workspace is never shown here.",
   "Page not found",
   "Back to Tours",
   "Allowance",
   "Cancel",
   "Save",
+  "The link in the mail stops working. You can invite the same address again later.",
+  "Keep it",
+  "Cancel invite",
+  "Pictures that people already opened may stay in their browsers.",
+  "Keep it",
+  "Disable account",
+  "This removes the account and everything in its workspace:",
+  "Tours",
+  "Images and GIFs",
+  "Connected computers",
+  "Storage freed",
+  "Keep it",
+  "Delete account",
 ];
 
 /** Every text the Admin page's script puts on the page. */
@@ -114,10 +141,86 @@ const ADMIN_TEXT: Record<string, string> = {
   notFound: "Page not found",
   disabled: "Disabled",
   notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
+  // The invites set's mockups 1 to 4.
+  more: "More",
+  disable: "Disable",
+  enable: "Enable",
+  remove: "Delete",
+  // Proposed: the tag of an account whose delete has started.
+  deletingTag: "Deleting",
+  sending: "Sending…",
+  invitedBefore: "An invite is on its way to ",
+  invitedMiddle: ". The link works once and until ",
+  invitedAfter: ".",
+  hasAccount: "That address already has an account.",
+  badEmail: "That does not look like an email address.",
+  // Proposed in the brief, pinned here.
+  mailOff: "This site cannot send mail, so nobody can be invited from here.",
+  mailFailed: "The invite was saved, but the mail could not be sent. Press Resend to try again.",
+  tooManyInvites: "There are 100 open invites already. Cancel one you no longer need first.",
+  // Proposed: the rest after a 429, as the Connections page's.
+  restBefore: "Too many invites in a short time. Try again in ",
+  oneMinute: "1 minute.",
+  minutes: " minutes.",
+  // Proposed: a send whose answer was lost, when the list then shows the invite.
+  lostSendAfter: " has an invite now, but the answer was lost on the way, so it is not known whether its mail went out. If it does not arrive, press Resend.",
+  // Proposed: the phone's line under an invite's address.
+  sentInLine: "sent ",
+  untilInLine: "works until ",
+  ranOut: "Ran out ",
+  resend: "Resend",
+  cancel: "Cancel",
+  // Proposed in the brief (mockup 2's caption), pinned here.
+  resentBefore: "A new invite is on its way to ",
+  resentAfter: ". The earlier link no longer works.",
+  // Proposed: a resend whose answer was lost, when the list then shows new dates; and an invite that is gone.
+  lostResendAfter: " has a new link, so the earlier one no longer works, but the answer was lost on the way, so it is not known whether its mail went out. If it does not arrive, press Resend again.",
+  inviteGone: "That invite is no longer open: it was used or cancelled meanwhile.",
+  cancelBefore: "Cancel the invite to ",
+  cancelAfter: "?",
+  cancelling: "Cancelling…",
+  disableBefore: 'Disable "',
+  quoteAfter: '"?',
+  fromNowOn: "From now on ",
+  disableMiddle: " cannot sign in, Mythicshot on their computers cannot publish, and their ",
+  // Proposed in the brief, pinned here: "their 1 tour", "their 3 tours", and "their tours" for none.
+  oneTour: "1 tour",
+  manyTours: " tours",
+  allTours: "tours",
+  disableEnd: " and every image and clip they shared stop being available to anyone. Nothing is deleted: enabling the account brings everything back.",
+  disabling: "Disabling…",
+  // Proposed: More's label while an enable runs.
+  enabling: "Enabling…",
+  enabledAfter: " is enabled again. Their tours and shared links work as before; they sign in again to use the dashboard.",
+  // Proposed in the brief, pinned here; the enable's own_account is proposed.
+  ownDisable: "You cannot disable your own account.",
+  lastAdminDisable: "This is the last admin, so it cannot be disabled.",
+  ownEnable: "You cannot enable your own account.",
+  beingDeleted: "This account is being deleted and cannot be enabled.",
+  deleteBefore: 'Delete "',
+  deleteAfter: '" for good?',
+  removeWarnBefore: "This cannot be undone. Their links stop working for everyone, and ",
+  removeWarnAfter: " can be invited again as a new account.",
+  typeUsername: "Type the username to confirm",
+  // Proposed: the label for an account without a username.
+  typeEmail: "Type the email address to confirm",
+  deletingBefore: 'Deleting "',
+  deletingAfter: '"…',
+  filesBefore: "Removing files, ",
+  filesOf: " of ",
+  filesAfter: ". Keep this page open. If it is interrupted, open Delete again to finish.",
+  // Proposed: the note after a delete, and the delete's refusals (not_disabled's and site_owner's are the brief's).
+  deletedAfter: " was deleted.",
+  mismatch: "That does not match. Type it exactly as it is shown in the list.",
+  notDisabled: "Disable the account first.",
+  siteOwner: "This account set the site up and cannot be deleted.",
+  sharedWorkspace: "Another account belongs to this workspace, so it cannot be deleted.",
+  lastAdminDelete: "This is the last admin, so it cannot be deleted.",
+  ownDelete: "You cannot delete your own account.",
 };
 
-/** The strings with a space in the script that are not words for a person: class names. */
-const CLASS_NAMES = ["btn sm quiet", "tag warn", "n tours", "n used", "n allowance", "mini over", "allow-warn allow-message", "allow-hint allow-message"];
+/** The strings with a space in the script that are not words for a person: class names and lists of ids. */
+const CLASS_NAMES = ["btn sm quiet", "btn sm danger", "tag warn", "n tours", "n used", "n allowance", "mini over", "allow-warn allow-message", "allow-hint allow-message", "d name", "ws name", "t name", "d narrow-only", "note plain", "delete-text delete-warn"];
 
 /** A script's TEXT object, read from the script's own text. */
 function scriptText(js: string): Record<string, string> {
@@ -208,11 +311,13 @@ describe("the Admin page and its script", () => {
     }
   });
 
-  it("the wording is mockups 9 and 10's own", () => {
+  it("the wording is mockups 9 and 10's own, and the invites set's mockups 1 to 4", () => {
     const doc = new FakeDocument(ADMIN_HTML);
     expect(textNodes(doc.body)).toEqual(ADMIN_WORDING);
     expect(textNodes(doc.head)).toEqual(["Admin"]);
-    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt", "placeholder"]) expect(e.hasAttribute(name), `<${e.tagName} ${name}>`).toBe(false);
+    // The one placeholder is the invite field's, mockup 1's example address.
+    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt"]) expect(e.hasAttribute(name), `<${e.tagName} ${name}>`).toBe(false);
+    expect(doc.body.all().filter((e) => e.hasAttribute("placeholder")).map((e) => [e.id, e.getAttribute("placeholder")])).toEqual([["invite-email", "name@example.com"]]);
     expect(scriptText(ADMIN_JS)).toEqual(ADMIN_TEXT);
     const words = new Set(Object.values(ADMIN_TEXT));
     const sentences = scriptStrings(ADMIN_JS).filter((t) => /[a-z]/i.test(t) && /\s/.test(t) && t !== "use strict");
@@ -226,6 +331,23 @@ describe("the Admin page and its script", () => {
     expect(T.hintSize + T.hintStandardBefore + "5 GB" + T.hintStandardAfter).toBe("Write a size such as 500 MB or 10 GB. Leave it empty to use the standard allowance of 5 GB.");
     expect(T.hintSize + T.hintNone).toBe("Write a size such as 500 MB or 10 GB. Leave it empty for no allowance.");
     expect(T.warnBefore + "2 GB" + T.warnAfter).toBe("That is less than this workspace uses. Nothing is deleted, but its new uploads are refused until it is under 2 GB.");
+    // The sentences of the invites set's mockups 1 to 4, put together from their parts.
+    expect(T.invitedBefore + "mara@example.com" + T.invitedMiddle + "27 Nov 2026" + T.invitedAfter).toBe("An invite is on its way to mara@example.com. The link works once and until 27 Nov 2026.");
+    expect(T.ranOut + "19 Nov").toBe("Ran out 19 Nov");
+    expect(T.cancelBefore + "mara@example.com" + T.cancelAfter).toBe("Cancel the invite to mara@example.com?");
+    expect(T.resentBefore + "mara@example.com" + T.resentAfter).toBe("A new invite is on its way to mara@example.com. The earlier link no longer works.");
+    expect(T.disableBefore + "tess" + T.quoteAfter).toBe('Disable "tess"?');
+    expect(T.fromNowOn + "tess" + T.disableMiddle + "3" + T.manyTours + T.disableEnd).toBe(
+      "From now on tess cannot sign in, Mythicshot on their computers cannot publish, and their 3 tours and every image and clip they shared stop being available to anyone. Nothing is deleted: enabling the account brings everything back.",
+    );
+    expect(T.fromNowOn + "tess" + T.disableMiddle + T.oneTour + T.disableEnd).toContain("and their 1 tour and every image");
+    expect(T.fromNowOn + "tess" + T.disableMiddle + T.allTours + T.disableEnd).toContain("and their tours and every image");
+    expect("tess" + T.enabledAfter).toBe("tess is enabled again. Their tours and shared links work as before; they sign in again to use the dashboard.");
+    expect(T.deleteBefore + "rook" + T.deleteAfter).toBe('Delete "rook" for good?');
+    expect(T.removeWarnBefore + "rook@example.com" + T.removeWarnAfter).toBe("This cannot be undone. Their links stop working for everyone, and rook@example.com can be invited again as a new account.");
+    expect(T.deletingBefore + "rook" + T.deletingAfter).toBe('Deleting "rook"…');
+    expect(T.filesBefore + "240" + T.filesOf + "400" + T.filesAfter).toBe("Removing files, 240 of 400. Keep this page open. If it is interrupted, open Delete again to finish.");
+    expect(T.restBefore + "60" + T.minutes).toBe("Too many invites in a short time. Try again in 60 minutes.");
     // The failure sentences are the shared script's approved ones; the page has none of its own.
     expect(ADMIN_JS).toContain("Dash.failure(");
     expect(ADMIN_JS).not.toMatch(/Something went wrong|Too many requests/);
@@ -253,7 +375,7 @@ describe("the Admin page and its script", () => {
     // The script sets no style or handler attribute; the one style it touches is a bar's width, through the CSSOM.
     expect(ADMIN_JS).not.toMatch(/setAttribute\("(?:style|on[a-z]+|src|srcdoc|href)"/);
     expect(ADMIN_JS).not.toMatch(/\.on[a-z]+\s*=/);
-    expect([...ADMIN_JS.matchAll(/\.style\b[^;]*/g)].map((m) => m[0])).toEqual(['.style.width = width + "%"']);
+    expect([...ADMIN_JS.matchAll(/\.style\b[^;]*/g)].map((m) => m[0])).toEqual(['.style.width = width + "%"', '.style.width = share + "%"']);
     expect(DASH_CSS).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
   });
 
@@ -262,18 +384,54 @@ describe("the Admin page and its script", () => {
     expect(ADMIN_JS).not.toMatch(/csrf/i);
     // Every request, by method and path.
     const requests = [...ADMIN_JS.matchAll(/\bapi\("([A-Z]+)", ([^,)]*)/g)].map((m) => `${m[1]} ${m[2]}`);
-    expect(requests.sort()).toEqual(['GET "/api/v1/admin/summary"', "GET path", "PATCH WORKSPACES + encodeURIComponent(id"].sort());
+    expect(requests.sort()).toEqual(
+      [
+        'GET "/api/v1/admin/summary"',
+        "GET path",
+        "PATCH WORKSPACES + encodeURIComponent(id",
+        "GET INVITES",
+        "POST INVITES",
+        'POST INVITES + "/" + encodeURIComponent(v.id',
+        'DELETE INVITES + "/" + encodeURIComponent(v.id',
+        'POST ACCOUNTS + "/" + encodeURIComponent(d.id',
+        'POST ACCOUNTS + "/" + encodeURIComponent(a.id',
+        'GET ACCOUNTS + "/" + encodeURIComponent(a.id',
+        "DELETE path",
+      ].sort(),
+    );
     expect(ADMIN_JS).toContain('var ACCOUNTS = "/api/v1/admin/accounts";');
     expect(ADMIN_JS).toContain('var WORKSPACES = "/api/v1/admin/workspaces/";');
+    expect(ADMIN_JS).toContain('var INVITES = "/api/v1/admin/invites";');
     expect(ADMIN_JS).toContain('var path = after === null ? ACCOUNTS : ACCOUNTS + "?after=" + encodeURIComponent(after);');
-    // The ids that go into an address are checked first.
+    // Each request with its whole path and its body, as written.
+    for (const line of [
+      'Dash.api("POST", INVITES, { email: v })',
+      'Dash.api("POST", INVITES + "/" + encodeURIComponent(v.id) + "/resend")',
+      'Dash.api("DELETE", INVITES + "/" + encodeURIComponent(v.id))',
+      'Dash.api("POST", ACCOUNTS + "/" + encodeURIComponent(d.id) + "/disable")',
+      'Dash.api("POST", ACCOUNTS + "/" + encodeURIComponent(a.id) + "/enable")',
+      'Dash.api("GET", ACCOUNTS + "/" + encodeURIComponent(a.id) + "/removal")',
+      'var path = ACCOUNTS + "/" + encodeURIComponent(r.id);',
+      'Dash.api("DELETE", path, { username: r.expected })',
+    ]) expect(ADMIN_JS, line).toContain(line);
+    // An address goes only into a body: "email" is never part of a path.
+    expect(ADMIN_JS).not.toMatch(/(?:INVITES|ACCOUNTS) \+[^;]*email/);
+    // The ids that go into an address are checked first, each against the API's shape.
     expect(ADMIN_JS).toContain("var USER_ID = /^usr_[0-9a-f]{24}$/;");
     expect(ADMIN_JS).toContain("var WORKSPACE_ID = /^ws_[0-9a-f]{24}$/;");
+    expect(ADMIN_JS).toContain("var INVITE_ID = /^inv_[0-9a-f]{24}$/;");
+    expect(ADMIN_JS).toContain("if (!free() || blocked() || !INVITE_ID.test(v.id)) return;");
+    expect(ADMIN_JS).toContain("if (!free() || !INVITE_ID.test(v.id)) return;");
+    expect(ADMIN_JS.match(/if \(!free\(\) \|\| !USER_ID\.test\(a\.id\)\) return;/g)).toHaveLength(3);
+    expect(ADMIN_JS).toContain("return list.filter(function (a) { return a !== null && typeof a === \"object\" && typeof a.workspace_id === \"string\" && WORKSPACE_ID.test(a.workspace_id)");
+    expect(ADMIN_JS).toContain("var own = me === null || a.id === me || !USER_ID.test(a.id);");
     // Nothing is asked of the admin routes before the session says admin.
     expect(ADMIN_JS).toContain("if (who.admin !== true) { notFound(); return; }");
     // Nothing is stored, no cookie is touched, and leaving the page goes only to /signin, through the shared script.
-    const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "setTimeout(", "document.referrer", "navigator."];
+    const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer", "navigator."];
     for (const api of forbidden) expect(ADMIN_JS, api).not.toContain(api);
+    // The two timers: the pause between a delete's calls, and the end of the rest after a 429.
+    expect(ADMIN_JS.match(/setTimeout\(/g)).toHaveLength(2);
     // No other page serves, loads or names the Admin page's script.
     for (const p of DASH_PAGES.filter((x) => x.path !== "/admin")) {
       expect(p.html, p.path).not.toContain("/dash/admin.js");
@@ -300,21 +458,34 @@ describe("the Admin page and its script", () => {
     const all = doc.root.all();
     for (const b of all.filter((e) => e.tagName === "button")) expect(b.getAttribute("type"), `#${b.id}`).toBe("button");
     const messages = all.filter((e) => /\b(?:message|load)\b/.test(e.className) && e.parent?.tagName !== "noscript");
-    expect(messages.map((m) => m.id).sort()).toEqual(["admin-message", "allow-message", "dash-load"]);
+    expect(messages.map((m) => m.id).sort()).toEqual(["admin-message", "allow-message", "cancel-message", "dash-load", "delete-message", "disable-message", "invite-message", "invites-message"]);
     for (const m of messages) expect([m.getAttribute("role"), m.getAttribute("aria-live")], `#${m.id}`).toEqual(["status", "polite"]);
-    // A message line takes no room until it has a message.
+    // A message line takes no room until it has a message; nor does a note.
     for (const m of messages.filter((e) => e.id !== "dash-load")) expect(m.hidden, `#${m.id}`).toBe(true);
-    // The page behind the question, made inert while it is open: the bar and the admin screen.
+    const notes = all.filter((e) => /\bnote\b/.test(e.className));
+    expect(notes.map((n) => n.id)).toEqual(["invite-note", "invites-note", "admin-note"]);
+    for (const n of notes) expect([n.getAttribute("role"), n.getAttribute("aria-live"), n.hidden], `#${n.id}`).toEqual(["status", "polite", true]);
+    // The page behind a question, made inert while it is open: the bar and the admin screen.
     expect(ADMIN_JS).toContain('var BEHIND = ["dash-top", "admin"];');
     for (const h of all.filter((e) => e.tagName === "h1" || e.tagName === "h2")) expect(h.getAttribute("tabindex"), `#${h.id}`).toBe("-1");
-    const dialog = all.find((e) => e.getAttribute("role") === "dialog")!;
-    expect([dialog.getAttribute("aria-modal"), dialog.getAttribute("aria-labelledby"), dialog.getAttribute("aria-describedby")]).toEqual(["true", "allow-title", "allow-uses"]);
+    const dialogs = all.filter((e) => e.getAttribute("role") === "dialog" || e.getAttribute("role") === "alertdialog");
+    expect(dialogs.map((d) => [d.id, d.getAttribute("role"), d.getAttribute("aria-modal"), d.getAttribute("aria-labelledby"), d.getAttribute("aria-describedby")])).toEqual([
+      ["allow-box", "dialog", "true", "allow-title", "allow-uses"],
+      ["cancel-box", "alertdialog", "true", "cancel-title", "cancel-text"],
+      ["disable-box", "alertdialog", "true", "disable-title", "disable-text disable-warn"],
+      ["delete-box", "alertdialog", "true", "delete-title", "delete-text delete-warn"],
+    ]);
     const input = doc.getElementById("allow-input")!;
     expect([input.tagName, input.getAttribute("type"), input.getAttribute("autocomplete"), input.getAttribute("spellcheck"), input.getAttribute("aria-describedby")]).toEqual(["input", "text", "off", "false", "allow-hint allow-message"]);
+    // The invite field: an email field the browser offers nothing for, named for a screen reader.
+    const email = doc.getElementById("invite-email")!;
+    expect([email.getAttribute("type"), email.getAttribute("autocomplete"), email.getAttribute("spellcheck"), email.getAttribute("maxlength"), email.getAttribute("aria-describedby")]).toEqual(["email", "off", "false", "254", "invite-text invite-message"]);
+    const typed = doc.getElementById("delete-input")!;
+    expect([typed.getAttribute("type"), typed.getAttribute("autocomplete"), typed.getAttribute("autocapitalize"), typed.getAttribute("spellcheck")]).toEqual(["text", "off", "off", "false"]);
     // The empty headers have names a screen reader reads and the eye does not see.
-    expect(all.filter((e) => e.tagName === "th").map((th) => th.textContent)).toEqual(["Account", "Workspace", "Tours", "Share", "Used", "Allowance", "Actions"]);
-    for (const name of ["Share", "Actions"]) expect(all.find((e) => e.tagName === "span" && e.textContent === name)!.className, name).toBe("vh");
-    expect(all.find((e) => e.tagName === "label")!.getAttribute("for")).toBe("allow-input");
+    expect(all.filter((e) => e.tagName === "th").map((th) => th.textContent)).toEqual(["Address", "Sent", "Works until", "Actions", "Account", "Workspace", "Tours", "Share", "Used", "Allowance", "Actions"]);
+    for (const name of ["Share", "Actions", "Email address"]) for (const e of all.filter((x) => (x.tagName === "span" || x.tagName === "label") && x.textContent === name)) expect(e.className, name).toBe("vh");
+    expect(all.filter((e) => e.tagName === "label").map((l) => l.getAttribute("for"))).toEqual(["invite-email", "allow-input", "delete-input"]);
     // Every element the script looks up by id is on the page.
     const ids = new Set(all.map((e) => e.id));
     const asked = [...ADMIN_JS.matchAll(/\$\("([a-z-]+)"\)/g)].map((m) => m[1]);
@@ -330,6 +501,12 @@ describe("the Admin page and its script", () => {
     expect(phone).toContain(".accounts, .accounts tbody, .accounts tr, .accounts td { display: block; }");
     expect(phone).toContain(".accounts thead { display: none; }");
     expect(phone).toContain(".accounts td[data-label]::before { content: attr(data-label); ");
+    // Invites become cards on a phone: the address, the line with the dates (or the tag), the buttons under them.
+    expect(phone).toContain(".invites, .invites tbody, .invites tr, .invites td { display: block; }");
+    expect(phone).toContain(".invites thead, .invites td.when { display: none; }");
+    expect(phone).toContain(".invites td.acts-cell { margin-top: 8px; }");
+    // A long question scrolls inside the screen.
+    expect(own).toContain("#cancel-box, #disable-box, #delete-box { max-height: 100%; overflow-y: auto; }");
     expect(DASH_CSS).not.toMatch(/overflow-x|100vw/);
   });
 });

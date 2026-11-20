@@ -244,6 +244,26 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
   .accounts td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 6.5em; color: var(--muted); font-size: 0.85rem; }
   .accounts .acts-cell { padding-top: 8px; }
 }
+.invite-text { margin: 0 0 10px; }
+.invite-message { margin: 8px 0 0; }
+.invites { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+.invites th { text-align: left; font-size: 0.76rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 0 10px 8px 0; white-space: nowrap; }
+.invites td { padding: 11px 10px 11px 0; border-top: 1px solid var(--line); vertical-align: middle; }
+.invites td.when { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.invites .t { font-weight: 400; }
+.invites .d { color: var(--muted); font-size: 0.85rem; }
+.invites .d .tag { margin-left: 2px; }
+#cancel-box, #disable-box, #delete-box { max-height: 100%; overflow-y: auto; }
+#delete-progress .meter { margin: 8px 0 6px; }
+@media (max-width: 720px) {
+  .invites, .invites tbody, .invites tr, .invites td { display: block; }
+  .invites thead, .invites td.when { display: none; }
+  .invites tr { padding: 12px 0; border-top: 1px solid var(--line); }
+  .invites tr:first-child { border-top: 0; padding-top: 0; }
+  .invites tr:last-child { padding-bottom: 0; }
+  .invites td { padding: 0; border-top: 0; }
+  .invites td.acts-cell { margin-top: 8px; }
+}
 
 /* The Account page. */
 .row { display: flex; justify-content: space-between; align-items: center; gap: 6px 12px; flex-wrap: wrap; padding: 11px 0; border-top: 1px solid var(--line); font-size: 0.93rem; }

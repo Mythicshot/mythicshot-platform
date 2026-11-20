@@ -7,7 +7,8 @@
 // the username in the bar and shows the Admin tab for an admin, all through textContent
 // and `hidden`, then hands the page { username, admin, workspace } and, for the Account
 // page, { named, email, sessionId, emailChange } (whether the account has a username, its
-// address, this session's id, and whether the address can be changed here). A page that
+// address, this session's id, and whether the address can be changed here), and for the
+// Admin page { accountId } (the account's own id, to know its own row). A page that
 // has something to say to a visitor who is not signed in passes a second function, which is
 // called instead of sending the visitor to /signin. Every request goes
 // through Dash.api: to this site only, with the browser's session for this address, no
@@ -281,6 +282,7 @@ export const DASH_JS = `var Dash = (function () {
         named: named,
         email: typeof who.email === "string" ? who.email : "",
         sessionId: typeof d.session.id === "string" ? d.session.id : "",
+        accountId: typeof who.id === "string" ? who.id : "",
         emailChange: d.email_change === true,
       });
     }).then(null, function () {
