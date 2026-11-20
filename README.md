@@ -136,6 +136,17 @@ A repeated delete request after the tour is gone answers `404`, and the server c
 
 Deleting removes the files from the server; it cannot reach copies that were already handed out. A browser that opened the public page in the last minute may show it once more from its own cache, and images a visitor already downloaded stay in that browser's cache (published images are sent with a one-year cache lifetime, because their names never change). A CDN or caching proxy in front of the server can keep serving both for as long as it holds them; purge it there if that matters. The same holds after an unpublish.
 
+### Who may view a tour
+
+Each tour has a viewing setting: `public` (anyone with the link, the default and how every tour worked before 0.1.36), `people` (the addresses on the tour's list, and the workspace's own account) or `me` (the workspace's own account alone). The list holds up to 200 addresses and is kept when the setting moves away from `people`. The workspace's account is matched by its address as it is at the moment of the check, so an email change counts at once.
+
+| Request | Answer |
+|---|---|
+| `GET /api/v1/tours/<id>/access` | `200 {"access","viewers":[…],"limit":200,"can_restrict","switching"}`: the setting, the whole list, whether the site can mail (which `people` and `me` need), and `{"done","total"}` while the live pictures move, else `null` |
+| `PUT /api/v1/tours/<id>/access` with `{"access":"people","viewers":["ana@example.com"]}` | `200` with the same answer once done. `viewers` replaces the whole list; leave it out to keep the list. A published tour between `public` and the other two answers `202 {"status":"switching","done","total"}` while its pictures move: send the same request until `200`. Refusals: `400 bad_access`, `400 bad_viewer` (names the entry's position, never an address), `400 too_many_viewers`, `409 cannot_restrict` on a site without mail, `409 access_switching` for another setting while a move is under way |
+
+A restricted tour's published pictures are kept in the private store, never in the public one, so a public bucket domain (`PUBLIC_IMAGE_BASE`) cannot serve them. Changing a published tour between `public` and a restricted setting moves the pictures of the version that is live now, never the draft, and keeps the link. Made restricted, the tour stops being public at the first request, and the old public pictures are deleted at the last, also those a re-publish replaced that were still in their grace; made public, it becomes public only once all its pictures are in place. A browser or a CDN that already holds a public picture keeps it for as long as it holds it. In this version the page that checks a visitor's address is not there yet, so a restricted tour's page answers `404` to everyone; between `people` and `me`, and for a change of the list, nothing moves. Publishing, unpublishing and deleting work for a restricted tour as for a public one, and a publish keeps its setting. Nothing is mailed to the addresses on the list.
+
 ### Replace a chapter
 
 The full reference for these requests, with every answer, error code and limit, is the site's own documentation page at `/docs` (see [API documentation](#api-documentation)); this section is the short version.

@@ -129,6 +129,8 @@ const theirTours = (t: Ids): [string, string][] => [
   ["their draft tour", t.draft.tour],
   ["their tour with a publish in progress", t.publishing.tour],
   ["their half-deleted tour", t.deleting.tour],
+  ["their restricted tour", t.restricted.tour],
+  ["their tour whose switch to restricted is in progress", t.switching.tour],
 ];
 
 const CASES: Record<string, Entry> = {
@@ -170,6 +172,14 @@ const CASES: Record<string, Entry> = {
     { what: "their live publish, named for the caller's own tour", method: "POST", path: tourPath(m.published.tour, "/publish"), json: { publish_id: t.published.publishId }, field: "publish_id", expect: NO_PUBLISH },
   ],
   "POST /api/v1/tours/:id/unpublish": (t) => theirTours(t).map(([what, id]) => ({ what, method: "POST", path: tourPath(id, "/unpublish"), expect: NO_TOUR })),
+  // Who may view a tour, and its list of addresses: the workspace's own data.
+  "GET /api/v1/tours/:id/access": (t) => theirTours(t).map(([what, id]) => ({ what, method: "GET", path: tourPath(id, "/access"), expect: NO_TOUR })),
+  "PUT /api/v1/tours/:id/access": (t) =>
+    theirTours(t).flatMap(([what, id]) => [
+      { what: `${what}, made public with an empty list`, method: "PUT", path: tourPath(id, "/access"), json: { access: "public", viewers: [] }, expect: NO_TOUR },
+      { what: `${what}, made restricted to the caller's address`, method: "PUT", path: tourPath(id, "/access"), json: { access: "people", viewers: ["intruder@example.com"] }, expect: NO_TOUR },
+      { what: `${what}, its switch continued`, method: "PUT", path: tourPath(id, "/access"), json: { access: "me" }, expect: NO_TOUR },
+    ]),
   "DELETE /api/v1/sessions/:id": (t) => [
     { what: "the session they are signed in with", method: "DELETE", path: `/api/v1/sessions/${t.session}`, only: "session", expect: NO_SESSION },
     { what: "another live session of theirs", method: "DELETE", path: `/api/v1/sessions/${t.otherSession}`, only: "session", expect: NO_SESSION },
@@ -287,12 +297,16 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
   },
   "GET /p/:name": {
     reason: "a published picture, for visitors: the name is 128 random bits and is served only while a live snapshot or a re-publish inside its grace names it",
-    samples: (w) => [w.a.ids.published.publicName, w.a.ids.published.retiredName, w.a.ids.publishing.pendingName, inventedIds().published.publicName].map((name) => ({ method: "GET", path: `/p/${name}` })),
+    samples: (w) =>
+      [w.a.ids.published.publicName, w.a.ids.published.retiredName, w.a.ids.publishing.pendingName, inventedIds().published.publicName, w.a.ids.switching.publicName, w.a.ids.restricted.privateName].map((name) => ({
+        method: "GET",
+        path: `/p/${name}`,
+      })),
   },
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { reason: "the player's own files, the same for every tour", samples: () => [{ method: "GET", path: "/player.js" }, { method: "GET", path: "/player.css" }] },
   "GET /t/:slug": {
     reason: "a published tour's page, for visitors: only a published tour answers, from its snapshot",
-    samples: (w) => [w.a.ids.published.slug, w.a.ids.draft.slug, w.a.ids.publishing.slug, inventedIds().published.slug].map((slug) => ({ method: "GET", path: `/t/${slug}` })),
+    samples: (w) => [w.a.ids.published.slug, w.a.ids.draft.slug, w.a.ids.publishing.slug, inventedIds().published.slug, w.a.ids.restricted.slug, w.a.ids.switching.slug].map((slug) => ({ method: "GET", path: `/t/${slug}` })),
   },
   // Shared items: found by their 100-bit link id alone, and only while online and of an
   // account that is not disabled; every other link is the one 404 page.
@@ -749,12 +763,13 @@ describe("one workspace against another", () => {
     for (const n of invented) expect(names).not.toContain(n);
     for (const side of [w.a, w.b]) {
       const s = await snapshotOf(w.deps, side, w.keys);
-      for (const table of ["workspace", "user", "membership", "signin_method", "signin_code", "session", "email_change", "audit", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object", "media", "media_object"]) {
+      for (const table of ["workspace", "user", "membership", "signin_method", "signin_code", "session", "email_change", "audit", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object", "media", "media_object", "tour_viewer", "access_switch"]) {
         expect(s.rows[table].length, `${side.name} has no row in ${table}`).toBeGreaterThan(0);
       }
-      // Every file a row names is there, but the one picture the publish in progress has not copied yet.
+      // Every file a row names is there, but the one picture the publish in progress has not
+      // copied yet, and the three the switch in progress has not moved yet.
       const notCopied = s.rows.public_object.filter((o) => o.state === "pending" && o.copied === 0).map((o) => o.image_key);
-      expect(notCopied).toHaveLength(1);
+      expect(notCopied).toHaveLength(4);
       expect(Object.keys(s.files).filter((key) => s.files[key] === "missing")).toEqual(notCopied);
       expect(Object.keys(s.files).length).toBeGreaterThan(20);
     }
@@ -876,7 +891,11 @@ describe("one workspace against another", () => {
     expect(after.rows.upload.map((u) => u.id)).not.toContain(w.b.ids.upload);
     expect(after.rows.tour_deletion).toEqual([]);
     expect(after.rows.replaced_object).toEqual([]);
-    expect(after.rows.public_object).toEqual([]);
+    // All but the rows of its switch in progress, which no housekeeping takes for abandoned:
+    // a switch stays until it is finished, unpublished or deleted.
+    expect(after.rows.public_object.filter((o) => !String(o.publish_id).startsWith("sw_"))).toEqual([]);
+    expect(after.rows.public_object.every((o) => o.state === "pending" && o.tour_id === w.b.ids.switching.tour)).toBe(true);
+    expect(after.rows.access_switch).toHaveLength(1);
     expect(after.rows.media.map((m) => m.id)).not.toContain(w.b.ids.media.uploading);
     expect(before.rows.media.map((m) => m.id)).toContain(w.a.ids.media.uploading);
   });
@@ -937,12 +956,14 @@ describe("one workspace against another", () => {
     expect(first.b["GET /api/v1/usage/largest by session"]).toEqual(first.b["GET /api/v1/usage/largest by token"]);
     // The largest tours are the workspace's own, every one of them here (it has fewer than ten).
     const largestA = JSON.parse(first.a["GET /api/v1/usage/largest by session"].body).tours as Json[];
-    expect(largestA.map((t) => t.id).sort()).toEqual([w.a.ids.published.tour, w.a.ids.draft.tour, w.a.ids.publishing.tour].sort());
+    expect(largestA.map((t) => t.id).sort()).toEqual([w.a.ids.published.tour, w.a.ids.draft.tour, w.a.ids.publishing.tour, w.a.ids.restricted.tour, w.a.ids.switching.tour].sort());
     // The largest of every kind: the workspace's own tours and items (the unfinished one too), never the other's.
     for (const [me, them] of [[w.a, w.b], [w.b, w.a]] as const) {
       const mine = JSON.parse(first[me === w.a ? "a" : "b"]["GET /api/v1/usage/largest by session"].body).largest as Json[];
-      expect(mine.map((e) => e.id).sort()).toEqual([me.ids.published.tour, me.ids.draft.tour, me.ids.publishing.tour, me.ids.media.image, me.ids.media.clip, me.ids.media.uploading].sort());
-      const theirs = new Set([them.ids.published.tour, them.ids.draft.tour, them.ids.publishing.tour, them.ids.media.image, them.ids.media.clip, them.ids.media.uploading]);
+      expect(mine.map((e) => e.id).sort()).toEqual(
+        [me.ids.published.tour, me.ids.draft.tour, me.ids.publishing.tour, me.ids.restricted.tour, me.ids.switching.tour, me.ids.media.image, me.ids.media.clip, me.ids.media.uploading].sort(),
+      );
+      const theirs = new Set([them.ids.published.tour, them.ids.draft.tour, them.ids.publishing.tour, them.ids.restricted.tour, them.ids.switching.tour, them.ids.media.image, them.ids.media.clip, them.ids.media.uploading]);
       for (const e of mine) expect(theirs.has(e.id as string), String(e.id)).toBe(false);
     }
 
@@ -1156,7 +1177,7 @@ describe("one workspace against another", () => {
       expect(got.json.workspace).toEqual({ id: mine.workspaceId, name: mine.workspaceName });
       const token = got.json.token as string;
       const tours = await send(deps, "GET", "/api/v1/tours", { token });
-      expect(tours.json.tours.map((t: Json) => t.id).sort()).toEqual([mine.ids.published.tour, mine.ids.draft.tour, mine.ids.publishing.tour].sort());
+      expect(tours.json.tours.map((t: Json) => t.id).sort()).toEqual([mine.ids.published.tour, mine.ids.draft.tour, mine.ids.publishing.tour, mine.ids.restricted.tour, mine.ids.switching.tour].sort());
       for (const n of namesIn(theirs.ids)) expect(tours.text.includes(n), n).toBe(false);
       expect((await send(deps, "PATCH", tourPath(theirs.ids.draft.tour), { token, body: JSON.stringify({ title: "Taken over" }), headers: JSON_HEADERS })).json).toEqual(NO_TOUR.body);
       // The other workspace can neither see the token in its list nor revoke or rename it; the caller sees it.
@@ -1479,8 +1500,8 @@ describe("routes with no owner", () => {
     // What each answers: the wizard is closed on a site that has workspaces; a tour page and
     // a picture answer only for what is live (or retired and inside its grace).
     for (const key of Object.keys(OPEN).filter((k) => k.includes(" /setup"))) expect(statuses[key], key).toEqual([404]);
-    expect(statuses["GET /t/:slug"]).toEqual([200, 404, 404, 404]);
-    expect(statuses["GET /p/:name"]).toEqual([200, 200, 404, 404]);
+    expect(statuses["GET /t/:slug"]).toEqual([200, 404, 404, 404, 404, 404]);
+    expect(statuses["GET /p/:name"]).toEqual([200, 200, 404, 404, 404, 404]);
     // A code nobody was given gets the one refusal of a sign-in link.
     expect(statuses["POST /api/v1/signin/complete"]).toEqual([403]);
     expect(statuses["GET /"]).toEqual([302]);
@@ -1501,6 +1522,12 @@ describe("routes with no owner", () => {
     expect(await page(a.ids.draft.slug)).toEqual(await page(never.draft.slug));
     expect(await page(a.ids.publishing.slug)).toEqual(await page(never.draft.slug));
     expect(await picture(a.ids.publishing.pendingName)).toEqual(await picture(never.published.publicName));
+    // A restricted tour, and one whose switch to restricted is in progress, answer as tours
+    // that never existed: their pages, their live pictures still in the public store, and the
+    // names of their private ones.
+    expect(await page(a.ids.restricted.slug)).toEqual(await page(never.draft.slug));
+    expect(await page(a.ids.switching.slug)).toEqual(await page(never.draft.slug));
+    for (const name of [a.ids.switching.publicName, a.ids.switching.movedName, a.ids.restricted.privateName]) expect(await picture(name)).toEqual(await picture(never.published.publicName));
     // The live page names its own public pictures: no draft file, no workspace, account or
     // token, and nothing of the other workspace. (It does carry its steps' ids, which the
     // player uses; a step id opens nothing without its workspace's credential.)

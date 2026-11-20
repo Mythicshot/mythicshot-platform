@@ -12,6 +12,10 @@
 // - an open upload for a new tour: step 1 sent, step 2 and the logo not;
 // - a tour of 13 steps with a publish in progress (12 pictures copied, not live);
 // - a tour whose delete was cut off after its rows went and before its files did;
+// - a restricted tour (setting 'people', two addresses on its list), published, so its live
+//   pictures are in the private store, and a second one published publicly whose switch to
+//   'me' is in progress (12 of its 15 pictures moved to the private store), both through the
+//   API (src/access.ts);
 // - a second token that was revoked (written by SQL: no route revokes a token yet);
 // - two live sessions of its account, signed in as the server signs a browser in; the
 //   first is the one the suite sends requests with. The first side's account is the site's
@@ -60,6 +64,10 @@ export type Ids = {
   publishing: TourIds & { publishId: string; pendingName: string };
   /** Half deleted: the tour row is gone, its deletion and its files are not. */
   deleting: { tour: string };
+  /** Restricted and published: `privateName` is a live picture's name in the private store (after `v/`), `viewer` an address on its list. */
+  restricted: TourIds & { privateName: string; viewer: string };
+  /** Published publicly, with a switch to 'me' in progress: `publicName` is a live picture still in the public store, `movedName` one already copied to the private store. */
+  switching: TourIds & { publicName: string; movedName: string };
   /** An open upload for a new tour: step 1 sent, step 2 and the logo not. */
   upload: string;
   /** An open upload that replaces the draft tour's chapter: step 1 reused, step 2 not sent. */
@@ -140,6 +148,8 @@ const sizes = (base: number) => ({
   openReplace: [base + 3, base + 8],
   upload: [base + 6, base + 7],
   large: Array.from({ length: 13 }, (_, i) => base + 10 + i),
+  restricted: [base + 50, base + 51],
+  switching: Array.from({ length: 14 }, (_, i) => base + 60 + i),
   gone: [base + 30],
   media: { image: base + 40, clip: base + 41, uploading: base + 42 },
 });
@@ -158,6 +168,8 @@ export function inventedIds(like?: Ids): Ids {
     draft: { ...tour(), sha256: [randomHex(64), randomHex(64)], committedUpload: newId("up"), committedReplace: newId("up") },
     publishing: { ...tour(), publishId: "pub_" + randomHex(24), pendingName: name() },
     deleting: { tour: newId("tour") },
+    restricted: { ...tour(), privateName: name(), viewer: `${randomHex(8)}-viewer@example.com` },
+    switching: { ...tour(), publicName: name(), movedName: name() },
     upload: newId("up"),
     replaceUpload: newId("up"),
     media: { image: newId("med"), clip: newId("med"), uploading: newId("med"), imageLink: newLinkId(), clipLink: newLinkId(), uploadingLink: newLinkId() },
@@ -304,6 +316,24 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
   must(await cutOff((broken) => send(broken, "DELETE", `/api/v1/tours/${gone.tour_id}`, { token })), 500, "the delete that is cut off");
   await need(deps.db.first("SELECT 1 AS x FROM tour_deletion WHERE tour_id = ?", [gone.tour_id]), "deletion in progress");
 
+  // A restricted tour, published to the private store, with two addresses on its list.
+  const restricted = await uploadTour(deps, token, manifestOf(s.restricted, `${name} restricted tour`, true), { kind: "new" }, fill);
+  const viewer = `${name.toLowerCase()}-viewer@example.com`;
+  // Restricting needs a site that can mail a link: an address for links is lent for these requests.
+  const config = deps.config;
+  deps.config = { ...config, siteHost: config.siteHost ?? "tours.example.com" };
+  const access = (tourId: string, body: Json) => send(deps, "PUT", `/api/v1/tours/${tourId}/access`, { token, body: JSON.stringify(body), headers: JSON_HEADERS });
+  must(await access(restricted.tour_id, { access: "people", viewers: [viewer, `${name.toLowerCase()}-second@example.com`] }), 200, "restricting a draft");
+  must(await publishOf(restricted.tour_id), 200, "the restricted publish");
+  // A public tour of 15 pictures whose switch to 'me' has moved 12.
+  const switching = await uploadTour(deps, token, manifestOf(s.switching, `${name} switching tour`, true), { kind: "new" }, fill);
+  must(await publishOf(switching.tour_id), 202, "the first call of the switching tour's publish");
+  let pub = await publishOf(switching.tour_id);
+  while (pub.status === 202) pub = await send(deps, "POST", `/api/v1/tours/${switching.tour_id}/publish`, { token, body: JSON.stringify({ publish_id: pub.json.publish_id }), headers: JSON_HEADERS });
+  must(pub, 200, "the switching tour's publish");
+  must(await access(switching.tour_id, { access: "me" }), 202, "the switch in progress");
+  deps.config = config;
+
   // The shared items.
   const mediaSpec = { width: 64, height: 64, bytes: s.media.uploading };
   const image = await shareItem(deps, token, { kind: "image", content_type: "image/png", bytes: s.media.image, width: 64, height: 64, title: `${name} shared image` }, png(64, 64, s.media.image, fill), { preview: true, commit: true });
@@ -319,6 +349,7 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
   const nameOf = async (sql: string, tourId: string, what: string) => (await need(deps.db.first<{ image_key: string }>(sql, [tourId]), what)).image_key.slice(2);
   const live = await need(deps.db.first<{ publish_id: string }>("SELECT publish_id FROM snapshot WHERE tour_id = ?", [published.tour_id]), "snapshot");
   const { sha256: _unused, ...largeIds } = await tourIds(large);
+  const withoutHashes = ({ sha256: _hashes, ...rest }: TourIds & { sha256: string[] }): TourIds => rest;
 
   const ids: Ids = {
     published: {
@@ -334,6 +365,16 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
       pendingName: await nameOf("SELECT image_key FROM public_object WHERE tour_id = ? AND state = 'pending' AND copied = 1 ORDER BY image_key LIMIT 1", large.tour_id, "copied picture of the publish in progress"),
     },
     deleting: { tour: gone.tour_id },
+    restricted: {
+      ...withoutHashes(await tourIds(restricted)),
+      privateName: await nameOf("SELECT image_key FROM snapshot_object WHERE tour_id = ? ORDER BY image_key LIMIT 1", restricted.tour_id, "live private picture"),
+      viewer,
+    },
+    switching: {
+      ...withoutHashes(await tourIds(switching)),
+      publicName: await nameOf("SELECT image_key FROM snapshot_object WHERE tour_id = ? ORDER BY image_key LIMIT 1", switching.tour_id, "live public picture of the switching tour"),
+      movedName: await nameOf("SELECT image_key FROM public_object WHERE tour_id = ? AND state = 'pending' AND copied = 1 ORDER BY image_key LIMIT 1", switching.tour_id, "moved picture of the switch"),
+    },
     upload,
     replaceUpload: second.json.upload_id,
     media: { image: image.id, clip: clip.id, uploading: unfinished.id, imageLink: image.link, clipLink: clip.link, uploadingLink: unfinished.link },
@@ -432,6 +473,9 @@ export const OWNED: Readonly<Record<string, string>> = {
   snapshot_object: BY_TOUR,
   public_object: BY_TOUR,
   publish_job: BY_TOUR,
+  // Who may view a tour (migration 0014): its list of addresses and a switch in progress.
+  tour_viewer: BY_TOUR,
+  access_switch: BY_TOUR,
   replaced_object: BY_TOUR,
   upload: "workspace_id = ?",
   upload_step: "upload_id IN (SELECT id FROM upload WHERE workspace_id = ?)",
@@ -475,7 +519,7 @@ async function digest(store: FileStore, key: string): Promise<string> {
   return `${bytes.byteLength} bytes, sha256 ${await sha256Hex(bytes)}, ${file.contentType}, ${file.cacheControl}`;
 }
 
-/** Published pictures (`p/`) are in the public store; everything else, shared items' objects (`m/`) too, in the drafts. */
+/** Published pictures (`p/`) are in the public store; everything else, a restricted tour's live pictures (`v/`) and shared items' objects (`m/`) too, in the drafts. */
 const storeOf = (deps: Deps, key: string) => (key.startsWith("p/") ? deps.pub : deps.drafts);
 
 export type Snapshot = { rows: Record<string, Json[]>; files: Record<string, string> };
@@ -548,7 +592,7 @@ export function needlesOf(snapshot: Snapshot, more: string[] = []): string[] {
       for (const [column, value] of Object.entries(row)) {
         if (typeof value !== "string" || value.length < 6 || !NAMING.test(column)) continue;
         out.add(value);
-        if (value.startsWith("p/")) out.add(value.slice(2));
+        if (value.startsWith("p/") || value.startsWith("v/")) out.add(value.slice(2));
       }
     }
   }
