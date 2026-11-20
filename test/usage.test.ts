@@ -7,6 +7,7 @@ import { parseManifest, type Manifest } from "../src/manifest.ts";
 import type { Deps } from "../src/ports.ts";
 import { LOGO_RULE } from "../src/sniff.ts";
 import { ALLOWANCE_SQL, USED_SQL, allowanceFromSetting, formatBytes, reservedFor, usageOf } from "../src/usage.ts";
+import { SIZE_TABLE } from "./sizes.ts";
 import { clone, commit, count, createUpload, fixtures, putStep, send, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 
 const v2 = fixtures.v2 as Json;
@@ -278,6 +279,63 @@ describe("usage of a workspace", () => {
   });
 });
 
+describe("the largest tours", () => {
+  const LARGEST = "/api/v1/usage/largest";
+
+  it("answers the ten largest tours of the caller's own workspace, largest first, ties by id", async () => {
+    const { deps, a, b } = await setup();
+    // Twelve tours in A: sizes 1100 to 2200, but two of them the same size (1500).
+    const sizes = [1100, 1200, 1300, 1400, 1500, 1500, 1700, 1800, 1900, 2000, 2100, 2200];
+    const made: { id: string; title: string; bytes: number }[] = [];
+    for (const [i, bytes] of sizes.entries()) {
+      const title = `Tour ${i + 1}`;
+      const t = await uploadTour(deps, a.token, manifestOf([bytes - 100, 100], title), { kind: "new" }, i);
+      made.push({ id: t.tour_id, title, bytes });
+    }
+    // A logo counts in its tour's size, as in the usage.
+    const withLogo = await uploadTour(deps, a.token, v3, { kind: "new" }, 99);
+    made.push({ id: withLogo.tour_id, title: v3.title as string, bytes: sum(v3) + 1000 });
+    // B's tours are larger than all of A's, and never in A's answer.
+    await uploadTour(deps, b.token, manifestOf([900_000], "Bravo giant"));
+
+    const r = await send(deps, "GET", LARGEST, { token: a.token });
+    expect(r.status, r.text).toBe(200);
+    expect(r.headers.get("cache-control")).toBe("no-store");
+    const want = [...made].sort((x, y) => y.bytes - x.bytes || (x.id < y.id ? -1 : 1)).slice(0, 10);
+    expect(r.json).toEqual({ tours: want });
+    for (const t of r.json.tours) expect(Object.keys(t)).toEqual(["id", "title", "bytes"]);
+    // The two of 1500 bytes are both in it, in the order of their ids.
+    const tied = made.filter((t) => t.bytes === 1500).map((t) => t.id).sort();
+    expect(r.json.tours.filter((t: Json) => t.bytes === 1500).map((t: Json) => t.id)).toEqual(tied);
+    // Each size is the one the tour list gives.
+    const listed = Object.fromEntries(((await send(deps, "GET", "/api/v1/tours", { token: a.token })).json.tours as Json[]).map((t) => [t.id, t.bytes]));
+    for (const t of r.json.tours) expect(t.bytes, t.id).toBe(listed[t.id]);
+    // B sees only its own.
+    expect((await send(deps, "GET", LARGEST, { token: b.token })).json.tours.map((t: Json) => t.title)).toEqual(["Bravo giant"]);
+  });
+
+  it("an empty workspace has no largest tours, and nobody without a credential gets any", async () => {
+    const { deps, a } = await setup();
+    expect((await send(deps, "GET", LARGEST, { token: a.token })).json).toEqual({ tours: [] });
+    const nobody = await send(deps, "GET", LARGEST);
+    expect([nobody.status, nobody.text]).toEqual([401, '{"error":"unauthorized"}']);
+  });
+
+  it("the answer makes as many database calls for many tours as for few", async () => {
+    const { deps, a, calls } = await setup();
+    await uploadTour(deps, a.token, manifestOf([500]));
+    const callsFor = async () => {
+      const before = calls();
+      expect((await send(deps, "GET", LARGEST, { token: a.token })).status).toBe(200);
+      return calls() - before;
+    };
+    await callsFor();
+    const few = await callsFor();
+    for (let i = 1; i <= 11; i++) await uploadTour(deps, a.token, manifestOf([500 + i]), { kind: "new" }, i);
+    expect(await callsFor()).toBe(few);
+  });
+});
+
 describe("what an upload reserves", () => {
   const parsed = (m: Json): Manifest => {
     const r = parseManifest(m);
@@ -331,30 +389,10 @@ describe("the STORAGE_ALLOWANCE_BYTES setting", () => {
 });
 
 describe("how sizes are written", () => {
-  it("sizes read as bytes, KB, MB and GB", () => {
-    const cases: [number, string][] = [
-      [0, "0 bytes"],
-      [1, "1 byte"],
-      [2, "2 bytes"],
-      [1023, "1023 bytes"],
-      [1024, "1.00 KB"],
-      [1536, "1.50 KB"],
-      [10 * 1024, "10.0 KB"],
-      [512 * 1024, "512 KB"],
-      [200_000, "195 KB"],
-      [2_000_000, "1.91 MB"],
-      [Math.round(14.2 * 1024 * 1024), "14.2 MB"],
-      [1024 * 1024 - 1, "1.00 MB"],
-      [1024 * 1024, "1.00 MB"],
-      [1023 * 1024 * 1024, "1023 MB"],
-      [1024 * 1024 * 1024 - 1, "1.00 GB"],
-      [1_073_741_824, "1.00 GB"],
-      [Math.round(1.02 * 1024 ** 3), "1.02 GB"],
-      [5 * 1024 ** 4, "5120 GB"],
-      [Number.MAX_SAFE_INTEGER, "8388608 GB"],
-    ];
-    for (const [n, text] of cases) expect(formatBytes(n), String(n)).toBe(text);
-    // Never a fourth digit after the point, an exponent or a rounded-up unit that does not exist.
-    for (const n of [999, 1000, 1025, 99_999, 999_999, 1_048_575, 123_456_789, 9_999_999_999]) expect(formatBytes(n), String(n)).toMatch(/^(\d{1,4} bytes|\d\.\d\d (KB|MB|GB)|\d\d\.\d (KB|MB|GB)|\d{3,} (KB|MB|GB))$/);
+  it("sizes read as the pages write them: 1024 to a unit, at most one decimal, no trailing .0", () => {
+    // The one table the account page's script is held to as well (test/sizes.ts).
+    for (const [n, text] of SIZE_TABLE) expect(formatBytes(n), String(n)).toBe(text);
+    // Never a second digit after the point, a trailing .0, an exponent or a unit past GB.
+    for (const n of [999, 1000, 1025, 99_999, 999_999, 1_048_575, 123_456_789, 9_999_999_999, 1024 ** 4 + 1]) expect(formatBytes(n), String(n)).toMatch(/^(\d{1,4} bytes?|\d+(\.[1-9])? (KB|MB|GB))$/);
   });
 });

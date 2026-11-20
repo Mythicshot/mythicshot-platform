@@ -156,7 +156,8 @@ describe("an upload against the allowance", () => {
     await setAllowance(big, owner, 3_100_000);
     const large = await createUpload(big, owner.token, manifestOf([2_000_000]));
     expectFull(large, 3_000_001, 3_100_000, 2_000_000);
-    expect(large.json.detail).toContain("this tour needs 1.91 MB of room, but the workspace has 97.7 KB left of its 2.96 MB allowance.");
+    // Sizes are written as the pages write them: at most one decimal, no trailing ".0".
+    expect(large.json.detail).toContain("this tour needs 1.9 MB of room, but the workspace has 97.7 KB left of its 3 MB allowance.");
   });
 
   it('the sentence is under 200 characters and reads after "Could not start the upload: "', async () => {
@@ -189,6 +190,9 @@ describe("an upload against the allowance", () => {
     }
     // The README's example is a real answer, byte for byte.
     expect(README).toContain(await storageFull(usage(1_070_491_238, 1_073_741_824), 14_889_779).text());
+    expect(((await storageFull(usage(1_070_491_238, 1_073_741_824), 14_889_779).json()) as Json).detail).toBe(
+      "this tour needs 14.2 MB of room, but the workspace has 3.1 MB left of its 1 GB allowance. Nothing was uploaded. Delete tours you no longer need, or ask the site's admin for more room",
+    );
     // Over its allowance, a workspace has nothing left, never a negative size.
     expect(((await storageFull(usage(5000, 10), 7).json()) as Json).detail).toContain("has 0 bytes left of its 10 bytes allowance");
     // It says nothing was uploaded, and never that the site deletes anything.

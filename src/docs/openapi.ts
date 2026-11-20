@@ -16,6 +16,7 @@ import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
 import { DELETE_FILES_PER_CALL } from "../tours.ts";
 import { SESSION_COOKIE, SESSION_MS, SIGNIN_CODE_MS } from "../sessions.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS, UPLOAD_MAX_AGE_MS } from "../uploads.ts";
+import { LARGEST_TOURS } from "../usage.ts";
 import { VERSION } from "../version.ts";
 
 export type OpenApiParameter = { name: string; in: "path"; required: true; description: string; schema: Record<string, unknown> };
@@ -238,7 +239,7 @@ function schemas(): Record<string, Schema> {
       "The tour is unpublished, but some of its public images are still to be removed. Send the same request again.",
     ),
     Tour: object(
-      ["id", "title", "status", "slug", "url", "chapters", "steps", "updated_at", "published_at", "unpublished_changes"],
+      ["id", "title", "status", "slug", "url", "chapters", "steps", "bytes", "updated_at", "published_at", "unpublished_changes"],
       {
         id: { type: "string", pattern: "^tour_[0-9a-f]{24}$" },
         title: { type: "string" },
@@ -247,6 +248,7 @@ function schemas(): Record<string, Schema> {
         url: { type: ["string", "null"], description: "The public link as a path, /t/<slug>, to put after the server address. null for a draft." },
         chapters: whole("How many chapters the draft has."),
         steps: whole("How many steps the draft has."),
+        bytes: whole("The tour's size in bytes, counted as GET /api/v1/usage counts storage: the images of all its steps and its logo (a logo stored by a server before version 0.1.8 counts as 0). Over all of a workspace's tours these add up to the usage's pictures and logos; uploads that are not finished belong to no tour and are not in it."),
         updated_at: whole("When the draft last changed, in milliseconds since 1970."),
         published_at: { type: ["integer", "null"], description: "When the tour was last published, in milliseconds since 1970. null for a draft." },
         unpublished_changes: {
@@ -297,6 +299,18 @@ function schemas(): Record<string, Schema> {
       },
       "What a workspace uses of its storage allowance.",
     ),
+    LargestTours: object(["tours"], {
+      tours: {
+        type: "array",
+        maxItems: LARGEST_TOURS,
+        description: `At most ${LARGEST_TOURS}, largest first; tours of the same size in the order of their ids.`,
+        items: object(["id", "title", "bytes"], {
+          id: { type: "string", pattern: "^tour_[0-9a-f]{24}$" },
+          title: { type: "string" },
+          bytes: whole("The tour's size in bytes, as the tour list gives it."),
+        }),
+      },
+    }),
     StorageFull: object(
       ["error", "detail", "used_bytes", "allowance_bytes", "needed_bytes"],
       {
@@ -369,6 +383,15 @@ function schemas(): Record<string, Schema> {
         ),
       },
       "One account and how its workspace uses its storage. Nothing of the workspace's tours: no tour, title, link, picture, token or session.",
+    ),
+    AdminSummary: object(
+      ["accounts", "used_bytes", "standard_allowance_bytes"],
+      {
+        accounts: whole("How many accounts the site has."),
+        used_bytes: whole("What all workspaces use together, in bytes: the sum of every account's used_bytes in the list of accounts."),
+        standard_allowance_bytes: { type: ["integer", "null"], description: "The site's standard allowance from the server's settings, in bytes, which every workspace without a number of its own has. null when none is set: no limit." },
+      },
+      "The site's storage in all. Three numbers, nothing of any workspace.",
     ),
     AdminAccountList: object(["accounts", "next"], {
       accounts: { type: "array", maxItems: ADMIN_PAGE, description: `The accounts, in the order they were made, at most ${ADMIN_PAGE}.`, items: ref("AdminAccount") },
@@ -804,6 +827,16 @@ function paths(): OpenApiDoc["paths"] {
         responses: { "200": answer("The workspace's numbers.", ref("Usage")), "401": UNAUTHORIZED },
       },
     },
+    "/api/v1/usage/largest": {
+      get: {
+        tags: ["Workspace"],
+        summary: "The workspace's ten largest tours",
+        description: `The ${LARGEST_TOURS} largest tours of the token's workspace, largest first, each with its id, its title and its size in bytes as the tour list gives it (its steps' images and its logo, as GET /api/v1/usage counts them). Tours of the same size come in the order of their id. Fewer when the workspace has fewer tours; none for an empty one.`,
+        operationId: "getLargestTours",
+        security: TOKEN,
+        responses: { "200": answer("The largest tours.", ref("LargestTours")), "401": UNAUTHORIZED },
+      },
+    },
     "/api/v1/signin/request": {
       post: {
         tags: ["Accounts"],
@@ -887,6 +920,19 @@ function paths(): OpenApiDoc["paths"] {
         responses: { "204": { ...empty("Every session of the account has ended."), headers: setCookie("Clears the session cookie.") }, "401": UNAUTHORIZED },
       },
     },
+    "/api/v1/admin/summary": {
+      get: {
+        tags: ["Admin"],
+        summary: "Every account's storage use in all",
+        description: `For the site's admin: how many accounts there are, what all their workspaces use together (counted as GET /api/v1/usage counts it for each account itself) and the site's standard allowance, null when the server's settings set none. Nothing of any workspace is in it. Every refusal is the one 404, whoever asks and whatever is wrong with the request. ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminSummary",
+        security: SESSION,
+        responses: {
+          "200": answer("The three numbers.", ref("AdminSummary")),
+          "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, or a session on the tours address. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
+        },
+      },
+    },
     "/api/v1/admin/accounts": {
       get: {
         tags: ["Admin"],
@@ -941,7 +987,7 @@ export function openapi(): OpenApiDoc {
       { name: "Uploads", description: "Send a tour, a new chapter or a chapter's replacement: start, one request per image, finish." },
       { name: "Workspace", description: "The workspace a token or a session belongs to." },
       { name: "Accounts", description: "Signing in with a link sent by mail, and the browser sessions of an account. The site's own pages use these." },
-      { name: "Admin", description: "For the site's admin alone: how each account uses its storage, and each workspace's allowance. To anyone else these answer 404." },
+      { name: "Admin", description: "For the site's admin alone: the site's storage in all, how each account uses its storage, and each workspace's allowance. To anyone else these answer 404." },
       { name: "Server", description: "Whether the server is up. Needs no token." },
     ],
     paths: paths(),

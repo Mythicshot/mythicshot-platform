@@ -36,7 +36,7 @@ const PUBLIC = ["GET /healthz", "POST /api/v1/signin/request", "POST /api/v1/sig
 /** The operations that take a session and no token. */
 const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere"];
 /** The site admin's operations: an admin's session alone, and a 404 (never a 401) to everyone else. */
-const ADMIN_ONLY = ["GET /api/v1/admin/accounts", "PATCH /api/v1/admin/workspaces/:id"];
+const ADMIN_ONLY = ["GET /api/v1/admin/summary", "GET /api/v1/admin/accounts", "PATCH /api/v1/admin/workspaces/:id"];
 
 /** Every operation of the description, with its key in the form of the route table. */
 function operations(doc: OpenApiDoc): { key: string; path: string; method: string; op: Json }[] {
@@ -240,6 +240,7 @@ describe("the API description", () => {
       "Cancel an upload",
       "The workspace and the server version",
       "The workspace's storage use",
+      "The workspace's ten largest tours",
       "Ask for a sign-in link",
       "Finish signing in",
       "The session and who it is",
@@ -247,6 +248,7 @@ describe("the API description", () => {
       "End one of the account's sessions",
       "Sign out",
       "Sign out everywhere",
+      "Every account's storage use in all",
       "List every account's storage use",
       "Set a workspace's storage allowance",
       "Whether the server is up",
@@ -364,11 +366,34 @@ describe("the API description", () => {
 
   it("the tour list's items carry the fields the list answers, unpublished_changes included", () => {
     const tour = (openapi().components.schemas as Json).Tour;
-    const fields = ["id", "title", "status", "slug", "url", "chapters", "steps", "updated_at", "published_at", "unpublished_changes"];
+    const fields = ["id", "title", "status", "slug", "url", "chapters", "steps", "bytes", "updated_at", "published_at", "unpublished_changes"];
     expect(Object.keys(tour.properties)).toEqual(fields);
     expect(tour.required).toEqual(fields);
     expect(tour.additionalProperties).toBe(false);
     expect(tour.properties.unpublished_changes.type).toBe("boolean");
+    expect(tour.properties.bytes).toMatchObject({ type: "integer", minimum: 0 });
+    // The size is counted as the usage counts storage, and says so.
+    for (const text of ["logo", "GET /api/v1/usage"]) expect(tour.properties.bytes.description, text).toContain(text);
+  });
+
+  it("the largest tours and the admin's summary are described with the fields they answer, closed", () => {
+    const doc = openapi();
+    const s = doc.components.schemas as Json;
+    const largest = operations(doc).find((o) => o.key === "GET /api/v1/usage/largest")!.op;
+    expect([largest.tags, largest.operationId, Object.keys(largest.responses)]).toEqual([["Workspace"], "getLargestTours", ["200", "401"]]);
+    expect(largest.responses["200"].content["application/json"].schema).toEqual({ $ref: "#/components/schemas/LargestTours" });
+    expect(s.LargestTours).toMatchObject({ required: ["tours"], additionalProperties: false });
+    expect(s.LargestTours.properties.tours.maxItems).toBe(10);
+    const item = s.LargestTours.properties.tours.items;
+    expect([Object.keys(item.properties), item.required, item.additionalProperties]).toEqual([["id", "title", "bytes"], ["id", "title", "bytes"], false]);
+    for (const text of ["The 10 largest tours", "largest first", "order of their id"]) expect(largest.description, text).toContain(text);
+
+    const summary = operations(doc).find((o) => o.key === "GET /api/v1/admin/summary")!.op;
+    expect([summary.tags, summary.operationId, Object.keys(summary.responses)]).toEqual([["Admin"], "adminSummary", ["200", "404"]]);
+    expect(summary.responses["200"].content["application/json"].schema).toEqual({ $ref: "#/components/schemas/AdminSummary" });
+    const fields = ["accounts", "used_bytes", "standard_allowance_bytes"];
+    expect([Object.keys(s.AdminSummary.properties), s.AdminSummary.required, s.AdminSummary.additionalProperties]).toEqual([fields, fields, false]);
+    expect(s.AdminSummary.properties.standard_allowance_bytes.type).toEqual(["integer", "null"]);
   });
 
   it("an upload can target a new tour, a new chapter, or the replacement of a chapter", () => {

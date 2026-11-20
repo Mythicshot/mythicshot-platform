@@ -15,7 +15,8 @@
 //
 // Nothing here deletes anything. The one refusal is made by the statement that creates an
 // upload (src/uploads.ts), built from USED_SQL and ALLOWANCE_OF_SQL; this file words its
-// answer (storageFull) and serves a workspace its own numbers (GET /api/v1/usage).
+// answer (storageFull) and serves a workspace its own numbers (GET /api/v1/usage)
+// and its largest tours (GET /api/v1/usage/largest).
 //
 // This file imports no route module (src/uploads.ts imports it), so the settings, which
 // read allowanceFromSetting, and the routes can load in either order.
@@ -54,6 +55,20 @@ const PICTURES = "(SELECT coalesce(sum(s.bytes), 0) FROM tour t JOIN step s ON s
 const LOGOS = "(SELECT coalesce(sum(t.logo_bytes), 0) FROM tour t WHERE t.workspace_id = p.ws)";
 const UPLOADS = "(SELECT coalesce(sum(u.reserved_bytes), 0) FROM upload u WHERE u.workspace_id = p.ws AND u.closing_at IS NULL)";
 const TOURS = "(SELECT count(*) FROM tour t WHERE t.workspace_id = p.ws)";
+
+/**
+ * The size of one tour in bytes, as a scalar expression over the row `t` of `tour` in
+ * scope: the bytes of its steps and the recorded size of its logo (null counts as
+ * nothing). It is PICTURES and LOGOS for one tour, so over a workspace's tours these sizes
+ * add up to exactly the usage's pictures plus logos; the usage's used_bytes is that plus
+ * the room open uploads hold, which belongs to no tour yet. Like the usage, it counts no
+ * published copy and no file that waits to be cleaned up. It takes no parameter.
+ */
+export const TOUR_BYTES_SQL = "((SELECT coalesce(sum(s.bytes), 0) FROM step s WHERE s.tour_id = t.id) + coalesce(t.logo_bytes, 0))";
+
+/** How many tours GET /api/v1/usage/largest answers. */
+export const LARGEST_TOURS = 10;
+
 const PARAMS = "(SELECT ? AS ws) p";
 
 /**
@@ -153,6 +168,21 @@ export function usageRoutes(app: Hono, deps: Deps): void {
       counted: { pictures: u.pictures, logos: u.logos, uploads_in_progress: u.uploads },
     });
   });
+  /**
+   * GET /api/v1/usage/largest: the LARGEST_TOURS largest tours of the caller's own
+   * workspace, each with its id, title and size (TOUR_BYTES_SQL), largest first; tours of
+   * the same size in the order of their ids. One statement, whatever the number of tours.
+   * It only reads.
+   */
+  app.get("/api/v1/usage/largest", async (c) => {
+    const auth = await requireAuth(c.req.raw, deps);
+    if (auth instanceof Response) return auth;
+    const rows = await deps.db.all<{ id: string; title: string; bytes: number }>(
+      `SELECT t.id, t.title, ${TOUR_BYTES_SQL} AS bytes FROM tour t WHERE t.workspace_id = ? ORDER BY bytes DESC, t.id LIMIT ?`,
+      [auth.workspaceId, LARGEST_TOURS],
+    );
+    return json(200, { tours: rows.map((r) => ({ id: r.id, title: r.title, bytes: r.bytes })) });
+  });
 }
 
 /**
@@ -171,18 +201,20 @@ export function reservedFor(m: Manifest, takesLogo: boolean, logoBytes: number |
 const UNITS = ["KB", "MB", "GB"] as const;
 
 /**
- * A size for a person to read: 1024-based, three significant digits (`0 bytes`,
- * `512 KB`, `14.2 MB`, `1.02 GB`). Under 1024 it is the exact number of bytes; GB is the
- * largest unit, so a larger size is a longer number of GB.
+ * A size for a person to read, written as the site's pages write it: under 1024 the exact
+ * number of bytes (`0 bytes`, `1 byte`, `1023 bytes`); otherwise 1024 to the next unit,
+ * at most one decimal and no trailing ".0" (`512 KB`, `14.2 MB`, `1.2 GB`, `5 GB`). A value
+ * that rounds to 1024 of a unit is 1 of the next. GB is the largest unit, so a larger size
+ * is a longer number of GB. The account page's script (src/signin/page.ts) cannot import
+ * this, so both are held to the one table in test/sizes.ts.
  */
 export function formatBytes(n: number): string {
   if (n < 1024) return n === 1 ? "1 byte" : `${n} bytes`;
   let value = n;
   for (const [i, unit] of UNITS.entries()) {
     value /= 1024;
-    const text = value < 9.995 ? value.toFixed(2) : value < 99.95 ? value.toFixed(1) : String(Math.round(value));
-    // 1023.5 KB and up would read "1024 KB": that is 1.00 of the next unit.
-    if (Number(text) < 1024 || i === UNITS.length - 1) return `${text} ${unit}`;
+    const rounded = Math.round(value * 10) / 10;
+    if (rounded < 1024 || i === UNITS.length - 1) return `${rounded} ${unit}`;
   }
   return `${n} bytes`;
 }

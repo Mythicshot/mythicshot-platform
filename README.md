@@ -119,7 +119,7 @@ Mythicshot lists, renames and deletes tours with these requests. Each carries `A
 | Request | Answer |
 |---|---|
 | `GET /api/v1/me` | `200 {"workspace","version"}`: the workspace's name and the version of the server. With two addresses the answer also has `addresses`, the two host names; see [One address or two](#one-address-or-two) |
-| `GET /api/v1/tours` | `200 {"tours":[…]}`, most recently changed first. Each tour has `id`, `title`, `status` (`draft` or `published`), `slug`, `url`, `chapters`, `steps`, `updated_at`, `published_at` (times in milliseconds) and `unpublished_changes`. `url` is the public link as a path, `/t/<slug>`, to put after the server address; it and `published_at` are `null` for a draft. `unpublished_changes` is `true` when the tour is published and its draft holds a chapter upload or update that is not on the public page yet, so publishing it again would change what visitors see, and also when the site cannot tell, which happens only for some tours last published before version 0.1.4; it is `false` for a draft, and for a published tour whose page is up to date (a rename is live at once and never sets it) |
+| `GET /api/v1/tours` | `200 {"tours":[…]}`, most recently changed first. Each tour has `id`, `title`, `status` (`draft` or `published`), `slug`, `url`, `chapters`, `steps`, `bytes` (its size: its steps' images and its logo, counted as `GET /api/v1/usage` counts them), `updated_at`, `published_at` (times in milliseconds) and `unpublished_changes`. `url` is the public link as a path, `/t/<slug>`, to put after the server address; it and `published_at` are `null` for a draft. `unpublished_changes` is `true` when the tour is published and its draft holds a chapter upload or update that is not on the public page yet, so publishing it again would change what visitors see, and also when the site cannot tell, which happens only for some tours last published before version 0.1.4; it is `false` for a draft, and for a published tour whose page is up to date (a rename is live at once and never sets it) |
 | `PATCH /api/v1/tours/<id>` with `{"title":"New name"}` | `200 {"id","title"}` with the title as saved. The title follows the rule of a tour's title at upload: trimmed, 1 to 200 characters, no control or format characters; otherwise `400 bad_title` with the reason. The slug and the public link stay the same |
 | `DELETE /api/v1/tours/<id>` | `200 {"deleted":true}` when nothing of the tour is left; `202 {"status":"in_progress","done":250,"total":601}` (files removed, of how many) when more remain, so call again; `409 publish_busy` while a publish of the tour is in progress; `404` once it is gone, the same answer as for a tour that never existed |
 
@@ -185,10 +185,14 @@ The setting is `STORAGE_ALLOWANCE_BYTES` (see [Settings](#settings)): the allowa
 
 `allowance_bytes` is `null` when there is no limit. `over` is `true` when more is used than the allowance.
 
+The `bytes` of a workspace's tours in `GET /api/v1/tours` add up to `pictures` plus `logos`; `used_bytes` is that plus `uploads_in_progress`, which belongs to no tour yet. `GET /api/v1/usage/largest` answers the workspace's ten largest tours, largest first, as `{"tours":[{"id","title","bytes"}]}`.
+
+The site's admin also has `GET /api/v1/admin/summary`, with the admin's session only: `{"accounts","used_bytes","standard_allowance_bytes"}`, the number of accounts, what all workspaces use together, and the allowance from the server's settings (`null` when none is set). Anyone else gets `404`.
+
 An upload that would take the workspace over its allowance is refused when it is started, by `POST /api/v1/uploads`, before any image is sent. Nothing is stored and no upload exists afterwards. The answer is `413` with the numbers in bytes and one sentence a program can show as it is:
 
 ```
-{"error":"storage_full","detail":"this tour needs 14.2 MB of room, but the workspace has 3.10 MB left of its 1.00 GB allowance. Nothing was uploaded. Delete tours you no longer need, or ask the site's admin for more room","used_bytes":1070491238,"allowance_bytes":1073741824,"needed_bytes":14889779}
+{"error":"storage_full","detail":"this tour needs 14.2 MB of room, but the workspace has 3.1 MB left of its 1 GB allowance. Nothing was uploaded. Delete tours you no longer need, or ask the site's admin for more room","used_bytes":1070491238,"allowance_bytes":1073741824,"needed_bytes":14889779}
 ```
 
 A new tour or a new chapter needs room for all its images. Replacing a chapter needs room only for what its images come to above the chapter's present ones.

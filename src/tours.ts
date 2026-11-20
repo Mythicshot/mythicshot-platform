@@ -37,6 +37,7 @@ import { parseTitle } from "./manifest.ts";
 import { housekeeping } from "./publish.ts";
 import { clearReplaced } from "./replace.ts";
 import type { Deps, Stmt } from "./ports.ts";
+import { TOUR_BYTES_SQL } from "./usage.ts";
 import { VERSION } from "./version.ts";
 
 const TOUR_ID = /^tour_[0-9a-f]{24}$/;
@@ -159,10 +160,13 @@ export function tourRoutes(app: Hono, deps: Deps): void {
     // tour has no snapshot, and for a snapshot from before migration 0006 that is not known
     // to hold the whole draft. It is read in this same statement, so the list makes no
     // extra call for it.
-    const rows = await deps.db.all<{ id: string; title: string; status: "draft" | "published"; slug: string; chapters: number; steps: number; updated_at: number; published_at: number | null; draft_version: number; live_version: number | null }>(
+    // bytes is the tour's size as the usage counts storage (TOUR_BYTES_SQL in src/usage.ts),
+    // read in this same statement too.
+    const rows = await deps.db.all<{ id: string; title: string; status: "draft" | "published"; slug: string; chapters: number; steps: number; bytes: number; updated_at: number; published_at: number | null; draft_version: number; live_version: number | null }>(
       `SELECT t.id, t.title, t.status, t.slug,
               (SELECT count(*) FROM chapter c WHERE c.tour_id = t.id) AS chapters,
               (SELECT count(*) FROM step s WHERE s.tour_id = t.id) AS steps,
+              ${TOUR_BYTES_SQL} AS bytes,
               t.updated_at, t.published_at, t.draft_version,
               (SELECT n.draft_version FROM snapshot n WHERE n.tour_id = t.id) AS live_version
          FROM tour t WHERE t.workspace_id = ? ORDER BY t.updated_at DESC, t.id`,
@@ -185,6 +189,7 @@ export function tourRoutes(app: Hono, deps: Deps): void {
       url: t.status === "published" ? `/t/${t.slug}` : null,
       chapters: t.chapters,
       steps: t.steps,
+      bytes: t.bytes,
       updated_at: t.updated_at,
       published_at: t.status === "published" ? t.published_at : null,
       unpublished_changes: t.status === "published" && (t.live_version === null || t.live_version < t.draft_version),

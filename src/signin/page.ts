@@ -343,9 +343,10 @@ export const SIGNIN_JS = `(function () {
     }
   }
 
-  // Sizes as the owner chose for this page: 1024 to the next unit, as the server counts,
-  // at most one decimal and no trailing .0 (1.2 GB, 5 GB, 512 KB). The server's own
-  // formatBytes (src/usage.ts, three significant digits) stays as it is for the API.
+  // Sizes as the owner chose them: 1024 to the next unit, as the server counts, at most
+  // one decimal and no trailing .0 (1.2 GB, 5 GB, 512 KB). The server's formatBytes
+  // (src/usage.ts) writes them the same way; this script cannot import it, so both are
+  // held to the one table in test/sizes.ts.
   function formatBytes(n) {
     if (n < 1024) return n === 1 ? TEXT.oneByte : n + TEXT.bytes;
     var units = ["KB", "MB", "GB"];

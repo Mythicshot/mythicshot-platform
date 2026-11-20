@@ -1,9 +1,11 @@
-// The admin API: how each account uses its storage, and the allowance of one workspace.
+// The admin API: the site's storage in all, how each account uses its storage, and the allowance of one workspace.
 // No platform API.
 //
 // The site's admin needs an overview of how every account's storage allowance is used,
 // and must not be able to open any account's links or content. So these routes are the one
-// place a caller sees beyond its own workspace, and they answer only this, per account: its
+// place a caller sees beyond its own workspace. The summary answers three numbers: the
+// number of accounts, the bytes all workspaces use together and the site's standard
+// allowance. The list answers only this, per account: its
 // id, username, email, status, whether it is the admin, when it was made, its workspace's
 // id, its tour count, the bytes it uses with the breakdown GET /api/v1/usage gives the
 // account itself, and its allowance (the workspace's own number or null for the site's,
@@ -71,6 +73,23 @@ function allowanceOf(v: unknown): number | null | undefined {
 }
 
 export function adminRoutes(app: Hono, deps: Deps): void {
+  /**
+   * The summary line of the admin's page: how many accounts there are, the bytes every
+   * workspace uses in all (each counted with the account's own usage SQL, USAGE_COLUMNS, so
+   * the sum is the sum of the list's used_bytes), and the site's standard allowance from
+   * its settings, null when none is set. Three numbers, nothing of any workspace. One
+   * statement, whatever the number of accounts. It only reads.
+   */
+  app.get("/api/v1/admin/summary", async (c) => {
+    const auth = await requireAuth(c.req.raw, deps, { admin: true });
+    if (auth instanceof Response) return auth;
+    const row = await deps.db.first<{ accounts: number; used: number }>(
+      `SELECT (SELECT count(*) FROM user) AS accounts,
+              (SELECT coalesce(sum(w.pictures + w.logos + w.uploads), 0) FROM (SELECT ${USAGE_COLUMNS} FROM (SELECT id AS ws FROM workspace) p) w) AS used`,
+    );
+    return json(200, { accounts: row?.accounts ?? 0, used_bytes: row?.used ?? 0, standard_allowance_bytes: deps.config.storageAllowanceBytes ?? null });
+  });
+
   /**
    * Every account, in the order they were made, ADMIN_PAGE at a time: who it is, its
    * workspace's id, its tour count, its usage and its allowance. `?after=<account id>`

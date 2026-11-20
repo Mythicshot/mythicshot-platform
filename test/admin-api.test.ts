@@ -19,6 +19,7 @@ import { dumpOf, manifestOf, namesIn, needlesOf, snapshotOf, world, type Side, t
 
 const SLOW = { timeout: 120_000 };
 const ACCOUNTS = "/api/v1/admin/accounts";
+const SUMMARY = "/api/v1/admin/summary";
 const workspacePath = (id: string) => `/api/v1/admin/workspaces/${id}`;
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
 const TOURS = "https://tours.example.com";
@@ -29,6 +30,7 @@ const MAX = 9007199254740991;
 const LIST_KEYS = ["accounts", "next"];
 const ACCOUNT_KEYS = ["admin", "allowance_bytes", "counted", "created_at", "email", "id", "over", "status", "storage_allowance_bytes", "tours", "used_bytes", "username", "workspace_id"];
 const COUNTED_KEYS = ["logos", "pictures", "uploads_in_progress"];
+const SUMMARY_KEYS = ["accounts", "standard_allowance_bytes", "used_bytes"];
 const SET_KEYS = ["allowance_bytes", "over", "storage_allowance_bytes", "used_bytes", "workspace_id"];
 
 /** The one answer every refusal of an admin route is. */
@@ -184,10 +186,56 @@ describe("the admin's list of accounts", () => {
   });
 });
 
+describe("the admin's summary", () => {
+  it("answers the number of accounts, the bytes they use in all and the standard allowance, and nothing of any workspace", SLOW, async () => {
+    const w = await build();
+    const r = await ask(w.deps, "GET", SUMMARY, { headers: page(w.a.session) });
+    expect(r.status, r.text).toBe(200);
+    expect(r.headers.get("cache-control")).toBe("no-store");
+    expect(Object.keys(r.json).sort()).toEqual(SUMMARY_KEYS);
+    // The bytes in all are the sum of every account's own usage answer, and of the list's figures.
+    const own = [await usageOf(w, w.a), await usageOf(w, w.b)];
+    const listed = (await list(w)).json.accounts as Json[];
+    expect(r.json).toEqual({ accounts: 2, used_bytes: own[0].used_bytes + own[1].used_bytes, standard_allowance_bytes: null });
+    expect(r.json.used_bytes).toBe(listed.reduce((n, a) => n + (a.used_bytes as number), 0));
+    expect(r.json.used_bytes).toBeGreaterThan(0);
+    // A workspace's own allowance is not the standard one.
+    expect((await setAllowance(w, w.b.workspaceId, 5000)).status).toBe(200);
+    expect((await ask(w.deps, "GET", SUMMARY, { headers: page(w.a.session) })).json.standard_allowance_bytes).toBeNull();
+    for (const side of [w.a, w.b]) expectNothingOf(r.text, await forbiddenOf(w, side), "the summary");
+    // HEAD of it is answered too, as for the list.
+    expect((await ask(w.deps, "HEAD", SUMMARY, { headers: page(w.a.session) })).status).toBe(200);
+  });
+
+  it("the standard allowance is the site's setting, and the count and sum take in every account", SLOW, async () => {
+    const { deps, calls } = await makeDeps({ storageAllowanceBytes: 1_073_741_824 });
+    const admin = await seedAccount(deps, { admin: true });
+    const session = await signInAs(deps, admin.userId);
+    const summary = async () => {
+      const before = calls();
+      const r = await ask(deps, "GET", SUMMARY, { headers: page(session) });
+      expect(r.status, r.text).toBe(200);
+      return { json: r.json, calls: calls() - before };
+    };
+    const first = await summary();
+    expect(first.json).toEqual({ accounts: 1, used_bytes: 0, standard_allowance_bytes: 1_073_741_824 });
+    // More accounts, one with an open upload (its room counts, as in its usage): the same number of calls.
+    const member = await seedAccount(deps);
+    await seedAccount(deps);
+    const m = manifestOf([700, 300], "Member tour");
+    const open = await send(deps, "POST", "/api/v1/uploads", { token: member.token, body: JSON.stringify({ manifest: m, target: { kind: "new" } }), headers: { "content-type": "application/json" } });
+    expect(open.status, open.text).toBe(201);
+    const later = await summary();
+    expect(later.json).toEqual({ accounts: 3, used_bytes: 1000, standard_allowance_bytes: 1_073_741_824 });
+    expect(later.calls).toBe(first.calls);
+  });
+});
+
 describe("who may call an admin route", () => {
   /** Each admin route, with a request that would change or show something for the admin. */
   const routes = (w: World): { what: string; method: string; path: string; json?: unknown }[] => [
     { what: "the list", method: "GET", path: ACCOUNTS },
+    { what: "the summary", method: "GET", path: SUMMARY },
     { what: "the allowance", method: "PATCH", path: workspacePath(w.b.workspaceId), json: { storage_allowance_bytes: 1 } },
   ];
 

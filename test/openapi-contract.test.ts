@@ -223,6 +223,7 @@ function client(deps: Deps) {
     health: (origin?: string) => call("GET", "/healthz", origin === undefined ? {} : { origin }),
     me: (token: string | null, origin?: string) => call("GET", "/api/v1/me", origin === undefined ? { token } : { token, origin }),
     usage: (token: string | null) => call("GET", "/api/v1/usage", { token }),
+    largest: (token: string | null) => call("GET", "/api/v1/usage/largest", { token }),
     list: (token: string | null) => call("GET", "/api/v1/tours", { token }),
     rename: (token: string | null, tourId: string, body: unknown) => call("PATCH", `/api/v1/tours/${tourId}`, withJson(token, body)),
     del: (token: string | null, tourId: string) => call("DELETE", `/api/v1/tours/${tourId}`, { token }),
@@ -303,7 +304,7 @@ function refused(r: Call, status: number, code: string): void {
   expect([r.status, r.json?.error], r.text).toEqual([status, code]);
 }
 
-const TOUR_FIELDS = ["id", "title", "status", "slug", "url", "chapters", "steps", "updated_at", "published_at", "unpublished_changes"];
+const TOUR_FIELDS = ["id", "title", "status", "slug", "url", "chapters", "steps", "bytes", "updated_at", "published_at", "unpublished_changes"];
 const NO_TOUR = "tour_" + "0".repeat(24);
 const NO_UPLOAD = "up_" + "0".repeat(24);
 const NO_STEP = "st_" + "0".repeat(24);
@@ -342,6 +343,10 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     expect(draft).toHaveLength(1);
     expect(Object.keys(draft[0])).toEqual(TOUR_FIELDS);
     expect(draft[0]).toMatchObject({ id: t.tour_id, status: "draft", url: null, published_at: null, chapters: 1, steps: 3, unpublished_changes: false });
+    // Its size is its steps' pictures and its logo, as the usage counts them; the largest tours say the same.
+    const counted = (await api.usage(a.token)).json.counted;
+    expect(draft[0].bytes).toBe(counted.pictures + counted.logos);
+    expect((await api.largest(a.token)).json).toEqual({ tours: [{ id: t.tour_id, title: draft[0].title, bytes: draft[0].bytes }] });
 
     // A draft step image is the type its bytes are, and carries its sandbox policy.
     const steps = await stepIds(deps, t.tour_id);
@@ -692,6 +697,9 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const headers = { cookie: `${SESSION_COOKIE}=${made.secret}`, origin: "https://tours.example.com", "x-csrf-token": await csrfFor(made.secret), "content-type": JSON_TYPE };
     await api.upload(member.token, small(2));
 
+    // The summary.
+    expect((await api.call("GET", "/api/v1/admin/summary", { headers })).json).toEqual({ accounts: 2, used_bytes: 240, standard_allowance_bytes: 1_000_000 });
+
     // The list, and its next page.
     const list = await api.call("GET", "/api/v1/admin/accounts", { headers });
     expect(list.json.accounts.map((a: Json) => a.id)).toEqual([admin.userId, member.userId]);
@@ -710,6 +718,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
 
     // Anyone else: the one 404.
     refused(await api.call("GET", "/api/v1/admin/accounts", { token: member.token }), 404, "not_found");
+    refused(await api.call("GET", "/api/v1/admin/summary", { token: member.token }), 404, "not_found");
     refused(await api.call("PATCH", path, { token: admin.token, body: JSON.stringify({ storage_allowance_bytes: 1 }), headers: JSON_HEADERS }), 404, "not_found");
   });
 
@@ -808,7 +817,7 @@ describe("the description is checked in full", () => {
 
   it("the schema checker itself refuses a missing field, an extra field and a wrong type, and a keyword it does not know", () => {
     const tour = { $ref: "#/components/schemas/Tour" };
-    const good: Json = { id: NO_TOUR, title: "A tour", status: "draft", slug: "abcdefghij", url: null, chapters: 1, steps: 3, updated_at: 1, published_at: null, unpublished_changes: false };
+    const good: Json = { id: NO_TOUR, title: "A tour", status: "draft", slug: "abcdefghij", url: null, chapters: 1, steps: 3, bytes: 0, updated_at: 1, published_at: null, unpublished_changes: false };
     expect(check(DOC, tour, good)).toEqual([]);
     const { unpublished_changes: _gone, ...lacking } = good;
     expect(check(DOC, tour, lacking)).toEqual(['$: the required field "unpublished_changes" is missing']);
