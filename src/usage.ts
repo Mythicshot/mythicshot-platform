@@ -9,7 +9,9 @@
 //   then; otherwise one that outlived the day could land on top of a newer one, past the
 //   allowance.
 // - every shared item (src/media.ts): the bytes its create declared, reserved from that
-//   create on, and the size of every preview it has a claim for. An item that is being
+//   create on (they hold its current parts), and every other object it has a claim row
+//   for: its current preview, and each claim that is not current (a send under way, a part
+//   or preview it replaced that is not removed yet, a send that died). An item that is being
 //   deleted or swept (closing) still counts until its row is removed, which happens only
 //   with its last object: a delete that finishes frees the room at once, and one that was
 //   cut off counts until it is retried.
@@ -61,7 +63,7 @@ const PICTURES = "(SELECT coalesce(sum(s.bytes), 0) FROM tour t JOIN step s ON s
 const LOGOS = "(SELECT coalesce(sum(t.logo_bytes), 0) FROM tour t WHERE t.workspace_id = p.ws)";
 const UPLOADS = "(SELECT coalesce(sum(u.reserved_bytes), 0) FROM upload u WHERE u.workspace_id = p.ws AND u.closing_at IS NULL)";
 const MEDIA =
-  "((SELECT coalesce(sum(m.bytes), 0) FROM media m WHERE m.workspace_id = p.ws) + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o JOIN media m ON m.id = o.media_id WHERE m.workspace_id = p.ws AND o.n = -1))";
+  "((SELECT coalesce(sum(m.bytes), 0) FROM media m WHERE m.workspace_id = p.ws) + (SELECT coalesce(sum(o.bytes), 0) FROM media_object o JOIN media m ON m.id = o.media_id WHERE m.workspace_id = p.ws AND (o.current = 0 OR o.n = -1)))";
 const TOURS = "(SELECT count(*) FROM tour t WHERE t.workspace_id = p.ws)";
 
 /**

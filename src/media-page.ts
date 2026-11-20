@@ -263,13 +263,20 @@ function parseName(name: string): { link: string; ext: Ext | null } | null {
 /**
  * The lookup, made for every request whatever the name: a name that is no link id is
  * looked up as "", which finds nothing at the same cost. An item of the other kind, or of
- * a type this module does not serve, is not found.
+ * a type this module does not serve, is not found. Nor is an item of more parts than one
+ * answer may read (MAX_SERVED_PARTS): one stored under an older, larger size setting
+ * would otherwise make a whole-file answer run past the call budget. It is logged, with
+ * its number of parts only.
  */
 async function lookup(deps: Deps, kind: Kind, link: string | null): Promise<ShareItem | null> {
   const files = await onlineItemFiles(deps, link ?? "");
   if (files === null || link === null) return null;
   const type = FILE_TYPES[files.contentType];
   if (type === undefined || type.kind !== kind || files.kind !== kind || files.parts.length === 0) return null;
+  if (files.parts.length > MAX_SERVED_PARTS) {
+    console.error(`share: an online item has ${files.parts.length} parts, more than the ${MAX_SERVED_PARTS} one answer may read; answering 404`);
+    return null;
+  }
   return { ...files, link };
 }
 

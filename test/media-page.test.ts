@@ -2,11 +2,12 @@
 // of an image and of a clip with their exact sentences and headers, escaping, the link
 // preview tags, the file with ETag and Range, the one 404 for every link that does not
 // work, the call budget for the largest clip, and the addresses that answer.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
 import { newId, newLinkId } from "../src/auth.ts";
 import { SUBREQUEST_BUDGET } from "../src/budget.ts";
 import type { Hosts } from "../src/hosts.ts";
+import { MAX_SERVED_PARTS } from "../src/limits.ts";
 import { PART_BYTES, onlineItemFiles } from "../src/media.ts";
 import { SHARE_CSS, SHARE_JS } from "../src/media-assets.ts";
 import { SHARE_NOT_FOUND_HTML, shareDate, shareDuration } from "../src/media-page.ts";
@@ -484,6 +485,40 @@ describe("a link that does not work", () => {
     // Enabling the account again brings its item back: the rule is the account, nothing was removed.
     await deps.db.run("UPDATE user SET status = 'active' WHERE id = ?", [off.userId]);
     expect((await get(deps, `/r/${disabled.link}`)).status).toBe(200);
+  });
+});
+
+describe("an item of more parts than one answer may read", () => {
+  it("is the one 404 on every route, logs its number of parts and nothing of its keys, and reads no part", SLOW, async () => {
+    const { deps, a } = await world();
+    const reference = await get(deps, `/r/${newLinkId()}`);
+    // Rows only, as an item stored under an older, larger size setting would be: 39 current parts.
+    const id = newId("med");
+    const link = newLinkId();
+    const parts = MAX_SERVED_PARTS + 1;
+    const bytes = parts * PART_BYTES;
+    await deps.db.run(
+      `INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, duration_ms, title, state, created_at, online_at)
+       VALUES (?, ?, ?, 'clip', 'video/mp4', ?, ?, 960, 540, 12000, NULL, 'online', ?, ?)`,
+      [id, a.workspaceId, link, bytes, parts, ONLINE_AT, ONLINE_AT],
+    );
+    await deps.db.batch(
+      Array.from({ length: parts }, (_, n) => ({
+        sql: "INSERT INTO media_object (media_id, claim, n, ext, bytes, claimed_at, stored_at, current) VALUES (?, ?, ?, NULL, ?, ?, ?, 1)",
+        params: [id, claim(), n, PART_BYTES, ONLINE_AT, ONLINE_AT],
+      })),
+    );
+    expect((await onlineItemFiles(deps, link))?.parts).toHaveLength(parts);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const path of [`/r/${link}`, `/r/${link}.mp4`, `/r/${link}/download`, `/r/${link}/preview`]) {
+      const r = await get(deps, path);
+      expect(seen(r), path).toEqual(seen(reference));
+      expect(r.calls, path).toBe(2);
+    }
+    const lines = logged.mock.calls.map((c) => String(c[0]));
+    logged.mockRestore();
+    expect(lines).toEqual(Array(4).fill(`share: an online item has ${parts} parts, more than the ${MAX_SERVED_PARTS} one answer may read; answering 404`));
+    for (const line of lines) expect(line.includes(id) || line.includes(link) || line.includes("m/")).toBe(false);
   });
 });
 

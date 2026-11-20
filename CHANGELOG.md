@@ -8,6 +8,7 @@ Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on
 - Chat apps that preview links show the picture and the title.
 - A link to an item that was deleted, is not finished, or belongs to a disabled account shows one "This link no longer works" page, the same as a link that never existed.
 - Clips can be watched from any point, and a file is read only as far as it is played.
+- Upgrading: an install whose image or clip size setting is above 76,000,000 bytes (38 parts of 2,000,000 bytes) is now refused at start, because a larger file could not be sent in one answer within the limit of storage and database calls a request may make. Lower the setting to 76,000,000 bytes or less. An item already stored with more parts than that answers "This link no longer works".
 
 ## 0.1.20 (2026-11-20)
 
@@ -15,7 +16,8 @@ Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on
 - The first part is checked against the declared type, and for a PNG, JPEG or GIF against the declared width and height, from the file's own bytes.
 - Items count against the workspace's storage allowance from the moment they are started, together with tours and uploads. One that does not fit is refused before anything is sent.
 - A workspace starts at most 60 items, sends at most 2,000 parts and 240 previews an hour. An item that is not finished within a day can no longer be finished and is removed.
-- Items are kept in the private store and are only ever served through the site. Once an item is online, nothing it serves can change. A deleted item counts toward the allowance until its files are really gone.
+- Items are kept in the private store and are only ever served through the site. Once an item is online, nothing it serves can change. A deleted item counts toward the allowance until its files are really gone: when a part is still being sent at that moment, the delete answers `cleanup_pending` and is sent again.
+- A part or preview whose sending was cut off counts toward the allowance until it is cleaned up, at most four such sends are kept per item, and they are removed five minutes later by the item's next send, its commit, or the next sweep. A send that lost its place on an item that is still open answers 409 `superseded`, so it can be sent again.
 - Upgrading: this version needs its database change (migration 0010) before it serves, because reading a workspace's storage use reads the new table. Both ways of installing do this already: the Node server applies new migrations when it starts, before it answers, and `npm run setup:cloudflare -- update` applies them before it deploys.
 
 ## 0.1.19 (2026-11-20)

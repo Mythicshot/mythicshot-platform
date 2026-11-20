@@ -262,10 +262,10 @@ describe("migrations, usage, pages and tokens", () => {
     const withItems: DbSnapshot = {
       ...db,
       media: { columns: ["id", "workspace_id", "state", "bytes"], rows: [["m1", WS, "online", 50], ["m2", WS, "uploading", 20], ["m3", WS, "closing", 900], ["m4", "ws_other", "online", 7]] },
-      media_object: { columns: ["media_id", "n", "bytes"], rows: [["m1", -1, 5], ["m1", 0, 50], ["m3", -1, 9], ["m4", -1, 3]] },
+      media_object: { columns: ["media_id", "n", "bytes", "current"], rows: [["m1", -1, 5, 1], ["m1", 0, 50, 1], ["m1", 0, 40, 0], ["m3", -1, 9, 0], ["m4", -1, 3, 1]] },
     };
-    // Items count until their rows go, closing ones too, with every preview claim; parts are in the item's bytes.
-    expect(usageFromRows(withItems, WS)).toEqual({ pictures: 30, logos: 100, uploads: 7, media: 984, used: 1121, tours: 2 });
+    // Items count until their rows go, closing ones too, with every claim but a current part's (the item's bytes hold those).
+    expect(usageFromRows(withItems, WS)).toEqual({ pictures: 30, logos: 100, uploads: 7, media: 1024, used: 1161, tours: 2 });
     const good = answer(200, JSON.stringify({ used_bytes: 137, allowance_bytes: null, over: false, tours: 2, counted: { pictures: 30, logos: 100, uploads_in_progress: 7 } }));
     expect(usageProblems(good, sum)).toEqual([]);
     const off = answer(200, JSON.stringify({ used_bytes: 136, allowance_bytes: null, over: false, tours: 2, counted: { pictures: 29, logos: 100, uploads_in_progress: 7 } }));
