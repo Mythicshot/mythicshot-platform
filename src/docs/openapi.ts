@@ -13,7 +13,7 @@ import { ADMIN_PAGE, MAX_ALLOWANCE_BYTES } from "../admin-api.ts";
 import { PAGE_CACHE } from "../page.ts";
 import { LIMITS } from "../manifest.ts";
 import { CLIP_MAX_DURATION_MS, CLIP_MAX_SIDE, DEFAULT_MEDIA_LIMITS, LIST_PAGE, MAX_LOOSE_CLAIMS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, TITLE_MAX } from "../media.ts";
-import { LIMITS_CONNECT, LIMITS_INVITE, LIMITS_MEDIA } from "../rate.ts";
+import { LIMITS_CONNECT, LIMITS_INVITE, LIMITS_MEDIA, LIMITS_VIEWER } from "../rate.ts";
 import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, PUBLIC_CACHE, STALE_PUBLISH_MS } from "../publish.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
 import { DELETE_FILES_PER_CALL } from "../tours.ts";
@@ -25,6 +25,7 @@ import { SESSION_COOKIE, SESSION_MS, SIGNIN_CODE_MS } from "../sessions.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS, UPLOAD_MAX_AGE_MS } from "../uploads.ts";
 import { LARGEST_TOURS } from "../usage.ts";
 import { VERSION } from "../version.ts";
+import { VIEWER_CODE_MS, VIEWER_COOKIE, VIEWER_IDLE_MS, VIEWER_MAX_MS } from "../viewers.ts";
 
 export type OpenApiParameter = { name: string; in: "path"; required: true; description: string; schema: Record<string, unknown> };
 export type OpenApiOperation = {
@@ -34,9 +35,10 @@ export type OpenApiOperation = {
   operationId: string;
   /**
    * Who may call: empty for a request that needs no credential; the token or the session
-   * cookie (either one, never both) for most; the session alone for the session's own requests.
+   * cookie (either one, never both) for most; the session alone for the session's own requests;
+   * the viewer cookie alone for the one request that says which address it proved.
    */
-  security: [] | [{ token: [] }, { session: [] }] | [{ session: [] }];
+  security: [] | [{ token: [] }, { session: [] }] | [{ session: [] }] | [{ viewer: [] }];
   parameters?: OpenApiParameter[];
   requestBody?: { required: boolean; description?: string; content: Record<string, unknown> };
   responses: Record<string, unknown>;
@@ -48,7 +50,7 @@ export type OpenApiDoc = {
   tags: { name: string; description: string }[];
   paths: Record<string, Record<string, OpenApiOperation>>;
   components: {
-    securitySchemes: { token: { type: "http"; scheme: "bearer" }; session: { type: "apiKey"; in: "cookie"; name: string } };
+    securitySchemes: { token: { type: "http"; scheme: "bearer" }; session: { type: "apiKey"; in: "cookie"; name: string }; viewer: { type: "apiKey"; in: "cookie"; name: string } };
     schemas: Record<string, unknown>;
     responses: Record<string, unknown>;
   };
@@ -165,6 +167,8 @@ const whole = (description: string, minimum = 0): Schema => ({ type: "integer", 
 const TOKEN = [{ token: [] }, { session: [] }] as [{ token: [] }, { session: [] }];
 /** The session cookie alone: the session's own requests. */
 const SESSION = [{ session: [] }] as [{ session: [] }];
+/** The viewer cookie alone: the address a visitor proved on the tours address. */
+const VIEWER = [{ viewer: [] }] as [{ viewer: [] }];
 /** The caller guard's two refusals of a change made with a session (src/auth.ts), on each route that takes a session alone and changes something. */
 const SESSION_CHANGE_REFUSED = refusal("bad_origin: the request did not come from a page of this address. bad_csrf: the X-Csrf-Token header is missing or is not this session's anti-forgery value.", "bad_origin", "bad_csrf");
 const UNAUTHORIZED = { $ref: "#/components/responses/Unauthorized" };
@@ -176,6 +180,9 @@ const bare = (...codes: string[]): Schema => object(["error"], { error: { type: 
 const someDetail = (...codes: string[]): Schema => object(["error"], { error: { type: "string", enum: codes }, detail: { type: "string" } });
 const retryAfter = { "retry-after": { description: "Seconds until the count starts again.", schema: { type: "integer", minimum: 1 } } };
 const setCookie = (description: string) => ({ "set-cookie": { description, schema: { type: "string", pattern: `^${SESSION_COOKIE}=` } } });
+const setViewerCookie = (description: string) => ({ "set-cookie": { description, schema: { type: "string", pattern: `^${VIEWER_COOKIE}=` } } });
+/** A viewer code, as the request bodies carry it. */
+const viewerCode: Schema = { type: "string", pattern: "^dpv_[0-9a-f]{40}$", description: "The code of the viewer link, the part after # in its address." };
 
 const tourId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The tour's id, as the tour list and an upload's commit give it.", schema: { type: "string", pattern: "^tour_[0-9a-f]{24}$" } };
 const uploadId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The upload's id, from the answer that started it.", schema: { type: "string", pattern: "^up_[0-9a-f]{24}$" } };
@@ -210,6 +217,8 @@ function introduction(): string {
     `A signed-in person changes the account's email address in two steps: POST /api/v1/account/email mails a link to the new address, and POST /api/v1/account/email/confirm, sent with the code in that link from the same account's session, makes the change, once and within ${EMAIL_CHANGE_MS / 60_000} minutes. The old address is then sent a notice. Both need the session; a token cannot change an address.`,
     "",
     `Nobody signs up: the site's admin invites an address (POST /api/v1/admin/invites), which mails a link that works once and for ${INVITE_MS / 86_400_000} days. The page the link opens looks the code up (POST /api/v1/invite/check) and accepts it with the username the person chooses (POST /api/v1/invite/accept), which makes the account, an empty workspace of its own and a session, and sets the session cookie as finishing a sign-in does. The code is only ever sent in a request body, never in an address. Both requests take no credential: one that carries a token answers \`400 credentials_not_allowed\`, and a browser signed in to any account answers \`409 signed_in\`. Every code that cannot be used, whether unknown, used, cancelled, replaced by a newer invite or expired, answers the one \`404 invite_invalid\`.`,
+    "",
+    `A tour may be shared with a list of addresses. A visitor proves an address on the tours address (on a server with one address, on that address), with no account: POST /api/v1/view/request, with the address and the tour's slug, answers the same \`202\` whatever the tour or the address, and mails a link only when the tour is shared with that address. The link works once and for ${VIEWER_CODE_MS / 60_000} minutes; POST /api/v1/view/check looks its code up without using it, and POST /api/v1/view/complete turns it into a viewer session, a cookie of its own, ${VIEWER_COOKIE}, which lasts ${VIEWER_IDLE_MS / 86_400_000} days from its last use and at most ${VIEWER_MAX_MS / 86_400_000} days. It is no account and no credential of any other request: it only tells the tour pages which address the browser proved (GET /api/v1/view/session), until POST /api/v1/view/signout ends it. These requests carry no token (one that does answers \`400 credentials_not_allowed\`), and every code that cannot be used, whether unknown, used or expired, answers the one \`404 view_link_invalid\`.`,
     "",
     "A request with a session that changes anything (any method but GET and HEAD) must come from the site's own pages: its Origin must be the address it is sent to, and it must carry the session's anti-forgery value in the header `X-Csrf-Token`, which GET /api/v1/session gives. A token and a session cookie together are refused.",
     "",
@@ -257,6 +266,7 @@ function introduction(): string {
     `- An upload that is not finished is removed after ${hours} hours.`,
     `- A shared image: ${n(DEFAULT_MEDIA_LIMITS.imageMaxBytes)} bytes and ${n(DEFAULT_MEDIA_LIMITS.imageMaxSide)} pixels on a side, PNG or JPEG. A shared clip: ${n(DEFAULT_MEDIA_LIMITS.clipMaxBytes)} bytes, GIF or MP4, at most ${n(CLIP_MAX_SIDE)} pixels on a side and ${CLIP_MAX_DURATION_MS / 60_000} minutes long. These numbers are fixed in this version: no setting changes them. Each is sent in parts of ${n(PART_BYTES)} bytes. An item's preview: ${n(PREVIEW_RULE.maxBytes)} bytes and ${n(PREVIEW_RULE.maxSide)} pixels on a side, PNG or JPEG. A workspace starts at most ${LIMITS_MEDIA.create.most} items, sends at most ${n(LIMITS_MEDIA.part.most)} parts and ${LIMITS_MEDIA.preview.most} previews an hour, and an item that is not finished within ${MEDIA_MAX_AGE_MS / 3_600_000} hours is removed and can no longer be finished.`,
     `- Connecting the app: a network asks for at most ${LIMITS_CONNECT.startNetwork.most} pairs of codes in ${LIMITS_CONNECT.startNetwork.windowMs / 60_000} minutes and ${LIMITS_CONNECT.startNetworkDay.most} in a day, and has at most ${OPEN_PER_NETWORK} waiting at once; it asks for tokens at most ${LIMITS_CONNECT.pollNetwork.most} times in ${LIMITS_CONNECT.pollNetwork.windowMs / 60_000} minutes. An account may type ${LIMITS_CONNECT.wrongAccount.most} short codes that name no waiting request in ${LIMITS_CONNECT.wrongAccount.windowMs / 60_000} minutes, and a network ${LIMITS_CONNECT.wrongNetwork.most}; a right code is not counted.`,
+    `- Viewer links: one address is sent at most ${LIMITS_VIEWER.linkRecipient.most} in ${LIMITS_VIEWER.linkRecipient.windowMs / 60_000} minutes and ${LIMITS_VIEWER.linkRecipientDay.most} in a day however many tours or networks ask, and at most ${LIMITS_VIEWER.linkPair.most} for one tour in ${LIMITS_VIEWER.linkPair.windowMs / 60_000} minutes; the site sends at most ${LIMITS_VIEWER.mailSite.most} viewer mails an hour, on a cap of their own. A network asks for links at most ${LIMITS_VIEWER.linkNetwork.most} times in ${LIMITS_VIEWER.linkNetwork.windowMs / 60_000} minutes, and looks up and completes codes at most ${LIMITS_VIEWER.codeNetwork.most} times in ${LIMITS_VIEWER.codeNetwork.windowMs / 60_000} minutes.`,
     `- Invites: an admin sends at most ${LIMITS_INVITE.sendAdmin.most} an hour, resends included; the site sends at most ${LIMITS_INVITE.mailSite.most} invite mails an hour and holds at most ${MAX_INVITES} open invites; invites that ran out do not count. A network looks up and accepts invites at most ${LIMITS_INVITE.codeNetwork.most} times in ${LIMITS_INVITE.codeNetwork.windowMs / 60_000} minutes.`,
     "- A workspace may have a storage allowance, set by the server's settings or its admin. An upload or a shared item that would take the workspace over it is refused when it is started, with 413 `storage_full` and the numbers, before anything is stored. Nothing is ever deleted because of an allowance.",
     `- A publish that makes no progress for ${minutes} minutes counts as abandoned.`,
@@ -478,6 +488,14 @@ function schemas(): Record<string, Schema> {
       },
       "What the page shows before the account is made.",
     ),
+    ViewerRequest: input(["email", "slug"], {
+      email: text(254, "The visitor's address. Spaces around it are dropped and capitals do not count. Anything else answers the same, and nothing is sent."),
+      slug: text(64, "The slug of the tour, as in its link /t/<slug>."),
+    }),
+    ViewerCode: input(["code"], { code: viewerCode }),
+    ViewerFound: object(["email", "slug"], { email: { type: "string", description: "The address the link was mailed to: the one the browser will prove." }, slug: { type: "string", pattern: "^[a-z2-7]{10}$", description: "The tour the link was asked for." } }),
+    ViewerDone: object(["slug"], { slug: { type: "string", pattern: "^[a-z2-7]{10}$", description: "The tour the link was asked for, where the page goes next." } }),
+    ViewerSession: object(["email"], { email: { type: "string", description: "The address this browser proved." } }),
     InviteSend: object(["email"], { email: text(254, "The address to invite. Spaces around it are dropped and capitals do not count.", 3) }),
     Invite: object(
       ["id", "email", "created_at", "expires_at", "state"],
@@ -1649,6 +1667,84 @@ function paths(): OpenApiDoc["paths"] {
         responses: { "204": empty("Cancelled."), "404": answer("No such invite, or anything other than the site's admin, signed in on this address, with a correct request. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")) },
       },
     },
+    "/api/v1/view/request": {
+      post: {
+        tags: ["Viewers"],
+        summary: "Ask for a link to view a shared tour",
+        description: `For the page of a tour that is shared with a list of addresses, on the tours address: mails the visitor a link that proves the address, when the slug names a published tour shared with it and mail is on. The answer is the same \`202\` in every case (an unknown tour, a public one, an address not on the list, a malformed address), after the same work, so it tells nothing about the tour or its list, and it does not wait for the mail. The link works once and for ${VIEWER_CODE_MS / 60_000} minutes. Needs no credential, but must come from a page of the address it is sent to, as JSON; a token is refused. One address gets at most a few links in a quarter hour and in a day, however many tours or networks ask; past that the answer is the same and no mail is sent.`,
+        operationId: "requestViewerLink",
+        security: [],
+        requestBody: { required: true, content: json(ref("ViewerRequest")) },
+        responses: {
+          "202": answer("The same for every tour and address.", ref("Ok")),
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token.", "bad_request", "credentials_not_allowed"),
+          "403": refusal("The request did not come from a page of this address: no Origin, another one, or the browser says it came from another site.", "bad_origin"),
+          "429": { description: "Too many requests from this network. Nothing was sent.", headers: retryAfter, content: json(bare("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/view/check": {
+      post: {
+        tags: ["Viewers"],
+        summary: "Look up a viewer link",
+        description: `For the page a viewer link opens: the address the link was mailed to and the tour it was asked for. It changes nothing, so a mail scanner that opens the link uses nothing up. Needs no credential, but must come from a page of the address it is sent to, as JSON; a token is refused. Every code that cannot be used gets the one answer view_link_invalid. A network may look up and complete codes ${LIMITS_VIEWER.codeNetwork.most} times in ${LIMITS_VIEWER.codeNetwork.windowMs / 60_000} minutes.`,
+        operationId: "checkViewerLink",
+        security: [],
+        requestBody: { required: true, content: json(ref("ViewerCode")) },
+        responses: {
+          "200": answer("The link's address and tour.", ref("ViewerFound")),
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token.", "bad_request", "credentials_not_allowed"),
+          "403": refusal("The request did not come from a page of this address.", "bad_origin"),
+          "404": refusal("The link cannot be used: unknown, already used, expired or not a viewer code. They cannot be told apart.", "view_link_invalid"),
+          "429": { description: "Too many tries from this network. Nothing was looked at.", headers: retryAfter, content: json(bare("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/view/complete": {
+      post: {
+        tags: ["Viewers"],
+        summary: "Prove the address of a viewer link",
+        description: "Turns the code of a viewer link into a viewer session for the address it was mailed to, once, and sets the viewer cookie on this address: a new session every time, which replaces the one the browser had. Of two requests with one code only one makes a session. Needs no credential, but must come from a page of the address it is sent to, as JSON, so another site cannot do it for a visitor; a token is refused. Every code that cannot be used gets the one answer view_link_invalid. The answer never repeats the code.",
+        operationId: "completeViewerLink",
+        security: [],
+        requestBody: { required: true, content: json(ref("ViewerCode")) },
+        responses: {
+          "200": { ...answer("The address is proved; the tour to go to.", ref("ViewerDone")), headers: setViewerCookie("The viewer cookie: host-only, Secure, HttpOnly and SameSite=Lax.") },
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token.", "bad_request", "credentials_not_allowed"),
+          "403": refusal("The request did not come from a page of this address.", "bad_origin"),
+          "404": refusal("The link cannot be used: unknown, already used, expired or not a viewer code. They cannot be told apart.", "view_link_invalid"),
+          "429": { description: "Too many tries from this network. Nothing was looked at.", headers: retryAfter, content: json(bare("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/view/signout": {
+      post: {
+        tags: ["Viewers"],
+        summary: "End this browser's viewer session",
+        description: "Ends the viewer session of the browser's viewer cookie and clears the cookie. A request with no viewer cookie answers the same 204 and sets nothing. Must come from a page of the address it is sent to; a token is refused. It never touches an account's session.",
+        operationId: "viewerSignOut",
+        security: [],
+        responses: {
+          "204": empty("Signed out. With a viewer cookie, the answer clears it."),
+          "400": refusal("credentials_not_allowed: the request carries a token.", "credentials_not_allowed"),
+          "403": refusal("The request did not come from a page of this address.", "bad_origin"),
+        },
+      },
+    },
+    "/api/v1/view/session": {
+      get: {
+        tags: ["Viewers"],
+        summary: "The address this browser proved",
+        description: "For the tour pages to show whom the visitor views as: the address of the browser's live viewer session. Needs the viewer cookie, so it cannot be tried from the documentation page, which never sends a cookie; a token is refused, and a request with both proves nothing. An account's session is no viewer session.",
+        operationId: "getViewerSession",
+        security: VIEWER,
+        responses: {
+          "200": answer("The proved address.", ref("ViewerSession")),
+          "400": refusal("credentials_not_allowed: the request carries a token.", "credentials_not_allowed"),
+          "401": answer("No live viewer session: no viewer cookie, or one that is unknown, signed out or over. This answer has no detail.", bare("unauthorized")),
+        },
+      },
+    },
     "/healthz": {
       get: {
         tags: ["Server"],
@@ -1676,11 +1772,12 @@ export function openapi(): OpenApiDoc {
       { name: "Accounts", description: "Signing in with a link sent by mail, accepting an invite, the browser sessions of an account, and changing its email address. The site's own pages use these." },
       { name: "Connections", description: "Connecting the desktop app with a short code a signed-in person confirms, and the workspace's tokens: list, rename and revoke. The app's two requests take no credential; the rest take the session." },
       { name: "Admin", description: "For the site's admin alone: the site's storage in all, how each account uses its storage, each workspace's allowance, inviting people, and disabling, enabling and deleting an account. To anyone else these answer 404." },
+      { name: "Viewers", description: "A visitor proving an email address on the tours address, to view a tour shared with a list of addresses. No account and no token: the tour pages use these." },
       { name: "Server", description: "Whether the server is up. Needs no token." },
     ],
     paths: paths(),
     components: {
-      securitySchemes: { token: { type: "http", scheme: "bearer" }, session: { type: "apiKey", in: "cookie", name: SESSION_COOKIE } },
+      securitySchemes: { token: { type: "http", scheme: "bearer" }, session: { type: "apiKey", in: "cookie", name: SESSION_COOKIE }, viewer: { type: "apiKey", in: "cookie", name: VIEWER_COOKIE } },
       schemas: schemas(),
       responses: {
         Unauthorized: answer("The token or session is missing, malformed, unknown, expired or revoked.", ref("Unauthorized")),

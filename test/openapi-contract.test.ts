@@ -32,6 +32,7 @@ import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../
 import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS } from "../src/uploads.ts";
 import { VERSION } from "../src/version.ts";
+import { useViewerGate } from "../src/viewers.ts";
 import { clone, fixtures, gif, jpeg, logoPng, mp4, png, send, sha256Hex, stepImage, type Call, type Json } from "./bundle.ts";
 import { check, deref, KEYWORDS, keywordsOf } from "./openapi-schema.ts";
 
@@ -315,7 +316,10 @@ const NO_WORKSPACE = "ws_" + "0".repeat(24);
 /** Well formed and known to no server: the placeholder the plan allows in tests. */
 const NO_TOKEN = "dp_" + "0".repeat(40);
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  useViewerGate(null);
+});
 
 describe("the description against the real answers", { timeout: 120_000 }, () => {
   it("every answer of a full upload, publish, list, rename, replace, unpublish and delete is as documented", async () => {
@@ -469,9 +473,10 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     // Without a token, and with one no server knows: every request that needs one.
     const idFor = (path: string) => (path.includes("/uploads/") ? NO_UPLOAD : path.includes("/sessions/") ? "ses_" + "0".repeat(24) : path.includes("/workspaces/") ? NO_WORKSPACE : path.includes("/tokens/") ? "tok_" + "0".repeat(24) : NO_TOUR);
     const example = (op: Op) => op.path.replace("{id}", idFor(op.path)).replace("{step_id}", NO_STEP).replace("{n}", "1");
-    const guarded = OPS.filter((op) => op.op.security.length > 0);
-    // All but health, the two sign-in requests, the two requests of an invite and the app's two requests while it connects.
-    expect(guarded).toHaveLength(OPS.length - 7);
+    // The one request that takes the viewer cookie refuses any token (its own test above); it takes no token or session at all.
+    const guarded = OPS.filter((op) => op.op.security.length > 0 && !op.op.security.some((s: Json) => "viewer" in s));
+    // All but health, the two sign-in requests, the two requests of an invite, the app's two requests while it connects and the five of a visitor.
+    expect(guarded).toHaveLength(OPS.length - 12);
     for (const op of guarded) {
       for (const token of [null, NO_TOKEN]) {
         const r = await api.call(op.method, example(op), { token });
@@ -954,6 +959,55 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     refused(await offApi.call("POST", "/api/v1/admin/invites", { headers: offHeaders, body: JSON.stringify({ email: "x@example.com" }) }), 409, "mail_off");
     await off.deps.db.run("INSERT INTO invite (id, email, code_hash, created_at, expires_at) VALUES (?, 'x@example.com', ?, 1, 2)", ["inv_" + "1".repeat(24), "d".repeat(64)]);
     refused(await offApi.call("POST", `/api/v1/admin/invites/inv_${"1".repeat(24)}/resend`, { headers: offHeaders }), 409, "mail_off");
+  });
+
+  it("every answer of a visitor proving an address is as documented", async () => {
+    const { deps, mail } = await makeDeps({ hosts: { tours: "tours.example.com", app: "app.example.com" } });
+    const api = client(deps);
+    // A stand-in for the tour's own setting: one read for every question, and one tour shared with one address.
+    useViewerGate({ mayRequest: async (d, slug, email) => (await d.db.first("SELECT 1 AS x")) !== null && slug === "restricted" && email === "mara@example.com" });
+    const TOURS = "https://tours.example.com";
+    const page = { "content-type": JSON_TYPE, origin: TOURS };
+    const network = (address: string) => (d: Deps) => ({ fetch: (req: Request) => (setClientAddress(req, address), createApp(d).fetch(req)) });
+    const post = (path: string, body: unknown, more: Opts = {}) => api.call("POST", path, { origin: TOURS, ...more, body: typeof body === "string" ? body : JSON.stringify(body), headers: { ...page, ...more.headers } });
+
+    // Asking for a link.
+    expect((await post("/api/v1/view/request", { email: "mara@example.com", slug: "restricted" })).json).toEqual({ ok: true });
+    expect((await post("/api/v1/view/request", { email: "bram@example.com", slug: "restricted" })).status).toBe(202);
+    refused(await post("/api/v1/view/request", "[]"), 400, "bad_request");
+    refused(await post("/api/v1/view/request", { email: "mara@example.com", slug: "restricted" }, { token: NO_TOKEN }), 400, "credentials_not_allowed");
+    refused(await post("/api/v1/view/request", { email: "mara@example.com", slug: "restricted" }, { headers: { origin: "https://evil.example.net" } }), 403, "bad_origin");
+    for (let i = 0; i < 10; i++) await post("/api/v1/view/request", { email: "bram@example.com", slug: "openpublic" }, { app: network("203.0.113.70") });
+    refused(await post("/api/v1/view/request", { email: "bram@example.com", slug: "openpublic" }, { app: network("203.0.113.70") }), 429, "rate_limited");
+    const code = (mail.sent[0]?.text.match(/dpv_[0-9a-f]{40}/) ?? [""])[0];
+    expect(code).not.toBe("");
+
+    // Looking the code up and completing it.
+    expect((await post("/api/v1/view/check", { code })).json).toEqual({ email: "mara@example.com", slug: "restricted" });
+    refused(await post("/api/v1/view/check", "{"), 400, "bad_request");
+    refused(await post("/api/v1/view/check", { code }, { token: NO_TOKEN }), 400, "credentials_not_allowed");
+    refused(await post("/api/v1/view/check", { code }, { headers: { origin: "https://evil.example.net" } }), 403, "bad_origin");
+    refused(await post("/api/v1/view/check", { code: "dpv_" + "0".repeat(40) }), 404, "view_link_invalid");
+    refused(await post("/api/v1/view/complete", "{"), 400, "bad_request");
+    refused(await post("/api/v1/view/complete", { code }, { token: NO_TOKEN }), 400, "credentials_not_allowed");
+    refused(await post("/api/v1/view/complete", { code }, { headers: { origin: "https://evil.example.net" } }), 403, "bad_origin");
+    const done = await post("/api/v1/view/complete", { code });
+    expect(done.json).toEqual({ slug: "restricted" });
+    expect(done.headers.get("set-cookie")).toMatch(/^__Host-dp_viewer=dpw_[0-9a-f]{64};/);
+    refused(await post("/api/v1/view/complete", { code }), 404, "view_link_invalid");
+    for (let i = 0; i < 20; i++) await post("/api/v1/view/check", { code }, { app: network("203.0.113.71") });
+    refused(await post("/api/v1/view/check", { code }, { app: network("203.0.113.71") }), 429, "rate_limited");
+    refused(await post("/api/v1/view/complete", { code }, { app: network("203.0.113.71") }), 429, "rate_limited");
+
+    // The session and signing out.
+    const cookie = (done.headers.get("set-cookie") ?? "").split(";")[0];
+    expect((await api.call("GET", "/api/v1/view/session", { origin: TOURS, headers: { cookie } })).json).toEqual({ email: "mara@example.com" });
+    refused(await api.call("GET", "/api/v1/view/session", { origin: TOURS, token: NO_TOKEN, headers: { cookie } }), 400, "credentials_not_allowed");
+    refused(await api.call("POST", "/api/v1/view/signout", { origin: TOURS, token: NO_TOKEN, headers: { cookie, origin: TOURS } }), 400, "credentials_not_allowed");
+    refused(await api.call("POST", "/api/v1/view/signout", { origin: TOURS, headers: { cookie, origin: "https://evil.example.net" } }), 403, "bad_origin");
+    expect((await api.call("POST", "/api/v1/view/signout", { origin: TOURS, headers: { cookie, origin: TOURS } })).status).toBe(204);
+    const gone = await api.call("GET", "/api/v1/view/session", { origin: TOURS, headers: { cookie } });
+    expect([gone.status, gone.text]).toEqual([401, '{"error":"unauthorized"}']);
   });
 
   it("every answer of shared items is as documented", async () => {
@@ -1465,9 +1519,18 @@ describe("the error codes in the code", () => {
       for (const m of literal) inCode.add(`${m[1]} ${m[2]}`);
     }
     expect([...inCode]).toEqual(expect.arrayContaining(["410 expired_code", "429 slow_down", "400 credentials_not_allowed", "400 bad_device_name", "400 bad_name"]));
-    // These twelve are the only modules that answer with apiError (src/http.ts defines it).
+    // A visitor proving an address answers with apiError, and with plain JSON for its one 401, which has no detail.
+    const viewers = source("viewers.ts");
+    const viewersLiteral = [...viewers.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
+    expect(viewersLiteral.length, "viewers.ts: an apiError call without a literal status and code").toBe([...viewers.matchAll(/\bapiError\(/g)].length);
+    for (const m of viewersLiteral) inCode.add(`${m[1]} ${m[2]}`);
+    const viewersPlain = [...viewers.matchAll(/\bjson\((\d{3}), \{ error: "([a-z_]+)"/g)];
+    expect(viewersPlain.length, "viewers.ts: an error answer not built in place").toBe([...viewers.matchAll(/\berror: "/g)].length);
+    for (const m of viewersPlain) inCode.add(`${m[1]} ${m[2]}`);
+    expect([...inCode]).toEqual(expect.arrayContaining(["404 view_link_invalid", "401 unauthorized", "403 bad_origin"]));
+    // These thirteen are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/account-removal.ts", "../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts"]);
+    expect(callers).toEqual(["../src/account-removal.ts", "../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.
