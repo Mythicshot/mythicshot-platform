@@ -161,6 +161,8 @@ const whole = (description: string, minimum = 0): Schema => ({ type: "integer", 
 const TOKEN = [{ token: [] }, { session: [] }] as [{ token: [] }, { session: [] }];
 /** The session cookie alone: the session's own requests. */
 const SESSION = [{ session: [] }] as [{ session: [] }];
+/** The caller guard's two refusals of a change made with a session (src/auth.ts), on each route that takes a session alone and changes something. */
+const SESSION_CHANGE_REFUSED = refusal("bad_origin: the request did not come from a page of this address. bad_csrf: the X-Csrf-Token header is missing or is not this session's anti-forgery value.", "bad_origin", "bad_csrf");
 const UNAUTHORIZED = { $ref: "#/components/responses/Unauthorized" };
 /** Said on every request that takes only a session. */
 const NOT_FROM_THE_PAGE = "It needs the session cookie, so it cannot be tried from the documentation page, which never sends a cookie.";
@@ -1217,7 +1219,7 @@ function paths(): OpenApiDoc["paths"] {
         operationId: "endSession",
         security: SESSION,
         parameters: [sessionId],
-        responses: { "204": empty("The session has ended."), "401": UNAUTHORIZED, "404": refusal("No such live session of this account.", "not_found") },
+        responses: { "204": empty("The session has ended."), "401": UNAUTHORIZED, "403": SESSION_CHANGE_REFUSED, "404": refusal("No such live session of this account.", "not_found") },
       },
     },
     "/api/v1/signout": {
@@ -1227,7 +1229,7 @@ function paths(): OpenApiDoc["paths"] {
         description: `Ends the session the request is sent with and clears its cookie. ${NOT_FROM_THE_PAGE}`,
         operationId: "signOut",
         security: SESSION,
-        responses: { "204": { ...empty("Signed out."), headers: setCookie("Clears the session cookie.") }, "401": UNAUTHORIZED },
+        responses: { "204": { ...empty("Signed out."), headers: setCookie("Clears the session cookie.") }, "401": UNAUTHORIZED, "403": SESSION_CHANGE_REFUSED },
       },
     },
     "/api/v1/signout/everywhere": {
@@ -1237,7 +1239,7 @@ function paths(): OpenApiDoc["paths"] {
         description: `Ends every session of the caller's account, in every browser, and clears this one's cookie. Tokens keep working. ${NOT_FROM_THE_PAGE}`,
         operationId: "signOutEverywhere",
         security: SESSION,
-        responses: { "204": { ...empty("Every session of the account has ended."), headers: setCookie("Clears the session cookie.") }, "401": UNAUTHORIZED },
+        responses: { "204": { ...empty("Every session of the account has ended."), headers: setCookie("Clears the session cookie.") }, "401": UNAUTHORIZED, "403": SESSION_CHANGE_REFUSED },
       },
     },
     "/api/v1/account/email": {
@@ -1252,6 +1254,7 @@ function paths(): OpenApiDoc["paths"] {
           "200": answer("The same for every well-formed address.", ref("Ok")),
           "400": answer("bad_request: the body is not a JSON object sent as application/json. bad_email, with no detail: email is not an email address.", someDetail("bad_request", "bad_email")),
           "401": UNAUTHORIZED,
+          "403": SESSION_CHANGE_REFUSED,
           "409": refusal("This site cannot send mail, so the address cannot be changed here. Nothing was stored.", "mail_off"),
           "429": { description: "Too many requests for this account or this address. Nothing was stored or sent.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
         },
@@ -1269,6 +1272,7 @@ function paths(): OpenApiDoc["paths"] {
           "200": answer("The address was changed.", ref("EmailChanged")),
           "400": refusal("bad_request: the body is not a JSON object sent as application/json. bad_code: the link no longer works; ask for a new one.", "bad_request", "bad_code"),
           "401": UNAUTHORIZED,
+          "403": SESSION_CHANGE_REFUSED,
           "429": { description: "Too many tries for this account. Nothing was looked at.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
         },
       },
@@ -1316,6 +1320,7 @@ function paths(): OpenApiDoc["paths"] {
           "200": answer("The request.", ref("ConnectRequest")),
           "400": refusal("The body is not a JSON object sent as application/json.", "bad_request"),
           "401": UNAUTHORIZED,
+          "403": SESSION_CHANGE_REFUSED,
           "404": refusal("No request waiting under this code.", "not_found"),
           "429": { description: "Too many wrong codes from this account or this network. Nothing was looked at.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
         },
@@ -1333,6 +1338,7 @@ function paths(): OpenApiDoc["paths"] {
           "204": empty("Confirmed."),
           "400": refusal("The body is not a JSON object sent as application/json.", "bad_request"),
           "401": UNAUTHORIZED,
+          "403": SESSION_CHANGE_REFUSED,
           "404": refusal("No request waiting under this code.", "not_found"),
           "429": { description: "Too many wrong codes from this account or this network. Nothing was looked at.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
         },
@@ -1350,6 +1356,7 @@ function paths(): OpenApiDoc["paths"] {
           "204": empty("Refused."),
           "400": refusal("The body is not a JSON object sent as application/json.", "bad_request"),
           "401": UNAUTHORIZED,
+          "403": SESSION_CHANGE_REFUSED,
           "404": refusal("No request waiting under this code.", "not_found"),
           "429": { description: "Too many wrong codes from this account or this network. Nothing was looked at.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
         },
@@ -1378,6 +1385,7 @@ function paths(): OpenApiDoc["paths"] {
           "200": answer("The token, renamed.", ref("TokenEntry")),
           "400": refusal("bad_request: the body is not a JSON object sent as application/json. bad_name: the name breaks its rule.", "bad_request", "bad_name"),
           "401": UNAUTHORIZED,
+          "403": SESSION_CHANGE_REFUSED,
           "404": refusal("No such token in this workspace.", "not_found"),
         },
       },
@@ -1388,7 +1396,7 @@ function paths(): OpenApiDoc["paths"] {
         operationId: "revokeToken",
         security: SESSION,
         parameters: [tokenIdParam],
-        responses: { "204": empty("Revoked."), "401": UNAUTHORIZED, "404": refusal("No such token in this workspace.", "not_found") },
+        responses: { "204": empty("Revoked."), "401": UNAUTHORIZED, "403": SESSION_CHANGE_REFUSED, "404": refusal("No such token in this workspace.", "not_found") },
       },
     },
     "/api/v1/admin/summary": {
