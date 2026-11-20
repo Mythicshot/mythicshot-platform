@@ -201,7 +201,7 @@ describe("the API description", () => {
 
   it("every operation has a tag, a one-line summary, a description, an operationId that is unique, and a 401 unless it is public", () => {
     const doc = openapi();
-    expect(doc.tags.map((t) => t.name)).toEqual(["Tours", "Uploads", "Workspace", "Accounts", "Admin", "Server"]);
+    expect(doc.tags.map((t) => t.name)).toEqual(["Tours", "Uploads", "Items", "Workspace", "Accounts", "Admin", "Server"]);
     for (const t of doc.tags) expect(t.description.length, t.name).toBeGreaterThan(10);
     const ids: string[] = [];
     const summaries: string[] = [];
@@ -238,6 +238,14 @@ describe("the API description", () => {
       "Send the logo",
       "Finish an upload",
       "Cancel an upload",
+      "Start a shared item",
+      "List the workspace's shared items",
+      "Get one shared item",
+      "Delete a shared item",
+      "Send one part of an item",
+      "Send an item's preview",
+      "Get an item's preview",
+      "Finish a shared item",
       "The workspace and the server version",
       "The workspace's storage use",
       "The workspace's ten largest tours",
@@ -297,9 +305,17 @@ describe("the API description", () => {
     for (const f of fields.slice(2)) expect(full.properties[f], f).toMatchObject({ type: "integer", minimum: 0 });
     expect(res.description).toContain("storage_full");
     expect(res.description).toContain("too_large");
-    // No other request answers storage_full: only a create is ever refused for storage.
+    // No other request answers storage_full: only starting an upload or a shared item, and
+    // sending an item's preview (whose size is counted when it is sent), is ever refused for storage.
+    const forStorage = ["POST /api/v1/uploads", "POST /api/v1/media", "PUT /api/v1/media/:id/preview"];
     for (const { key, op } of operations(doc)) {
-      if (key !== "POST /api/v1/uploads") expect(JSON.stringify(op.responses), key).not.toContain("StorageFull");
+      expect(JSON.stringify(op.responses).includes("StorageFull"), key).toBe(forStorage.includes(key));
+    }
+    // Each says so in its 413, beside its other forms.
+    for (const key of forStorage.slice(1)) {
+      const r = operations(doc).find((o) => o.key === key)!.op.responses["413"];
+      expect(r.description, key).toContain("storage_full");
+      expect(r.content["application/json"].schema.oneOf.at(-1), key).toEqual({ $ref: "#/components/schemas/StorageFull" });
     }
     // The limits section and the create's own text both say it.
     expect(doc.info.description).toContain("413 `storage_full`");

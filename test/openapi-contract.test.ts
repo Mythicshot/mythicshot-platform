@@ -26,11 +26,12 @@ import { setClientAddress } from "../src/client.ts";
 import { openapi } from "../src/docs/openapi.ts";
 import type { Deps } from "../src/ports.ts";
 import { COPY_BATCH } from "../src/publish.ts";
+import { LIMITS_MEDIA, workspaceKey } from "../src/rate.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS } from "../src/uploads.ts";
 import { VERSION } from "../src/version.ts";
-import { clone, fixtures, jpeg, logoPng, png, send, sha256Hex, stepImage, type Call, type Json } from "./bundle.ts";
+import { clone, fixtures, gif, jpeg, logoPng, mp4, png, send, sha256Hex, stepImage, type Call, type Json } from "./bundle.ts";
 import { check, deref, KEYWORDS, keywordsOf } from "./openapi-schema.ts";
 
 /**
@@ -759,6 +760,135 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     refused(await api.call("PATCH", path, { token: admin.token, body: JSON.stringify({ storage_allowance_bytes: 1 }), headers: JSON_HEADERS }), 404, "not_found");
   });
 
+  it("every answer of shared items is as documented", async () => {
+    const { deps, a, b } = await setup();
+    const api = client(deps);
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const jsonOf = (token: string | null, body: unknown): Opts => ({ token, body: typeof body === "string" ? body : JSON.stringify(body), headers: JSON_HEADERS });
+    const bytesOf = (token: string | null, body: Uint8Array): Opts => ({ token, body: body as NonNullable<RequestInit["body"]> });
+    const create = (token: string | null, body: unknown) => api.call("POST", "/api/v1/media", jsonOf(token, body));
+    const part = (token: string | null, id: string, n: number | string, body: Uint8Array) => api.call("PUT", `/api/v1/media/${id}/parts/${n}`, bytesOf(token, body));
+    const preview = (token: string | null, id: string, body: Uint8Array) => api.call("PUT", `/api/v1/media/${id}/preview`, bytesOf(token, body));
+    const commit = (token: string | null, id: string) => api.call("POST", `/api/v1/media/${id}/commit`, { token });
+    const image = { kind: "image", content_type: "image/png", bytes: 3000, width: 64, height: 48, title: "A shared image" };
+    const clip = { kind: "clip", content_type: "video/mp4", bytes: 2_000_100, width: 320, height: 240, duration_ms: 4000 };
+
+    // An image: start, its part, a PNG preview, finish, read, list, its preview, delete.
+    const made = await create(a.token, image);
+    expect(made.json).toEqual({ id: made.json.id, parts: 1, part_bytes: 2_000_000 });
+    const id = made.json.id as string;
+    refused(await part(a.token, id, 0, png(64, 48, 2999)), 400, "bad_part");
+    refused(await part(a.token, id, 0, jpeg(64, 48, 3000)), 400, "bad_media");
+    refused(await part(a.token, id, 1, png(64, 48, 3000)), 404, "not_found");
+    refused(await part(a.token, id, 0, new Uint8Array(2_000_001)), 413, "too_large");
+    refused(await commit(a.token, id), 409, "incomplete");
+    expect((await part(a.token, id, 0, png(64, 48, 3000))).status).toBe(204);
+    refused(await preview(a.token, id, gif(10, 10, 100)), 400, "bad_image");
+    refused(await preview(a.token, id, png(10, 10, 100_001)), 413, "too_large");
+    refused(await api.call("GET", `/api/v1/media/${id}/preview`, { token: a.token }), 404, "not_found");
+    expect((await preview(a.token, id, png(32, 24, 500))).status).toBe(204);
+    expect((await api.call("GET", `/api/v1/media/${id}`, { token: a.token })).json.state).toBe("uploading");
+    const done = await commit(a.token, id);
+    expect(done.json).toMatchObject({ id, kind: "image", path: `/i/${done.json.link_id}` });
+    expect((await commit(a.token, id)).json).toEqual(done.json);
+    refused(await part(a.token, id, 0, png(64, 48, 3000)), 409, "already_online");
+    refused(await preview(a.token, id, png(32, 24, 500)), 409, "already_online");
+    const got = await api.call("GET", `/api/v1/media/${id}/preview`, { token: a.token });
+    expect([got.status, got.headers.get("content-type")]).toEqual([200, "image/png"]);
+    expect((await api.call("GET", `/api/v1/media/${id}`, { token: a.token })).json).toMatchObject({ state: "online", has_preview: true, title: "A shared image" });
+    expect((await api.call("GET", "/api/v1/media?kind=image", { token: a.token })).json.items.map((i: Json) => i.id)).toEqual([id]);
+
+    // A clip of two parts with a JPEG preview.
+    const twice = await create(a.token, clip);
+    const clipId = twice.json.id as string;
+    expect(twice.json.parts).toBe(2);
+    const file = mp4(clip.bytes);
+    expect((await part(a.token, clipId, 1, file.subarray(2_000_000))).status).toBe(204);
+    expect((await part(a.token, clipId, 0, file.subarray(0, 2_000_000))).status).toBe(204);
+    expect((await preview(a.token, clipId, jpeg(40, 30, 700))).status).toBe(204);
+    expect((await commit(a.token, clipId)).json.path).toMatch(/^\/r\/[a-z2-7]{20}$/);
+    const jpg = await api.call("GET", `/api/v1/media/${clipId}/preview`, { token: a.token });
+    expect([jpg.status, jpg.headers.get("content-type")]).toEqual([200, "image/jpeg"]);
+
+    // Lists: a page, a bad kind, a bad cursor.
+    expect((await api.call("GET", "/api/v1/media?kind=clip", { token: a.token })).json).toMatchObject({ next: null });
+    refused(await api.call("GET", "/api/v1/media?kind=film", { token: a.token }), 400, "bad_request");
+    refused(await api.call("GET", "/api/v1/media?kind=image&cursor=nope", { token: a.token }), 400, "bad_cursor");
+
+    // Refusals of a create: a field, the body's length, the limits.
+    refused(await create(a.token, { ...image, kind: "film" }), 400, "bad_request");
+    refused(await create(a.token, { ...image, title: "x".repeat(5000) }), 413, "too_large");
+    expect((await create(a.token, { ...image, bytes: 20 * 1024 * 1024 })).json).toMatchObject({ error: "media_too_large", max_bytes: 10 * 1024 * 1024, max_side: 8192 });
+
+    // Nobody, and another workspace's item.
+    for (const [method, path] of [["POST", "/api/v1/media"], ["GET", "/api/v1/media?kind=image"], ["GET", `/api/v1/media/${id}`], ["DELETE", `/api/v1/media/${id}`], ["POST", `/api/v1/media/${id}/commit`], ["GET", `/api/v1/media/${id}/preview`]] as const) {
+      expect((await api.call(method, path, { token: null })).status, `${method} ${path}`).toBe(401);
+      if (method !== "POST" || path !== "/api/v1/media") {
+        if (!path.includes("?")) refused(await api.call(method, path, { token: b.token }), 404, "not_found");
+      }
+    }
+    expect((await part(null, id, 0, png(64, 48, 3000))).status).toBe(401);
+    expect((await preview(null, id, png(32, 24, 500))).status).toBe(401);
+    refused(await preview(b.token, id, png(32, 24, 500)), 404, "not_found");
+
+    // A delete whose files could not all be removed, then the one that finishes it.
+    const broken: Deps = { ...deps, drafts: { ...deps.drafts, delete: () => Promise.reject(new Error("the store is down")) } };
+    const log = console.error;
+    console.error = () => {};
+    try {
+      const cut = await client(broken).call("DELETE", `/api/v1/media/${clipId}`, { token: a.token });
+      refused(cut, 500, "cleanup_pending");
+    } finally {
+      console.error = log;
+    }
+    expect((await api.call("DELETE", `/api/v1/media/${clipId}`, { token: a.token })).status).toBe(204);
+    expect((await api.call("DELETE", `/api/v1/media/${id}`, { token: a.token })).status).toBe(204);
+
+    // A send whose claim is removed while it writes (as one older than its lifetime is), on an item still open.
+    const open = (await create(a.token, { ...image, title: "Still open" })).json.id as string;
+    let cut = false;
+    const losing: Deps = {
+      ...deps,
+      drafts: {
+        ...deps.drafts,
+        put: async (key, body, meta) => {
+          if (!cut && key.startsWith(`m/${open}/`)) {
+            cut = true;
+            await deps.db.run("DELETE FROM media_object WHERE media_id = ? AND claim = ?", [open, key.split(".")[1]]);
+          }
+          return deps.drafts.put(key, body, meta);
+        },
+      },
+    };
+    refused(await client(losing).call("PUT", `/api/v1/media/${open}/parts/0`, bytesOf(a.token, png(64, 48, 3000))), 409, "superseded");
+    cut = false;
+    refused(await client(losing).call("PUT", `/api/v1/media/${open}/preview`, bytesOf(a.token, png(32, 24, 500))), 409, "superseded");
+    expect((await api.call("DELETE", `/api/v1/media/${open}`, { token: a.token })).status).toBe(204);
+
+    // At most so many parts and previews an hour: the counts so far are written directly, one short of each limit.
+    const sendsOf = (await create(a.token, image)).json.id as string;
+    const key = await workspaceKey(a.workspaceId);
+    for (const limit of [LIMITS_MEDIA.part, LIMITS_MEDIA.preview]) {
+      await deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?) ON CONFLICT (bucket, key, window_start) DO UPDATE SET count = excluded.count", [limit.bucket, key, now - (now % limit.windowMs), limit.most]);
+    }
+    refused(await part(a.token, sendsOf, 0, png(64, 48, 3000)), 429, "too_many_items");
+    refused(await preview(a.token, sendsOf, png(32, 24, 500)), 429, "too_many_items");
+    expect((await api.call("DELETE", `/api/v1/media/${sendsOf}`, { token: a.token })).status).toBe(204);
+
+    // At most so many starts an hour.
+    for (let i = 0; i < LIMITS_MEDIA.create.most; i++) expect((await send(deps, "POST", "/api/v1/media", jsonOf(b.token, image))).status).toBe(201);
+    const over = await create(b.token, image);
+    refused(over, 429, "too_many_items");
+    now += 3_600_000;
+
+    // The storage allowance: a create and a preview it refuses.
+    await deps.db.run("UPDATE workspace SET storage_allowance_bytes = 4000 WHERE id = ?", [a.workspaceId]);
+    refused(await create(a.token, { ...image, bytes: 4001 }), 413, "storage_full");
+    const small = (await create(a.token, image)).json.id as string;
+    refused(await preview(a.token, small, png(10, 10, 1001)), 413, "storage_full");
+  });
+
   it("the answers any request can get are as the introduction says", async () => {
     const intro = DOC.info.description;
     const hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -968,9 +1098,18 @@ describe("the error codes in the code", () => {
     expect(adminPlain.length, "admin-api.ts: an error answer not built in place").toBe([...admin.matchAll(/\berror: "/g)].length);
     for (const m of adminPlain) inCode.add(`${m[1]} ${m[2]}`);
     expect([...inCode]).toEqual(expect.arrayContaining(["400 bad_allowance", "404 not_found"]));
-    // These six are the only modules that answer with apiError (src/http.ts defines it).
+    // Shared items answer with apiError, and with plain JSON for the one refusal that carries the limits.
+    const media = source("media.ts");
+    const mediaLiteral = [...media.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
+    expect(mediaLiteral.length, "media.ts: an apiError call without a literal status and code").toBe([...media.matchAll(/\bapiError\(/g)].length);
+    for (const m of mediaLiteral) inCode.add(`${m[1]} ${m[2]}`);
+    const mediaPlain = [...media.matchAll(/\bjson\((\d{3}), \{ error: "([a-z_]+)"/g)];
+    expect(mediaPlain.length, "media.ts: an error answer not built in place").toBe([...media.matchAll(/\berror: "/g)].length);
+    for (const m of mediaPlain) inCode.add(`${m[1]} ${m[2]}`);
+    expect([...inCode]).toEqual(expect.arrayContaining(["413 media_too_large", "429 too_many_items", "400 bad_media", "409 already_online"]));
+    // These eight are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/admin-api.ts", "../src/email-change.ts", "../src/http.ts", "../src/publish.ts", "../src/signin.ts", "../src/tours.ts", "../src/uploads.ts"]);
+    expect(callers).toEqual(["../src/admin-api.ts", "../src/email-change.ts", "../src/http.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tours.ts", "../src/uploads.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.

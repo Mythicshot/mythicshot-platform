@@ -105,6 +105,12 @@ export type Config = {
   setupCode: string | null; // null or shorter than 16 characters: setup is off
   /** Open (uncommitted, unexpired) uploads a workspace may have at once. Default 5. */
   maxOpenUploads?: number;
+  /** The most bytes a shared image may have. Default 10 MB (10 × 1024 × 1024), DEFAULT_MEDIA_LIMITS in src/media.ts. */
+  mediaImageMaxBytes?: number;
+  /** The most pixels a shared image may have on a side. Default 8,192. */
+  mediaImageMaxSide?: number;
+  /** The most bytes a shared clip (a GIF or an MP4) may have. Default 50 MB (50 × 1024 × 1024). */
+  mediaClipMaxBytes?: number;
   /**
    * How long a published image a re-publish replaced stays served before it is deleted,
    * so a viewer still on the previous page keeps its images. Default 10 minutes.

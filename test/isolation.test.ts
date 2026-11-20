@@ -5,12 +5,15 @@
 // an id that never existed (status, body and headers, byte for byte), when a row of any
 // table changed, or when anything was written to or deleted from either store.
 //
-// Every route of the app is in exactly one of six tables, keyed "<METHOD> <route path>"
+// Every route of the app is in exactly one of seven tables, keyed "<METHOD> <route path>"
 // exactly as in `createApp(deps).routes`:
 // - CASES: routes with an id in the path. Each lists the requests in which one workspace
 //   names the other's ids, with the exact answer.
 // - BODY_IDS: routes with no id in the path whose body carries one. The same kind of list.
 // - LISTS: routes that answer a collection or a summary of the caller's own workspace.
+// - CREATES: routes with no id that make something new in the caller's own workspace,
+//   each with a request that does. Made by one workspace, it must change nothing of the
+//   other, and belong to the caller's.
 // - SELF: routes with no id that change only the caller's own session or account.
 // - OPEN: routes with no owner at all, each with its reason.
 // - ADMIN: routes that cross workspaces on purpose, for the site's admin alone, each with
@@ -48,7 +51,7 @@ import { LIMITS_SIGNIN } from "../src/rate.ts";
 import { PAD_BUCKET } from "../src/signin.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { ORIGIN, commit, logoPng, putStep, send, stepImage, type Call, type Json } from "./bundle.ts";
-import { OWNED, SHARED, createReplace, dumpOf, inventedIds, manifestOf, namesIn, needlesOf, snapshotOf, tablesOf, world, type Ids, type Side, type World } from "./isolation-world.ts";
+import { OWNED, SHARED, createReplace, dumpOf, inventedIds, manifestOf, mediaPart, namesIn, needlesOf, snapshotOf, tablesOf, world, type Ids, type Side, type World } from "./isolation-world.ts";
 
 const SLOW = { timeout: 120_000 };
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -65,6 +68,7 @@ const NO_CHAPTER = notFound("chapter");
 const NO_STEP = notFound("step");
 const NO_UPLOAD = notFound("upload");
 const NO_SESSION = notFound("session");
+const NO_ITEM = notFound("item");
 /** What a credential that may not be used here gets: a token on a route that takes only a session, a session on the tours address. */
 const NOBODY: Expect = { status: 401, body: { error: "unauthorized" } };
 /** Aborting an upload answers 204 whatever the id: there is nothing to tell apart. */
@@ -96,6 +100,7 @@ type Entry = (theirs: Ids, mine: Ids) => Req[];
 
 const tourPath = (id: string, rest = "") => `/api/v1/tours/${id}${rest}`;
 const uploadPath = (id: string, rest = "") => `/api/v1/uploads/${id}${rest}`;
+const mediaPath = (id: string, rest = "") => `/api/v1/media/${id}${rest}`;
 /** Each of the other workspace's tours, in every state a tour can be in. */
 const theirTours = (t: Ids): [string, string][] => [
   ["their published tour", t.published.tour],
@@ -147,6 +152,34 @@ const CASES: Record<string, Entry> = {
     { what: "the session they are signed in with", method: "DELETE", path: `/api/v1/sessions/${t.session}`, only: "session", expect: NO_SESSION },
     { what: "another live session of theirs", method: "DELETE", path: `/api/v1/sessions/${t.otherSession}`, only: "session", expect: NO_SESSION },
   ],
+  "PUT /api/v1/media/:id/parts/:n": (t) => [
+    { what: "the part their unfinished item has, with bytes it would accept", method: "PUT", path: mediaPath(t.media.uploading, "/parts/0"), bytes: mediaPart(t.pictures.media, t.fill), expect: NO_ITEM },
+    { what: "a part number their unfinished item does not have", method: "PUT", path: mediaPath(t.media.uploading, "/parts/1"), bytes: mediaPart(t.pictures.media, t.fill), expect: NO_ITEM },
+    { what: "the part of their online image", method: "PUT", path: mediaPath(t.media.image, "/parts/0"), bytes: mediaPart(t.pictures.media, t.fill), expect: NO_ITEM },
+    { what: "the part of their online clip", method: "PUT", path: mediaPath(t.media.clip, "/parts/0"), bytes: mediaPart(t.pictures.media, t.fill), expect: NO_ITEM },
+  ],
+  "PUT /api/v1/media/:id/preview": (t) => [
+    { what: "a preview for their unfinished item", method: "PUT", path: mediaPath(t.media.uploading, "/preview"), bytes: logoPng(), expect: NO_ITEM },
+    { what: "a preview for their online image", method: "PUT", path: mediaPath(t.media.image, "/preview"), bytes: logoPng(), expect: NO_ITEM },
+  ],
+  "POST /api/v1/media/:id/commit": (t) => [
+    { what: "their unfinished item, which its owner could commit", method: "POST", path: mediaPath(t.media.uploading, "/commit"), expect: NO_ITEM },
+    { what: "their online image, whose commit answers its owner again", method: "POST", path: mediaPath(t.media.image, "/commit"), expect: NO_ITEM },
+  ],
+  "DELETE /api/v1/media/:id": (t) => [
+    { what: "their unfinished item", method: "DELETE", path: mediaPath(t.media.uploading), expect: NO_ITEM },
+    { what: "their online image", method: "DELETE", path: mediaPath(t.media.image), expect: NO_ITEM },
+    { what: "their online clip", method: "DELETE", path: mediaPath(t.media.clip), expect: NO_ITEM },
+  ],
+  "GET /api/v1/media/:id": (t) => [
+    { what: "their online image", method: "GET", path: mediaPath(t.media.image), expect: NO_ITEM },
+    { what: "their online clip", method: "GET", path: mediaPath(t.media.clip), expect: NO_ITEM },
+    { what: "their unfinished item", method: "GET", path: mediaPath(t.media.uploading), expect: NO_ITEM },
+  ],
+  "GET /api/v1/media/:id/preview": (t) => [
+    { what: "the preview of their online image", method: "GET", path: mediaPath(t.media.image, "/preview"), expect: NO_ITEM },
+    { what: "the preview of their unfinished item", method: "GET", path: mediaPath(t.media.uploading, "/preview"), expect: NO_ITEM },
+  ],
 };
 
 /** A create for the open upload's own pictures, into `target`. */
@@ -185,12 +218,26 @@ const LISTS: Record<string, { path: string; holds: string; only?: "token" | "ses
   "GET /api/v1/usage": { path: "/api/v1/usage", holds: "the caller's workspace's usage and allowance" },
   "GET /api/v1/usage/largest": { path: "/api/v1/usage/largest", holds: "the ten largest tours of the caller's workspace, with their sizes" },
   "GET /api/v1/tours": { path: "/api/v1/tours", holds: "the caller's workspace's tours" },
+  // The clips' list is looked at beside it in the test of the lists.
+  "GET /api/v1/media": { path: "/api/v1/media?kind=image", holds: "the caller's workspace's online shared images (and, with kind=clip, clips)" },
   "GET /api/v1/setup/connected": { path: "/api/v1/setup/connected", holds: "whether the caller's own token was used", only: "token" },
   "GET /api/v1/session": { path: "/api/v1/session", holds: "the caller's account, workspace, session and anti-forgery value", only: "session" },
   "GET /api/v1/sessions": { path: "/api/v1/sessions", holds: "the live sessions of the caller's own account", only: "session" },
 };
 
 type Sample = { method: string; path: string; json?: unknown; headers?: Record<string, string> };
+
+/**
+ * Routes with no id that make something new in the caller's own workspace: what they make,
+ * a request that makes it (`made` names the table the new row is in), and nothing more.
+ */
+const CREATES: Record<string, { makes: string; sample: (side: Side) => Sample; made: string }> = {
+  "POST /api/v1/media": {
+    makes: "starts a shared item in the caller's own workspace; the body names no workspace and no id",
+    sample: (side) => ({ method: "POST", path: "/api/v1/media", json: { kind: "image", content_type: "image/png", bytes: 1234, width: 10, height: 10, title: `${side.name} new item` } }),
+    made: "media",
+  },
+};
 
 /**
  * Routes that belong to no workspace: why, and requests that must answer everyone the same.
@@ -298,7 +345,7 @@ const ADMIN: Record<string, { reason: string; request: (w: World) => Sample; fie
 };
 
 type Tables = Record<string, Record<string, unknown>>;
-const TABLES: Tables = { CASES, BODY_IDS, LISTS, OPEN, SELF, ADMIN };
+const TABLES: Tables = { CASES, BODY_IDS, LISTS, CREATES, OPEN, SELF, ADMIN };
 
 // ---- The route list against the tables ----
 
@@ -313,7 +360,7 @@ const hasParameter = (key: string) => key.slice(key.indexOf(" ") + 1).includes("
 function whereToAdd(key: string): string {
   return hasParameter(key)
     ? "add it to CASES in test/isolation.test.ts, with a request for every id it can be given (or to OPEN with its reason, if it has no owner, or to ADMIN with its fields, if it is an admin route)"
-    : "add it to LISTS in test/isolation.test.ts if it answers a collection or a summary, to SELF if it changes only the caller's own session or account, to BODY_IDS if its body carries an id, to ADMIN with its fields if it is an admin route, or to OPEN with its reason if it has no owner";
+    : "add it to LISTS in test/isolation.test.ts if it answers a collection or a summary, to CREATES if it makes something new in the caller's own workspace, to SELF if it changes only the caller's own session or account, to BODY_IDS if its body carries an id, to ADMIN with its fields if it is an admin route, or to OPEN with its reason if it has no owner";
 }
 
 /** An admin route, by its path: every one is under /api/v1/admin/. */
@@ -341,7 +388,7 @@ function parameterProblems(routes: string[], tables: Tables = TABLES): string[] 
   const inTable = (name: string, key: string) => Object.hasOwn(tables[name] ?? {}, key);
   const problems = routes
     .filter((key) => hasParameter(key) && !inTable("CASES", key) && !inTable("OPEN", key) && !(isAdminKey(key) && inTable("ADMIN", key)))
-    .map((key) => `${key} takes an id in its path: it belongs in CASES (or in OPEN with its reason), not in LISTS, SELF or BODY_IDS`);
+    .map((key) => `${key} takes an id in its path: it belongs in CASES (or in OPEN with its reason), not in LISTS, CREATES, SELF or BODY_IDS`);
   for (const key of routes) {
     if (isAdminKey(key) && !inTable("ADMIN", key)) problems.push(`${key} is an admin route: it belongs in ADMIN, with every field it may answer`);
     if (!isAdminKey(key) && inTable("ADMIN", key)) problems.push(`${key} is in ADMIN but is no admin route: only routes under /api/v1/admin/ cross workspaces`);
@@ -455,6 +502,7 @@ describe("the tables against the route table", () => {
     expect(routes()).toContain("DELETE /api/v1/tours/:id");
     for (const [key, entry] of Object.entries(OPEN)) expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(LISTS)) expect(entry.holds.length, `${key} must say what it holds`).toBeGreaterThan(10);
+    for (const [key, entry] of Object.entries(CREATES)) expect(entry.makes.length, `${key} must say what it makes`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(SELF)) expect((entry.ends ?? entry.changes ?? "").length, `${key} must say what it ends or changes`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(ADMIN)) {
       expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
@@ -524,7 +572,7 @@ describe("the tables against the route table", () => {
     const asList: Tables = { ...TABLES, LISTS: { ...LISTS, "GET /api/v1/tours/:id/notes": {} } };
     expect(tableProblems(["GET /api/v1/tours/:id/notes", ...routes()], asList)).toEqual([]);
     expect(parameterProblems(["GET /api/v1/tours/:id/notes", ...routes()], asList)).toEqual([
-      "GET /api/v1/tours/:id/notes takes an id in its path: it belongs in CASES (or in OPEN with its reason), not in LISTS, SELF or BODY_IDS",
+      "GET /api/v1/tours/:id/notes takes an id in its path: it belongs in CASES (or in OPEN with its reason), not in LISTS, CREATES, SELF or BODY_IDS",
     ]);
     // A route in two tables, and a table key left behind by a route that is gone.
     const twice: Tables = { ...TABLES, LISTS: { ...LISTS, "GET /healthz": {} } };
@@ -537,7 +585,7 @@ describe("the tables against the route table", () => {
     withAdmin.get("/api/v1/admin/tours", (c) => c.json({}));
     withAdmin.delete("/api/v1/admin/workspaces/:id", (c) => c.json({}));
     expect(tableProblems(routeKeysOf(withAdmin))).toEqual([
-      "GET /api/v1/admin/tours is in no table: add it to LISTS in test/isolation.test.ts if it answers a collection or a summary, to SELF if it changes only the caller's own session or account, to BODY_IDS if its body carries an id, to ADMIN with its fields if it is an admin route, or to OPEN with its reason if it has no owner",
+      "GET /api/v1/admin/tours is in no table: add it to LISTS in test/isolation.test.ts if it answers a collection or a summary, to CREATES if it makes something new in the caller's own workspace, to SELF if it changes only the caller's own session or account, to BODY_IDS if its body carries an id, to ADMIN with its fields if it is an admin route, or to OPEN with its reason if it has no owner",
       "DELETE /api/v1/admin/workspaces/:id is in no table: add it to CASES in test/isolation.test.ts, with a request for every id it can be given (or to OPEN with its reason, if it has no owner, or to ADMIN with its fields, if it is an admin route)",
     ]);
     const misplaced: Tables = { ...TABLES, LISTS: { ...LISTS, "GET /api/v1/admin/tours": {} }, CASES: { ...CASES, "DELETE /api/v1/admin/workspaces/:id": () => [] } };
@@ -562,7 +610,7 @@ describe("one workspace against another", () => {
     for (const n of invented) expect(names).not.toContain(n);
     for (const side of [w.a, w.b]) {
       const s = await snapshotOf(w.deps, side, w.keys);
-      for (const table of ["workspace", "user", "membership", "signin_method", "signin_code", "session", "email_change", "audit", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object"]) {
+      for (const table of ["workspace", "user", "membership", "signin_method", "signin_code", "session", "email_change", "audit", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object", "media", "media_object"]) {
         expect(s.rows[table].length, `${side.name} has no row in ${table}`).toBeGreaterThan(0);
       }
       // Every file a row names is there, but the one picture the publish in progress has not copied yet.
@@ -674,6 +722,7 @@ describe("one workspace against another", () => {
       ["unpublish", () => send(w.deps, "POST", tourPath(w.b.ids.published.tour, "/unpublish"), { token: w.b.token })],
       ["delete a tour", () => send(w.deps, "DELETE", tourPath(w.b.ids.draft.tour), { token: w.b.token })],
       ["finish a delete", () => send(w.deps, "DELETE", tourPath(w.b.ids.deleting.tour), { token: w.b.token })],
+      ["start a shared item", () => send(w.deps, "POST", "/api/v1/media", { token: w.b.token, body: JSON.stringify(CREATES["POST /api/v1/media"].sample(w.b).json), headers: JSON_HEADERS })],
     ];
     for (const [what, run] of own) {
       w.tick();
@@ -689,6 +738,8 @@ describe("one workspace against another", () => {
     expect(after.rows.tour_deletion).toEqual([]);
     expect(after.rows.replaced_object).toEqual([]);
     expect(after.rows.public_object).toEqual([]);
+    expect(after.rows.media.map((m) => m.id)).not.toContain(w.b.ids.media.uploading);
+    expect(before.rows.media.map((m) => m.id)).toContain(w.a.ids.media.uploading);
   });
 
   it("no list or summary of one workspace holds anything of the other", SLOW, async () => {
@@ -724,12 +775,23 @@ describe("one workspace against another", () => {
       for (const n of mine.a) expect(first.b[key].body.includes(n), `${key} told the second workspace ${n} of the first`).toBe(false);
       for (const n of mine.b) expect(first.a[key].body.includes(n), `${key} told the first workspace ${n} of the second`).toBe(false);
     }
+    // The list of clips, which LISTS does not ask for, holds nothing of the other workspace either, by either credential.
+    for (const credential of CREDENTIALS) {
+      const clipsOfB = await fire(deps, { method: "GET", path: "/api/v1/media?kind=clip" }, credential.of(w.b));
+      const clipsOfA = await fire(deps, { method: "GET", path: "/api/v1/media?kind=clip" }, credential.of(w.a));
+      expect([clipsOfA.status, clipsOfB.status]).toEqual([200, 200]);
+      for (const n of mine.a) expect(clipsOfB.text.includes(n), `the clips told the second workspace ${n} of the first`).toBe(false);
+      for (const n of mine.b) expect(clipsOfA.text.includes(n), `the clips told the first workspace ${n} of the second`).toBe(false);
+      expect(clipsOfA.json.items.map((i: Json) => i.id)).toEqual([w.a.ids.media.clip]);
+    }
     // A leak would be seen: each workspace's own answers do hold its own names.
     expect(first.a["GET /api/v1/tours by token"].body).toContain(w.a.ids.published.tour);
     expect(first.a["GET /api/v1/tours by session"].body).toContain("Alpha draft tour");
     expect(first.a["GET /api/v1/me by session"].body).toContain("Alpha workspace");
     expect(first.a["GET /api/v1/session by session"].body).toContain(w.a.email);
     expect(first.a["GET /api/v1/sessions by session"].body).toContain(w.a.ids.otherSession);
+    expect(first.a["GET /api/v1/media by token"].body).toContain(w.a.ids.media.imageLink);
+    expect(first.a["GET /api/v1/media by session"].body).toContain("Alpha shared image");
     // A token and a session of one workspace see the same tours and the same usage.
     expect(first.b["GET /api/v1/tours by session"]).toEqual(first.b["GET /api/v1/tours by token"]);
     expect(first.b["GET /api/v1/usage by session"]).toEqual(first.b["GET /api/v1/usage by token"]);
@@ -745,7 +807,9 @@ describe("one workspace against another", () => {
       const pictures = sum(s.rows.step, "bytes");
       const logos = sum(s.rows.tour, "logo_bytes");
       const uploads = sum(s.rows.upload.filter((u) => u.closing_at === null), "reserved_bytes");
-      return { used_bytes: pictures + logos + uploads, allowance_bytes: null, over: false, tours: s.rows.tour.length, counted: { pictures, logos, uploads_in_progress: uploads } };
+      const media = sum(s.rows.media, "bytes") + sum(s.rows.media_object.filter((o) => o.current === 0 || o.n === -1), "bytes");
+      expect(media).toBeGreaterThan(0);
+      return { used_bytes: pictures + logos + uploads + media, allowance_bytes: null, over: false, tours: s.rows.tour.length, counted: { pictures, logos, uploads_in_progress: uploads } };
     };
     const usedA = JSON.parse(first.a["GET /api/v1/usage by token"].body);
     const usedB = JSON.parse(first.b["GET /api/v1/usage by token"].body);
@@ -810,6 +874,27 @@ describe("one workspace against another", () => {
     // Everywhere did end the caller's own sessions: the ones the world made, too.
     expect(await alive(BY_SESSION.of(a))).toBe(401);
     expect(await alive(BY_SESSION.of(b))).toBe(401);
+  });
+
+  it("what a workspace makes is its own, and nothing of the other workspace changes", SLOW, async () => {
+    const w = await build();
+    for (const [mine, theirs] of directions(w)) {
+      for (const credential of CREDENTIALS) {
+        for (const [key, entry] of Object.entries(CREATES)) {
+          const before = await snapshotOf(w.deps, theirs, w.keys);
+          const had = (await snapshotOf(w.deps, mine, w.keys)).rows[entry.made].length;
+          w.tick();
+          const what = `${key} (as ${mine.name}, by ${credential.name})`;
+          const r = await fire(w.deps, entry.sample(mine), credential.of(mine));
+          expect(r.status, `${what}: ${r.text}`).toBe(201);
+          expect(await snapshotOf(w.deps, theirs, w.keys), `${what} changed something of ${theirs.name}`).toEqual(before);
+          expect((await snapshotOf(w.deps, mine, w.keys)).rows[entry.made].length, what).toBe(had + 1);
+          // The answer names nothing of the other workspace.
+          for (const n of namesIn(theirs.ids)) expect(r.text.includes(n), `${what} told ${n}`).toBe(false);
+        }
+      }
+    }
+    expect(w.writes()).toEqual([]);
   });
 
   it("changing an email address reaches nothing of the other workspace: its address answers as a free one, its code as one that never existed", SLOW, async () => {
@@ -956,7 +1041,8 @@ describe("a caller that is nobody", () => {
   /** One request per route that needs a caller, each naming the caller's own data: a valid token would be answered with it. */
   function ownRequests(side: Side): { key: string; req: Req | Sample }[] {
     const lists = Object.entries(LISTS).map(([key, list]) => ({ key, req: { method: "GET", path: list.path } as Sample }));
-    return [...everyCase(side.ids, side.ids), ...lists];
+    const creates = Object.entries(CREATES).map(([key, entry]) => ({ key, req: entry.sample(side) }));
+    return [...everyCase(side.ids, side.ids), ...lists, ...creates];
   }
 
   it("a revoked token and a malformed one get 401 everywhere", SLOW, async () => {
@@ -981,7 +1067,7 @@ describe("a caller that is nobody", () => {
       ["the workspace's id", `Bearer ${a.workspaceId}`],
     ];
     const requests = ownRequests(a);
-    expect(new Set(requests.map((r) => r.key))).toEqual(new Set([...Object.keys(CASES), ...Object.keys(BODY_IDS), ...Object.keys(LISTS)]));
+    expect(new Set(requests.map((r) => r.key))).toEqual(new Set([...Object.keys(CASES), ...Object.keys(BODY_IDS), ...Object.keys(LISTS), ...Object.keys(CREATES)]));
     for (const [what, value] of headers) {
       for (const { key, req } of requests) {
         w.tick();

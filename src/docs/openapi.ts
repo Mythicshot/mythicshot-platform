@@ -11,6 +11,8 @@
 // it fetched the description from. The one example carries a placeholder address.
 import { ADMIN_PAGE, MAX_ALLOWANCE_BYTES } from "../admin-api.ts";
 import { LIMITS } from "../manifest.ts";
+import { CLIP_MAX_DURATION_MS, CLIP_MAX_SIDE, DEFAULT_MEDIA_LIMITS, LIST_PAGE, MAX_LOOSE_CLAIMS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, TITLE_MAX } from "../media.ts";
+import { LIMITS_MEDIA } from "../rate.ts";
 import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../publish.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
 import { DELETE_FILES_PER_CALL } from "../tours.ts";
@@ -157,6 +159,7 @@ const tourId: OpenApiParameter = { name: "id", in: "path", required: true, descr
 const uploadId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The upload's id, from the answer that started it.", schema: { type: "string", pattern: "^up_[0-9a-f]{24}$" } };
 const stepId: OpenApiParameter = { name: "step_id", in: "path", required: true, description: "The step's id.", schema: { type: "string", pattern: "^st_[0-9a-f]{24}$" } };
 const workspaceId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The workspace's id, as the list of accounts gives it in workspace_id.", schema: { type: "string", pattern: "^ws_[0-9a-f]{24}$" } };
+const mediaId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The item's id, from the answer that started it.", schema: { type: "string", pattern: "^med_[0-9a-f]{24}$" } };
 const sessionId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The session's id, as the list of sessions gives it.", schema: { type: "string", pattern: "^ses_[0-9a-f]{24}$" } };
 
 function introduction(): string {
@@ -217,7 +220,8 @@ function introduction(): string {
     `- One publish request copies up to ${COPY_BATCH} images; one delete request removes up to ${DELETE_FILES_PER_CALL} files.`,
     `- ${DEFAULT_MAX_OPEN_UPLOADS} open uploads per workspace, unless the server's settings give another number.`,
     `- An upload that is not finished is removed after ${hours} hours.`,
-    "- A workspace may have a storage allowance, set by the server's settings or its admin. An upload that would take the workspace over it is refused when it is started, with 413 `storage_full` and the numbers, before anything is stored. Nothing is ever deleted because of an allowance.",
+    `- A shared image: ${n(DEFAULT_MEDIA_LIMITS.imageMaxBytes)} bytes and ${n(DEFAULT_MEDIA_LIMITS.imageMaxSide)} pixels on a side, PNG or JPEG. A shared clip: ${n(DEFAULT_MEDIA_LIMITS.clipMaxBytes)} bytes, GIF or MP4, at most ${n(CLIP_MAX_SIDE)} pixels on a side and ${CLIP_MAX_DURATION_MS / 60_000} minutes long. The server's settings can give other numbers for the image and clip sizes. Each is sent in parts of ${n(PART_BYTES)} bytes. An item's preview: ${n(PREVIEW_RULE.maxBytes)} bytes and ${n(PREVIEW_RULE.maxSide)} pixels on a side, PNG or JPEG. A workspace starts at most ${LIMITS_MEDIA.create.most} items, sends at most ${n(LIMITS_MEDIA.part.most)} parts and ${LIMITS_MEDIA.preview.most} previews an hour, and an item that is not finished within ${MEDIA_MAX_AGE_MS / 3_600_000} hours is removed and can no longer be finished.`,
+    "- A workspace may have a storage allowance, set by the server's settings or its admin. An upload or a shared item that would take the workspace over it is refused when it is started, with 413 `storage_full` and the numbers, before anything is stored. Nothing is ever deleted because of an allowance.",
     `- A publish that makes no progress for ${minutes} minutes counts as abandoned.`,
     "",
     "Anything over a limit is refused, never cut short.",
@@ -333,9 +337,78 @@ function schemas(): Record<string, Schema> {
         detail: { type: "string", description: "The same in words, as one sentence under 200 characters that a program can show after its own words, such as \"Could not start the upload: \". The text may change; do not match on it." },
         used_bytes: whole("What the workspace uses now, in bytes."),
         allowance_bytes: whole("The workspace's storage allowance, in bytes."),
-        needed_bytes: whole(`The room this upload needs, in bytes: all its images, and for a logo it carries its logo_bytes, or ${n(LOGO_RULE.maxBytes)} without one; for the replacement of a chapter, only what that comes to above the chapter's present images and, for a tour's first chapter, the recorded size of its present logo.`),
+        needed_bytes: whole(`The room this upload needs, in bytes: all its images, and for a logo it carries its logo_bytes, or ${n(LOGO_RULE.maxBytes)} without one; for the replacement of a chapter, only what that comes to above the chapter's present images and, for a tour's first chapter, the recorded size of its present logo. For a shared item, its bytes; for an item's preview, what its size comes to above the preview it replaces.`),
       },
-      "The upload would take the workspace over its storage allowance. Nothing was stored and no upload exists.",
+      "The upload, shared item or preview would take the workspace over its storage allowance. Nothing was stored, and no upload or item exists that this request made.",
+    ),
+    MediaCreate: input(
+      ["kind", "content_type", "bytes", "width", "height"],
+      {
+        kind: { type: "string", enum: ["image", "clip"], description: "An image (a PNG or a JPEG) or a clip (a GIF or an MP4)." },
+        content_type: { type: "string", enum: ["image/png", "image/jpeg", "image/gif", "video/mp4"], description: "image/png or image/jpeg for an image, image/gif or video/mp4 for a clip. Part 0 must be a file of this type." },
+        bytes: whole(`The file's length in bytes: at most ${n(DEFAULT_MEDIA_LIMITS.imageMaxBytes)} for an image and ${n(DEFAULT_MEDIA_LIMITS.clipMaxBytes)} for a clip, unless the server's settings give other numbers.`, 1),
+        width: whole(`In pixels: at most ${n(DEFAULT_MEDIA_LIMITS.imageMaxSide)} for an image, unless the server's settings give another number, and ${n(CLIP_MAX_SIDE)} for a clip. For a PNG, JPEG or GIF it must be what the file says.`, 1),
+        height: whole("In pixels, as width.", 1),
+        duration_ms: { type: "integer", minimum: 1, maximum: CLIP_MAX_DURATION_MS, description: "How long the clip runs, in milliseconds. Required for a clip; leave it out for an image. Shown as given." },
+        title: { type: ["string", "null"], maxLength: TITLE_MAX, description: `Optional: at most ${TITLE_MAX} characters after trimming, no control or format characters. Empty is no title.` },
+      },
+    ),
+    MediaCreated: object(["id", "parts", "part_bytes"], {
+      id: { type: "string", pattern: "^med_[0-9a-f]{24}$" },
+      parts: whole("How many parts to send, numbered from 0.", 1),
+      part_bytes: whole(`The length of every part but the last, which holds the rest: ${n(PART_BYTES)}.`, 1),
+    }),
+    MediaCommitted: object(["id", "link_id", "kind", "path", "link"], {
+      id: { type: "string", pattern: "^med_[0-9a-f]{24}$" },
+      link_id: { type: "string", pattern: "^[a-z2-7]{20}$", description: "The item's public name. It never changes." },
+      kind: { type: "string", enum: ["image", "clip"] },
+      path: { type: "string", description: "The item's public address as a path: /i/<link_id> for an image, /r/<link_id> for a clip." },
+      link: { type: "string", description: "The item's public address in full, on the address for images and clips from the server's settings. When the settings name no address it is the same as path, to put after the server address." },
+    }),
+    MediaItem: object(["id", "link_id", "kind", "title", "content_type", "bytes", "width", "height", "duration_ms", "created_at", "has_preview", "path", "link"], {
+      id: { type: "string", pattern: "^med_[0-9a-f]{24}$" },
+      link_id: { type: "string", pattern: "^[a-z2-7]{20}$" },
+      kind: { type: "string", enum: ["image", "clip"] },
+      title: { type: ["string", "null"] },
+      content_type: { type: "string", enum: ["image/png", "image/jpeg", "image/gif", "video/mp4"] },
+      bytes: whole("The file's length in bytes.", 1),
+      width: whole("In pixels.", 1),
+      height: whole("In pixels.", 1),
+      duration_ms: { type: ["integer", "null"], description: "A clip's duration in milliseconds, as given. null for an image." },
+      created_at: whole("When the item was started, in milliseconds since 1970."),
+      has_preview: { type: "boolean", description: "Whether a preview picture was sent." },
+      path: { type: "string", description: "The public address as a path: /i/<link_id> or /r/<link_id>." },
+      link: { type: "string", description: "The public address in full, from the server's settings; the same as path when they name no address." },
+    }),
+    MediaItemState: object(["id", "link_id", "kind", "title", "content_type", "bytes", "width", "height", "duration_ms", "created_at", "has_preview", "path", "link", "state"], {
+      id: { type: "string", pattern: "^med_[0-9a-f]{24}$" },
+      link_id: { type: "string", pattern: "^[a-z2-7]{20}$" },
+      kind: { type: "string", enum: ["image", "clip"] },
+      title: { type: ["string", "null"] },
+      content_type: { type: "string", enum: ["image/png", "image/jpeg", "image/gif", "video/mp4"] },
+      bytes: whole("The file's length in bytes.", 1),
+      width: whole("In pixels.", 1),
+      height: whole("In pixels.", 1),
+      duration_ms: { type: ["integer", "null"], description: "A clip's duration in milliseconds, as given. null for an image." },
+      created_at: whole("When the item was started, in milliseconds since 1970."),
+      has_preview: { type: "boolean", description: "Whether a preview picture was sent." },
+      path: { type: "string", description: "The public address as a path: /i/<link_id> or /r/<link_id>." },
+      link: { type: "string", description: "The public address in full, from the server's settings; the same as path when they name no address." },
+      state: { type: "string", enum: ["uploading", "online"], description: "uploading until the item is finished, then online." },
+    }),
+    MediaList: object(["items", "next"], {
+      items: { type: "array", maxItems: LIST_PAGE, items: ref("MediaItem"), description: "Newest first." },
+      next: { type: ["string", "null"], description: "Send it as cursor for the next page. null on the last page." },
+    }),
+    MediaTooLarge: object(
+      ["error", "detail", "max_bytes", "max_side"],
+      {
+        error: { type: "string", enum: ["media_too_large"] },
+        detail: { type: "string", description: "The same in words. The text may change; do not match on it." },
+        max_bytes: whole("The most bytes an item of this kind may have here.", 1),
+        max_side: whole("The most pixels an item of this kind may have on a side.", 1),
+      },
+      "The item is larger than this server takes. Nothing was stored.",
     ),
     SignInRequest: input(["email"], { email: text(254, "The address to send the link to. Spaces around it are dropped and capitals do not count.", 3) }),
     SignInComplete: input(["code"], { code: { type: "string", pattern: "^dpl_[0-9a-f]{40}$", description: "The code of the link, the part after #c= in its address." } }),
@@ -622,6 +695,7 @@ function paths(): OpenApiDoc["paths"] {
   const minutes = STALE_PUBLISH_MS / 60_000;
   const noTour = refusal("No such tour in this workspace: unknown, another workspace's, or already deleted.", "not_found");
   const noUpload = (also = "") => refusal(`No such upload in this workspace: unknown, another workspace's, finished or cancelled${also}.`, "not_found");
+  const noMedia = (also: string) => refusal(`No such item in this workspace: unknown, another workspace's, or being deleted${also}.`, "not_found");
   const image = { "image/png": { schema: { type: "string", format: "binary" } }, "image/jpeg": { schema: { type: "string", format: "binary" } } };
   return {
     "/api/v1/tours": {
@@ -829,6 +903,128 @@ function paths(): OpenApiDoc["paths"] {
         security: TOKEN,
         parameters: [uploadId],
         responses: { "204": empty("The upload is gone, or was not there."), "401": UNAUTHORIZED },
+      },
+    },
+    "/api/v1/media": {
+      post: {
+        tags: ["Items"],
+        summary: "Start a shared item",
+        description: `Starts sharing one image (a PNG or a JPEG) or one clip (a GIF or an MP4): say what it is, then send its parts, optionally a preview, and finish it. The answer says how many parts to send; every part but the last is ${n(PART_BYTES)} bytes. On a workspace with a storage allowance, an item that would take it over is refused here with 413 storage_full, before any part is sent; from here on its bytes count as used until it is deleted. An item that is not finished is removed after ${MEDIA_MAX_AGE_MS / 3_600_000} hours. A workspace starts at most ${LIMITS_MEDIA.create.most} items an hour.`,
+        operationId: "createMedia",
+        security: TOKEN,
+        requestBody: { required: true, content: json(ref("MediaCreate")) },
+        responses: {
+          "201": answer("The item exists. Send its parts.", ref("MediaCreated")),
+          "400": refusal("The body is not a JSON object, or a field breaks its rule; the detail names it.", "bad_request"),
+          "401": UNAUTHORIZED,
+          "413": answer(
+            "too_large: the request body is too long. media_too_large: the item is larger than this server takes, and the answer carries the limits. storage_full: the item would take the workspace over its storage allowance; nothing was stored. Deleting tours or items, or a larger allowance, makes room.",
+            { oneOf: [refusalSchema("too_large"), ref("MediaTooLarge"), ref("StorageFull")] },
+          ),
+          "429": { description: `This workspace already started ${LIMITS_MEDIA.create.most} items in the last hour.`, headers: retryAfter, content: refusal("", "too_many_items").content },
+        },
+      },
+      get: {
+        tags: ["Items"],
+        summary: "List the workspace's shared items",
+        description: `The finished items of the workspace of one kind, newest first, ${LIST_PAGE} at a time. Ask with the query kind=image or kind=clip; for the next page add cursor= with the next of the previous answer. Items that are not finished are not listed.`,
+        operationId: "listMedia",
+        security: TOKEN,
+        responses: {
+          "200": answer("One page of items.", ref("MediaList")),
+          "400": refusal("bad_request: kind is missing or not image or clip. bad_cursor: the cursor is not one this list gave.", "bad_request", "bad_cursor"),
+          "401": UNAUTHORIZED,
+        },
+      },
+    },
+    "/api/v1/media/{id}": {
+      get: {
+        tags: ["Items"],
+        summary: "Get one shared item",
+        description: "One item of the workspace, finished or not, with its state.",
+        operationId: "getMedia",
+        security: TOKEN,
+        parameters: [mediaId],
+        responses: { "200": answer("The item.", ref("MediaItemState")), "401": UNAUTHORIZED, "404": noMedia("") },
+      },
+      delete: {
+        tags: ["Items"],
+        summary: "Delete a shared item",
+        description: "Removes an item, finished or not, with every part and its preview. Its public address stops working at once. 204 means nothing of it is left and its bytes no longer count. 500 cleanup_pending means it is deleted all the same, but some of its files are still to go (the store failed, or a part or preview was being sent at that moment), and it counts until they are: send the same request again.",
+        operationId: "deleteMedia",
+        security: TOKEN,
+        parameters: [mediaId],
+        responses: {
+          "204": empty("Nothing of the item is left."),
+          "401": UNAUTHORIZED,
+          "404": noMedia(", or already deleted"),
+          "500": refusal("The item is deleted, but some of its files are still to be removed, and until they are its bytes count. Send the same request again.", "cleanup_pending"),
+        },
+      },
+    },
+    "/api/v1/media/{id}/parts/{n}": {
+      put: {
+        tags: ["Items"],
+        summary: "Send one part of an item",
+        description: `The body is part n of the file, as bytes: ${n(PART_BYTES)} bytes for every part but the last, which holds the rest. Part 0 must start like a file of the declared type, read from its own bytes, and for a PNG, JPEG or GIF its width and height must be the declared ones; an MP4's size and duration are taken as declared. Parts may be sent in any order; sending one again replaces it.`,
+        operationId: "putMediaPart",
+        security: TOKEN,
+        parameters: [mediaId, { name: "n", in: "path", required: true, description: "The part's number, counted from 0.", schema: { type: "integer", minimum: 0, maximum: 998 } }],
+        requestBody: { required: true, content: { "application/octet-stream": { schema: { type: "string", format: "binary" } } } },
+        responses: {
+          "204": empty("The part is stored."),
+          "400": refusal("bad_part: the part's length is not the one it must have. bad_media: part 0 is not a file of the declared type, or its width and height differ from the declared ones.", "bad_part", "bad_media"),
+          "401": UNAUTHORIZED,
+          "404": noMedia(", or the item has no part of that number"),
+          "409": refusal("already_online: the item is finished; its parts cannot change. superseded: this send did not take its place (it took too long, or its claim was removed); the item is still open: check it and send again what is missing.", "already_online", "superseded"),
+          "413": refusal("The part is too long.", "too_large"),
+          "429": { description: `This workspace already sent ${LIMITS_MEDIA.part.most} parts in the last hour, or ${MAX_LOOSE_CLAIMS} sends of this item have not finished yet.`, headers: retryAfter, content: refusal("", "too_many_items").content },
+        },
+      },
+    },
+    "/api/v1/media/{id}/preview": {
+      put: {
+        tags: ["Items"],
+        summary: "Send an item's preview",
+        description: `Optional: a small picture that stands for the item in lists, a PNG or a JPEG of at most ${n(PREVIEW_RULE.maxBytes)} bytes and ${n(PREVIEW_RULE.maxSide)} pixels on a side, read from its own bytes. Send it before the item is finished; a new one replaces the old. Its size counts against the storage allowance.`,
+        operationId: "putMediaPreview",
+        security: TOKEN,
+        parameters: [mediaId],
+        requestBody: { required: true, content: image },
+        responses: {
+          "204": empty("The preview is stored."),
+          "400": refusal("The body is not a PNG or JPEG within the preview's size.", "bad_image"),
+          "401": UNAUTHORIZED,
+          "404": noMedia(""),
+          "409": refusal("already_online: the item is finished; its preview cannot change. superseded: this send did not take its place (it took too long, or its claim was removed); the item is still open: send it again.", "already_online", "superseded"),
+          "413": answer("too_large: the preview is too long. storage_full: it would take the workspace over its storage allowance; nothing was stored.", { oneOf: [refusalSchema("too_large"), ref("StorageFull")] }),
+          "429": { description: `This workspace already sent ${LIMITS_MEDIA.preview.most} previews in the last hour, or ${MAX_LOOSE_CLAIMS} sends of this item have not finished yet.`, headers: retryAfter, content: refusal("", "too_many_items").content },
+        },
+      },
+      get: {
+        tags: ["Items"],
+        summary: "Get an item's preview",
+        description: "The item's preview picture, to its own workspace, as the type read from its bytes when it was sent.",
+        operationId: "getMediaPreview",
+        security: TOKEN,
+        parameters: [mediaId],
+        responses: { "200": { description: "The preview.", content: image }, "401": UNAUTHORIZED, "404": noMedia(", or it has no preview") },
+      },
+    },
+    "/api/v1/media/{id}/commit": {
+      post: {
+        tags: ["Items"],
+        summary: "Finish a shared item",
+        description: "Checks that every part is stored and that they add up to the declared bytes, and puts the item online at its public address. From then on it does not change until it is deleted. A repeated request answers the same.",
+        operationId: "commitMedia",
+        security: TOKEN,
+        parameters: [mediaId],
+        responses: {
+          "200": answer("The item is online.", ref("MediaCommitted")),
+          "401": UNAUTHORIZED,
+          "404": noMedia(""),
+          "409": refusal("A part has not been sent or is still being sent, the parts do not add up to the declared bytes, or the preview is still being sent; the detail says which. Nothing changes.", "incomplete"),
+        },
       },
     },
     "/api/v1/me": {
@@ -1042,6 +1238,7 @@ export function openapi(): OpenApiDoc {
     tags: [
       { name: "Tours", description: "List, rename, publish, unpublish and delete tours, and read a draft step's image." },
       { name: "Uploads", description: "Send a tour, a new chapter or a chapter's replacement: start, one request per image, finish." },
+      { name: "Items", description: "Share a single image or a short clip: start, one request per part, an optional preview, finish; then list, read and delete." },
       { name: "Workspace", description: "The workspace a token or a session belongs to." },
       { name: "Accounts", description: "Signing in with a link sent by mail, the browser sessions of an account, and changing its email address. The site's own pages use these." },
       { name: "Admin", description: "For the site's admin alone: the site's storage in all, how each account uses its storage, and each workspace's allowance. To anyone else these answer 404." },

@@ -16,7 +16,7 @@ const T0 = 1_800_000_000_000;
 const DAY = 24 * 60 * 60 * 1000;
 const JSON_HEADERS = { "content-type": "application/json" };
 const BAD_SETTING = "STORAGE_ALLOWANCE_BYTES is not a number of bytes. Write digits only, such as 1073741824, or leave it out for no limit.";
-const NOTHING = { pictures: 0, logos: 0, uploads: 0, used: 0, allowance: null, over: false, tours: 0 };
+const NOTHING = { pictures: 0, logos: 0, uploads: 0, media: 0, used: 0, allowance: null, over: false, tours: 0 };
 
 type Ws = { workspaceId: string; token: string };
 
@@ -95,7 +95,7 @@ describe("usage of a workspace", () => {
     await openUpload(deps, a, 70_000);
 
     const used = pictures + 1000 + 75_000;
-    expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures, logos: 1000, uploads: 75_000, used, allowance: null, over: false, tours: 2 });
+    expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures, logos: 1000, uploads: 75_000, media: 0, used, allowance: null, over: false, tours: 2 });
     // The scalar subquery the create statement uses gives the same number.
     expect(await usedBySql(deps, a.workspaceId)).toBe(used);
   });
@@ -203,10 +203,10 @@ describe("usage of a workspace", () => {
     await openUpload(deps, b, 2_000_000);
     await deps.db.run("UPDATE workspace SET storage_allowance_bytes = 7 WHERE id = ?", [b.workspaceId]);
 
-    expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures: 333, logos: 33, uploads: 4000, used: 4366, allowance: null, over: false, tours: 1 });
+    expect(await usageOf(deps, a.workspaceId)).toEqual({ pictures: 333, logos: 33, uploads: 4000, media: 0, used: 4366, allowance: null, over: false, tours: 1 });
     expect(await usedBySql(deps, a.workspaceId)).toBe(4366);
     const usedB = 180_000 + 2_000_000 + 900_000 + 150_000 + 3_000_000;
-    expect(await usageOf(deps, b.workspaceId)).toEqual({ pictures: 3_080_000, logos: 150_000, uploads: 3_000_000, used: usedB, allowance: 7, over: true, tours: 2 });
+    expect(await usageOf(deps, b.workspaceId)).toEqual({ pictures: 3_080_000, logos: 150_000, uploads: 3_000_000, media: 0, used: usedB, allowance: 7, over: true, tours: 2 });
     expect(await usedBySql(deps, b.workspaceId)).toBe(usedB);
     // The two sums together are everything recorded: nothing is counted twice or left out.
     const all = await deps.db.first<{ n: number }>("SELECT (SELECT coalesce(sum(bytes), 0) FROM step) + (SELECT coalesce(sum(logo_bytes), 0) FROM tour) + (SELECT coalesce(sum(reserved_bytes), 0) FROM upload) AS n");
@@ -275,7 +275,7 @@ describe("usage of a workspace", () => {
     const before = calls();
     const usage = await usageOf(deps, a.workspaceId);
     expect(calls() - before).toBe(1);
-    expect(usage).toEqual({ pictures: 1000, logos: 0, uploads: 50, used: 1050, allowance: 10_000, over: false, tours: 1 });
+    expect(usage).toEqual({ pictures: 1000, logos: 0, uploads: 50, media: 0, used: 1050, allowance: 10_000, over: false, tours: 1 });
   });
 });
 

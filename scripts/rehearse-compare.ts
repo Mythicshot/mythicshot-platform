@@ -276,12 +276,15 @@ export function migrationProblems(applied: string[], expected: string[]): string
   return out;
 }
 
-export type UsageSum = { pictures: number; logos: number; uploads: number; used: number; tours: number };
+export type UsageSum = { pictures: number; logos: number; uploads: number; media: number; used: number; tours: number };
 
 /**
  * The storage use of one workspace, summed here from the rows themselves rather than by
  * the server's query: the bytes of every step of its tours, the recorded logo sizes of its
- * tours, and the room held by its uploads that are not closing.
+ * tours, the room held by its uploads that are not closing, and the bytes of its shared
+ * items (closing ones too, until their rows go) and of every claim of theirs but a current part's
+ * (none on a database before migration 0010). The items are in used_bytes only: the usage
+ * answer names no part of its own for them yet.
  */
 export function usageFromRows(db: DbSnapshot, workspaceId: string): UsageSum {
   const tours = rowsOf(db.tour).filter((t) => t.workspace_id === workspaceId);
@@ -290,7 +293,12 @@ export function usageFromRows(db: DbSnapshot, workspaceId: string): UsageSum {
   const pictures = rowsOf(db.step).filter((s) => ids.has(s.tour_id as string)).reduce((n, s) => n + num(s.bytes), 0);
   const logos = tours.reduce((n, t) => n + num(t.logo_bytes ?? null), 0);
   const uploads = rowsOf(db.upload).filter((u) => u.workspace_id === workspaceId && u.closing_at === null).reduce((n, u) => n + num(u.reserved_bytes ?? null), 0);
-  return { pictures, logos, uploads, used: pictures + logos + uploads, tours: tours.length };
+  const items = rowsOf(db.media).filter((m) => m.workspace_id === workspaceId);
+  const itemIds = new Set(items.map((m) => m.id));
+  // Every claim but a current part's, which the item's bytes already hold.
+  const previews = rowsOf(db.media_object).filter((o) => itemIds.has(o.media_id as string) && (o.current === 0 || o.n === -1));
+  const media = items.reduce((n, m) => n + num(m.bytes), 0) + previews.reduce((n, o) => n + num(o.bytes), 0);
+  return { pictures, logos, uploads, media, used: pictures + logos + uploads + media, tours: tours.length };
 }
 
 /** Problems with a usage answer against the sum of the rows. */

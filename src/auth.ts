@@ -50,16 +50,29 @@ export async function hashToken(token: string): Promise<string> {
 }
 
 /** A new row id: the prefix, "_" and 24 lowercase hex characters (96 random bits). */
-export function newId(prefix: "ws" | "usr" | "tok" | "tour" | "ch" | "st" | "up" | "ses" | "sic" | "emc"): string {
+export function newId(prefix: "ws" | "usr" | "tok" | "tour" | "ch" | "st" | "up" | "ses" | "sic" | "emc" | "med"): string {
   return prefix + "_" + hex(randomBytes(12));
+}
+
+/** `n` characters from a-z and 2-7, each 5 random bits. */
+function slugOf(n: number): string {
+  // 256 is a multiple of 32, so masking each byte keeps every character equally likely.
+  let s = "";
+  for (const b of randomBytes(n)) s += SLUG_ALPHABET[b & 31];
+  return s;
 }
 
 /** A new public slug: 10 characters from a-z and 2-7 (50 random bits). */
 export function newSlug(): string {
-  // 256 is a multiple of 32, so masking each byte keeps every character equally likely.
-  let s = "";
-  for (const b of randomBytes(10)) s += SLUG_ALPHABET[b & 31];
-  return s;
+  return slugOf(10);
+}
+
+/**
+ * A new public name for a shared item: 20 characters from the alphabet of newSlug (100
+ * random bits). Random by itself, never made from the item's id or anything else.
+ */
+export function newLinkId(): string {
+  return slugOf(20);
 }
 
 /**

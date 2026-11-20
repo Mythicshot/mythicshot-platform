@@ -24,6 +24,7 @@ const CODE = "correct-horse-battery-staple";
 const NOT_FOUND = '{"error":"not_found"}';
 const TOUR = "tour_0123456789abcdef01234567";
 const UPLOAD = "up_0123456789abcdef01234567";
+const MEDIA = "med_0123456789abcdef01234567";
 const STEP = "st_0123456789abcdef01234567";
 const SESSION = "ses_0123456789abcdef01234567";
 const WORKSPACE = "ws_0123456789abcdef01234567";
@@ -68,6 +69,14 @@ const ROWS: Record<string, Row> = {
   "PUT /api/v1/uploads/:id/logo": api("PUT", `/api/v1/uploads/${UPLOAD}/logo`),
   "POST /api/v1/uploads/:id/commit": api("POST", `/api/v1/uploads/${UPLOAD}/commit`),
   "DELETE /api/v1/uploads/:id": api("DELETE", `/api/v1/uploads/${UPLOAD}`),
+  "POST /api/v1/media": api("POST", "/api/v1/media"),
+  "PUT /api/v1/media/:id/parts/:n": api("PUT", `/api/v1/media/${MEDIA}/parts/0`),
+  "PUT /api/v1/media/:id/preview": api("PUT", `/api/v1/media/${MEDIA}/preview`),
+  "POST /api/v1/media/:id/commit": api("POST", `/api/v1/media/${MEDIA}/commit`),
+  "DELETE /api/v1/media/:id": api("DELETE", `/api/v1/media/${MEDIA}`),
+  "GET /api/v1/media": api("GET", "/api/v1/media"),
+  "GET /api/v1/media/:id": api("GET", `/api/v1/media/${MEDIA}`),
+  "GET /api/v1/media/:id/preview": api("GET", `/api/v1/media/${MEDIA}/preview`),
   "GET /api/v1/me": api("GET", "/api/v1/me"),
   "GET /api/v1/usage": api("GET", "/api/v1/usage"),
   "GET /api/v1/usage/largest": api("GET", "/api/v1/usage/largest"),
@@ -254,7 +263,8 @@ describe("the host-routing matrix", () => {
     expect(ADMIN_KEYS.length).toBe(3);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
-    expect(API_KEYS.length).toBe(15);
+    // 15, and the eight routes of shared items.
+    expect(API_KEYS.length).toBe(23);
     expect(WIZARD_KEYS.length).toBe(5);
     // No route of the shipped app is a media route yet, so the img address has health alone.
     expect(Object.values(HOST_RULES).filter((r) => r === "media")).toEqual([]);

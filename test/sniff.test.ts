@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, imageInfo, sniffImage } from "../src/sniff.ts";
+import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, imageInfo, mediaInfo, sniffImage, sniffMedia } from "../src/sniff.ts";
 
 const bytes = (...xs: number[]) => new Uint8Array(xs);
 const ascii = (s: string) => new TextEncoder().encode(s);
@@ -143,5 +143,47 @@ describe("checkImage", () => {
     const r = checkImage(ascii("<script>S3CRET</script>"), step);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).not.toContain("S3CRET");
+  });
+});
+
+describe("a shared item's first bytes", () => {
+  const gifHead = (sig: string, w: number, h: number) => bytes(...ascii(sig), w & 255, w >> 8, h & 255, h >> 8, 0xf7, 0, 0, ...new Array(20).fill(0));
+  const ftyp = (size: number, brand = "isom", pad = 64) => bytes(...be32(size), ...ascii("ftyp"), ...ascii(brand), ...be32(0), ...ascii("isom"), ...ascii("mp41"), ...new Array(pad).fill(0));
+
+  it("knows PNG, JPEG, GIF87a, GIF89a and an MP4 ftyp box", () => {
+    expect(sniffMedia(png(10, 10))).toBe("png");
+    expect(sniffMedia(jpeg(10, 10))).toBe("jpg");
+    expect(sniffMedia(gifHead("GIF87a", 1, 1))).toBe("gif");
+    expect(sniffMedia(gifHead("GIF89a", 1, 1))).toBe("gif");
+    expect(sniffMedia(ftyp(24))).toBe("mp4");
+    expect(sniffMedia(ftyp(16, "mp42"))).toBe("mp4");
+  });
+
+  it("reads a GIF's size from its logical screen descriptor, and takes an MP4's from nobody", () => {
+    expect(mediaInfo(gifHead("GIF89a", 640, 480))).toEqual({ type: "gif", width: 640, height: 480 });
+    expect(mediaInfo(gifHead("GIF87a", 0x1234, 1))).toEqual({ type: "gif", width: 0x1234, height: 1 });
+    expect(mediaInfo(png(300, 200))).toEqual({ type: "png", width: 300, height: 200 });
+    expect(mediaInfo(jpeg(30, 20))).toEqual({ type: "jpg", width: 30, height: 20 });
+    expect(mediaInfo(ftyp(24))).toEqual({ type: "mp4", width: null, height: null });
+    // A side of 0 or a cut-off header gives nothing.
+    expect(mediaInfo(gifHead("GIF89a", 0, 10))).toBeNull();
+    expect(mediaInfo(ascii("GIF89a\x01"))).toBeNull();
+  });
+
+  it("refuses HTML, SVG, scripts, executables, archives, other GIF versions and implausible ftyp boxes", () => {
+    for (const text of ["<!DOCTYPE html><html>", "<html><body>", "<svg xmlns='http://www.w3.org/2000/svg'>", "<?xml version='1.0'?><svg>", "#!/bin/sh\nrm -rf /", "GIF88a\x01\x00\x01\x00", "gif89a\x01\x00\x01\x00", "%PDF-1.7", ""]) {
+      expect(sniffMedia(ascii(text)), text).toBeNull();
+      expect(mediaInfo(ascii(text)), text).toBeNull();
+    }
+    expect(sniffMedia(bytes(0x4d, 0x5a, 0x90, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0xff, 0xff, 0, 0, 0xb8))).toBeNull(); // an executable
+    expect(sniffMedia(bytes(0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0))).toBeNull(); // ELF
+    expect(sniffMedia(bytes(0x50, 0x4b, 3, 4, ...new Array(30).fill(0)))).toBeNull(); // a zip
+    expect(sniffMedia(ftyp(8))).toBeNull(); // too short for a brand
+    expect(sniffMedia(ftyp(22))).toBeNull(); // not a whole number of brands
+    expect(sniffMedia(ftyp(8192, "isom", 9000))).toBeNull(); // implausibly long
+    expect(sniffMedia(ftyp(4000, "isom", 10))).toBeNull(); // longer than the bytes there are
+    expect(sniffMedia(ftyp(24, "is\x00m"))).toBeNull(); // a brand that is no text
+    expect(sniffMedia(bytes(...be32(24), ...ascii("moov"), ...new Array(30).fill(0)))).toBeNull(); // another box first
+    expect(sniffMedia(bytes(...ascii("<ht"), ...ascii("ftyp"), ...new Array(30).fill(0x41)))).toBeNull(); // HTML with ftyp at offset 4: size is "<ht" + "f", far too large
   });
 });
