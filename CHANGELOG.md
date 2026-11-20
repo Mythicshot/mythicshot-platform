@@ -2,6 +2,13 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.25 (2026-11-20)
+
+- Dashboard, Images and GIFs pages: when a delete gets no answer, the page asks the item itself. Only "no such item" counts as deleted; an item still online or still being sent, or no answer to that either, shows the failure. Before, an item that newer items had pushed off the pages shown could be reported deleted while it was still online.
+- Upgrade rehearsal: a JSON answer of the new build that only adds fields is allowed, counted as "differ only by added fields", and each added field is named once per route by its path, never with a value. A changed or removed value, a changed type or list length, or another status still fails, and an answer that is not JSON must still be the same to the byte. The way back stays strict.
+- Upgrade rehearsal: `--mode three` (or `REHEARSE_MODE=three`) adds the address for images and clips, `img.example.com`. An old build from before 0.1.19 runs with two addresses and the new one with three, and the report says so.
+- Changelog: the missing 0.1.22 entry, and the 0.1.21 entry and the API description now say that the image and clip sizes are fixed in this version, with no setting to change them.
+
 ## 0.1.24 (2026-11-20)
 
 - Dashboard, Storage page: images and GIFs count beside tours. The line shows how many images, GIFs and tours the workspace has, what takes the room has GIFs and Images rows, and "Largest items" lists all three kinds together, each marked Tour, Image or GIF.
