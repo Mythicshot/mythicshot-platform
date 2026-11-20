@@ -317,7 +317,7 @@ const SELF_ENDS = Object.entries(SELF).filter(([, entry]) => entry.ends !== unde
 const SELF_CHANGES = Object.keys(SELF).filter((key) => SELF[key].changes !== undefined);
 
 /** The fields of one account in the admin's list: who it is, its counts and its allowance. */
-const ACCOUNT_FIELDS = ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "counted.pictures", "counted.logos", "counted.uploads_in_progress"];
+const ACCOUNT_FIELDS = ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "counted.pictures", "counted.logos", "counted.uploads_in_progress", "counted.images", "counted.gifs"];
 
 /**
  * Routes that cross workspaces on purpose, for the site's admin alone: why, a request the
@@ -799,6 +799,13 @@ describe("one workspace against another", () => {
     // The largest tours are the workspace's own, every one of them here (it has fewer than ten).
     const largestA = JSON.parse(first.a["GET /api/v1/usage/largest by session"].body).tours as Json[];
     expect(largestA.map((t) => t.id).sort()).toEqual([w.a.ids.published.tour, w.a.ids.draft.tour, w.a.ids.publishing.tour].sort());
+    // The largest of every kind: the workspace's own tours and items (the unfinished one too), never the other's.
+    for (const [me, them] of [[w.a, w.b], [w.b, w.a]] as const) {
+      const mine = JSON.parse(first[me === w.a ? "a" : "b"]["GET /api/v1/usage/largest by session"].body).largest as Json[];
+      expect(mine.map((e) => e.id).sort()).toEqual([me.ids.published.tour, me.ids.draft.tour, me.ids.publishing.tour, me.ids.media.image, me.ids.media.clip, me.ids.media.uploading].sort());
+      const theirs = new Set([them.ids.published.tour, them.ids.draft.tour, them.ids.publishing.tour, them.ids.media.image, them.ids.media.clip, them.ids.media.uploading]);
+      for (const e of mine) expect(theirs.has(e.id as string), String(e.id)).toBe(false);
+    }
 
     // The numbers of a workspace are its own rows' and nobody else's.
     const usage = async (side: Side) => {
@@ -808,9 +815,21 @@ describe("one workspace against another", () => {
       const logos = sum(s.rows.tour, "logo_bytes");
       const uploads = sum(s.rows.upload.filter((u) => u.closing_at === null), "reserved_bytes");
       const live = s.rows.media.filter((m) => m.state !== "closing");
-      const media = sum(live, "bytes") + sum(live, "preview_bytes");
-      expect(media).toBeGreaterThan(0);
-      return { used_bytes: pictures + logos + uploads + media, allowance_bytes: null, over: false, tours: s.rows.tour.length, counted: { pictures, logos, uploads_in_progress: uploads } };
+      const of = (kind: string) => live.filter((m) => m.kind === kind);
+      const images = sum(of("image"), "bytes") + sum(of("image"), "preview_bytes");
+      const gifs = sum(of("clip"), "bytes") + sum(of("clip"), "preview_bytes");
+      expect(images).toBeGreaterThan(0);
+      expect(gifs).toBeGreaterThan(0);
+      const online = (kind: string) => of(kind).filter((m) => m.state === "online").length;
+      return {
+        used_bytes: pictures + logos + uploads + images + gifs,
+        allowance_bytes: null,
+        over: false,
+        tours: s.rows.tour.length,
+        images: online("image"),
+        gifs: online("clip"),
+        counted: { pictures, logos, uploads_in_progress: uploads, images, gifs },
+      };
     };
     const usedA = JSON.parse(first.a["GET /api/v1/usage by token"].body);
     const usedB = JSON.parse(first.b["GET /api/v1/usage by token"].body);

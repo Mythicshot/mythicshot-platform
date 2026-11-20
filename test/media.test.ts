@@ -458,7 +458,7 @@ describe("the storage allowance", () => {
   });
 
   it("every sentence stays under 200 characters and reads after \"Could not start the upload: \"", async () => {
-    const usage = (used: number, allowance: number): Usage => ({ pictures: used, logos: 0, uploads: 0, media: 0, used, allowance, over: used > allowance, tours: 1 });
+    const usage = (used: number, allowance: number): Usage => ({ pictures: used, logos: 0, uploads: 0, media: 0, imageBytes: 0, gifBytes: 0, used, allowance, over: used > allowance, tours: 1, images: 0, gifs: 0 });
     const MAX = Number.MAX_SAFE_INTEGER;
     for (const of of ["image", "clip", "preview"] as const) {
       for (const [u, needed] of [[usage(600, 1000), 500], [usage(MAX - 1023, MAX), 1023 * 1024], [usage(0, MAX), MAX], [usage(MAX, MAX), MAX]] as [Usage, number][]) {
@@ -514,7 +514,8 @@ describe("the storage allowance", () => {
     const online = await shareItem(deps, token, { ...CLIP, bytes: 3 * MB });
     const { id: unfinished } = await sendItem(deps, token, { ...CLIP, bytes: 4 * MB });
     const usage = await usageOf(deps, token);
-    expect(usage).toEqual({ used_bytes: 7 * MB, allowance_bytes: 10 * MB, over: false, tours: 0, counted: { pictures: 0, logos: 0, uploads_in_progress: 0 } });
+    // The unfinished clip counts its bytes under gifs, but is not yet one of the online gifs.
+    expect(usage).toEqual({ used_bytes: 7 * MB, allowance_bytes: 10 * MB, over: false, tours: 0, images: 0, gifs: 1, counted: { pictures: 0, logos: 0, uploads_in_progress: 0, images: 0, gifs: 7 * MB } });
     refused(await create(deps, token, { ...CLIP, bytes: 3 * MB + 1 }), 413, "storage_full");
 
     expect((await remove(deps, token, online.id)).status).toBe(204);

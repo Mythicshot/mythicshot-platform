@@ -174,18 +174,18 @@ The setting is `STORAGE_ALLOWANCE_BYTES` (see [Settings](#settings)): the allowa
 
 | | What |
 |---|---|
-| Counted | The image of every step of every tour, published or not; each tour's logo; and the room every unfinished upload holds from the moment it is started (all its images as the manifest gives them, and for a logo it carries the `logo_bytes` it was started with, or 200,000 bytes without, until the logo's real size is recorded when the upload is finished) until it is finished, aborted or removed |
+| Counted | The image of every step of every tour, published or not; each tour's logo; the room every unfinished upload holds from the moment it is started (all its images as the manifest gives them, and for a logo it carries the `logo_bytes` it was started with, or 200,000 bytes without, until the logo's real size is recorded when the upload is finished) until it is finished, aborted or removed; and every shared image and clip with its preview, from the moment it is started until it is deleted |
 | Not counted | The copies of images a published tour serves, so a fully published workspace can hold about twice its count on disk; images that wait to be removed after a delete or a replace; a logo stored by a server older than 0.1.8; the database itself |
 
 `GET /api/v1/usage`, with a token, answers the workspace's own numbers, on either address:
 
 ```
-{"used_bytes":4700,"allowance_bytes":1073741824,"over":false,"tours":1,"counted":{"pictures":3000,"logos":1000,"uploads_in_progress":700}}
+{"used_bytes":4700,"allowance_bytes":1073741824,"over":false,"tours":1,"images":0,"gifs":0,"counted":{"pictures":3000,"logos":1000,"uploads_in_progress":700,"images":0,"gifs":0}}
 ```
 
-`allowance_bytes` is `null` when there is no limit. `over` is `true` when more is used than the allowance.
+`allowance_bytes` is `null` when there is no limit. `over` is `true` when more is used than the allowance. `images` and `gifs` count the shared images and clips (GIFs and MP4s) that are online. In `counted`, `images` and `gifs` are their bytes, each item with its preview: an item counts from the moment it is started, so one still being sent is counted there (not in `uploads_in_progress`, which holds tour uploads only), and one being deleted counts nothing. The five numbers of `counted` add up to `used_bytes`.
 
-The `bytes` of a workspace's tours in `GET /api/v1/tours` add up to `pictures` plus `logos`; `used_bytes` is that plus `uploads_in_progress`, which belongs to no tour yet. `GET /api/v1/usage/largest` answers the workspace's ten largest tours, largest first, as `{"tours":[{"id","title","bytes"}]}`.
+The `bytes` of a workspace's tours in `GET /api/v1/tours` add up to `pictures` plus `logos`; `used_bytes` is that plus `uploads_in_progress`, which belongs to no tour yet. `GET /api/v1/usage/largest` answers the workspace's ten largest tours, largest first, as `{"tours":[{"id","title","bytes"}]}`, and beside them `"largest":[{"kind","id","title","bytes"}]`: the ten largest things of every kind together, where `kind` is `tour`, `image` or `gif` and an item without a title has `null`. It lists an item still being sent, which takes room, but not one being deleted.
 
 The site's admin also has `GET /api/v1/admin/summary`, with the admin's session only: `{"accounts","used_bytes","standard_allowance_bytes"}`, the number of accounts, what all workspaces use together, and the allowance from the server's settings (`null` when none is set). Anyone else gets `404`.
 
@@ -338,7 +338,7 @@ The dashboard is the set of pages a signed-in person uses on the app address (or
 | Page | What it does |
 |---|---|
 | Tours, `/tours` | Lists the workspace's tours, most recently changed first, each with its steps, size, the day it changed and whether it is published or has changes waiting. "Copy link" and "Open" for a published tour; "Publish", "Publish changes", "Unpublish" and "Delete". Delete asks first and cannot be undone; the recording on the computer is not touched |
-| Storage, `/storage` | What the workspace uses: against its allowance with a bar when it has one, what takes the room (tours, logos, uploads in progress), and its largest tours with "Delete". A workspace over its allowance sees a warning |
+| Storage, `/storage` | What the workspace uses: against its allowance with a bar when it has one, with its numbers of images, GIFs and tours; what takes the room (tours, GIFs, images, logos, uploads in progress); and its largest items of every kind, each marked Tour, Image or GIF, with "Delete". A workspace over its allowance sees a warning |
 | Account, `/account` | The username, the email address and the workspace; where the account is signed in, with the sign-outs of [Sessions](#sessions); and, on a site whose mail is on, changing the email address (see [Changing an email address](#changing-an-email-address)). The username cannot be changed in this version |
 | Admin, `/admin` | For the site's admin only: every account and its storage, and each workspace's allowance. The tab is shown only to the admin, and everyone else gets "not found" from the routes behind it |
 

@@ -324,7 +324,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     expect((await api.health()).json).toEqual({ ok: true });
     expect((await api.me(a.token)).json).toEqual({ workspace: "Workspace A", version: VERSION });
     // Usage: nothing yet, and no limit unless the site or the workspace has one.
-    expect((await api.usage(a.token)).json).toEqual({ used_bytes: 0, allowance_bytes: null, over: false, tours: 0, counted: { pictures: 0, logos: 0, uploads_in_progress: 0 } });
+    expect((await api.usage(a.token)).json).toEqual({ used_bytes: 0, allowance_bytes: null, over: false, tours: 0, images: 0, gifs: 0, counted: { pictures: 0, logos: 0, uploads_in_progress: 0, images: 0, gifs: 0 } });
 
     // A new tour with a logo, request by request.
     const created = await api.create(a.token, v3);
@@ -347,7 +347,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     // Its size is its steps' pictures and its logo, as the usage counts them; the largest tours say the same.
     const counted = (await api.usage(a.token)).json.counted;
     expect(draft[0].bytes).toBe(counted.pictures + counted.logos);
-    expect((await api.largest(a.token)).json).toEqual({ tours: [{ id: t.tour_id, title: draft[0].title, bytes: draft[0].bytes }] });
+    expect((await api.largest(a.token)).json).toEqual({ tours: [{ id: t.tour_id, title: draft[0].title, bytes: draft[0].bytes }], largest: [{ kind: "tour", id: t.tour_id, title: draft[0].title, bytes: draft[0].bytes }] });
 
     // A draft step image is the type its bytes are, and carries its sandbox policy.
     const steps = await stepIds(deps, t.tour_id);
@@ -513,7 +513,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const full = await api.create(b.token, small(1));
     refused(full, 413, "storage_full");
     expect(full.json).toEqual({ error: "storage_full", detail: full.json.detail, used_bytes: 0, allowance_bytes: 100, needed_bytes: 120 });
-    expect((await api.usage(b.token)).json).toEqual({ used_bytes: 0, allowance_bytes: 100, over: false, tours: 0, counted: { pictures: 0, logos: 0, uploads_in_progress: 0 } });
+    expect((await api.usage(b.token)).json).toEqual({ used_bytes: 0, allowance_bytes: 100, over: false, tours: 0, images: 0, gifs: 0, counted: { pictures: 0, logos: 0, uploads_in_progress: 0, images: 0, gifs: 0 } });
     await deps.db.run("UPDATE workspace SET storage_allowance_bytes = NULL WHERE id = ?", [b.workspaceId]);
     // The open-upload cap, in workspace B, which has none open: one more than allowed.
     const open: string[] = [];
@@ -810,6 +810,17 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     expect((await commit(a.token, clipId)).json.path).toMatch(/^\/r\/[a-z2-7]{20}$/);
     const jpg = await api.call("GET", `/api/v1/media/${clipId}/preview`, { token: a.token });
     expect([jpg.status, jpg.headers.get("content-type")]).toEqual([200, "image/jpeg"]);
+
+    // The usage and the largest list count both items, each with its preview, in their documented shapes.
+    const u = (await api.usage(a.token)).json;
+    expect([u.images, u.gifs]).toEqual([1, 1]);
+    expect(u.counted.pictures + u.counted.logos + u.counted.uploads_in_progress + u.counted.images + u.counted.gifs).toBe(u.used_bytes);
+    const items = ((await api.largest(a.token)).json.largest as Json[]).filter((e) => e.kind !== "tour");
+    expect(items.map((e) => [e.kind, e.id, e.title])).toEqual([
+      ["gif", clipId, null],
+      ["image", id, "A shared image"],
+    ]);
+    expect(items.map((e) => e.bytes)).toEqual([u.counted.gifs, u.counted.images]);
 
     // Lists: a page, a bad kind, a bad cursor.
     expect((await api.call("GET", "/api/v1/media?kind=clip", { token: a.token })).json).toMatchObject({ next: null });

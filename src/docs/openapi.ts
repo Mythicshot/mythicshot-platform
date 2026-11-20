@@ -300,33 +300,48 @@ function schemas(): Record<string, Schema> {
       },
     ),
     Usage: object(
-      ["used_bytes", "allowance_bytes", "over", "tours", "counted"],
+      ["used_bytes", "allowance_bytes", "over", "tours", "images", "gifs", "counted"],
       {
-        used_bytes: whole("What the workspace uses, in bytes: the three numbers of counted together."),
+        used_bytes: whole("What the workspace uses, in bytes: the five numbers of counted together."),
         allowance_bytes: { type: ["integer", "null"], description: "The workspace's storage allowance in bytes: its own number, else the server's setting. null when there is no limit." },
         over: { type: "boolean", description: "true when more is used than the allowance. Always false without a limit; exactly the allowance is not over it." },
         tours: whole("How many tours the workspace has, drafts and published."),
+        images: whole("How many shared images the workspace has online. One still being sent is not counted here, though its bytes are counted."),
+        gifs: whole("How many shared clips (GIFs and MP4s) the workspace has online. One still being sent is not counted here, though its bytes are counted."),
         counted: object(
-          ["pictures", "logos", "uploads_in_progress"],
+          ["pictures", "logos", "uploads_in_progress", "images", "gifs"],
           {
             pictures: whole("The images of every step of every tour, published or not."),
             logos: whole("The tours' logos. A logo stored by a server before version 0.1.8 counts as 0."),
-            uploads_in_progress: whole("The room held by uploads that are not finished: what each one needed when it was started."),
+            uploads_in_progress: whole("The room held by tour uploads that are not finished: what each one needed when it was started. A shared item still being sent is not in it: it counts under images or gifs."),
+            images: whole("The shared images, each with its preview: every image online and every one still being sent, which counts its declared bytes from the moment it is started. One being deleted counts nothing."),
+            gifs: whole("The shared clips (GIFs and MP4s), each with its preview, counted as images are."),
           },
-          "What used_bytes is made of, in bytes.",
+          "What used_bytes is made of, in bytes. The five numbers add up to used_bytes.",
         ),
       },
       "What a workspace uses of its storage allowance.",
     ),
-    LargestTours: object(["tours"], {
+    LargestTours: object(["tours", "largest"], {
       tours: {
         type: "array",
         maxItems: LARGEST_TOURS,
-        description: `At most ${LARGEST_TOURS}, largest first; tours of the same size in the order of their ids.`,
+        description: `The tours alone: at most ${LARGEST_TOURS}, largest first; tours of the same size in the order of their ids.`,
         items: object(["id", "title", "bytes"], {
           id: { type: "string", pattern: "^tour_[0-9a-f]{24}$" },
           title: { type: "string" },
           bytes: whole("The tour's size in bytes, as the tour list gives it."),
+        }),
+      },
+      largest: {
+        type: "array",
+        maxItems: LARGEST_TOURS,
+        description: `Tours, images and GIFs together: at most ${LARGEST_TOURS}, largest first; things of the same size in the order of their ids.`,
+        items: object(["kind", "id", "title", "bytes"], {
+          kind: { type: "string", enum: ["tour", "image", "gif"], description: "tour, image, or gif for a shared clip (a GIF or an MP4). Delete a tour with DELETE /api/v1/tours/{id}, an image or a GIF with DELETE /api/v1/media/{id}." },
+          id: { type: "string", pattern: "^(tour|med)_[0-9a-f]{24}$", description: "A tour's id (tour_…) or a shared item's (med_…)." },
+          title: { type: ["string", "null"], description: "The title. null for a shared item that has none; a tour always has one. Show it as text: it may hold any characters." },
+          bytes: whole("The size in bytes, as GET /api/v1/usage counts it: a tour's as the tour list gives it, an item's declared bytes with its preview."),
         }),
       },
     }),
@@ -474,12 +489,18 @@ function schemas(): Record<string, Schema> {
         storage_allowance_bytes: { type: ["integer", "null"], description: "The workspace's own number, in bytes. null when it has none and the site's default applies." },
         over: { type: "boolean", description: "true when more is used than the allowance in force." },
         counted: object(
-          ["pictures", "logos", "uploads_in_progress"],
-          { pictures: whole("The images of every step of every tour."), logos: whole("The tours' logos."), uploads_in_progress: whole("The room held by uploads that are not finished.") },
-          "What used_bytes is made of, in bytes, as in GET /api/v1/usage.",
+          ["pictures", "logos", "uploads_in_progress", "images", "gifs"],
+          {
+            pictures: whole("The images of every step of every tour."),
+            logos: whole("The tours' logos."),
+            uploads_in_progress: whole("The room held by tour uploads that are not finished."),
+            images: whole("The shared images with their previews, as one total."),
+            gifs: whole("The shared clips (GIFs and MP4s) with their previews, as one total."),
+          },
+          "What used_bytes is made of, in bytes, as in GET /api/v1/usage. The five numbers add up to used_bytes.",
         ),
       },
-      "One account and how its workspace uses its storage. Nothing of the workspace's tours: no tour, title, link, picture, token or session.",
+      "One account and how its workspace uses its storage. Nothing of the workspace's tours or shared items: no tour, item, title, link, picture, token or session.",
     ),
     AdminSummary: object(
       ["accounts", "used_bytes", "standard_allowance_bytes"],
@@ -1039,7 +1060,7 @@ function paths(): OpenApiDoc["paths"] {
       get: {
         tags: ["Workspace"],
         summary: "The workspace's storage use",
-        description: `What the token's workspace uses of its storage allowance, in bytes. Counted: the image of every step of every tour, published or not; each tour's logo; and the room held by every upload that is not finished (its images as the manifest gives them, and for a logo it carries the logo_bytes it was started with, or ${n(LOGO_RULE.maxBytes)} bytes without, until the logo's real size is recorded when the upload is finished), until the upload is finished, cancelled or removed. An upload nobody finishes is not removed by the clock alone: it is removed when the workspace next starts an upload once it is more than ${hours} hours old, and until then its room is still counted here. Not counted: the copies of images a published tour serves, and files that wait to be removed after a delete or a replace. allowance_bytes is null when neither the server's settings nor the workspace has one: No limit. over is true when more is used than the allowance, which can happen when an allowance is lowered; the server never deletes or unpublishes anything because of it, and only starting an upload that needs room is refused.`,
+        description: `What the token's workspace uses of its storage allowance, in bytes. Counted: the image of every step of every tour, published or not; each tour's logo; and the room held by every upload that is not finished (its images as the manifest gives them, and for a logo it carries the logo_bytes it was started with, or ${n(LOGO_RULE.maxBytes)} bytes without, until the logo's real size is recorded when the upload is finished), until the upload is finished, cancelled or removed. An upload nobody finishes is not removed by the clock alone: it is removed when the workspace next starts an upload once it is more than ${hours} hours old, and until then its room is still counted here. Also counted: every shared image and clip with its preview, from the moment it is started (its declared bytes) until it is deleted or, unfinished after ${MEDIA_MAX_AGE_MS / 3_600_000} hours, removed. counted gives them as images and gifs (clips: GIFs and MP4s), and an item that is not finished counts there, under its own kind, not in uploads_in_progress, which holds the tours' uploads only. The top-level images and gifs count the items that are online. Not counted: the copies of images a published tour serves, files that wait to be removed after a delete or a replace, and an item being deleted. The five numbers of counted add up to used_bytes. allowance_bytes is null when neither the server's settings nor the workspace has one: No limit. over is true when more is used than the allowance, which can happen when an allowance is lowered; the server never deletes or unpublishes anything because of it, and only starting an upload that needs room is refused.`,
         operationId: "getUsage",
         security: TOKEN,
         responses: { "200": answer("The workspace's numbers.", ref("Usage")), "401": UNAUTHORIZED },
@@ -1048,11 +1069,11 @@ function paths(): OpenApiDoc["paths"] {
     "/api/v1/usage/largest": {
       get: {
         tags: ["Workspace"],
-        summary: "The workspace's ten largest tours",
-        description: `The ${LARGEST_TOURS} largest tours of the token's workspace, largest first, each with its id, its title and its size in bytes as the tour list gives it (its steps' images and its logo, as GET /api/v1/usage counts them). Tours of the same size come in the order of their id. Fewer when the workspace has fewer tours; none for an empty one.`,
+        summary: "The workspace's ten largest tours, images and GIFs",
+        description: `Two lists of the token's workspace. tours: the ${LARGEST_TOURS} largest tours, largest first, each with its id, its title and its size in bytes as the tour list gives it (its steps' images and its logo, as GET /api/v1/usage counts them). Tours of the same size come in the order of their id. largest: the ${LARGEST_TOURS} largest things of every kind together, each with its kind (tour, image, or gif for a clip), id, title (null for an item without one) and size in bytes as GET /api/v1/usage counts it (an item's declared bytes with its preview). It holds an item that is still being sent, as it takes room and can be deleted, but not one being deleted. Things of the same size come in the order of their id. Each list has fewer when the workspace has fewer; none for an empty one.`,
         operationId: "getLargestTours",
         security: TOKEN,
-        responses: { "200": answer("The largest tours.", ref("LargestTours")), "401": UNAUTHORIZED },
+        responses: { "200": answer("The largest tours, and the largest of every kind.", ref("LargestTours")), "401": UNAUTHORIZED },
       },
     },
     "/api/v1/signin/request": {
