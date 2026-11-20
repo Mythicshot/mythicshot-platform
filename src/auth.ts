@@ -50,7 +50,7 @@ export async function hashToken(token: string): Promise<string> {
 }
 
 /** A new row id: the prefix, "_" and 24 lowercase hex characters (96 random bits). */
-export function newId(prefix: "ws" | "usr" | "tok" | "tour" | "ch" | "st" | "up" | "ses" | "sic" | "emc" | "med" | "crq"): string {
+export function newId(prefix: "ws" | "usr" | "tok" | "tour" | "ch" | "st" | "up" | "ses" | "sic" | "emc" | "med" | "crq" | "inv"): string {
   return prefix + "_" + hex(randomBytes(12));
 }
 

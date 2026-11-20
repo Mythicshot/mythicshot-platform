@@ -135,6 +135,53 @@ export function emailChangeMail(to: string, link: string, siteName: string = DEF
 }
 
 /**
+ * The link of one invite code: like a sign-in link, the code sits after the `#`, on the
+ * page that lets the invited person choose a username: `<origin>/invite#<code>`. The same
+ * rules for the origin and the code as `signInLink`, and the same two errors.
+ */
+export function inviteLink(origin: string, code: string): string {
+  if (!isOrigin(origin)) throw new Error("bad origin");
+  if (typeof code !== "string" || !CODE_CHARS.test(code)) throw new Error("bad code");
+  return `${origin}/invite#${code}`;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+/** A day as a mail writes it: the day of the month, the month's abbreviation and the year, in UTC, such as "27 Nov 2026". */
+export function mailDate(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+/** A username as `src/usernames.ts` stores one; anything else is not put in a mail. */
+const STORED_USERNAME = /^[a-z][a-z0-9-]{2,29}$/;
+
+/**
+ * The invite mail, in the words of the approved mockup. It names the admin who sent it by
+ * username, or, for an inviter without one (or one whose account is gone), says nothing of
+ * who sent it. The link is on a line of its own, once. `expiresAt` is when the link stops
+ * working, written as `mailDate` writes it.
+ */
+export function inviteMail(to: string, inviter: string | null, link: string, expiresAt: number, siteName: string = DEFAULT_SITE_NAME): Mail {
+  const name = siteNameOf(siteName);
+  const who = typeof inviter === "string" && STORED_USERNAME.test(inviter) ? `${inviter} invited you` : "You are invited";
+  return {
+    to,
+    subject: `You are invited to ${name}`,
+    text: [
+      `${who} to ${name}, a tool for sharing screenshots, clips and click-through tours.`,
+      "",
+      "Open this link to choose a username and get started:",
+      "",
+      link,
+      "",
+      `It works once and until ${mailDate(expiresAt)}. If you were not expecting this, ignore this mail: nothing happens without the link.`,
+      "",
+    ].join("\n"),
+  };
+}
+
+/**
  * An address with most of it hidden: the first character of the part before the @, "…",
  * and the @ with everything after it, so `new@example.com` is `n…@example.com`. A part
  * before the @ of one or two characters is not shown at all (`jo@example.com` is
