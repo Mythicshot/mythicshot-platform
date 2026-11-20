@@ -88,6 +88,13 @@ const ROWS: Record<string, Row> = {
   "GET /account": page("/account"),
   "GET /signin/signin.css": page("/signin/signin.css"),
   "GET /signin/signin.js": page("/signin/signin.js"),
+  // The dashboard: on the app address only. GET / sends a browser on (to /signin, as no
+  // cookie is sent here); the tours address sends it on to the app address first.
+  "GET /": { method: "GET", path: "/", one: 302, tours: 308, app: 302, unknown: 421 },
+  "GET /tours": page("/tours"),
+  "GET /dash/tours.js": page("/dash/tours.js"),
+  "GET /dash/dash.css": page("/dash/dash.css"),
+  "GET /dash/dash.js": page("/dash/dash.js"),
   "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421 },
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { method: "GET", path: "/player.js", one: 200, tours: 200, app: 404, unknown: 421 },
   "GET /t/:slug": { method: "GET", path: "/t/no-such-tour", one: 404, tours: 404, app: 308, unknown: 421 },
@@ -111,6 +118,9 @@ const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS
 const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 /** The sign-in pages and their stylesheet and script. */
 const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account)(?:\/|$)/.test(k));
+/** The dashboard's pages and their files (src/dash/), and the address that sends a browser on to them. */
+const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:tours|dash\/)/.test(k));
+const ROOT_KEY = "GET /";
 const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
 const DOCS_PAGE_KEY = "GET /docs";
 /** The page's own files and the licence notices. */
@@ -212,7 +222,10 @@ describe("the host-routing matrix", () => {
     for (const key of SESSION_KEYS) expect(HOST_RULES[key], key).toBe("app");
     for (const key of ADMIN_KEYS) expect(HOST_RULES[key], key).toBe("app");
     for (const key of PAGE_KEYS) expect(HOST_RULES[key], key).toBe("app");
+    for (const key of DASH_KEYS) expect(HOST_RULES[key], key).toBe("app");
+    expect(HOST_RULES[ROOT_KEY]).toBe("app-redirect");
     expect(PAGE_KEYS.length).toBe(5);
+    expect(DASH_KEYS.length).toBe(4);
     expect(SESSION_KEYS.length).toBe(7);
     expect(ADMIN_KEYS.length).toBe(3);
     expect(DESCRIPTION_KEYS.length).toBe(2);
@@ -235,7 +248,8 @@ describe("the host-routing matrix", () => {
       expect(answers["GET /p/:name"].text).toBe(NOT_FOUND);
       expect(answers["GET /p/:name"].headers.get("content-type")).toBe("application/json");
       expect(answers[PLAYER_KEY].headers.get("content-type")).toBe("text/javascript; charset=utf-8");
-      for (const key of KEYS) expect(answers[key].headers.get("location"), key).toBeNull();
+      for (const key of KEYS) if (key !== ROOT_KEY) expect(answers[key].headers.get("location"), key).toBeNull();
+      expect(answers[ROOT_KEY].headers.get("location")).toBe("/signin");
     }
     expect(await count(deps, "workspace")).toBe(0);
   });
@@ -245,11 +259,12 @@ describe("the host-routing matrix", () => {
     const answers = await column(deps, TOURS);
     expect(statuses(answers)).toEqual(expected("tours"));
     // As in one-address mode, except for the documentation page, which lives on the app address.
-    const onApp = [DOCS_PAGE_KEY, ...DOCS_FILE_KEYS, ...SESSION_KEYS, ...ADMIN_KEYS, ...PAGE_KEYS];
+    const onApp = [DOCS_PAGE_KEY, ROOT_KEY, ...DOCS_FILE_KEYS, ...SESSION_KEYS, ...ADMIN_KEYS, ...PAGE_KEYS, ...DASH_KEYS];
     const without = (col: Record<string, number>) => Object.fromEntries(Object.entries(col).filter(([k]) => !onApp.includes(k)));
     expect(without(expected("tours"))).toEqual(without(expected("one")));
     expect(answers[DOCS_PAGE_KEY].headers.get("location")).toBe(APP + "/docs");
-    for (const key of [...DOCS_FILE_KEYS, ...SESSION_KEYS, ...ADMIN_KEYS, ...PAGE_KEYS]) expectNotHere(answers[key], key);
+    expectRedirect(answers[ROOT_KEY], APP + "/", ROOT_KEY);
+    for (const key of [...DOCS_FILE_KEYS, ...SESSION_KEYS, ...ADMIN_KEYS, ...PAGE_KEYS, ...DASH_KEYS]) expectNotHere(answers[key], key);
     for (const key of DESCRIPTION_KEYS) expect(answers[key].status, key).toBe(200);
     for (const key of API_KEYS) expect(answers[key].json.error, key).toBe("unauthorized");
     expect(answers["GET /setup"].headers.get("content-type")).toBe("text/html; charset=utf-8");
@@ -258,7 +273,7 @@ describe("the host-routing matrix", () => {
     expect(answers["GET /p/:name"].text).toBe(NOT_FOUND);
     expect(answers[PLAYER_KEY].headers.get("content-type")).toBe("text/javascript; charset=utf-8");
     // The tours address redirects nothing else.
-    for (const key of KEYS) if (key !== DOCS_PAGE_KEY) expect(answers[key].headers.get("location"), key).toBeNull();
+    for (const key of KEYS) if (key !== DOCS_PAGE_KEY && key !== ROOT_KEY) expect(answers[key].headers.get("location"), key).toBeNull();
   });
 
   it("the app address answers the token API and health, redirects tour pages and pictures, and has no wizard and no player files", async () => {
@@ -274,10 +289,12 @@ describe("the host-routing matrix", () => {
     for (const key of ["GET /t/:slug", "GET /p/:name"]) expectRedirect(answers[key], TOURS + ROWS[key].path, key);
     for (const key of [...WIZARD_KEYS, PLAYER_KEY]) expectNotHere(answers[key], key);
     // The documentation page, its files, the description and the sign-in pages answer here, and none of them redirects.
-    for (const key of [DOCS_PAGE_KEY, ...DOCS_FILE_KEYS, ...DESCRIPTION_KEYS, ...PAGE_KEYS]) {
+    for (const key of [DOCS_PAGE_KEY, ...DOCS_FILE_KEYS, ...DESCRIPTION_KEYS, ...PAGE_KEYS, ...DASH_KEYS]) {
       expect(answers[key].status, key).toBe(200);
       expect(answers[key].headers.get("location"), key).toBeNull();
     }
+    // GET / sends a browser without a session cookie to the sign-in page, on this address.
+    expect([answers[ROOT_KEY].status, answers[ROOT_KEY].headers.get("location"), answers[ROOT_KEY].calls]).toEqual([302, "/signin", 0]);
     expect(await count(deps, "workspace")).toBe(0);
   });
 
@@ -307,7 +324,6 @@ describe("the host-routing matrix", () => {
   it("an unknown path is 404 on a configured host and 421 on an unknown one", async () => {
     const { deps } = await twoAddress();
     const paths: [string, string][] = [
-      ["GET", "/"],
       ["GET", "/nope"],
       ["GET", "/api/v1/nope"],
       ["GET", "/t"],

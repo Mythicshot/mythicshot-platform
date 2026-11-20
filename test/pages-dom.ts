@@ -14,12 +14,21 @@ export class FakeText {
 
 type Listener = (event: FakeEvent) => void;
 
+/** What a keyboard event carries besides its type: the key, and whether Shift was held. */
+export type KeyInit = { key?: string; shiftKey?: boolean };
+
 export class FakeEvent {
   defaultPrevented = false;
+  readonly key: string;
+  readonly shiftKey: boolean;
   constructor(
     public type: string,
     public target: FakeElement,
-  ) {}
+    init: KeyInit = {},
+  ) {
+    this.key = init.key ?? "";
+    this.shiftKey = init.shiftKey === true;
+  }
   preventDefault(): void {
     this.defaultPrevented = true;
   }
@@ -132,8 +141,8 @@ export class FakeElement {
     this.listeners.set(type, list);
   }
   /** Runs this element's listeners for `type`, then its ancestors' (bubbling). */
-  dispatch(type: string): FakeEvent {
-    const event = new FakeEvent(type, this);
+  dispatch(type: string, init: KeyInit = {}): FakeEvent {
+    const event = new FakeEvent(type, this, init);
     for (let at: FakeElement | null = this; at !== null; at = at.parent) for (const fn of at.listeners.get(type) ?? []) fn(event);
     return event;
   }

@@ -74,6 +74,15 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /signin/signin.css": "app",
   "GET /signin/signin.js": "app",
 
+  // The dashboard (src/dash/), on the app address where the session cookie lives. The
+  // tours address sends / on to the app address, which then sends a person to /tours or
+  // /signin; the pages and their files have no place on the tours address.
+  "GET /": "app-redirect",
+  "GET /tours": "app",
+  "GET /dash/tours.js": "app",
+  "GET /dash/dash.css": "app",
+  "GET /dash/dash.js": "app",
+
   // Tour pages, their pictures and the player's files.
   "GET /p/:name": "tours-redirect",
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": "tours",

@@ -192,8 +192,12 @@ const LISTS: Record<string, { path: string; holds: string; only?: "token" | "ses
 
 type Sample = { method: string; path: string; json?: unknown; headers?: Record<string, string> };
 
-/** Routes that belong to no workspace: why, and requests that must answer everyone the same. */
-const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[] }> = {
+/**
+ * Routes that belong to no workspace: why, and requests that must answer everyone the same.
+ * `byCookie`: the answer may differ with whether a session cookie is sent, and on nothing
+ * else: every caller with a cookie gets one answer, every caller without one another.
+ */
+const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; byCookie?: true }> = {
   "GET /healthz": { reason: "says only that the site is up", samples: () => [{ method: "GET", path: "/healthz" }] },
   "GET /setup": { reason: "the wizard's page, open only while the site has no workspace at all", samples: () => [{ method: "GET", path: "/setup" }] },
   "GET /setup/setup.css": { reason: "the wizard's stylesheet, open only while the site has no workspace at all", samples: () => [{ method: "GET", path: "/setup/setup.css" }] },
@@ -225,6 +229,15 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[] }> 
   "GET /account": { reason: "the account page, fixed text the same for everyone; the account it shows is fetched by its script from the API", samples: () => [{ method: "GET", path: "/account" }] },
   "GET /signin/signin.css": { reason: "the sign-in pages' stylesheet, fixed text", samples: () => [{ method: "GET", path: "/signin/signin.css" }] },
   "GET /signin/signin.js": { reason: "the sign-in pages' script, fixed text", samples: () => [{ method: "GET", path: "/signin/signin.js" }] },
+  "GET /": {
+    reason: "sends a browser to the Tours page when it sends a session cookie and to the sign-in page when not, without looking the cookie up",
+    samples: () => [{ method: "GET", path: "/" }],
+    byCookie: true,
+  },
+  "GET /tours": { reason: "the dashboard's Tours page, fixed text the same for everyone; the tours it shows its script asks the API for", samples: () => [{ method: "GET", path: "/tours" }] },
+  "GET /dash/tours.js": { reason: "the Tours page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/tours.js" }] },
+  "GET /dash/dash.css": { reason: "the dashboard's stylesheet, fixed text", samples: () => [{ method: "GET", path: "/dash/dash.css" }] },
+  "GET /dash/dash.js": { reason: "the dashboard's shared script, fixed text", samples: () => [{ method: "GET", path: "/dash/dash.js" }] },
   "POST /api/v1/signin/request": {
     reason: "asks for a sign-in link: the answer is the same for every address and every caller, and a link goes only to the address's own mailbox",
     samples: () => [{ method: "POST", path: "/api/v1/signin/request", json: { email: "nobody-here@example.com" }, headers: { origin: ORIGIN } }],
@@ -1006,7 +1019,19 @@ describe("routes with no owner", () => {
         w.tick();
         const first = await fire(deps, sample, callers[0][1]);
         statuses[key].push(first.status);
-        for (const [who, credential] of callers.slice(1)) expect(seen(await fire(deps, sample, credential)), `${key} ${sample.path} for ${who}`).toEqual(seen(first));
+        // For a route that answers by whether a cookie is sent, the first caller with one sets that answer.
+        let firstWithCookie: Call | null = null;
+        for (const [who, credential] of callers.slice(1)) {
+          const answer = await fire(deps, sample, credential);
+          if (entry.byCookie === true && credential.headers?.cookie !== undefined) {
+            firstWithCookie ??= answer;
+            expect(seen(answer), `${key} ${sample.path} for ${who}`).toEqual(seen(firstWithCookie));
+          } else expect(seen(answer), `${key} ${sample.path} for ${who}`).toEqual(seen(first));
+        }
+        if (entry.byCookie === true) {
+          expect([first.status, first.headers.get("location"), first.calls], `${key} without a cookie`).toEqual([302, "/signin", 0]);
+          expect([firstWithCookie?.status, firstWithCookie?.headers.get("location"), firstWithCookie?.calls], `${key} with a cookie`).toEqual([302, "/tours", 0]);
+        }
       }
     }
     // No token or session was looked at (none records a use), nothing was claimed and nothing stored.
@@ -1020,7 +1045,8 @@ describe("routes with no owner", () => {
     expect(statuses["GET /p/:name"]).toEqual([200, 200, 404, 404]);
     // A code nobody was given gets the one refusal of a sign-in link.
     expect(statuses["POST /api/v1/signin/complete"]).toEqual([403]);
-    for (const key of Object.keys(OPEN).filter((k) => !k.includes(" /setup") && !k.includes(":slug") && !k.includes(":name") && !k.endsWith("/signin/complete"))) for (const s of statuses[key]) expect(s, key).toBe(200);
+    expect(statuses["GET /"]).toEqual([302]);
+    for (const key of Object.keys(OPEN).filter((k) => !k.includes(" /setup") && !k.includes(":slug") && !k.includes(":name") && !k.endsWith("/signin/complete") && k !== "GET /")) for (const s of statuses[key]) expect(s, key).toBe(200);
 
     // A draft's link, the link of a tour whose publish has not finished, and a picture that
     // publish has already copied answer exactly as a name that never existed.
