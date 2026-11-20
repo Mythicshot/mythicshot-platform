@@ -32,7 +32,7 @@ const ACCOUNT_MAIN = `  <div id="account-page">
       <h2 class="card-title" id="h-details" tabindex="-1">Your details</h2>
       <div class="row" id="row-username"><span>Username</span><span class="r" id="account-username"></span></div>
       <div class="row"><span>Email address</span><span class="r"><span id="account-email"></span><button type="button" class="btn sm quiet" id="email-change" hidden>Change</button></span></div>
-      <p class="hint" id="email-off" hidden>This site cannot send mail, so the email address cannot be changed here.</p>
+      <p class="hint" id="email-off" hidden>This site cannot send mail, so an email address cannot be changed here.</p>
       <div class="row"><span>Workspace</span><span class="r" id="account-workspace"></span></div>
     </div>
     <div class="card">

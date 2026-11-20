@@ -8,7 +8,7 @@
 // textContent, so a title can never become markup.
 //
 // The bars are sized through the CSSOM (element.style.width), which the content security
-// policy allows, as the account page sizes its bar; no style attribute is ever written.
+// policy allows, as the Admin page sizes its bars; no style attribute is ever written.
 //
 // Delete asks the Tours page's question, with its sentences, through the dashboard's one
 // question helper (Dash.question, src/dash/script.ts): while it is open the bar and the page

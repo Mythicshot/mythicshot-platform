@@ -128,7 +128,7 @@ export function emailChangeMail(to: string, link: string, siteName: string = DEF
       "",
       link,
       "",
-      `It works once and for 15 minutes, and you need to be signed in to ${name} when you open it. Until you confirm it there, nothing changes. If you did not ask for this, ignore this mail.`,
+      `It works once and for 15 minutes, and you need to be signed in to that ${name} account when you open it. Until you confirm it there, nothing changes. If you did not ask for this, ignore this mail.`,
       "",
     ].join("\n"),
   };

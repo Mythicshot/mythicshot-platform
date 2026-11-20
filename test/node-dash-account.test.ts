@@ -43,9 +43,11 @@ const BAD_EMAIL = "That does not look like an email address.";
 const NOT_ENDED = "That session could not be ended. Reload the page.";
 const MAIL_OFF_DETAIL = "This site cannot send mail, so an email address cannot be changed here.";
 // Proposed, not in the mockups.
-const MAIL_OFF_LINE = "This site cannot send mail, so the email address cannot be changed here.";
+const MAIL_OFF_LINE = "This site cannot send mail, so an email address cannot be changed here.";
 const HINT = "We send a link to the new address. Your address changes when you open it.";
 const BAD_CODE = "This link no longer works. Ask for a new one from your account page.";
+// Proposed (review follow-up L3).
+const OTHER_ACCOUNT = "If you have more than one account, sign in to the one that asked for the change and open the link again.";
 
 type Answer = { status: number; json?: unknown } | "network";
 type Fetched = { method: string; path: string; headers: Record<string, string>; body: string | undefined; init: Record<string, unknown> };
@@ -382,6 +384,18 @@ describe("the Account page", () => {
     expect(ended.left()).toBe("/signin");
   });
 
+  it("a session answer without its session part is a failure, as the old account page had it", async () => {
+    const full = (sessionAnswer() as { json: Record<string, unknown> }).json;
+    for (const part of [undefined, null, "ses_x"]) {
+      const tab = account({}, { session: { status: 200, json: { ...full, session: part } } });
+      await tab.settle();
+      expect(tab.$("dash-load").textContent, String(part)).toBe(FAILED);
+      expect(tab.$("account").hidden, String(part)).toBe(true);
+      expect(tab.fetched.map((f) => f.path), String(part)).toEqual(["/api/v1/session"]);
+      expect(tab.$("dash-user").textContent, String(part)).toBe("");
+    }
+  });
+
   it("when the session cannot be read the page says so; when the list cannot, the page shows the rest and says so", async () => {
     const broken = openPage(ACCOUNT_HTML, ACCOUNT_JS, `${APP}/account`, answers({ "GET /api/v1/session": "network" }));
     await broken.settle();
@@ -631,7 +645,7 @@ describe("the page an email-change link opens", () => {
     tab.$("confirm-button").click();
     await tab.settle();
     expect(states(tab)).toEqual(["dead"]);
-    expect(tab.shows()).toEqual(["Mythicshot", "solex", "Confirm your new email address", BAD_CODE]);
+    expect(tab.shows()).toEqual(["Mythicshot", "solex", "Confirm your new email address", BAD_CODE, OTHER_ACCOUNT]);
     expect(tab.$("dead").all().filter((e) => e.tagName === "a").map((a) => [a.getAttribute("href"), a.textContent])).toEqual([["/account", "Back to your account"]]);
     expect(tab.doc.activeElement?.id).toBe("h-dead");
     expect(tab.$("confirm-button").disabled).toBe(false);
@@ -708,6 +722,92 @@ describe("the page an email-change link opens", () => {
     expect(tab.fetched.filter((f) => f.method === "POST").map((f) => JSON.parse(f.body!).code)).toEqual([CODE, CODE, CODE, CODE, CODE]);
   });
 
+  it("a confirm whose answer was lost keeps the code; when the retry is refused but the address did change, the page says it is done", async () => {
+    const tab = linkPage(
+      `${APP}/account/email#c=${CODE}`,
+      answers({
+        "GET /api/v1/session": [sessionAnswer(), sessionAnswer({ email: "new@example.com" })],
+        "POST /api/v1/account/email/confirm": ["network", { status: 400, json: { error: "bad_code", detail: BAD_CODE } }],
+      }),
+    );
+    await tab.settle();
+    tab.$("confirm-button").click();
+    await tab.settle();
+    // No answer came: the general sentence, and the code kept for another press.
+    expect([tab.$("confirm-message").textContent, states(tab)]).toEqual([FAILED, ["confirm"]]);
+    tab.$("confirm-button").click();
+    await tab.settle();
+    // The first press did go through: the session now has the new address.
+    expect(states(tab)).toEqual(["done"]);
+    expect(tab.shows()).toEqual(["Mythicshot", "solex", "Your email address is now new@example.com", "Sign-in links go to this address from now on. We sent a notice to you@example.com."]);
+    expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", "POST /api/v1/account/email/confirm", "POST /api/v1/account/email/confirm", "GET /api/v1/session"]);
+    expect(tab.doc.activeElement?.id).toBe("h-done");
+  });
+
+  it("a retry after a lost answer that is refused, with the address unchanged or not readable, is the dead link; a refusal with no lost answer asks nothing more", async () => {
+    for (const second of [sessionAnswer(), SIGNED_OUT, "network", { status: 500, json: {} }] as Answer[]) {
+      const tab = linkPage(
+        `${APP}/account/email#c=${CODE}`,
+        answers({ "GET /api/v1/session": [sessionAnswer(), second], "POST /api/v1/account/email/confirm": ["network", { status: 400, json: { error: "bad_code" } }] }),
+      );
+      await tab.settle();
+      tab.$("confirm-button").click();
+      await tab.settle();
+      tab.$("confirm-button").click();
+      await tab.settle();
+      expect(states(tab), JSON.stringify(second)).toEqual(["dead"]);
+    }
+    const plain = linkPage(`${APP}/account/email#c=${CODE}`, answers({ "GET /api/v1/session": sessionAnswer(), "POST /api/v1/account/email/confirm": { status: 400, json: { error: "bad_code" } } }));
+    await plain.settle();
+    plain.$("confirm-button").click();
+    await plain.settle();
+    expect(states(plain)).toEqual(["dead"]);
+    expect(plain.fetched.filter((f) => f.path === "/api/v1/session")).toHaveLength(1);
+  });
+
+  it("against the real app: the confirm went through but its answer was lost; the retry shows that the address is changed", async () => {
+    const made = await makeDeps(TWO);
+    const { deps, mail } = made;
+    await seedAccount(deps, { admin: true, username: "acct-admin" });
+    const owner = await seedAccount(deps, { username: "solex" });
+    const me = browser(deps);
+    await me.signIn(owner.userId);
+    const page = me.account();
+    await page.settle();
+    page.$("email-change").click();
+    page.$("change-email").value = "solex.new@example.com";
+    page.$("change-send").click();
+    await page.settle();
+    await made.settle();
+    const link = /https:\/\/app\.example\.com\/account\/email#c=dpe_[0-9a-f]{40}/.exec(mail.sent[0].text)![0];
+    // A browser whose first confirm reaches the server but whose answer never arrives.
+    const app = createApp(deps);
+    let lose = true;
+    const respond: Responder = async (req) => {
+      const headers: Record<string, string> = { ...req.headers, "user-agent": FIREFOX, cookie: me.jar.cookie! };
+      if (req.method !== "GET") Object.assign(headers, { origin: APP, "sec-fetch-site": "same-origin" });
+      const res = await app.fetch(new Request(APP + req.path, { method: req.method, headers, body: req.body }));
+      const text = await res.text();
+      if (req.method === "POST" && lose) {
+        lose = false;
+        return "network";
+      }
+      return { status: res.status, json: text === "" ? undefined : JSON.parse(text) };
+    };
+    const tab = linkPage(link, respond);
+    await tab.settle();
+    tab.$("confirm-button").click();
+    await tab.settle();
+    await made.settle();
+    expect(tab.$("confirm-message").textContent).toBe(FAILED);
+    expect(await emailOf(deps, owner.userId)).toBe("solex.new@example.com");
+    tab.$("confirm-button").click();
+    await tab.settle();
+    expect(states(tab)).toEqual(["done"]);
+    expect(tab.$("h-done").textContent).toBe("Your email address is now solex.new@example.com");
+    expect(tab.$("done-old").textContent).toBe(owner.email);
+  });
+
   it("when who is signed in cannot be read, the page says so and shows no state", async () => {
     const tab = linkPage(`${APP}/account/email#c=${CODE}`, answers({ "GET /api/v1/session": "network" }));
     await tab.settle();
@@ -780,7 +880,7 @@ describe("the Account page and the link page against the real app", () => {
     expect(page.$("sent-title").textContent).toBe("Check solex.new@example.com");
     expect(page.$("sent-old").textContent).toBe(owner.email);
     expect(mail.sent.map((m) => m.to)).toEqual(["solex.new@example.com"]);
-    expect(mail.sent[0].text).toContain("It works once and for 15 minutes, and you need to be signed in to Mythicshot when you open it.");
+    expect(mail.sent[0].text).toContain("It works once and for 15 minutes, and you need to be signed in to that Mythicshot account when you open it.");
     const link = /https:\/\/app\.example\.com\/account\/email#c=dpe_[0-9a-f]{40}/.exec(mail.sent[0].text)![0];
     // Nothing has changed yet.
     expect(await emailOf(deps, owner.userId)).toBe(owner.email);
