@@ -502,7 +502,7 @@ function browser(deps: Deps) {
     }
     const text = await res.text();
     const retry = res.headers.get("retry-after");
-    return { status: res.status, json: text === "" ? undefined : JSON.parse(text), headers: retry === null ? {} : { "retry-after": retry } };
+    return { status: res.status, json: text === "" ? undefined : JSON.parse(text), headers: retry === null ? {} : ({ "retry-after": retry } as Record<string, string>) };
   };
   return {
     jar,
