@@ -882,6 +882,86 @@ describe("the three invariants", () => {
     expect(await count(deps, "media_object")).toBe(3);
   });
 
+  it("(b) expiry is final: a send whose object lands after its claim's lifetime is never stored, even when another send pruned it meanwhile", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await create(deps, token, CLIP)).json.id as string;
+    const file = fileOf(CLIP);
+    // The object of the slow send of part 1 lands; then the clock passes the claim's
+    // lifetime. Another request prunes the claim as loose: it deletes the claim's object,
+    // the slow send's batch runs, and only then does the pruner delete the row (with its
+    // `current = 0` re-check), as pruneClaims does in that order.
+    const slow = interrupt(deps, async () => {
+      now += 5 * 60 * 1000 + 1000;
+    });
+    const pruneMeanwhile: Deps = {
+      ...slow,
+      db: {
+        ...slow.db,
+        batch: async (stmts) => {
+          if (!stmts.some((st) => st.sql.includes("SET stored_at"))) return deps.db.batch(stmts);
+          const loose = await deps.db.all<{ claim: string }>("SELECT claim FROM media_object WHERE media_id = ? AND n = 1 AND current = 0 AND stored_at IS NULL AND claimed_at < ?", [id, now - 5 * 60 * 1000]);
+          expect(loose).toHaveLength(1);
+          await deps.drafts.delete(loose.map((l) => `m/${id}/part-001.${l.claim}`));
+          await deps.db.batch(stmts);
+          await deps.db.run("DELETE FROM media_object WHERE media_id = ? AND current = 0 AND (stored_at IS NOT NULL OR claimed_at < ?) AND claim = ?", [id, now - 5 * 60 * 1000, loose[0].claim]);
+        },
+      },
+    };
+    const r = await putPart(pruneMeanwhile, token, id, 1, partOf(file, 1));
+    expect([r.status, r.json?.error]).toEqual([409, "superseded"]);
+    expect(await deps.db.first("SELECT count(*) AS n FROM media_object WHERE media_id = ? AND n = 1 AND current = 1", [id])).toEqual({ n: 0 });
+    expect(await count(deps, "media_object")).toBe(0);
+    expect(await objectsOf(draftKeys, id)).toEqual([]);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+    // A fresh send of the part goes through, and the item can be finished with every object there.
+    for (const n of [0, 1, 2]) expect((await putPart(deps, token, id, n, partOf(file, n))).status).toBe(204);
+    expect((await commit(deps, token, id)).status).toBe(200);
+    const files = await onlineItemFiles(deps, (await get(deps, token, id)).json.link_id);
+    for (const key of files!.parts) expect(await readAll(deps, key)).not.toBeNull();
+  });
+
+  it("(b) a send past the claim's lifetime alone, with nobody pruning, is not stored either", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    const slow = interrupt(deps, async () => {
+      now += 5 * 60 * 1000 - 60_000 + 1;
+    });
+    refused(await putPart(slow, token, id, 0, fileOf(IMAGE)), 409, "superseded");
+    expect(await count(deps, "media_object")).toBe(0);
+    expect(await objectsOf(draftKeys, id)).toEqual([]);
+    expect((await putPart(deps, token, id, 0, fileOf(IMAGE))).status).toBe(204);
+  });
+
+  it("at the bound of loose claims, a finished item answers already_online, a full allowance storage_full, and a failing clean-up still 429", async () => {
+    const { deps } = await makeDeps({ storageAllowanceBytes: IMAGE.bytes + 4 * 2000 + 500 });
+    const { token } = await seedWorkspace(deps, "Acme");
+    const now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    const loose = async (n: number, bytes: number) => {
+      for (let i = 0; i < MAX_LOOSE_CLAIMS; i++) {
+        await deps.db.run("INSERT INTO media_object (media_id, claim, n, ext, bytes, claimed_at) VALUES (?, ?, ?, ?, ?, ?)", [id, `${n === -1 ? "e" : "d"}${i}`.padEnd(24, "0"), n, n === -1 ? "png" : null, bytes, now]);
+      }
+    };
+    // Young loose preview claims: the allowance is the reason a further preview is refused.
+    await loose(-1, 2000);
+    refused(await putPreview(deps, token, id, png(10, 10, 1000)), 413, "storage_full");
+    // A failing clean-up on the way does not turn the 429 into a 500.
+    const failing: Deps = { ...deps, drafts: { ...deps.drafts, delete: () => Promise.reject(new Error("the store is down")) } };
+    await deps.db.run("UPDATE media_object SET claimed_at = ? WHERE media_id = ? AND claim LIKE 'e1%'", [now - 10 * 60 * 1000, id]);
+    refused(await quiet(() => putPart(failing, token, id, 0, fileOf(IMAGE))), 429, "too_many_items");
+    // An item that went online meanwhile answers as one.
+    await deps.db.run("UPDATE media SET state = 'online' WHERE id = ?", [id]);
+    await deps.db.run("UPDATE media_object SET claimed_at = ? WHERE media_id = ?", [now, id]);
+    expect((await putPart(deps, token, id, 0, fileOf(IMAGE))).json.error).toBe("already_online");
+  });
+
   it("(c) a commit leaves no replaced or expired claim behind", async () => {
     const { deps, draftKeys } = await makeDeps();
     const { token } = await seedWorkspace(deps, "Acme");

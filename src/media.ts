@@ -90,6 +90,11 @@ export const MEDIA_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * than any request that writes one lives. After it, a delete takes the claim as dead.
  */
 export const CLAIM_LIFETIME_MS = 5 * 60 * 1000;
+/**
+ * A claim is stored only while younger than CLAIM_LIFETIME_MS less this, and taken as dead
+ * only once older than CLAIM_LIFETIME_MS: the gap covers clocks that differ a little.
+ */
+export const CLAIM_STORE_MARGIN_MS = 60_000;
 /** Items one list page holds. */
 export const LIST_PAGE = 50;
 /** Items one create removes at most while sweeping, to bound its work: three calls each. */
@@ -352,11 +357,20 @@ async function sweep(deps: Deps, workspaceId: string): Promise<void> {
  * MAX_LOOSE_CLAIMS claims that are not current), the object, then one batch that marks
  * the claim stored and current in place of the claim that was, only while the item is
  * uploading. Then the item's loose claims (the one this replaced, and any of a request
- * that is gone) are removed, objects first. At most fifteen calls: seven on the way, and
- * five more when the claim is first refused for loose claims (a look, their removal, a
- * second try and a second look), or four more when the object is not stored (a look at
- * the claim row, its removal, and a look at the item). Answers 204, or what the item has
- * become meanwhile.
+ * that is gone) are removed, objects first. At most seventeen calls, auth included: auth
+ * (2), the item (1) and the rate limit (1) before it; the claim (1); when that is refused
+ * at the bound of loose claims, a look (1), their removal (3) and a second try (1), or
+ * instead of the second try a look (1), the item (1) and, for a preview, the usage (1)
+ * before the answer; then the object (1), the batch (1), the read (1) and the removal of
+ * what it replaced (2), or, when the claim was not stored, a look at its row (1), its
+ * removal (2) and the item (1). Answers 204, or what the item has become meanwhile.
+ *
+ * Expiry is final: a claim old enough to be taken as dead (older than CLAIM_LIFETIME_MS,
+ * which pruneClaims and removeClosing remove, object first) can never be stored. The batch
+ * marks a claim stored only while it is younger than CLAIM_LIFETIME_MS less
+ * CLAIM_STORE_MARGIN_MS, one value taken once after the object was written, so the two
+ * ages never overlap the wrong way even between clocks that differ by up to the margin.
+ * A send past it ends in the clean-up, and answers 409 superseded.
  */
 async function storeClaim(
   deps: Deps,
@@ -365,6 +379,8 @@ async function storeClaim(
   o: { n: number; ext: ImageType | null; bytes: number; data: Uint8Array; contentType: string },
   claim: (token: string, now: number) => Stmt,
   refused: () => Promise<Response>,
+  /** For a claim counted against the allowance (the preview): the storage answer when it does not fit, else null. */
+  full: (now: ItemRow) => Promise<Response | null> = async () => null,
 ): Promise<Response> {
   const token = claimToken();
   const key = objectKey(item.id, { n: o.n, claim: token, ext: o.ext });
@@ -382,11 +398,25 @@ async function storeClaim(
     // have not finished. Loose claims are removed and the claim is tried once more.
     let held = await loose();
     if ((held?.held ?? 0) < MAX_LOOSE_CLAIMS) return refused();
-    if ((await pruneClaims(deps, auth.workspaceId, item.id)) > 0 && (await insert())) {
+    // Housekeeping: an error removing them falls through to the answer below, never a 500.
+    let pruned = 0;
+    try {
+      pruned = await pruneClaims(deps, auth.workspaceId, item.id);
+    } catch {
+      console.error("media: could not remove loose files of an item; a later send, commit or sweep removes them");
+    }
+    if (pruned > 0 && (await insert())) {
       held = null;
     } else {
       held = await loose();
       if ((held?.held ?? 0) < MAX_LOOSE_CLAIMS) return refused();
+      // Still at the bound: what the item has become comes first (finished or gone), then
+      // the allowance for a preview, and only then the bound itself.
+      const now = await loadItem(deps, auth, item.id);
+      if (now === null) return noItem();
+      if (now.state === "online") return alreadyOnline();
+      const storage = await full(now);
+      if (storage !== null) return storage;
       const wait = held?.oldest === null || held?.oldest === undefined ? CLAIM_LIFETIME_MS : held.oldest + CLAIM_LIFETIME_MS - deps.now();
       const res = apiError(429, "too_many_items", `${MAX_LOOSE_CLAIMS} sends of this item have not finished; wait for them, or try again later`);
       res.headers.set("retry-after", String(Math.min(CLAIM_LIFETIME_MS / 1000, Math.max(1, Math.ceil(wait / 1000)))));
@@ -402,14 +432,19 @@ async function storeClaim(
     await deps.drafts.put(key, o.data, { contentType: o.contentType, cacheControl: NO_CACHE });
     const open = `EXISTS (SELECT 1 FROM media WHERE media.id = ? AND ${OPEN_ITEM})`;
     const floor = deps.now() - MEDIA_MAX_AGE_MS;
+    // The youngest a claim may be stored at: one value for both statements.
+    const fresh = deps.now() - CLAIM_LIFETIME_MS + CLAIM_STORE_MARGIN_MS;
     phase = "sent";
     await deps.db.batch([
       {
         sql: `UPDATE media_object SET current = 0 WHERE media_id = ? AND n = ? AND current = 1 AND ${open}
-                AND EXISTS (SELECT 1 FROM media_object c WHERE c.media_id = ? AND c.claim = ? AND c.stored_at IS NULL)`,
-        params: [item.id, o.n, item.id, auth.workspaceId, floor, item.id, token],
+                AND EXISTS (SELECT 1 FROM media_object c WHERE c.media_id = ? AND c.claim = ? AND c.stored_at IS NULL AND c.claimed_at >= ?)`,
+        params: [item.id, o.n, item.id, auth.workspaceId, floor, item.id, token, fresh],
       },
-      { sql: `UPDATE media_object SET stored_at = ?, current = 1 WHERE media_id = ? AND claim = ? AND stored_at IS NULL AND ${open}`, params: [deps.now(), item.id, token, item.id, auth.workspaceId, floor] },
+      {
+        sql: `UPDATE media_object SET stored_at = ?, current = 1 WHERE media_id = ? AND claim = ? AND stored_at IS NULL AND claimed_at >= ? AND ${open}`,
+        params: [deps.now(), item.id, token, fresh, item.id, auth.workspaceId, floor],
+      },
     ]);
     const rows = await deps.db.all<ClaimRow & { current: number }>("SELECT n, claim, ext, stored_at, claimed_at, current FROM media_object WHERE media_id = ? AND (n = ? OR current = 0)", [item.id, o.n]);
     if (rows.some((r) => r.claim === token && r.current === 1)) {
@@ -739,6 +774,11 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
         if (now.state === "online") return alreadyOnline();
         const usage = await usageOf(deps, auth.workspaceId);
         return storageFull(usage, Math.max(0, data.byteLength - (now.preview_bytes ?? 0)), "preview");
+      },
+      async (now) => {
+        const usage = await usageOf(deps, auth.workspaceId);
+        const needed = Math.max(0, data.byteLength - (now.preview_bytes ?? 0));
+        return usage.allowance !== null && usage.used + needed > usage.allowance ? storageFull(usage, needed, "preview") : null;
       },
     );
   });
