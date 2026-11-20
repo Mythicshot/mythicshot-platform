@@ -296,9 +296,9 @@ export REHEARSE_TOKENS
 npm run rehearse:upgrade -- ~/backups/tours-<date>-<time> ~/rehearse/old ~/rehearse/new
 ```
 
-6. Read the report. Each check is one line that starts with PASS or FAIL, and the last line is `RESULT: PASS` or `RESULT: FAIL`. The report never shows your token, an email address or a name from your data, so you can pass it on to whoever helps you.
+6. Read the report. Each check is one line that starts with PASS or FAIL, and the last line is `RESULT: PASS`, `RESULT: PASS, with N added fields to read above` or `RESULT: FAIL`. The report never shows your token, an email address or a name from your data, so you can pass it on to whoever helps you.
 
-**How to tell it worked:** the last line is `RESULT: PASS`. If any check says FAIL, do not run the update; the indented lines below that check say what differed.
+**How to tell it worked:** the last line is `RESULT: PASS`, or `RESULT: PASS, with N added fields to read above`. In the second case, read the `added fields` lines under the answers check first: each names a field the new version adds to an answer, which is usually a new feature but can also be data that should not be there. Update only when every one of them is a field you expect. If any check says FAIL, do not run the update; the indented lines below that check say what differed.
 
 The rehearsal does not test your hosting: not how the hosting starts the app, not its file system and not its version of Node.js. It also proves only what your own data holds; a kind of tour your site does not have yet is not tried.
 

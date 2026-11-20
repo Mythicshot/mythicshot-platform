@@ -52,6 +52,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ACCOUNT_TABLES,
+  addedFieldCount,
   checkAccountsBackfill,
   compareAnswers,
   compareRows,
@@ -85,6 +86,12 @@ export function healthHosts(mode: Mode): string[] {
   const h = HOSTS[mode];
   if (mode === "one") return [h.app];
   return h.img === undefined ? [h.tours, h.app] : [h.tours, h.app, h.img];
+}
+
+/** The roles a build's health answers must report on those addresses, in the same order: none asked with one address (the answer is taken as today), each address's own with two or three. */
+export function healthRoles(mode: Mode): (string | null)[] {
+  if (mode === "one") return [null];
+  return HOSTS[mode].img === undefined ? ["tours", "app"] : ["tours", "app", "img"];
 }
 
 /**
@@ -214,8 +221,14 @@ export function spawnBuild(build: string, dataDir: string, mode: Mode, workDir: 
   return { port, child, out, err, exited, startedAt: Date.now() };
 }
 
-/** Waits until the build has bound 127.0.0.1 on its port and every address answers its health check. */
-export async function waitReady(r: Running, hosts: string[]): Promise<void> {
+/**
+ * Waits until the build has bound 127.0.0.1 on its port and every address answers its health
+ * check. When `roles` names a role for a host, the health answer there must report it
+ * (`"address"`, the role the build sees the host in): a build that does not take a host's
+ * setting, such as one given IMG_HOST that does not know it, answers there as no address of
+ * the site, and fails at once with a line naming the placeholder host and the roles only.
+ */
+export async function waitReady(r: Running, hosts: string[], roles: (string | null)[] = []): Promise<void> {
   let gone = false;
   void r.exited.then(() => (gone = true));
   const deadline = Date.now() + START_TIMEOUT_MS;
@@ -225,13 +238,24 @@ export async function waitReady(r: Running, hosts: string[]): Promise<void> {
     if (bound !== undefined) {
       if (bound !== `rehearse-bound ${LOOPBACK} ${r.port}`) throw new Error("the build did not listen on 127.0.0.1 only");
       let ok = true;
-      for (const host of hosts) {
+      for (const [i, host] of hosts.entries()) {
+        let a: Answer;
         try {
-          const a = await fetchAnswer(r.port, "GET", "/healthz", host);
-          if (a.status !== 200) ok = false;
+          a = await fetchAnswer(r.port, "GET", "/healthz", host);
         } catch {
           ok = false;
+          continue;
         }
+        if (a.status !== 200) {
+          ok = false;
+          continue;
+        }
+        const want = roles[i] ?? null;
+        if (want === null) continue;
+        const said = jsonOf(a)?.address;
+        if (said === want) continue;
+        const as = said === undefined || said === null ? "no address of the site" : typeof said === "string" && KNOWN_ROLES.includes(said) ? `the ${said} address` : "something else";
+        throw new Error(`the build answers health on ${host} as ${as}, not as the ${want} address`);
       }
       if (ok) return;
     }
@@ -274,6 +298,9 @@ export function fetchAnswer(port: number, method: string, path: string, host: st
     req.end();
   });
 }
+
+/** The roles a health answer may report that the report repeats by name; any other value is never printed. */
+const KNOWN_ROLES: readonly string[] = ["tours", "app", "img"];
 
 const decoder = new TextDecoder();
 function jsonOf(a: Answer): any {
@@ -511,7 +538,7 @@ async function runPhase(build: BuildInfo, dataDir: string, mode: Mode, workDir: 
   const r = spawnBuild(build.dir, dataDir, mode, workDir, port);
   const hosts = healthHosts(mode);
   try {
-    await waitReady(r, hosts);
+    await waitReady(r, hosts, healthRoles(mode));
   } catch (err) {
     await stopBuild(r);
     const said = r.err.map((l) => l.split(workDir).join("<scratch>")).slice(-3);
@@ -532,6 +559,18 @@ async function runPhase(build: BuildInfo, dataDir: string, mode: Mode, workDir: 
 
 const tokenHash = (t: string) => createHash("sha256").update(t, "utf8").digest("hex");
 
+/**
+ * The report's last line: `RESULT: FAIL (...)` when a check failed; otherwise `RESULT: PASS`,
+ * or, when the new build's answers added fields, `RESULT: PASS, with N added fields to read
+ * above` (N: the field paths listed, over all routes). The exit status is 0 for both: an added
+ * field is allowed, but it is to be read before updating, because a new field can also be a leak.
+ */
+export function resultLine(failed: number, addedFields: number): string {
+  const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+  if (failed > 0) return `RESULT: FAIL (${plural(failed, "check")} failed)`;
+  return addedFields === 0 ? "RESULT: PASS" : `RESULT: PASS, with ${plural(addedFields, "added field")} to read above`;
+}
+
 /** Runs the whole rehearsal and returns the exit status. */
 export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (line: string) => void): Promise<number> {
   const args = parseArgs(argv, env);
@@ -546,6 +585,8 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
   if (modes.note !== null) report.line(`      ${modes.note}`);
   if (!existsSync(join(args.data, "db.sqlite"))) throw new Error("the data folder holds no db.sqlite");
   const sourceBefore = hashTree(args.data);
+  // How many added field paths the old-to-new comparison named: the last line asks the reader to read them.
+  let addedCount = 0;
   const work = mkdtempSync(join(tmpdir(), "rehearse-upgrade-"));
   scratch = work;
   try {
@@ -569,6 +610,7 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
 
     // The old build against the new one: a JSON answer that only adds fields is allowed, and named.
     const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true });
+    addedCount = addedFieldCount(cmp);
     report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.addedFields} differ only by added fields, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
     for (const route of Object.keys(cmp.addedFieldsByRoute).sort()) report.line(`      added fields, ${route}: ${cmp.addedFieldsByRoute[route].join(", ")}`);
 
@@ -630,7 +672,7 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     const pair = ports.map((p) => spawnBuild(newBuild.dir, race, modes.next, work, p));
     const spread = Math.abs(pair[1].startedAt - pair[0].startedAt);
     const hosts = healthHosts(modes.next);
-    const ready = await Promise.allSettled(pair.map((r) => waitReady(r, hosts)));
+    const ready = await Promise.allSettled(pair.map((r) => waitReady(r, hosts, healthRoles(modes.next))));
     const raceAnswers = ready.every((x) => x.status === "fulfilled") ? await recordSite(pair[0].port, modes.next, tokens) : null;
     await Promise.all(pair.map((r) => stopBuild(r)));
     const startProblems = ready.flatMap((x, i) => (x.status === "rejected" ? [`process ${i + 1}: ${x.reason instanceof Error ? x.reason.message : "did not start"}`] : []));
@@ -655,7 +697,7 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     for (const [p, h] of sourceBefore) if (sourceAfter.get(p) !== h) changed++;
     for (const p of sourceAfter.keys()) if (!sourceBefore.has(p)) changed++;
     report.check(changed === 0, `the given folder is as it was (${plural(sourceBefore.size, "file")}, ${changed} changed); the scratch copy was removed`);
-    report.line(report.failed === 0 ? "RESULT: PASS" : `RESULT: FAIL (${plural(report.failed, "check")} failed)`);
+    report.line(resultLine(report.failed, addedCount));
   }
   return report.failed === 0 ? 0 : 1;
 }
