@@ -1,4 +1,4 @@
-// npm run rehearse:upgrade -- <data folder> <old build> <new build> [--mode one|two] [--tokens-file <file>]
+// npm run rehearse:upgrade -- <data folder> <old build> <new build> [--mode one|two|three] [--tokens-file <file>]
 //
 // Rehearses an update on a copy of a site's data, on this computer only, and says plainly
 // whether the new build serves that site exactly as the old one did, and whether the old
@@ -13,9 +13,12 @@
 // - <old build> and <new build> are folders holding dist/node/entry.js, migrations/ and
 //   package.json, with the two runtime packages installed (an unpacked cPanel archive after
 //   `npm ci --omit=dev`, or a checkout after `npm run build`).
-// - The mode is `one` (one address, the default) or `two` (TOURS_HOST and APP_HOST set to
-//   the placeholders tours.example.com and app.example.com), from --mode or REHEARSE_MODE;
-//   never from the data.
+// - The mode is `one` (one address, the default), `two` (TOURS_HOST and APP_HOST set to
+//   the placeholders tours.example.com and app.example.com) or `three` (IMG_HOST set to
+//   img.example.com as well), from --mode or REHEARSE_MODE; never from the data. With
+//   `three`, a build that does not know the img address (any before 0.1.19, seen from its
+//   own compiled files: knowsImgRole) runs with two addresses instead; that is allowed for
+//   the old build only, and the report says so in one line.
 // - The tokens whose view of the site is compared come from REHEARSE_TOKENS (separated by
 //   spaces, commas or line ends) or from a file named by --tokens-file, one per line. They
 //   are never printed and never written anywhere.
@@ -64,13 +67,55 @@ import {
   type StoreListing,
 } from "./rehearse-compare.ts";
 
-export type Mode = "one" | "two";
+export type Mode = "one" | "two" | "three";
+export const MODES: readonly Mode[] = ["one", "two", "three"];
 
 /** The Host header of each address. With one address the name is never checked, so any fixed name does. */
-export const HOSTS: Record<Mode, { tours: string; app: string }> = {
+export const HOSTS: Record<Mode, { tours: string; app: string; img?: string }> = {
   one: { tours: "localhost", app: "localhost" },
   two: { tours: "tours.example.com", app: "app.example.com" },
+  three: { tours: "tours.example.com", app: "app.example.com", img: "img.example.com" },
 };
+
+/**
+ * Every address a build of the mode has, each checked for health when it starts: one
+ * name with one address, tours and app with two, and img as well with three.
+ */
+export function healthHosts(mode: Mode): string[] {
+  const h = HOSTS[mode];
+  if (mode === "one") return [h.app];
+  return h.img === undefined ? [h.tours, h.app] : [h.tours, h.app, h.img];
+}
+
+/**
+ * Whether a build knows the img address (IMG_HOST, from 0.1.19), from its own compiled
+ * files and never by starting it: its host roles (HOST_ROLES in dist/hosts.js) list
+ * "img", and its Node settings (dist/node/config.js) read "IMG_HOST". An older build
+ * ignores IMG_HOST, so its img address would answer as no address of the site.
+ */
+export function knowsImgRole(buildDir: string): boolean {
+  const read = (...p: string[]) => {
+    try {
+      return readFileSync(join(buildDir, ...p), "utf8");
+    } catch {
+      return "";
+    }
+  };
+  const roles = /\bHOST_ROLES\s*=\s*\[([^\]]*)\]/.exec(read("dist", "hosts.js"));
+  return roles !== null && /["']img["']/.test(roles[1]) && /["']IMG_HOST["']/.test(read("dist", "node", "config.js"));
+}
+
+/**
+ * The mode each build runs with: the asked one, except that with `three` an old build that
+ * does not know the img address runs with `two`, and `note` is the report's line saying
+ * so. A new build that does not know it cannot be rehearsed with three addresses.
+ */
+export function buildModes(asked: Mode, old: { version: string; knowsImg: boolean }, next: { version: string; knowsImg: boolean }): { old: Mode; next: Mode; note: string | null } {
+  if (asked !== "three") return { old: asked, next: asked, note: null };
+  if (!next.knowsImg) throw new Error(`the new build ${next.version} does not know the img address (IMG_HOST, from 0.1.19); rehearse it with --mode two`);
+  if (old.knowsImg) return { old: "three", next: "three", note: null };
+  return { old: "two", next: "three", note: `the old build ${old.version} does not know the img address, which came in 0.1.19: it runs with two addresses, the new build with three` };
+}
 
 const LOOPBACK = "127.0.0.1";
 const TOKEN = /^dp_[0-9a-f]{40}$/;
@@ -139,9 +184,11 @@ function childEnv(settings: Record<string, string>): NodeJS.ProcessEnv {
   return { ...env, ...settings };
 }
 
-/** The settings of a mode: none for one address, the two placeholder names for two. */
+/** The settings of a mode: none for one address, the two placeholder names for two, and the img one as well for three. */
 export function modeSettings(mode: Mode): Record<string, string> {
-  return mode === "two" ? { TOURS_HOST: HOSTS.two.tours, APP_HOST: HOSTS.two.app } : {};
+  if (mode === "one") return {};
+  const h = HOSTS[mode];
+  return h.img === undefined ? { TOURS_HOST: h.tours, APP_HOST: h.app } : { TOURS_HOST: h.tours, APP_HOST: h.app, IMG_HOST: h.img };
 }
 
 /** Starts a build's Node entry on `dataDir` and a free port. Does not wait for it; see waitReady. */
@@ -259,17 +306,21 @@ export function pictureAddresses(html: string): string[] | null {
  * health of each address; the tour list without a token and with an unknown one; per token
  * (by its number) the workspace, the tour list and the usage on each address, and for
  * every listed tour (by its place in the list) its page and every picture the page names.
+ * With three addresses these are the very requests of two, on the tours and app addresses,
+ * so a build with three compares with one with two; the img address's health is checked
+ * when the build starts (waitReady with healthHosts).
  */
 export async function recordSite(port: number, mode: Mode, tokens: string[]): Promise<Recorded[]> {
   const out: Recorded[] = [];
   const { tours, app } = HOSTS[mode];
-  const apiHosts = mode === "two" ? [["app", app], ["tours", tours]] : [["one", app]];
+  const several = mode !== "one";
+  const apiHosts = several ? [["app", app], ["tours", tours]] : [["one", app]];
   const add = async (key: string, method: string, routePath: string, path: string, host: string, token?: string) => {
     const answer = await fetchAnswer(port, method, path, host, token === undefined ? {} : { token });
     out.push({ key, route: `${method} ${routePath}`, answer });
     return answer;
   };
-  for (const [label, host] of mode === "two" ? [["tours", tours], ["app", app]] : [["one", app]]) {
+  for (const [label, host] of several ? [["tours", tours], ["app", app]] : [["one", app]]) {
     await add(`health (${label} address)`, "GET", "/healthz", "/healthz", host);
   }
   await add("no token: tour list", "GET", "/api/v1/tours", "/api/v1/tours", app);
@@ -288,7 +339,7 @@ export async function recordSite(port: number, mode: Mode, tokens: string[]): Pr
       if (typeof t?.slug !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(t.slug)) continue;
       const tourKey = `${who}: tour ${j + 1}`;
       const page = await add(`${tourKey} page`, "GET", "/t/:slug", `/t/${t.slug}`, tours);
-      if (mode === "two") await add(`${tourKey} page (app address)`, "GET", "/t/:slug", `/t/${t.slug}`, app);
+      if (several) await add(`${tourKey} page (app address)`, "GET", "/t/:slug", `/t/${t.slug}`, app);
       if (page.status !== 200) continue;
       const pictures = pictureAddresses(decoder.decode(page.body)) ?? [];
       for (const [k, address] of pictures.entries()) {
@@ -401,9 +452,9 @@ export function readTokens(env: NodeJS.ProcessEnv, file: string | null): string[
   return tokens;
 }
 
-type Args = { data: string; old: string; next: string; mode: Mode; tokensFile: string | null };
+export type Args = { data: string; old: string; next: string; mode: Mode; tokensFile: string | null };
 
-function parseArgs(argv: string[], env: NodeJS.ProcessEnv): Args {
+export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): Args {
   const positional: string[] = [];
   let mode = env.REHEARSE_MODE?.trim() || "one";
   let tokensFile: string | null = null;
@@ -416,9 +467,9 @@ function parseArgs(argv: string[], env: NodeJS.ProcessEnv): Args {
     else if (a.startsWith("--")) throw new Error(`unknown option ${a}`);
     else positional.push(a);
   }
-  if (positional.length !== 3) throw new Error("usage: rehearse-upgrade <data folder> <old build> <new build> [--mode one|two] [--tokens-file <file>]");
-  if (mode !== "one" && mode !== "two") throw new Error("the mode is one or two");
-  return { data: resolve(positional[0]), old: positional[1], next: positional[2], mode, tokensFile };
+  if (positional.length !== 3) throw new Error("usage: rehearse-upgrade <data folder> <old build> <new build> [--mode one|two|three] [--tokens-file <file>]");
+  if (!(MODES as readonly string[]).includes(mode)) throw new Error("the mode is one, two or three");
+  return { data: resolve(positional[0]), old: positional[1], next: positional[2], mode: mode as Mode, tokensFile };
 }
 
 /** The report: one line per check, and for a failed check one indented line per problem. */
@@ -444,6 +495,8 @@ class Report {
   }
 }
 
+const MODE_WORDS: Record<Mode, string> = { one: "one address", two: "two addresses", three: "three addresses" };
+
 type Phase = { answers: Recorded[]; stores: StoreListing; startedDb: DbRead; endDb: DbRead };
 
 /**
@@ -456,7 +509,7 @@ type Phase = { answers: Recorded[]; stores: StoreListing; startedDb: DbRead; end
 async function runPhase(build: BuildInfo, dataDir: string, mode: Mode, workDir: string, tokens: string[], report: Report, what: string): Promise<Phase | null> {
   const port = await freePort();
   const r = spawnBuild(build.dir, dataDir, mode, workDir, port);
-  const hosts = mode === "two" ? [HOSTS.two.tours, HOSTS.two.app] : [HOSTS.one.app];
+  const hosts = healthHosts(mode);
   try {
     await waitReady(r, hosts);
   } catch (err) {
@@ -485,10 +538,12 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
   const tokens = readTokens(env, args.tokensFile);
   const oldBuild = buildInfo(args.old);
   const newBuild = buildInfo(args.next);
+  const modes = buildModes(args.mode, { version: oldBuild.version, knowsImg: knowsImgRole(oldBuild.dir) }, { version: newBuild.version, knowsImg: knowsImgRole(newBuild.dir) });
   const report = new Report(print);
   const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 
-  report.line(`Upgrade rehearsal, ${args.mode === "two" ? "two addresses" : "one address"}: ${oldBuild.version} -> ${newBuild.version}, ${plural(tokens.length, "token")}`);
+  report.line(`Upgrade rehearsal, ${MODE_WORDS[args.mode]}: ${oldBuild.version} -> ${newBuild.version}, ${plural(tokens.length, "token")}`);
+  if (modes.note !== null) report.line(`      ${modes.note}`);
   if (!existsSync(join(args.data, "db.sqlite"))) throw new Error("the data folder holds no db.sqlite");
   const sourceBefore = hashTree(args.data);
   const work = mkdtempSync(join(tmpdir(), "rehearse-upgrade-"));
@@ -502,14 +557,14 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     const before = readDb(join(copy, "db.sqlite"));
     const unknownToOld = before.migrations.filter((m) => !oldBuild.migrations.includes(m));
     if (!report.check(unknownToOld.length === 0, `the data was written by the old build or an older one (${plural(before.migrations.length, "migration")} applied)`, unknownToOld.map((m) => `${m} is applied but not in the old build`))) return 1;
-    const old = await runPhase(oldBuild, copy, args.mode, work, tokens, report, `old build ${oldBuild.version}`);
+    const old = await runPhase(oldBuild, copy, modes.old, work, tokens, report, `old build ${oldBuild.version}`);
     if (old === null) return 1;
     report.line(`      recorded ${plural(old.answers.length, "answer")}; stores hold ${plural(old.stores.size, "file")}; database has ${plural(Object.keys(old.endDb.snapshot).length, "table")}`);
     const pending = newBuild.migrations.filter((m) => !old.endDb.migrations.includes(m));
     report.line(`      pending for the new build: ${pending.length === 0 ? "none" : pending.join(", ")}`);
 
     // --- the new build on the same copy
-    const next = await runPhase(newBuild, copy, args.mode, work, tokens, report, `new build ${newBuild.version}`);
+    const next = await runPhase(newBuild, copy, modes.next, work, tokens, report, `new build ${newBuild.version}`);
     if (next === null) return 1;
 
     // The old build against the new one: a JSON answer that only adds fields is allowed, and named.
@@ -519,7 +574,7 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
 
     for (const [i, token] of tokens.entries()) {
       const ws = next.endDb.snapshot.api_token?.rows.find((r) => r[next.endDb.snapshot.api_token.columns.indexOf("hash")] === tokenHash(token));
-      const usage = next.answers.find((r) => r.key === `token ${i + 1}: usage (${args.mode === "two" ? "app" : "one"} address)`);
+      const usage = next.answers.find((r) => r.key === `token ${i + 1}: usage (${modes.next === "one" ? "one" : "app"} address)`);
       if (ws === undefined || usage === undefined) {
         report.check(false, `token ${i + 1}: usage equals the sum of the rows`, ["the token or its usage answer was not found"]);
         continue;
@@ -554,7 +609,7 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     report.check(applied.length === 0, `applied migrations: exactly the new build's ${newBuild.migrations.length}, each once`, applied);
 
     // --- the way back: the old build on the migrated copy
-    const back = await runPhase(oldBuild, copy, args.mode, work, tokens, report, `way back: old build ${oldBuild.version} on the migrated copy`);
+    const back = await runPhase(oldBuild, copy, modes.old, work, tokens, report, `way back: old build ${oldBuild.version} on the migrated copy`);
     if (back !== null) {
       const again = compareAnswers(old.answers, back.answers);
       report.check(again.problems.length === 0 && again.added.length === 0, `way back: answers ${again.identical} identical to before the update, ${again.allowed + again.added.length} allowed differences, ${again.problems.length} differ`, again.problems);
@@ -572,11 +627,11 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     const race = join(work, "race");
     copyData(args.data, race);
     const ports = [await freePort(), await freePort()];
-    const pair = ports.map((p) => spawnBuild(newBuild.dir, race, args.mode, work, p));
+    const pair = ports.map((p) => spawnBuild(newBuild.dir, race, modes.next, work, p));
     const spread = Math.abs(pair[1].startedAt - pair[0].startedAt);
-    const hosts = args.mode === "two" ? [HOSTS.two.tours, HOSTS.two.app] : [HOSTS.one.app];
+    const hosts = healthHosts(modes.next);
     const ready = await Promise.allSettled(pair.map((r) => waitReady(r, hosts)));
-    const raceAnswers = ready.every((x) => x.status === "fulfilled") ? await recordSite(pair[0].port, args.mode, tokens) : null;
+    const raceAnswers = ready.every((x) => x.status === "fulfilled") ? await recordSite(pair[0].port, modes.next, tokens) : null;
     await Promise.all(pair.map((r) => stopBuild(r)));
     const startProblems = ready.flatMap((x, i) => (x.status === "rejected" ? [`process ${i + 1}: ${x.reason instanceof Error ? x.reason.message : "did not start"}`] : []));
     const errorLines = pair.reduce((n, r) => n + r.err.length, 0);

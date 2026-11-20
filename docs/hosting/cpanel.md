@@ -290,7 +290,7 @@ read -rs REHEARSE_TOKENS
 export REHEARSE_TOKENS
 ```
 
-5. Run the rehearsal on the backup folder. Put your backup folder's name in place of `tours-<date>-<time>`. If your platform has two addresses, as in [step 14](#14-a-second-address-for-the-app), add `--mode two` at the end.
+5. Run the rehearsal on the backup folder. Put your backup folder's name in place of `tours-<date>-<time>`. If your platform has two addresses, as in [step 14](#14-a-second-address-for-the-app), add `--mode two` at the end; with the third address for images and clips, as in [An optional third address for images and clips](#an-optional-third-address-for-images-and-clips), add `--mode three`.
 
 ```sh
 npm run rehearse:upgrade -- ~/backups/tours-<date>-<time> ~/rehearse/old ~/rehearse/new

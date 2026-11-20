@@ -1,7 +1,14 @@
 // The comparisons of the upgrade rehearsal (scripts/rehearse-compare.ts), without starting
-// any server: the allow-list lets through the date header and the version value and
-// nothing else, and every kind of real difference fails. The full rehearsal starts the
-// builds themselves and is run on its own: npm run rehearse:upgrade.
+// any build: the allow-list lets through the date header, the version value and (from the
+// old build to the new one only) fields a JSON answer adds, and every kind of real
+// difference fails. The address modes are checked on build folders made here and against a
+// stand-in server on 127.0.0.1. The full rehearsal starts the builds themselves and is run
+// on its own: npm run rehearse:upgrade.
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { transformSync } from "esbuild";
 import { describe, expect, it } from "vitest";
 import {
   checkAccountsBackfill,
@@ -17,7 +24,7 @@ import {
   type Recorded,
   type StoreListing,
 } from "../scripts/rehearse-compare.ts";
-import { pictureAddresses, readTokens } from "../scripts/rehearse-upgrade.ts";
+import { buildModes, healthHosts, knowsImgRole, modeSettings, parseArgs, pictureAddresses, readTokens, recordSite, waitReady, type Mode, type Running } from "../scripts/rehearse-upgrade.ts";
 
 const enc = new TextEncoder();
 
@@ -384,5 +391,124 @@ describe("migrations, usage, pages and tokens", () => {
       message = (err as Error).message;
     }
     expect(message).toBe("token 2 is not a token (dp_ and 40 lowercase hex characters)");
+  });
+});
+
+describe("the address modes", () => {
+  it("one, two or three, from --mode or REHEARSE_MODE; anything else is refused", () => {
+    const pos = ["data", "old", "new"];
+    expect(parseArgs([...pos], {}).mode).toBe("one");
+    expect(parseArgs([...pos, "--mode", "three"], {}).mode).toBe("three");
+    expect(parseArgs([...pos, "--mode=three"], {}).mode).toBe("three");
+    expect(parseArgs([...pos], { REHEARSE_MODE: " three " }).mode).toBe("three");
+    expect(parseArgs([...pos, "--mode", "two"], { REHEARSE_MODE: "three" }).mode).toBe("two");
+    expect(() => parseArgs([...pos, "--mode", "four"], {})).toThrow("the mode is one, two or three");
+  });
+
+  it("three sets the img address beside the two, and every address of a mode is checked for health", () => {
+    expect(modeSettings("one")).toEqual({});
+    expect(modeSettings("two")).toEqual({ TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com" });
+    expect(modeSettings("three")).toEqual({ TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com", IMG_HOST: "img.example.com" });
+    expect(healthHosts("one")).toEqual(["localhost"]);
+    expect(healthHosts("two")).toEqual(["tours.example.com", "app.example.com"]);
+    expect(healthHosts("three")).toEqual(["tours.example.com", "app.example.com", "img.example.com"]);
+  });
+
+  describe("whether a build knows the img address, from its compiled files", () => {
+    /** A build folder holding only the two files knowsImgRole reads, compiled from the given TypeScript as tsc would emit them. */
+    function buildWith(hostsTs: string | null, configTs: string | null): string {
+      const dir = mkdtempSync(join(tmpdir(), "rehearse-build-"));
+      mkdirSync(join(dir, "dist", "node"), { recursive: true });
+      const js = (ts: string) => transformSync(ts, { loader: "ts", format: "esm" }).code;
+      if (hostsTs !== null) writeFileSync(join(dir, "dist", "hosts.js"), js(hostsTs));
+      if (configTs !== null) writeFileSync(join(dir, "dist", "node", "config.js"), js(configTs));
+      return dir;
+    }
+    const today = { hosts: readFileSync(new URL("../src/hosts.ts", import.meta.url), "utf8"), config: readFileSync(new URL("../src/node/config.ts", import.meta.url), "utf8") };
+    // What 0.1.18 had: two roles, and settings that do not read IMG_HOST.
+    const before = {
+      hosts: 'export const HOST_ROLES = ["tours", "app"] as const;\nexport type HostRole = (typeof HOST_ROLES)[number];\n// IMG_HOST is not a setting here; "img" is no role.\n',
+      config: 'const ALLOWED = ["DATA_DIR", "PORT", "TOURS_HOST", "APP_HOST", "INVITE_CONTACT"];\nexport const allowed = ALLOWED;\n',
+    };
+
+    it("this checkout's build knows it; one shaped like 0.1.18 does not", () => {
+      const dirs = [buildWith(today.hosts, today.config), buildWith(before.hosts, before.config)];
+      try {
+        expect(knowsImgRole(dirs[0])).toBe(true);
+        expect(knowsImgRole(dirs[1])).toBe(false);
+      } finally {
+        for (const d of dirs) rmSync(d, { recursive: true, force: true });
+      }
+    });
+
+    it("both are needed: the img role and the setting read on Node; a missing file means it does not", () => {
+      const dirs = [buildWith(today.hosts, before.config), buildWith(before.hosts, today.config), buildWith(null, today.config), buildWith(today.hosts, null)];
+      try {
+        for (const d of dirs) expect(knowsImgRole(d)).toBe(false);
+        expect(knowsImgRole(join(tmpdir(), "no-such-build-folder-for-the-rehearsal"))).toBe(false);
+      } finally {
+        for (const d of dirs) rmSync(d, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("with three, an old build that does not know the img address runs with two, and the report says so in one line", () => {
+    const knows = (version: string) => ({ version, knowsImg: true });
+    const not = (version: string) => ({ version, knowsImg: false });
+    expect(buildModes("three", knows("0.1.24"), knows("0.1.25"))).toEqual({ old: "three", next: "three", note: null });
+    const mixed = buildModes("three", not("0.1.18"), knows("0.1.25"));
+    expect(mixed).toEqual({ old: "two", next: "three", note: "the old build 0.1.18 does not know the img address, which came in 0.1.19: it runs with two addresses, the new build with three" });
+    expect(mixed.note).not.toContain("\n");
+    expect(() => buildModes("three", knows("0.1.24"), not("0.1.18"))).toThrow("the new build 0.1.18 does not know the img address (IMG_HOST, from 0.1.19); rehearse it with --mode two");
+    // The other modes are as asked, whatever the builds know.
+    for (const m of ["one", "two"] as Mode[]) expect(buildModes(m, not("0.1.7"), not("0.1.8"))).toEqual({ old: m, next: m, note: null });
+  });
+
+  describe("against a stand-in server on 127.0.0.1", () => {
+    const TOKEN_1 = "dp_" + "1".repeat(40);
+    type Seen = { method: string; path: string; host: string };
+
+    /** Answers every route the rehearsal asks, the same on every address: one listed tour whose page names one picture. */
+    async function standIn(): Promise<{ server: Server; port: number; seen: Seen[] }> {
+      const seen: Seen[] = [];
+      const server = createServer((req, res) => {
+        seen.push({ method: req.method ?? "", path: req.url ?? "", host: req.headers.host ?? "" });
+        const json = (body: unknown) => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(body));
+        };
+        if (req.url === "/api/v1/tours") return json({ tours: [{ id: "tour_1", slug: "abcdefghij" }] });
+        if (req.url === "/t/abcdefghij") {
+          res.writeHead(200, { "content-type": "text/html" });
+          return res.end(`<script type="application/json" id="tour">${JSON.stringify({ base: "", tour: { chapters: [{ steps: [{ image: "p/a.png" }] }] } })}</script>`);
+        }
+        json({ ok: true });
+      });
+      await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+      const a = server.address();
+      return { server, port: typeof a === "object" && a !== null ? a.port : 0, seen };
+    }
+
+    it("three asks the very requests of two, on the tours and app addresses, and the img address only for its health", async () => {
+      const { server, port, seen } = await standIn();
+      try {
+        const two = await recordSite(port, "two", [TOKEN_1]);
+        const twoSeen = seen.splice(0);
+        const three = await recordSite(port, "three", [TOKEN_1]);
+        const threeSeen = seen.splice(0);
+        expect(three.map((r) => [r.key, r.route])).toEqual(two.map((r) => [r.key, r.route]));
+        expect(threeSeen).toEqual(twoSeen);
+        expect(new Set(threeSeen.map((s) => s.host))).toEqual(new Set(["tours.example.com", "app.example.com"]));
+        expect(three.map((r) => r.key)).toContain("health (tours address)");
+        expect(three.map((r) => r.key)).toContain("health (app address)");
+        expect(three.map((r) => r.key)).toContain("token 1: tour 1 page (app address)");
+        // Starting: health on each of the three addresses.
+        const r = { port, out: [`rehearse-bound 127.0.0.1 ${port}`], err: [], exited: new Promise<number | null>(() => {}), startedAt: Date.now() } as unknown as Running;
+        await waitReady(r, healthHosts("three"));
+        expect(seen.map((s) => [s.path, s.host])).toEqual([["/healthz", "tours.example.com"], ["/healthz", "app.example.com"], ["/healthz", "img.example.com"]]);
+      } finally {
+        server.close();
+      }
+    });
   });
 });

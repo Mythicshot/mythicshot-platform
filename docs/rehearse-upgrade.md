@@ -21,7 +21,9 @@ Each build is a folder with `dist/node/entry.js`, `migrations` and `package.json
 |---|---|
 | `REHEARSE_TOKENS` | The tokens whose view of the site is compared, separated by spaces, commas or line ends. At least one is needed. They are never printed or written anywhere |
 | `--tokens-file <file>` | Instead of `REHEARSE_TOKENS`: a file with one token per line |
-| `REHEARSE_MODE` | `one` (the default) or `two`. With `two`, both builds run with the two addresses `tours.example.com` and `app.example.com`. `--mode one` or `--mode two` does the same |
+| `REHEARSE_MODE` | `one` (the default), `two` or `three`. With `two`, both builds run with the two addresses `tours.example.com` and `app.example.com`. With `three`, they also get the address for images and clips, `img.example.com` (`IMG_HOST`), as described below. `--mode one`, `--mode two` or `--mode three` does the same |
+
+With `three`, the old build gets the third address only when it knows that address, which came in 0.1.19. The command reads this from the build's own compiled files and does not start the build to find out: the build's list of address roles (`dist/hosts.js`) must name `img`, and its settings (`dist/node/config.js`) must read `IMG_HOST`. An old build that does not know it runs with the two addresses and the new build with three, and the report says so in one line under its first line. A new build that does not know the third address cannot be rehearsed with `three`; the command stops and says to use `two`. Each build is checked for health on every address it has, the third one included, and the per-address checks of step 1 below run unchanged on the tours and app addresses, so a build with three addresses is compared with one with two answer by answer.
 
 Nothing else of your environment reaches the builds: no mail settings and no setup code. Each build runs on `127.0.0.1` only, on a free port, and no request goes anywhere else.
 
