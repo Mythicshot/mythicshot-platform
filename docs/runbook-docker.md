@@ -1138,6 +1138,7 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `connection_confirmed` | The account confirmed a request to connect the app, for its workspace; the subject is the id the app's token will have, and the detail names the request, such as `{"request":"crq_…"}`. The device's name is not recorded: it is the token's name in the token list |
 | `connection_refused` | The account refused a request to connect the app; the subject is the request |
 | `connection_collected` | The app collected the token of a confirmed request, and the token was made; the subject is the token, and the account is the one that confirmed |
+| `connection_mail_not_sent` | The mail telling the confirming account that a computer was connected was not sent; the subject is the token, and the detail names the request and why, such as `{"request":"crq_…","reason":"limit_account"}`: `limit_account` (5 such mails to the account that day), `limit_site` (30 from the site that hour), `no_address` (the account's address cannot be used), or the mail server's word (`connect`, `tls`, `auth`, `refused`, `timeout`) or `failed`. It is not tried again, and the connection itself is not affected |
 | `token_renamed` | A token of the workspace was renamed; the subject is the token |
 | `token_revoked` | A token of the workspace was revoked; the subject is the token |
 
