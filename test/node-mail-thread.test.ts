@@ -128,6 +128,9 @@ await import(${JSON.stringify(MAIL_WORKER_URL.href)});
 
 const mail = (subject: string): Mail => ({ to: "ada@example.com", subject, text: "x\n" });
 
+/** The one line written when the mail thread cannot start, with its fixed reason. */
+const START_LINE = (reason: string) => `mail: the mail thread could not start (${reason}); no mail was sent`;
+
 const made: ClosableMailer[] = [];
 function mailer(url: URL, options: Parameters<typeof workerMailer>[1] = {}, settings: SmtpSettings = SETTINGS): ClosableMailer {
   const m = workerMailer(settings, { workerUrl: url, ...options });
@@ -413,8 +416,12 @@ describe("the worker mailer, stand-in worker", () => {
     // To the worker: an id and the mail, nothing else.
     expect(posted.length).toBe(6);
     for (const message of posted) expect(Object.keys(message as object).sort()).toEqual(["id", "subject", "text", "to"]);
-    // Back: an id and the outcome. The crash's error is raised in this thread, and only noted.
-    const back = answers.filter((a) => !(a instanceof Error));
+    // Back: once per worker, first, that it is ready and nothing else (two workers: the
+    // crash ended the first); then an id and the outcome. The crash's error is raised in
+    // this thread, and only noted.
+    const ready = answers.filter((a) => !(a instanceof Error) && (a as { ready?: unknown }).ready !== undefined);
+    expect(ready).toEqual([{ ready: true }, { ready: true }]);
+    const back = answers.filter((a) => !(a instanceof Error) && !ready.includes(a));
     expect(back.length).toBe(5);
     for (const answer of back) expect(Object.keys(answer as object).sort()).toEqual(expect.arrayContaining(["id", "ok"]));
     for (const answer of back) expect(Object.keys(answer as object).length === 2 || Object.keys(answer as object).length === 4).toBe(true);
@@ -455,6 +462,72 @@ describe("the worker mailer, stand-in worker", () => {
     now += 1;
     await m.send(mail("ok"));
     expect(m.stats().starts).toBe(MAIL_WORKER_STARTS_PER_MINUTE + 1);
+  });
+
+  describe("a mail thread that cannot start says so in one fixed line, never as the mail server's refusal", () => {
+    /** A stand-in worker module that stops while it loads, before it serves anything. */
+    function brokenWorker(): URL {
+      wrappers += 1;
+      const file = join(scratch, `broken-worker-${wrappers}.mjs`);
+      writeFileSync(file, `import { workerData } from "node:worker_threads";\nthrow new Error("broken while loading, holding " + workerData.settings.password);\n`);
+      return pathToFileURL(file);
+    }
+
+    it("a worker module that stops while it loads: the mail is refused and the line says the thread did not start", async () => {
+      const lines: string[] = [];
+      const m = mailer(brokenWorker(), { log: (line) => void lines.push(line) });
+      expect(failure(await outcome(m.send(mail("ok"))), ["broken"])).toEqual(["refused", true]);
+      expect(lines).toEqual([START_LINE("it stopped before it was ready")]);
+      expect(m.stats()).toMatchObject({ starts: 1, running: false, busy: false });
+      // Each later start that fails the same way says it again, once.
+      failure(await outcome(m.send(mail("ok"))), ["broken"]);
+      expect(lines).toEqual([START_LINE("it stopped before it was ready"), START_LINE("it stopped before it was ready")]);
+    });
+
+    it("a missing worker module says the same", async () => {
+      const lines: string[] = [];
+      const m = mailer(pathToFileURL(join(scratch, "no-such-worker.mjs")), { log: (line) => void lines.push(line) });
+      expect(failure(await outcome(m.send(mail("ok"))))).toEqual(["refused", true]);
+      expect(lines).toEqual([START_LINE("it stopped before it was ready")]);
+    });
+
+    it("a thread that cannot be made at all: refused, not sent, and the line says so", async () => {
+      const lines: string[] = [];
+      // A URL that is not a file: Node refuses to make the thread, there and then.
+      const m = mailer(new URL("https://example.com/mail-worker.js"), { log: (line) => void lines.push(line) });
+      expect(failure(await outcome(m.send(mail("ok"))))).toEqual(["refused", false]);
+      expect(lines).toEqual([START_LINE("it could not be made")]);
+      expect(m.stats()).toMatchObject({ starts: 1, running: false });
+    });
+
+    it(`a thread started ${MAIL_WORKER_STARTS_PER_MINUTE} times in the last minute: the next send is refused, not sent, and the line says why`, async () => {
+      const lines: string[] = [];
+      const fake = fakeWorker();
+      const m = mailer(fake.url, { now: () => 1_000_000, log: (line) => void lines.push(line) });
+      // A worker that started and then died on a mail is no failure to start.
+      for (let i = 0; i < MAIL_WORKER_STARTS_PER_MINUTE; i++) failure(await outcome(m.send(mail("exit"))));
+      expect(lines).toEqual([]);
+      expect(failure(await outcome(m.send(mail("ok"))))).toEqual(["refused", false]);
+      expect(lines).toEqual([START_LINE(`it was started ${MAIL_WORKER_STARTS_PER_MINUTE} times in the last minute`)]);
+    });
+
+    it("a worker that started and works, crashes or hangs writes no such line; the line holds nothing secret", async () => {
+      const lines: string[] = [];
+      const m = mailer(fakeWorker().url, { runLimitMs: 300, log: (line) => void lines.push(line) });
+      await m.send(mail("ok"));
+      failure(await outcome(m.send(mail("crash"))), ["crashed"]);
+      failure(await outcome(m.send(mail("hang"))));
+      await m.send(mail("ok"));
+      expect(lines).toEqual([]);
+      for (const secret of SECRETS) expect(START_LINE("it stopped before it was ready")).not.toContain(secret);
+    });
+
+    it("by default the line goes to the error log", async () => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const m = mailer(brokenWorker());
+      failure(await outcome(m.send(mail("ok"))), ["broken"]);
+      expect(errors.mock.calls).toEqual([[START_LINE("it stopped before it was ready")]]);
+    });
   });
 
   it(`at most ${MAIL_QUEUE_MAX} mails wait; one more is refused at once and never sent`, async () => {
