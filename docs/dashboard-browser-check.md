@@ -16,7 +16,7 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 ## The bar
 
 - [ ] `http://localhost:3000/` while signed in lands on `/tours`; in a private window (nobody signed in) it lands on `/signin`. In the network panel the first answer is a `302` with `cache-control: no-store` and no body.
-- [ ] The bar across the top shows "Mythicshot", the tabs "Tours", "Storage", "Account" and "Admin" in that order, and the username `checker` on the right. "Tours" is marked as the current tab. There is no "Images" or "GIFs" tab.
+- [ ] The bar across the top shows "Mythicshot", the tabs "Tours", "Storage", "Account" and "Admin" in that order, and the username `checker` on the right (an account without a username shows the word "Account" there, never an email address). "Tours" is marked as the current tab. There is no "Images" or "GIFs" tab.
 - [ ] View the page source: the Admin link is in it with `hidden` (the script shows it because `checker` is the admin), the username is not in it, and nothing else names an admin route. In a private window, `view-source:http://localhost:3000/tours` shows the very same text.
 - [ ] "Storage" and "Admin" lead to `/storage` and `/admin`, which answer `{"error":"not_found"}` until their pages are built. "Account" leads to today's account page.
 - [ ] The console shows no error and no policy violation ("Refused to …" or "Content Security Policy"); the network panel shows only requests to `localhost:3000`: the page, its stylesheet and its two scripts (all three under `/dash/`), and `GET /api/v1/session`, `/api/v1/me`, `/api/v1/tours` and `/api/v1/usage`.
@@ -25,7 +25,7 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 ## The list
 
 - [ ] Under the heading "Tours" the line reads "3 tours in <workspace name> · <size> used", with the size written as everywhere else (at most one decimal, no trailing `.0`, 1024 to the next unit).
-- [ ] One row per tour, the most recently changed first. Each row has the title in bold and under it "<n> steps · localhost:3000/t/<slug>" for a published tour, or "<n> steps · no public link" for the other; then its tags, its size and the day it changed, such as "19 Nov".
+- [ ] One row per tour, the most recently changed first. Each row has the title in bold and under it "<n> steps · localhost:3000/t/" and the first four characters of the slug followed by "…" for a published tour (pointing at it shows the whole link), or "<n> steps · no public link" for the other; then its tags, its size and the day it changed, such as "19 Nov".
 - [ ] The tags: "Published" in green; "Published" and "Changes waiting" in amber for the tour with a new version; "Not published" in grey.
 - [ ] A published tour has "Copy link", "Open" and "More"; the unpublished one has "Publish" and "More".
 - [ ] Under the table: "\"Changes waiting\" means Mythicshot uploaded a newer version that visitors do not see yet. \"More\" holds: Publish changes, Unpublish, Delete."
@@ -48,18 +48,20 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 - [ ] "Publish changes" reads "Publishing…" on "More" while it runs, and afterwards the row has "Published" without "Changes waiting". The requests are `POST /api/v1/tours/tour_…/publish`, the later ones with the body `{"publish_id":"…"}`, each with an `X-Csrf-Token` header and `Origin: http://localhost:3000`.
 - [ ] "Unpublish" asks nothing, reads "Unpublishing…", and afterwards the row has "Not published", "no public link" and a "Publish" button with the focus on it. The old link answers 404.
 - [ ] "Publish" on that row reads "Publishing…" and brings the same link back.
-- [ ] Each button can be pressed only once while its request runs: a second press, or another row's button, sends nothing.
+- [ ] While a change runs, every row's buttons are greyed out and cannot be pressed; they come back when it ends.
+- [ ] A publish of a tour with no steps (if you can make one) says "This tour has no steps, so it cannot be published."
 
 ## Deleting a tour
 
 - [ ] "Delete" in the menu opens the question in the page, never a browser dialog: "Delete \"<title>\"?", "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched." and the buttons "Keep it" and "Delete tour". The focus is on "Keep it".
-- [ ] Tab and Shift+Tab stay on the two buttons. "Keep it" and Escape each close the question and put the focus back on that row's "More", with no request sent.
+- [ ] Tab and Shift+Tab stay on the two buttons, and the page behind cannot be clicked or reached with Tab. "Keep it", Escape and a click on the dimmed area around the question each close it and put the focus back on that row's "More", with no request sent.
 - [ ] "Delete tour" reads "Deleting…", sends `DELETE /api/v1/tours/tour_…` (again while it answers 202) with an `X-Csrf-Token` header, closes the question, and the row is gone, the line under the heading counts one tour fewer, and the focus is on the heading.
 - [ ] Delete every tour: the page shows "No tours yet" and "Record a tour in Mythicshot and choose Publish. It shows up here with a link to share." with no table and no hint.
 
 ## When something fails
 
 - [ ] With the server stopped, any button gives "Something went wrong. Try again in a moment." under the heading line (in the question, for "Delete tour") and comes back. Start the server again.
+- [ ] Make a change, and stop the server just after its request was answered (for example with the network panel's throttling at its slowest): the page says "The change was made, but the list could not be loaded again. Reload the page to see it." and keeps the list it had. Start the server again and reload.
 - [ ] Sign out in another tab, then press "Unpublish" here: the page goes to `/signin`.
 - [ ] Eleven fast requests from this machine are not limited (a loopback address is no network to count), so "Too many requests. Wait a few minutes and try again." cannot be seen here; note that it was not checked by hand.
 
