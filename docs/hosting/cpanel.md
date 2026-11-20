@@ -523,6 +523,27 @@ cd ~/apps/tours && ./cpanel.sh status
 
 The subdomain `app.example.com` can stay or be removed in cPanel. With one address the platform answers on every name the hosting sends to it.
 
+### An optional third address for images and clips
+
+Once the two addresses work, the platform can answer on a third name, `img.example.com`, for shared images and clips. This is optional: without it, images and clips answer on the tours address, and nothing else changes. On the img address the platform answers images, clips and its health check only, and takes no sign-in and no token there. This version has no images or clips to share yet, so the third address answers only its health check for now.
+
+1. Create the subdomain `img.example.com` and attach it to the same Node.js app, as in steps 1 and 2 above for the app address. The same **Unconfirmed** applies: whether your hosting lets one Node.js app answer for a third name has not been tried on real hosting.
+2. Wait for its certificate, as in step 3 above.
+
+**How to tell the first two steps worked:** `https://img.example.com/healthz` opens in a browser without a warning and shows `{"ok":true}`.
+
+3. Add one line to the settings file, below the two lines of step 4, with your own name in lowercase, without `https` in front and without a path. It only works beside both of those lines: on its own, or naming the same host as one of them, it stops the platform from starting.
+
+```text
+IMG_HOST=img.example.com
+```
+
+4. Restart the app, as in step 5 above.
+
+**How to tell it worked:** `https://img.example.com/healthz` shows `{"ok":true,"address":"img"}`, and the tours and app addresses show their own roles as before. `cpanel.sh` does not check the third address: open it in a browser.
+
+**The way back.** Remove the `IMG_HOST` line from the settings file and restart. The two addresses stay as they are, and images and clips answer on the tours address again.
+
 ## 15. Make yourself the admin
 
 The version with accounts brings sign-in with a link sent instead of a password, and the dashboard behind it. A site that was updated keeps working exactly as before: its tours, their links and its tokens are not changed, and nobody can sign in until the site has an admin. The admin is made once, by a command run on the hosting. There is no web page for it, and the setup code plays no part in it.
@@ -696,6 +717,7 @@ It prints `The account "yourname" now signs in with new@example.com.` and `Remov
 - The database copy made with the `sqlite3` tool, which is used only where the app's Node.js is not found. It was only run against a stand-in.
 - Resuming an update that was cut off, and the commands to go back. Both were run against stand-ins, with the cut made at the points the tests can reach.
 - The second address of [step 14](#14-a-second-address-for-the-app): the `--app-domain` option, the check before an update records it, and the check that each address reports its own role. All of it was run against stand-ins only.
+- The optional third address of [step 14](#an-optional-third-address-for-images-and-clips): only the platform's own tests have run it, and `cpanel.sh` does not check it.
 - `./cpanel.sh admin` of [step 15](#15-make-yourself-the-admin): the script's part was run against stand-ins, and once with a real Node.js and the real `app.cjs` in front of a stand-in command; the command itself was run against a real database on a development computer only. The backup that refuses a `sqlite3` tool older than 3.37 was run against a stand-in.
 - Sending mail, in [step 16](#16-send-sign-in-mail): the mail client and the thread it runs in were run only against a fake mail server on a development computer, and no mail has been sent through this guide's steps on real hosting.
 - The restore steps in [step 11](#11-restore-from-a-backup), and the labels of cPanel's pages and buttons throughout, which are written from memory of cPanel and may differ at your provider.

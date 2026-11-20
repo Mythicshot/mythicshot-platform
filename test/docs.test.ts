@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
 import { openapi, routeKeys } from "../src/docs/openapi.ts";
+import { resolveHosts } from "../src/hosts.ts";
 import { DOCS_CSS_PATH, DOCS_JS_PATH } from "../src/docs/site-assets.ts";
 import { VIEWER_CSS_PATH, VIEWER_JS_PATH, VIEWER_VERSION } from "../src/docs/viewer-assets.ts";
 import type { Deps } from "../src/ports.ts";
@@ -1429,5 +1430,35 @@ describe("two addresses in the docs", () => {
     expect(cloudflare).toContain("it handles one custom domain only");
     expect(cloudflare).toContain("keeps a pair that was set by hand");
     expect(CODE["../wrangler.jsonc"]).toMatch(/"TOURS_HOST": "",\n\s*"APP_HOST": ""/);
+  });
+
+  it("the optional third address is described as optional, untried on real hosting, and not yet on Docker", () => {
+    const readme = docs[README];
+    expect(readme).toContain("### An optional third address for images and clips");
+    expect(readme).toContain("It is optional: without it, shared images and clips answer on the tours address, and everything else answers exactly as described above whether the img address is set or not.");
+    expect(readme).toContain('Asked on it, `/healthz` prints `{"ok":true,"address":"img"}`.');
+    expect(readme).toContain("No session cookie is taken or set there, and no token is taken there either.");
+    expect(readme).toContain("The third address has not been run on real hosting either: it is checked by this repository's tests only.");
+    expect(readme).toMatch(/^\| `IMG_HOST` \| both \| Optional, and only beside both `TOURS_HOST` and `APP_HOST`/m);
+    // The lines the README quotes for it are the code's own.
+    const lines = [
+      resolveHosts({ img: "img.example.com" }),
+      resolveHosts({ tours: "tours.example.com", app: "app.example.com", img: "https://img.example.com" }),
+      resolveHosts({ tours: "tours.example.com", app: "app.example.com", img: "tours.example.com" }),
+    ];
+    for (const r of lines) {
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(readme).toContain(`\n${r.problem}\n`);
+    }
+    const docker = docs[DOCKER];
+    expect(docker).toContain("### A third address for images and clips");
+    expect(docker).toContain("On this route it is not available yet.");
+    expect(docker).toContain("> Do not add an `IMG_HOST` line to `.env` on this route yet: the app then serves images and clips only on a name Caddy does not answer for.");
+    // The Caddyfiles really have no place for it yet.
+    expect(installSh).not.toContain("IMG_DOMAIN");
+    const cloudflare = docs[CLOUDFLARE];
+    expect(cloudflare).toContain("A third var, `IMG_HOST`, is optional");
+    expect(cloudflare).toContain("Without it, images and clips answer on the tours address.");
+    expect(setupCloudflareTs).toMatch(/KEPT_VARS = \[[^\]]*"IMG_HOST"/);
   });
 });
