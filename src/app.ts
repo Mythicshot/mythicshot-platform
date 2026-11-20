@@ -6,6 +6,7 @@ import { emailChangeRoutes } from "./email-change.ts";
 import { hostGate } from "./host-gate.ts";
 import { requestHost, roleOf } from "./hosts.ts";
 import { mediaRoutes } from "./media.ts";
+import { sharePageRoutes } from "./media-page.ts";
 import type { Deps } from "./ports.ts";
 import { pageRoutes } from "./page.ts";
 import { pageRoutesForAccounts } from "./pages.ts";
@@ -44,6 +45,7 @@ export function createApp(deps: Deps): Hono {
   dashRoutes(app);
   publishRoutes(app, deps);
   pageRoutes(app, deps);
+  sharePageRoutes(app, deps);
 
   app.notFound((c) => c.json({ error: "not_found" }, 404));
 

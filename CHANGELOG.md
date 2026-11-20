@@ -2,6 +2,14 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.21 (2026-11-20)
+
+- A shared image or clip has its own page at its link: the picture as large as it fits, or the clip playing in a loop without sound, with its title, size and date, "Open full size" or "Open file", and "Download". The page never says who shared it.
+- Chat apps that preview links show the picture and the title.
+- A link to an item that was deleted, is not finished, or belongs to a disabled account shows one "This link no longer works" page, the same as a link that never existed.
+- Clips can be watched from any point, and a file is read only as far as it is played.
+- Upgrading: an install whose image or clip size setting is above 76,000,000 bytes (38 parts of 2,000,000 bytes) is now refused at start, because a larger file could not be sent in one answer within the limit of storage and database calls a request may make. Lower the setting to 76,000,000 bytes or less. An item already stored with more parts than that answers "This link no longer works".
+
 ## 0.1.20 (2026-11-20)
 
 - Shared items, through the API: a workspace can share a single image (PNG or JPEG, up to 10 MB) or a short clip (GIF or MP4, up to 50 MB). An item is sent in parts of 2,000,000 bytes, with an optional preview picture, and is online once it is finished. It stays until it is deleted.

@@ -581,6 +581,8 @@ export type OnlineItemFiles = {
   height: number;
   durationMs: number | null;
   title: string | null;
+  /** When the item went online (its commit), for the page's "shared" date. */
+  sharedAt: number;
   /** The keys in `deps.drafts` of parts 0 to parts - 1, in order: read and send them one after another. */
   parts: string[];
   /** The preview's key in `deps.drafts` and its type as read from its bytes, or null. */
@@ -591,19 +593,22 @@ export type OnlineItemFiles = {
  * The files of the online item with this link id, for the public serving routes: null for
  * a link id no item has, an item that is not online (unfinished, or being deleted), and an
  * item of a workspace with a disabled account (the same condition the token lookup holds,
- * src/auth.ts). Two database calls, no store call. What it answers cannot change while
- * the item is online: the keys are its current claims, which change only while uploading.
+ * src/auth.ts). Exactly two database calls and no store call for every input, a malformed
+ * link id and one no item has included (each is looked up as "", which finds nothing), so
+ * the work done does not tell which ids exist. What it answers cannot change while the
+ * item is online: the keys are its current claims, which change only while uploading.
  */
 export async function onlineItemFiles(deps: Deps, linkId: string): Promise<OnlineItemFiles | null> {
-  if (!/^[a-z2-7]{20}$/.test(linkId)) return null;
-  const item = await deps.db.first<ItemRow>(
-    `SELECT ${ITEM_COLUMNS} FROM media m WHERE m.link_id = ? AND m.state = 'online'
+  const wellFormed = /^[a-z2-7]{20}$/.test(linkId);
+  const item = await deps.db.first<ItemRow & { online_at: number | null }>(
+    `SELECT ${ITEM_COLUMNS}, m.online_at FROM media m WHERE m.link_id = ? AND m.state = 'online'
         AND NOT EXISTS (SELECT 1 FROM user u WHERE u.status = 'disabled'
                           AND (u.workspace_id = m.workspace_id OR u.id IN (SELECT ms.user_id FROM membership ms WHERE ms.workspace_id = m.workspace_id)))`,
-    [linkId],
+    [wellFormed ? linkId : ""],
   );
+  // The second call is made for every input, with "" when there is no item, which finds nothing.
+  const parts = await deps.db.all<{ n: number; claim: string }>("SELECT n, claim FROM media_object WHERE media_id = ? AND current = 1 AND n >= 0 ORDER BY n", [item?.id ?? ""]);
   if (item === null) return null;
-  const parts = await deps.db.all<{ n: number; claim: string }>("SELECT n, claim FROM media_object WHERE media_id = ? AND current = 1 AND n >= 0 ORDER BY n", [item.id]);
   if (parts.length !== item.parts || parts.some((p, i) => p.n !== i)) return null;
   return {
     id: item.id,
@@ -614,6 +619,7 @@ export async function onlineItemFiles(deps: Deps, linkId: string): Promise<Onlin
     height: item.height,
     durationMs: item.duration_ms,
     title: item.title,
+    sharedAt: item.online_at ?? item.created_at,
     parts: parts.map((p) => objectKey(item.id, { n: p.n, claim: p.claim, ext: null })),
     preview: item.preview_claim === null || item.preview_type === null ? null : { key: objectKey(item.id, { n: PREVIEW, claim: item.preview_claim, ext: item.preview_type }), type: item.preview_type },
   };

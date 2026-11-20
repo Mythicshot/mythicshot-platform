@@ -3,11 +3,12 @@
 // The cross-workspace cases are in test/isolation.test.ts with every other route's.
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
-import { SUBREQUEST_BUDGET } from "../src/budget.ts";
+import { SUBREQUEST_BUDGET, metered } from "../src/budget.ts";
 import { CLIP_MAX_DURATION_MS, DEFAULT_MEDIA_LIMITS, MAX_LOOSE_CLAIMS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, mediaLimits, mediaLimitsProblem, mediaLink, onlineItemFiles } from "../src/media.ts";
 import type { Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
 import { LIMITS_MEDIA, workspaceKey } from "../src/rate.ts";
+import { MAX_SERVED_PARTS, SERVE_LOOKUP_CALLS } from "../src/limits.ts";
 import { storageFull, type Usage } from "../src/usage.ts";
 import { ORIGIN, abort, count, createUpload, fixtures, gif, jpeg, mp4, png, send, uploadTour, type Call, type Json } from "./bundle.ts";
 
@@ -1028,7 +1029,7 @@ describe("the serving lookup", () => {
     expect((await commit(deps, token, id)).status).toBe(200);
     const files = await onlineItemFiles(deps, linkId);
     expect(files).toEqual({
-      id, kind: "clip", contentType: "video/mp4", bytes: CLIP.bytes, width: 1280, height: 720, durationMs: 12_000, title: null,
+      id, kind: "clip", contentType: "video/mp4", bytes: CLIP.bytes, width: 1280, height: 720, durationMs: 12_000, title: null, sharedAt: expect.any(Number),
       parts: [expect.stringMatching(new RegExp(`^m/${id}/part-000\\.[0-9a-f]{24}$`)), expect.stringMatching(/part-001\./), expect.stringMatching(/part-002\./)],
       preview: { key: expect.stringMatching(new RegExp(`^m/${id}/preview\\.[0-9a-f]{24}\\.png$`)), type: "png" },
     });
@@ -1042,6 +1043,15 @@ describe("the serving lookup", () => {
     expect(joined).toEqual(file);
     expect(await onlineItemFiles(deps, "a".repeat(20))).toBeNull();
     expect(await onlineItemFiles(deps, "not a link id")).toBeNull();
+    // The shared date is the commit's moment.
+    const row = await deps.db.first<{ online_at: number }>("SELECT online_at FROM media WHERE id = ?", [id]);
+    expect(files!.sharedAt).toBe(row!.online_at);
+    // Two database calls for every input: online, unknown, malformed, empty.
+    for (const asked of [linkId, "a".repeat(20), "not a link id", "", linkId.toUpperCase()]) {
+      const m = metered(deps);
+      await onlineItemFiles(m.deps, asked);
+      expect(m.calls(), asked).toBe(2);
+    }
     await deps.db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [owner.userId]);
     expect(await onlineItemFiles(deps, linkId)).toBeNull();
     await deps.db.run("UPDATE user SET status = 'active' WHERE id = ?", [owner.userId]);
@@ -1093,10 +1103,16 @@ describe("age, rate limits and settings", () => {
     expect((await putPart(deps, other.token, theirs, 0, fileOf(IMAGE))).status).toBe(204);
   });
 
-  it("limit settings that would need more than 999 parts, or are no whole numbers, are a configuration problem", () => {
+  it("limit settings that would need more parts than one public answer can send within the call budget, or are no whole numbers, are a configuration problem", () => {
     expect(mediaLimitsProblem({})).toBeNull();
-    expect(mediaLimitsProblem({ mediaImageMaxBytes: 999 * PART_BYTES, mediaClipMaxBytes: 1, mediaImageMaxSide: 65_535 })).toBeNull();
-    for (const bad of [{ mediaClipMaxBytes: 999 * PART_BYTES + 1 }, { mediaImageMaxBytes: 0 }, { mediaImageMaxBytes: 1.5 }, { mediaImageMaxSide: 0 }, { mediaImageMaxSide: 65_536 }]) {
+    // The lookup's calls and the most parts fill the budget exactly, and the defaults are well inside it.
+    expect(SERVE_LOOKUP_CALLS + MAX_SERVED_PARTS).toBe(SUBREQUEST_BUDGET);
+    expect(Math.ceil(DEFAULT_MEDIA_LIMITS.clipMaxBytes / PART_BYTES)).toBeLessThanOrEqual(MAX_SERVED_PARTS);
+    expect(mediaLimitsProblem({ mediaImageMaxBytes: MAX_SERVED_PARTS * PART_BYTES, mediaClipMaxBytes: MAX_SERVED_PARTS * PART_BYTES, mediaImageMaxSide: 65_535 })).toBeNull();
+    expect(mediaLimitsProblem({ mediaClipMaxBytes: MAX_SERVED_PARTS * PART_BYTES + 1 })).toBe(
+      `media settings: the most bytes of a shared image or clip must be a whole number from 1 to ${MAX_SERVED_PARTS * PART_BYTES} (${MAX_SERVED_PARTS} parts of ${PART_BYTES} bytes, which one answer can send within the call budget)`,
+    );
+    for (const bad of [{ mediaClipMaxBytes: MAX_SERVED_PARTS * PART_BYTES + 1 }, { mediaImageMaxBytes: MAX_SERVED_PARTS * PART_BYTES + 1 }, { mediaClipMaxBytes: 999 * PART_BYTES }, { mediaImageMaxBytes: 0 }, { mediaImageMaxBytes: 1.5 }, { mediaImageMaxSide: 0 }, { mediaImageMaxSide: 65_536 }]) {
       expect(mediaLimitsProblem(bad), JSON.stringify(bad)).toMatch(/^media settings: /);
     }
     expect(() => mediaLimits({ publicImageBase: "", setupCode: null, mediaClipMaxBytes: 10 ** 10 })).toThrow(/media settings/);
