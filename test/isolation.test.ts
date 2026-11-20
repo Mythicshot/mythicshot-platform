@@ -5,7 +5,7 @@
 // an id that never existed (status, body and headers, byte for byte), when a row of any
 // table changed, or when anything was written to or deleted from either store.
 //
-// Every route of the app is in exactly one of eight tables, keyed "<METHOD> <route path>"
+// Every route of the app is in exactly one of ten tables, keyed "<METHOD> <route path>"
 // exactly as in `createApp(deps).routes`:
 // - CASES: routes with an id in the path. Each lists the requests in which one workspace
 //   names the other's ids, with the exact answer.
@@ -27,6 +27,9 @@
 // - INVITE: looking up and accepting an invite, which take no credential and belong to no
 //   workspace; accepting makes a new workspace, which a test of its own checks is new and
 //   separate from every other.
+// - VIEWER: a visitor proving an email address on the tours address (src/viewers.ts), which
+//   takes no credential and reaches no workspace; a test of its own checks that a viewer
+//   cookie changes the answer of no other route, byte for byte.
 // A route in none of them, or in two, fails the first test below; so does a table key no
 // route has. The route list is the router's own, as in test/openapi.test.ts, so the
 // tables cannot drift from the app.
@@ -58,6 +61,7 @@ import { LIMITS_SIGNIN } from "../src/rate.ts";
 import { POLL_GAP_MS } from "../src/connect.ts";
 import { PAD_BUCKET } from "../src/signin.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
+import { VIEWER_CODE_MS, VIEWER_COOKIE } from "../src/viewers.ts";
 import { ORIGIN, commit, logoPng, putStep, send, stepImage, type Call, type Json } from "./bundle.ts";
 import { OWNED, SHARED, TRY_BUCKETS, createReplace, dumpOf, inventedIds, manifestOf, mediaPart, namesIn, needlesOf, snapshotOf, tablesOf, world, type Ids, type Side, type World } from "./isolation-world.ts";
 
@@ -477,8 +481,21 @@ const CONNECT: Record<string, { reason: string }> = {
   "POST /api/v1/connect/token": { reason: "gives a confirmed request's token, once, to whoever holds its 160-bit device code; the token belongs to the confirming workspace alone" },
 };
 
+/**
+ * A visitor proving an email address on the tours address: no credential (one that carries a
+ * token is refused), no workspace and no account. Each with its reason; the test "a viewer
+ * cookie changes no answer of any other route" sends every other route with and without one.
+ */
+const VIEWER: Record<string, { reason: string }> = {
+  "POST /api/v1/view/request": { reason: "asks for a viewer link to a tour: the same answer for every tour and address, and a link goes only to an address the tour's own list holds" },
+  "POST /api/v1/view/check": { reason: "shows the address and the tour's slug a viewer code was mailed for, to whoever holds the 160-bit code; it changes nothing and reads no workspace" },
+  "POST /api/v1/view/complete": { reason: "turns a 160-bit viewer code into a viewer session for the address it was mailed to; it reaches no workspace and no account" },
+  "POST /api/v1/view/signout": { reason: "ends the browser's own viewer session, named by its cookie; nothing of any workspace or account" },
+  "GET /api/v1/view/session": { reason: "the address the browser's own viewer cookie proved, and nothing else" },
+};
+
 type Tables = Record<string, Record<string, unknown>>;
-const TABLES: Tables = { CASES, BODY_IDS, LISTS, CREATES, OPEN, SELF, ADMIN, CONNECT, INVITE };
+const TABLES: Tables = { CASES, BODY_IDS, LISTS, CREATES, OPEN, SELF, ADMIN, CONNECT, INVITE, VIEWER };
 
 // ---- The route list against the tables ----
 
@@ -642,6 +659,7 @@ describe("the tables against the route table", () => {
     for (const [key, entry] of Object.entries(SELF)) expect((entry.ends ?? entry.changes ?? "").length, `${key} must say what it ends or changes`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(CONNECT)) expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(INVITE)) expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
+    for (const [key, entry] of Object.entries(VIEWER)) expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(ADMIN)) {
       expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
       // Only an answer with no body has no field.
@@ -1682,5 +1700,70 @@ describe("deleting an account", () => {
     const listed = (await asAdmin(w, "GET", "/api/v1/admin/accounts")).json.accounts as Json[];
     expect(listed.map((x) => x.id)).toEqual([a.userId]);
     expect(seen(await asAdmin(w, "GET", `/api/v1/admin/accounts/${b.userId}/removal`))).toEqual(seen(await asAdmin(w, "GET", `/api/v1/admin/accounts/${inventedIds().tokens.live.replace("tok_", "usr_")}/removal`)));
+  });
+});
+
+describe("a viewer cookie", () => {
+  it("changes no answer of any route but the viewer's own: every answer with a live viewer cookie is the answer without it, byte for byte", SLOW, async () => {
+    const w = await build();
+    const { deps, a, b } = w;
+    // A live viewer session for the first side's own address, made by the real completion: on
+    // a site with one address the viewer cookie and the account's session share the host,
+    // which is where one could most easily be taken for the other.
+    const code = "dpv_" + "c".repeat(40);
+    await deps.db.run("INSERT INTO viewer_code (id, email, slug, code_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)", [newId("vco"), a.email, a.ids.published.slug, await hashToken(code), deps.now(), deps.now() + VIEWER_CODE_MS]);
+    const done = await fire(deps, { method: "POST", path: "/api/v1/view/complete", json: { code } }, { token: null, headers: { "sec-fetch-site": "same-origin" }, page: true });
+    expect(done.status, done.text).toBe(200);
+    const viewer = done.headers.getSetCookie()[0].split(";")[0];
+    expect(viewer.startsWith(`${VIEWER_COOKIE}=dpw_`)).toBe(true);
+    expect((await fire(deps, { method: "GET", path: "/api/v1/view/session" }, { token: null, headers: { cookie: viewer } })).json).toEqual({ email: a.email });
+
+    /** The same credential with the viewer cookie added to whatever cookies the request already sends. */
+    const plus = (r: Req | Sample, c: Credential): Credential => {
+      const cookies = ["headers" in r ? r.headers?.cookie : undefined, c.headers?.cookie, viewer].filter((x): x is string => typeof x === "string");
+      return { ...c, headers: { ...c.headers, cookie: cookies.join("; ") } };
+    };
+    // A request that makes a request to connect answers new random codes each time: those alone are put aside.
+    const steady = (c: Call) => ({ ...seen(c), body: c.text.replace(/dpd_[0-9a-f]{40}/g, "dpd_…").replace(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/g, "XXXX-XXXX") });
+    const covered = new Set<string>();
+    const compare = async (key: string, what: string, r: Req | Sample, c: Credential) => {
+      w.tick();
+      const without = await fire(deps, r, c);
+      const withIt = await fire(deps, r, plus(r, c));
+      expect(steady(withIt), `${key}: ${what}`).toEqual(steady(without));
+      covered.add(key);
+    };
+    const nobody: Credential = { token: null };
+    const page: Credential = { token: null, headers: { "sec-fetch-site": "same-origin" }, page: true };
+
+    // Ids in the path or the body: the other workspace's, by the token and by the session.
+    for (const { key, req } of everyCase(b.ids, a.ids)) for (const credential of CREDENTIALS) await compare(key, `${req.what} by ${credential.name}`, req, credential.of(a));
+    // The caller's own lists, by each credential each takes.
+    for (const [key, list] of Object.entries(LISTS)) {
+      for (const credential of CREDENTIALS) if (list.only === undefined || list.only === credential.name) await compare(key, `by ${credential.name}`, { method: "GET", path: list.path }, credential.of(a));
+    }
+    // Routes with no owner, by nobody and by the owner's session.
+    for (const [key, entry] of Object.entries(OPEN)) for (const sample of entry.samples(w)) for (const [who, c] of [["nobody", nobody], ["the session", BY_SESSION.of(a)]] as const) await compare(key, `${sample.path} by ${who}`, sample, c);
+    // What makes or changes something: asked by nobody (and so refused), which changes nothing either way.
+    for (const [key, entry] of Object.entries(CREATES)) await compare(key, "by nobody", entry.sample(a), page);
+    for (const [key, entry] of Object.entries(SELF)) await compare(key, "by nobody", { method: "POST", path: entry.path, json: {} }, page);
+    // The admin's routes: those that only read, by the admin's session; every one by nobody.
+    for (const [key, entry] of Object.entries(ADMIN)) {
+      const r = entry.request(w);
+      await compare(key, "by nobody", r, page);
+      if (r.method === "GET") await compare(key, "by the admin", r, BY_SESSION.of(a));
+    }
+    // The app's two requests while it connects, and an invite looked up and accepted with a code nobody has; the real invite looked up.
+    await compare("POST /api/v1/connect/start", "by nobody", { method: "POST", path: "/api/v1/connect/start", json: { device_name: "Laptop" } }, nobody);
+    await compare("POST /api/v1/connect/start", "with a token", { method: "POST", path: "/api/v1/connect/start", json: { device_name: "Laptop" } }, BY_TOKEN.of(a));
+    await compare("POST /api/v1/connect/token", "by nobody", { method: "POST", path: "/api/v1/connect/token", json: { device_code: "dpd_" + "0".repeat(40) } }, nobody);
+    await compare("POST /api/v1/invite/check", "by nobody", { method: "POST", path: "/api/v1/invite/check", json: { code: w.invite.code } }, page);
+    await compare("POST /api/v1/invite/accept", "by nobody", { method: "POST", path: "/api/v1/invite/accept", json: { code: "dpi_" + "0".repeat(40), username: "newcomer" } }, page);
+
+    // Every route was asked, but the viewer's own, which are the routes that read the cookie.
+    const routes = routeKeysOf(createApp({ config: { publicImageBase: "", setupCode: null } } as Deps));
+    expect(routes.filter((key) => !covered.has(key)).sort()).toEqual(Object.keys(VIEWER).sort());
+    // The viewer session is still there, and still the first side's address alone.
+    expect(await deps.db.all("SELECT email FROM viewer_session")).toEqual([{ email: a.email }]);
   });
 });

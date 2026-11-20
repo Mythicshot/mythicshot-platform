@@ -1,5 +1,5 @@
 // Mail as the core sees it: one port, the mailer that is off, the texts of the sign-in,
-// email-change, new-connection and invite mails, and the address their links start with. No platform API here: the
+// email-change, new-connection, invite and viewer mails, and the addresses their links start with. No platform API here: the
 // SMTP client lives in src/node/smtp.ts, and tests use test/fake-mail.ts.
 import { normaliseHost, originOf } from "./hosts.ts";
 import type { Config } from "./ports.ts";
@@ -219,6 +219,51 @@ export function inviteLink(origin: string, code: string): string {
   if (!isOrigin(origin)) throw new Error("bad origin");
   if (typeof code !== "string" || !CODE_CHARS.test(code)) throw new Error("bad code");
   return `${origin}/invite#${code}`;
+}
+
+/**
+ * The origin every viewer link starts with, or null when the site has no configured address:
+ * the tours address in two- or three-address mode, else SITE_HOST, through normaliseHost as
+ * linkOrigin does. It comes from configuration only, never from a request. With null, no
+ * viewer mail may be sent.
+ */
+export function viewerLinkOrigin(config: Config): string | null {
+  const tours = config.hosts?.tours;
+  const raw = typeof tours === "string" && tours !== "" ? tours : config.siteHost;
+  const host = typeof raw === "string" ? normaliseHost(raw) : null;
+  return host === null ? null : originOf(host);
+}
+
+/**
+ * The link of one viewer code: like a sign-in link, the code sits after the `#`, on the page
+ * of the tours address that finishes proving the address: `<origin>/view#<code>`. The same
+ * rules for the origin and the code as `signInLink`, and the same two errors.
+ */
+export function viewerLink(origin: string, code: string): string {
+  if (!isOrigin(origin)) throw new Error("bad origin");
+  if (typeof code !== "string" || !CODE_CHARS.test(code)) throw new Error("bad code");
+  return `${origin}/view#${code}`;
+}
+
+/**
+ * The mail with a viewer link, in the words of the approved mockup. It names neither the tour
+ * nor who shared it, and is the same text for everyone: whoever reads the mailbox learns only
+ * that someone asked for a link there. The link is on a line of its own, once.
+ */
+export function viewerMail(to: string, link: string, siteName: string = DEFAULT_SITE_NAME): Mail {
+  const name = siteNameOf(siteName);
+  return {
+    to,
+    subject: `Your link to a ${name} tour`,
+    text: [
+      "Open this link to view the tour that was shared with you:",
+      "",
+      link,
+      "",
+      "It works once and for 15 minutes. If you did not ask for it, ignore this mail: nothing happens without the link.",
+      "",
+    ].join("\n"),
+  };
 }
 
 /** A day as a mail writes it: the day of the month, the month's abbreviation and the year, in UTC, such as "27 Nov 2026". */

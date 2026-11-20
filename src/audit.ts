@@ -35,6 +35,8 @@ export const AUDIT_EVENTS = [
   "account_disabled",
   "account_enabled",
   "account_deleted",
+  "viewer_link_sent",
+  "viewer_signin",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 
@@ -44,7 +46,7 @@ export type AuditEntry = {
   userId?: string | null;
   /** The id of the workspace it happened in. */
   workspaceId?: string | null;
-  /** The id of what was acted on: a session, an account, a workspace, a token, a connect request or an invite. */
+  /** The id of what was acted on: a session, an account, a workspace, a token, a connect request, an invite, a viewer code or a viewer session. */
   subject?: string | null;
   /**
    * A flat record of at most 8 entries. A value is a whole number, null (such as an
@@ -64,8 +66,12 @@ const ROW_ID = /^[a-z]{2,4}_[0-9a-f]{24}$/;
 /** A detail key or text value: a lowercase letter, then at most 39 lowercase letters, digits and underscores. */
 const WORD = /^[a-z][a-z0-9_]{0,39}$/;
 
-/** The prefix of a token (`dp_`), a sign-in code (`dpl_`), an email-change code (`dpe_`), a device code (`dpd_`), an invite code (`dpi_`) or a session secret (`dps_`) with hex after it: a word can be most of one. */
-const SECRET_PREFIX = /dp[lsedi]?_[0-9a-f]{8}/;
+/**
+ * The prefix of a token (`dp_`), a sign-in code (`dpl_`), an email-change code (`dpe_`), a
+ * device code (`dpd_`), an invite code (`dpi_`), a viewer code (`dpv_`), a session secret
+ * (`dps_`) or a viewer session secret (`dpw_`) with hex after it: a word can be most of one.
+ */
+const SECRET_PREFIX = /dp[lsedivw]?_[0-9a-f]{8}/;
 
 /** 32 or more hex characters in a row: a digest, or the random part of a secret. */
 const LONG_HEX = /[0-9a-f]{32}/;

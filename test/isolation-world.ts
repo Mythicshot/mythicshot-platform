@@ -454,6 +454,12 @@ export const SHARED: Readonly<Record<string, string>> = {
   // Deleting an account (src/account-removal.ts) removes an invite to its address and clears
   // its id from the invites it sent; test/isolation.test.ts checks both.
   invite: "the site's invites, which the admin alone lists and changes: an address and the digest of a code, until accepting one makes a new workspace for it",
+  // A viewer (src/viewers.ts, migration 0015) is an address that proved it reads its mail, on
+  // the tours address, to see tours shared with it: it is no account and has no workspace.
+  // Deleting or disabling an account leaves the viewer rows of the same address alone, by
+  // design: they are not the account's, and src/account-removal.ts says so.
+  viewer_code: "mailed viewer codes: an address, a tour's slug and the digest of a code; no workspace, account or tour row is named",
+  viewer_session: "viewer sessions: an address that proved it reads its mail and the digest of the cookie's secret; no workspace or account is named",
 };
 
 /**

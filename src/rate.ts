@@ -170,6 +170,48 @@ export const LIMITS_CONNECT_MAIL = {
   mailSite: { bucket: "connect_mail_site", windowMs: 3_600_000, most: 30 },
 } as const satisfies Record<string, Limit>;
 
+/**
+ * The limits on a visitor proving an address on the tours address (src/viewers.ts), each in a
+ * bucket of its own, apart from sign-in's, so neither can use up or hold back the other.
+ *
+ * Asking for a viewer link is counted for every request whose body is a JSON object, whatever
+ * the address, the tour or the answer: per network (`networkKey`; not counted when that is
+ * null; over: 429), per address (`recipientKey`, over a quarter hour and a day) and per address
+ * and tour (`viewerPairKey`). Over any of the last three: the usual answer and nothing sent. The
+ * address's own two limits hold however many tours or networks ask, so one mailbox gets at most
+ * that many viewer links. The viewer mail has a cap of its own for the whole site, counted under
+ * SITE_KEY only for a mail about to be sent, else under SITE_QUIET_KEY, as sign-in's is.
+ *
+ * Looking a code up and completing it come from a browser that is not signed in, so they are
+ * counted together per network, as trying a sign-in code is. A code is 160 random bits; the
+ * count bounds the work, it is not there against guessing.
+ */
+export const LIMITS_VIEWER = {
+  /** Link requests for one address, keyed by `recipientKey`. */
+  linkRecipient: { bucket: "view_recipient", windowMs: 900_000, most: 3 },
+  /** The same key, over a day. */
+  linkRecipientDay: { bucket: "view_recipient_day", windowMs: 86_400_000, most: 10 },
+  /** Link requests for one address and one tour, keyed by `viewerPairKey`: asking for one tour again and again stops sooner. */
+  linkPair: { bucket: "view_pair", windowMs: 900_000, most: 2 },
+  /** Link requests from one network, keyed by `networkKey`. Over: 429. */
+  linkNetwork: { bucket: "view_network", windowMs: 900_000, most: 10 },
+  /** Viewer mails from the whole site in an hour: a cap of its own, below sign-in's. */
+  mailSite: { bucket: "view_mail_site", windowMs: 3_600_000, most: 60 },
+  /** Code look-ups and completions from one network, keyed by `networkKey`. Over: 429. */
+  codeNetwork: { bucket: "view_code_network", windowMs: 900_000, most: 20 },
+} as const satisfies Record<string, Limit>;
+
+/**
+ * The key one address's viewer-link requests for one tour are counted under: 64 hex
+ * characters, the digest of a fixed prefix, the address as `parseEmail` stores it and the
+ * slug. Rejects with "bad email" or "bad slug" for anything that is not text.
+ */
+export async function viewerPairKey(email: string, slug: string): Promise<string> {
+  if (typeof email !== "string") throw new Error("bad email");
+  if (typeof slug !== "string") throw new Error("bad slug");
+  return sha256Hex("rate viewer pair\n" + email.trim().toLowerCase() + "\n" + slug);
+}
+
 /** The key of a counter that counts for the whole site. */
 export const SITE_KEY = "site";
 

@@ -8,7 +8,9 @@
 //   account), and a request to connect the app that it confirmed can no longer be collected
 //   (src/connect.ts holds the same rule). Nothing of its workspace is served: tour pages and
 //   pictures (src/page.ts, src/publish.ts) and shared items (onlineItemFiles in
-//   src/media.ts) answer as for one that does not exist. Nothing is deleted.
+//   src/media.ts) answer as for one that does not exist. Nothing is deleted. Viewer sessions
+//   and codes for the account's address (src/viewers.ts) are not the account's and are left
+//   as they are: a viewer is an address that proved it reads its mail, not an account.
 // - POST /api/v1/admin/accounts/:id/enable: the status goes back to active and nothing else
 //   changes; the person signs in again for the dashboard.
 // - GET /api/v1/admin/accounts/:id/removal: what a delete would remove, as counts.
@@ -158,7 +160,10 @@ async function finalStatements(deps: Deps, t: Target, adminId: string): Promise<
   const uid = t.id;
   // The rate counters keyed to the account: its own, its workspace's, and its own requests
   // for its address and for the address of its open email change, if any. Counters keyed to
-  // an address alone are the address's, not the account's, and run out by themselves.
+  // an address alone are the address's, not the account's, and run out by themselves. So are
+  // viewer codes and viewer sessions (migration 0015), keyed by an address and holding nothing
+  // of any workspace: neither a disable nor a delete touches them, and each tour still decides
+  // whom it shows by its own list.
   const found = await deps.db.first<{ new_email: string }>("SELECT new_email FROM email_change WHERE user_id = ?", [uid]);
   const newEmail = found?.new_email ?? null;
   const keys = [await accountKey(uid), await workspaceKey(ws), await pairKey(uid, t.email), ...(newEmail === null ? [] : [await pairKey(uid, newEmail)])];
