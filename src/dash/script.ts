@@ -14,6 +14,7 @@ export const DASH_JS = `var Dash = (function () {
   var TEXT = {
     tooMany: "Too many requests. Wait a few minutes and try again.",
     failed: "Something went wrong. Try again in a moment.",
+    account: "Account",
     oneByte: "1 byte",
     bytes: " bytes",
   };
@@ -23,8 +24,11 @@ export const DASH_JS = `var Dash = (function () {
   var $ = function (id) { return document.getElementById(id); };
 
   // Every request goes through here. A change made with the session carries the
-  // anti-forgery value from GET /api/v1/session.
+  // anti-forgery value from GET /api/v1/session. A path must be one absolute path of this
+  // site; anything else (another origin, a protocol-relative or relative path) is refused
+  // before any request.
   function api(method, path, body) {
+    if (typeof path !== "string" || !/^\\/(?![\\/\\\\])/.test(path)) throw new TypeError("path");
     var headers = {};
     var init = { method: method, headers: headers, credentials: "same-origin", cache: "no-store", redirect: "error", referrerPolicy: "no-referrer" };
     if (body !== undefined) {
@@ -90,7 +94,8 @@ export const DASH_JS = `var Dash = (function () {
       }
       csrf = d.csrf;
       var who = d.account;
-      var name = typeof who.username === "string" && who.username !== "" ? who.username : typeof who.email === "string" ? who.email : "";
+      // Without a username the bar says Account, never the email address: people record their screens.
+      var name = typeof who.username === "string" && who.username !== "" ? who.username : TEXT.account;
       $("dash-user").textContent = name;
       var admin = who.admin === true;
       if (admin) $("tab-admin").hidden = false;

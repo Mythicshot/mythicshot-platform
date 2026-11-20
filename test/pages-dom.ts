@@ -206,6 +206,10 @@ export class FakeDocument {
     const t = this.root.all().find((e) => e.tagName === "title");
     if (t) t.textContent = String(v);
   }
+  /** Listeners on the document: events dispatched on any element bubble up to them. */
+  addEventListener(type: string, fn: (event: FakeEvent) => void): void {
+    this.root.addEventListener(type, fn);
+  }
   getElementById(id: string): FakeElement | null {
     this.log?.push("document");
     return this.root.all().find((e) => e.id === id) ?? null;
