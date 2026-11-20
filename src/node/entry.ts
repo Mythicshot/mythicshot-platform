@@ -5,7 +5,7 @@ import { createApp } from "../app.ts";
 import { withBudget } from "../budget.ts";
 import { setClientAddress } from "../client.ts";
 import { DEFER_FAILED, deferTracker, type Deps } from "../ports.ts";
-import { clientAddressReader, configFromEnv, guardTarget, mailFromEnv, type Incoming } from "./config.ts";
+import { clientAddressReader, configFromEnv, guardTarget, mailFromEnv, proxyHint, type Incoming } from "./config.ts";
 import { APP_UID, prepareDataDir } from "./datadir.ts";
 import { NodeDb } from "./db.ts";
 import { NodeFileStore } from "./files.ts";
@@ -49,6 +49,9 @@ async function main(): Promise<void> {
   const closeMail = (mail.mailer as Partial<ClosableMailer>).close;
   const client = clientAddressReader(process.env.CLIENT_ADDRESS_HEADER);
   if (client.problem !== null) console.error(client.problem);
+  // Without the setting, a request from a private or local address is the sign of a proxy
+  // whose visitors all look like one: one line says which setting to set, once.
+  const hint = proxyHint(process.env.CLIENT_ADDRESS_HEADER, (line) => console.error(line));
   // Work that goes on after an answer (a mail being sent) is tracked here, so a stop can
   // wait for it. A failure is one fixed line; the error itself is never written.
   const background = deferTracker(() => console.error(DEFER_FAILED));
@@ -85,6 +88,7 @@ async function main(): Promise<void> {
   // The client address is noted before the app sees the request: the socket's, or the last
   // value of the header CLIENT_ADDRESS_HEADER names. The app itself reads no header for it.
   const fetchOne = (req: Request, env: { incoming: Incoming & { url?: string } }) => {
+    hint(env.incoming);
     setClientAddress(req, client.read(env.incoming));
     return guarded(req, env);
   };

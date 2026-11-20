@@ -3,6 +3,7 @@
 // without starting the app. (The mailer it makes for a usable mail block starts its
 // worker thread, and opens its first connection, only when a mail is sent.)
 import { canonicalAddress } from "../client.ts";
+import { hasNetwork } from "../rate.ts";
 import { parseEmail } from "../accounts.ts";
 import { misdirected } from "../host-gate.ts";
 import { hostSettingsFrom, normaliseHost, resolveHosts, type Hosts } from "../hosts.ts";
@@ -208,6 +209,32 @@ export function clientAddressReader(raw: string | undefined): { read: (incoming:
   if (name === "") return { read: (incoming) => clientAddressFrom(undefined, incoming), problem: null };
   if (!HEADER_NAME.test(name) || UNUSABLE_HEADERS.has(name.toLowerCase())) return { read: () => null, problem: BAD_CLIENT_HEADER };
   return { read: (incoming) => clientAddressFrom(name, incoming), problem: null };
+}
+
+/**
+ * The one line the Node entry writes when CLIENT_ADDRESS_HEADER is not set and a request
+ * comes from a private, local or missing socket address: the sign of a proxy in front of the
+ * app, which makes every visitor look like one. Fixed text: it never holds an address.
+ */
+export const PROXY_HINT =
+  "client address: requests come from a private or local address, which is how a proxy in front of the app looks; set CLIENT_ADDRESS_HEADER to the header your proxy writes the visitor's address in, or the limits per network (signing in, connecting the app) cannot tell visitors apart";
+
+/**
+ * A check for the Node entry to run on every request. With CLIENT_ADDRESS_HEADER unset or
+ * empty, the first request whose socket address is not a public one (loopback, private,
+ * link-local, or none at all, as over a local socket) makes it write PROXY_HINT through
+ * `log`, once for the life of the process; with the setting given, it never writes. It
+ * changes nothing else: the address the reader gives is the same with it as without it.
+ */
+export function proxyHint(raw: string | undefined, log: (line: string) => void): (incoming: Incoming) => void {
+  const name = typeof raw === "string" ? raw.trim() : "";
+  if (name !== "") return () => {};
+  let said = false;
+  return (incoming) => {
+    if (said || hasNetwork(canonicalAddress(incoming.socket.remoteAddress))) return;
+    said = true;
+    log(PROXY_HINT);
+  };
 }
 
 /**

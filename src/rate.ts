@@ -301,6 +301,15 @@ function network(address: string | null): string | null {
 }
 
 /**
+ * True when `address` is one the limits count per network: a public IPv4 or IPv6 address.
+ * False for a missing one, anything that is not an address, and a loopback, link-local or
+ * private one. Never throws.
+ */
+export function hasNetwork(address: string | null | undefined): boolean {
+  return network(address ?? null) !== null;
+}
+
+/**
  * The key a client's network is counted under: 64 hex characters, or null when there is
  * no network to count for. Null for a missing address, anything that is not an address,
  * and a loopback, link-local or private address (behind a proxy every visitor would share
