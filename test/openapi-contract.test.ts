@@ -833,7 +833,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     refused(await preview(b.token, id, png(32, 24, 500)), 404, "not_found");
 
     // A delete whose files could not all be removed, then the one that finishes it.
-    const broken: Deps = { ...deps, pub: { ...deps.pub, delete: () => Promise.reject(new Error("the store is down")) } };
+    const broken: Deps = { ...deps, drafts: { ...deps.drafts, delete: () => Promise.reject(new Error("the store is down")) } };
     const log = console.error;
     console.error = () => {};
     try {

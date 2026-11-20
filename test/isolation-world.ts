@@ -413,8 +413,8 @@ async function digest(store: FileStore, key: string): Promise<string> {
   return `${bytes.byteLength} bytes, sha256 ${await sha256Hex(bytes)}, ${file.contentType}, ${file.cacheControl}`;
 }
 
-/** Published pictures (`p/`) and shared items' objects (`m/`) are in the public store; everything else in the drafts. */
-const storeOf = (deps: Deps, key: string) => (key.startsWith("p/") || key.startsWith("m/") ? deps.pub : deps.drafts);
+/** Published pictures (`p/`) are in the public store; everything else, shared items' objects (`m/`) too, in the drafts. */
+const storeOf = (deps: Deps, key: string) => (key.startsWith("p/") ? deps.pub : deps.drafts);
 
 export type Snapshot = { rows: Record<string, Json[]>; files: Record<string, string> };
 
@@ -439,7 +439,7 @@ export async function snapshotOf(deps: Deps, side: { workspaceId: string }, keys
   const uploads = (rows.upload ?? []).map((u) => `u/${u.id}/`);
   for (const key of await keys.draftKeys()) if (uploads.some((prefix) => key.startsWith(prefix))) named.add(key);
   const items = (rows.media ?? []).map((m) => `m/${m.id}/`);
-  for (const key of await keys.publicKeys()) if (items.some((prefix) => key.startsWith(prefix))) named.add(key);
+  for (const key of await keys.draftKeys()) if (items.some((prefix) => key.startsWith(prefix))) named.add(key);
   const files: Record<string, string> = {};
   for (const key of [...named].sort()) files[key] = await digest(storeOf(deps, key), key);
   return { rows, files };

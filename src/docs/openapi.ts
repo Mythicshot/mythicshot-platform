@@ -363,7 +363,7 @@ function schemas(): Record<string, Schema> {
       link_id: { type: "string", pattern: "^[a-z2-7]{20}$", description: "The item's public name. It never changes." },
       kind: { type: "string", enum: ["image", "clip"] },
       path: { type: "string", description: "The item's public address as a path: /i/<link_id> for an image, /r/<link_id> for a clip." },
-      link: { type: "string", description: "The item's public address in full." },
+      link: { type: "string", description: "The item's public address in full, on the address for images and clips from the server's settings. When the settings name no address it is the same as path, to put after the server address." },
     }),
     MediaItem: object(["id", "link_id", "kind", "title", "content_type", "bytes", "width", "height", "duration_ms", "created_at", "has_preview", "path", "link"], {
       id: { type: "string", pattern: "^med_[0-9a-f]{24}$" },
@@ -378,7 +378,7 @@ function schemas(): Record<string, Schema> {
       created_at: whole("When the item was started, in milliseconds since 1970."),
       has_preview: { type: "boolean", description: "Whether a preview picture was sent." },
       path: { type: "string", description: "The public address as a path: /i/<link_id> or /r/<link_id>." },
-      link: { type: "string", description: "The public address in full." },
+      link: { type: "string", description: "The public address in full, from the server's settings; the same as path when they name no address." },
     }),
     MediaItemState: object(["id", "link_id", "kind", "title", "content_type", "bytes", "width", "height", "duration_ms", "created_at", "has_preview", "path", "link", "state"], {
       id: { type: "string", pattern: "^med_[0-9a-f]{24}$" },
@@ -393,7 +393,7 @@ function schemas(): Record<string, Schema> {
       created_at: whole("When the item was started, in milliseconds since 1970."),
       has_preview: { type: "boolean", description: "Whether a preview picture was sent." },
       path: { type: "string", description: "The public address as a path: /i/<link_id> or /r/<link_id>." },
-      link: { type: "string", description: "The public address in full." },
+      link: { type: "string", description: "The public address in full, from the server's settings; the same as path when they name no address." },
       state: { type: "string", enum: ["uploading", "online"], description: "uploading until the item is finished, then online." },
     }),
     MediaList: object(["items", "next"], {

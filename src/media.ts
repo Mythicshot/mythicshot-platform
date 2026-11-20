@@ -32,16 +32,20 @@
 //   named from the row alone, so a delete names every key the item could have written,
 //   even one whose request was cut off before its row was finished, and never another's.
 //
-// Where the objects live: the public store (`deps.pub`). The pages and file routes that
-// serve an item to visitors come later and serve it from where it is: a part cannot be
-// copied at commit, since copying the largest clip would take a read and a write per part,
-// more calls than one request may make (SUBREQUEST_BUDGET). `m/` cannot meet the public
-// store's other keys (`p/` names of published pictures) nor the drafts' `u/`. Nothing in
-// the public store is reachable by a key nobody gave out: an `m/` key carries the item's
-// id, 96 random bits, which no public answer names.
+// Where the objects live: the private store (`deps.drafts`), never the public one. The
+// public store can be a bucket with a public domain of its own (PUBLIC_IMAGE_BASE), where
+// an object is reachable without the app: an unfinished item, one being deleted, one of a
+// disabled account, and every online item would then be served past the checks the
+// serving route makes. Items are always served through the app (a later task reads the
+// parts and sets its own fixed headers), so nothing needs them in the public store, and
+// nothing is copied at commit. Their keys are under `m/`; everything else in the private
+// store is under `u/` (src/uploads.ts writes every draft key there, and the upload abort
+// and sweep, the tour delete and the replaced-picture clean-up delete only keys taken from
+// step, upload and replaced rows, which are those `u/` keys), so no other clean-up can
+// reach an item's object, and an item's delete names only its own `m/<id>/` keys.
 import type { Hono } from "hono";
 import { newId, newLinkId, requireAuth, type Auth } from "./auth.ts";
-import { originOf } from "./hosts.ts";
+import { mediaOrigin } from "./hosts.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
 import { isUniqueViolation, type Config, type Deps } from "./ports.ts";
 import { LIMITS_MEDIA, hitLimit, workspaceKey } from "./rate.ts";
@@ -125,17 +129,15 @@ export function mediaPath(item: { kind: MediaKind; link_id: string }): string {
 }
 
 /**
- * The full address of an item's public page: the seam the address work completes. Today it
- * is built from the tours address in two-address mode, else from the SITE_HOST setting,
- * else from the address the request was sent to (its own origin), followed by mediaPath.
- * A later change gives items an address of their own here, and only here: every answer
- * that carries `link` gets it from this function.
+ * The address of an item's public page: mediaOrigin (the img address when it is set, else
+ * the tours address, else SITE_HOST, from the configuration alone) followed by mediaPath.
+ * When the configuration names no address the origin is "" and the link is the path, as a
+ * tour's link is, for the client to put after the address it was given. Nothing of the
+ * request is read, so no Host header can put another site's name into a link. Every
+ * answer that carries `link` gets it from this function.
  */
-export function mediaLink(req: Request, config: Config, item: { kind: MediaKind; link_id: string }): string {
-  const hosts = config.hosts ?? null;
-  const site = typeof config.siteHost === "string" && config.siteHost !== "" ? config.siteHost : null;
-  const origin = hosts !== null ? originOf(hosts.tours) : site !== null ? originOf(site) : new URL(req.url).origin;
-  return origin + mediaPath(item);
+export function mediaLink(config: Config, item: { kind: MediaKind; link_id: string }): string {
+  return mediaOrigin({ hosts: config.hosts ?? null, ...(typeof config.siteHost === "string" ? { siteHost: config.siteHost } : {}) }) + mediaPath(item);
 }
 
 /** A random token naming one request's claim on a part or a preview: 24 hex characters. */
@@ -173,7 +175,7 @@ const noItem = () => apiError(404, "not_found", "no such item");
 const alreadyOnline = () => apiError(409, "already_online", "the item is online and cannot change any more; delete it and start again to change it");
 
 /** What every answer about one item says: the fields of the list, from its row. */
-function itemOut(req: Request, deps: Deps, row: ItemRow) {
+function itemOut(deps: Deps, row: ItemRow) {
   return {
     id: row.id,
     link_id: row.link_id,
@@ -187,24 +189,24 @@ function itemOut(req: Request, deps: Deps, row: ItemRow) {
     created_at: row.created_at,
     has_preview: row.preview_stored_at !== null,
     path: mediaPath(row),
-    link: mediaLink(req, deps.config, row),
+    link: mediaLink(deps.config, row),
   };
 }
 
 /** The commit's answer, the same each time it is asked. */
-function committedOut(req: Request, deps: Deps, row: ItemRow) {
-  return { id: row.id, link_id: row.link_id, kind: row.kind, path: mediaPath(row), link: mediaLink(req, deps.config, row) };
+function committedOut(deps: Deps, row: ItemRow) {
+  return { id: row.id, link_id: row.link_id, kind: row.kind, path: mediaPath(row), link: mediaLink(deps.config, row) };
 }
 
 /**
  * Removes an item of this workspace that is already marked closing: every object it could
  * have written, then its rows. Two calls, whatever the number of parts: one store delete
- * takes up to 1,000 keys (src/budget.ts counts it as one call, and R2 deletes them in one
- * operation) and an item has at most 999 parts and two possible previews. The rows go only
+ * takes up to 1,000 keys (src/budget.ts counts it as one call, R2 deletes them in one
+ * operation, and the Node store deletes them one by one within that call) and an item has at most 999 parts and two possible previews. The rows go only
  * while the item is still closing, and only once its objects have.
  */
 async function removeClosing(deps: Deps, workspaceId: string, item: { id: string; parts: number }): Promise<void> {
-  await deps.pub.delete(possibleKeys(item.id, item.parts));
+  await deps.drafts.delete(possibleKeys(item.id, item.parts));
   await deps.db.batch([
     { sql: "DELETE FROM media_part WHERE media_id IN (SELECT id FROM media WHERE id = ? AND workspace_id = ? AND state = 'closing')", params: [item.id, workspaceId] },
     { sql: "DELETE FROM media WHERE id = ? AND workspace_id = ? AND state = 'closing'", params: [item.id, workspaceId] },
@@ -424,7 +426,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
       return now?.state === "online" ? alreadyOnline() : noItem();
     }
     try {
-      await deps.pub.put(key, data, { contentType: item.content_type, cacheControl: NO_CACHE });
+      await deps.drafts.put(key, data, { contentType: item.content_type, cacheControl: NO_CACHE });
     } catch (err) {
       // The part is not stored: its row goes, if it is still this request's, so a commit
       // asks for it again. Whatever the store holds under the key is the item's to delete.
@@ -443,7 +445,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     // delete may have run before the object was written.
     const after = await loadItem(deps, auth, item.id);
     if (after === null || after.state === "closing") {
-      await deps.pub.delete([key]);
+      await deps.drafts.delete([key]);
       return noItem();
     }
     return noContent();
@@ -483,7 +485,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     }
     const key = previewKey(item.id, type);
     try {
-      await deps.pub.put(key, data, { contentType: PREVIEW_TYPE[type], cacheControl: NO_CACHE });
+      await deps.drafts.put(key, data, { contentType: PREVIEW_TYPE[type], cacheControl: NO_CACHE });
     } catch (err) {
       await deps.db.run("UPDATE media SET preview_type = NULL, preview_bytes = NULL, preview_claim = NULL WHERE id = ? AND workspace_id = ? AND preview_claim = ?", [
         item.id, auth.workspaceId, token,
@@ -496,14 +498,14 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     if (done.changes === 0) {
       const after = await loadItem(deps, auth, item.id);
       if (after === null || after.state === "closing") {
-        await deps.pub.delete([key]);
+        await deps.drafts.delete([key]);
         return noItem();
       }
       // A later send of the preview took the claim over and finishes it.
       return noContent();
     }
     // A preview of the other type that this one replaces is removed, so an item holds one.
-    if (item.preview_type !== null && item.preview_type !== type) await deps.pub.delete([previewKey(item.id, item.preview_type)]);
+    if (item.preview_type !== null && item.preview_type !== type) await deps.drafts.delete([previewKey(item.id, item.preview_type)]);
     return noContent();
   });
 
@@ -513,7 +515,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     if (auth instanceof Response) return auth;
     const item = await loadItem(deps, auth, c.req.param("id"));
     if (item === null || item.state === "closing") return noItem();
-    if (item.state === "online") return json(200, committedOut(c.req.raw, deps, item));
+    if (item.state === "online") return json(200, committedOut(deps, item));
     const incomplete = (detail: string) => apiError(409, "incomplete", detail);
     const rows = await deps.db.all<{ n: number; bytes: number; stored_at: number | null }>(
       "SELECT p.n, p.bytes, p.stored_at FROM media_part p JOIN media m ON m.id = p.media_id WHERE p.media_id = ? AND m.workspace_id = ?",
@@ -539,9 +541,9 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     );
     const now = await loadItem(deps, auth, item.id);
     if (now === null || now.state === "closing") return noItem();
-    if (now.state === "online") return json(200, committedOut(c.req.raw, deps, now));
+    if (now.state === "online") return json(200, committedOut(deps, now));
     if (done.changes === 0) return incomplete("a part or the preview was being sent again while finishing; finish it once more");
-    return json(200, committedOut(c.req.raw, deps, now));
+    return json(200, committedOut(deps, now));
   });
 
   // Delete an item in any state. 204 once nothing of it is left; repeat on 500 cleanup_pending.
@@ -580,7 +582,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     const page = rows.slice(0, LIST_PAGE);
     const last = page.at(-1);
     const next = rows.length > LIST_PAGE && last !== undefined ? encodeCursor(last.created_at, last.id) : null;
-    return json(200, { items: page.map((r) => itemOut(c.req.raw, deps, r)), next });
+    return json(200, { items: page.map((r) => itemOut(deps, r)), next });
   });
 
   // One item, in any state but closing.
@@ -589,7 +591,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     if (auth instanceof Response) return auth;
     const item = await loadItem(deps, auth, c.req.param("id"));
     if (item === null || item.state === "closing") return noItem();
-    return json(200, { ...itemOut(c.req.raw, deps, item), state: item.state });
+    return json(200, { ...itemOut(deps, item), state: item.state });
   });
 
   // The preview picture, to its own workspace only.
@@ -599,7 +601,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     const item = await loadItem(deps, auth, c.req.param("id"));
     if (item === null || item.state === "closing") return noItem();
     if (item.preview_type === null || item.preview_stored_at === null) return apiError(404, "not_found", "this item has no preview");
-    const file = await deps.pub.get(previewKey(item.id, item.preview_type));
+    const file = await deps.drafts.get(previewKey(item.id, item.preview_type));
     if (file === null) return apiError(404, "not_found", "this item has no preview");
     return new Response(file.body, { status: 200, headers: previewHeaders(item.preview_type, file.size) });
   });

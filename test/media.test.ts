@@ -5,10 +5,11 @@ import { describe, expect, it } from "vitest";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
 import { SUBREQUEST_BUDGET } from "../src/budget.ts";
 import { CLIP_MAX_DURATION_MS, DEFAULT_MEDIA_LIMITS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, mediaLink } from "../src/media.ts";
+import type { Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
 import { LIMITS_MEDIA } from "../src/rate.ts";
 import { storageFull, type Usage } from "../src/usage.ts";
-import { ORIGIN, count, createUpload, fixtures, gif, jpeg, mp4, png, send, type Call, type Json } from "./bundle.ts";
+import { ORIGIN, abort, count, createUpload, fixtures, gif, jpeg, mp4, png, send, uploadTour, type Call, type Json } from "./bundle.ts";
 
 const SLOW = { timeout: 300_000 };
 const JSON_HEADERS = { "content-type": "application/json" };
@@ -73,7 +74,7 @@ async function objectsOf(keys: () => Promise<string[]>, id: string): Promise<str
 }
 
 async function readAll(deps: Deps, key: string): Promise<Uint8Array | null> {
-  const file = await deps.pub.get(key);
+  const file = await deps.drafts.get(key);
   return file === null ? null : new Uint8Array(await new Response(file.body).arrayBuffer());
 }
 
@@ -81,7 +82,7 @@ const refused = (r: Call, status: number, error: string) => expect([r.status, r.
 
 describe("an item's life", () => {
   it("an image goes online: create, its part, a preview, commit, then it reads and lists", async () => {
-    const { deps, publicKeys } = await makeDeps();
+    const { deps, draftKeys } = await makeDeps();
     const { token } = await seedWorkspace(deps, "Acme");
     const made = await create(deps, token, { ...IMAGE, title: "  The new invoice screen  " });
     expect(made.status, made.text).toBe(201);
@@ -99,19 +100,19 @@ describe("an item's life", () => {
     const done = await commit(deps, token, id);
     expect(done.status, done.text).toBe(200);
     const linkId = done.json.link_id as string;
-    expect(done.json).toEqual({ id, link_id: linkId, kind: "image", path: `/i/${linkId}`, link: `${ORIGIN}/i/${linkId}` });
+    expect(done.json).toEqual({ id, link_id: linkId, kind: "image", path: `/i/${linkId}`, link: `/i/${linkId}` });
     // The link id is 20 characters of a-z and 2-7, and has nothing of the id in it.
     expect(linkId).toMatch(/^[a-z2-7]{20}$/);
     expect(linkId.includes(id.slice(4, 14))).toBe(false);
 
     const item = await get(deps, token, id);
-    const fields = { id, link_id: linkId, kind: "image", title: "The new invoice screen", content_type: "image/png", bytes: 5000, width: 640, height: 480, duration_ms: null, created_at: expect.any(Number), has_preview: true, path: `/i/${linkId}`, link: `${ORIGIN}/i/${linkId}` };
+    const fields = { id, link_id: linkId, kind: "image", title: "The new invoice screen", content_type: "image/png", bytes: 5000, width: 640, height: 480, duration_ms: null, created_at: expect.any(Number), has_preview: true, path: `/i/${linkId}`, link: `/i/${linkId}` };
     expect(item.json).toEqual({ ...fields, state: "online" });
     expect((await list(deps, token, "kind=image")).json).toEqual({ items: [fields], next: null });
     expect((await list(deps, token, "kind=clip")).json).toEqual({ items: [], next: null });
 
-    // Stored as its own object in the public store, with the bytes sent; the preview beside it.
-    expect(await objectsOf(publicKeys, id)).toEqual([`m/${id}/part-000`, `m/${id}/preview.png`]);
+    // Stored as its own object in the private store, with the bytes sent; the preview beside it.
+    expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`, `m/${id}/preview.png`]);
     expect(await readAll(deps, `m/${id}/part-000`)).toEqual(file);
 
     // The preview, to its own workspace: the sniffed type and nothing a browser could run.
@@ -125,7 +126,7 @@ describe("an item's life", () => {
   });
 
   it("a clip of several parts: every part but the last is 2,000,000 bytes, and the size and duration of an MP4 are as declared", async () => {
-    const { deps, publicKeys } = await makeDeps();
+    const { deps, draftKeys } = await makeDeps();
     const { token } = await seedWorkspace(deps, "Acme");
     const made = await create(deps, token, CLIP);
     expect(made.json.parts).toBe(3);
@@ -136,7 +137,7 @@ describe("an item's life", () => {
     const done = await commit(deps, token, id);
     expect(done.json).toMatchObject({ kind: "clip", path: `/r/${done.json.link_id}` });
     expect((await get(deps, token, id)).json).toMatchObject({ kind: "clip", content_type: "video/mp4", width: 1280, height: 720, duration_ms: 12_000, has_preview: false, title: null });
-    expect(await objectsOf(publicKeys, id)).toEqual([0, 1, 2].map((n) => `m/${id}/part-00${n}`));
+    expect(await objectsOf(draftKeys, id)).toEqual([0, 1, 2].map((n) => `m/${id}/part-00${n}`));
     expect((await readAll(deps, `m/${id}/part-002`))?.length).toBe(500_000);
     expect((await list(deps, token, "kind=clip")).json.items.map((i: Json) => i.id)).toEqual([id]);
   });
@@ -148,12 +149,99 @@ describe("an item's life", () => {
     await shareItem(deps, token, { kind: "image", content_type: "image/jpeg", bytes: 2_000_001, width: 8192, height: 10 });
   });
 
-  it("the link is built from the tours address, else SITE_HOST, else the request's own address", async () => {
-    const req = new Request("http://127.0.0.1:8787/api/v1/media/x/commit");
+  it("the link is built from the configuration alone: the img address, else the tours address, else SITE_HOST, else the path", async () => {
     const item = { kind: "clip" as const, link_id: "abcdefghijklmnopqrst" };
-    expect(mediaLink(req, { publicImageBase: "", setupCode: null }, item)).toBe("http://127.0.0.1:8787/r/abcdefghijklmnopqrst");
-    expect(mediaLink(req, { publicImageBase: "", setupCode: null, siteHost: "tours.example.org" }, item)).toBe("https://tours.example.org/r/abcdefghijklmnopqrst");
-    expect(mediaLink(req, { publicImageBase: "", setupCode: null, hosts: { tours: "t.example.org", app: "a.example.org" } }, { ...item, kind: "image" })).toBe("https://t.example.org/i/abcdefghijklmnopqrst");
+    const base = { publicImageBase: "", setupCode: null };
+    expect(mediaLink(base, item)).toBe("/r/abcdefghijklmnopqrst");
+    expect(mediaLink({ ...base, siteHost: "tours.example.org" }, item)).toBe("https://tours.example.org/r/abcdefghijklmnopqrst");
+    expect(mediaLink({ ...base, hosts: { tours: "t.example.org", app: "a.example.org" } }, { ...item, kind: "image" })).toBe("https://t.example.org/i/abcdefghijklmnopqrst");
+    expect(mediaLink({ ...base, hosts: { tours: "t.example.org", app: "a.example.org", img: "i.example.org" } }, item)).toBe("https://i.example.org/r/abcdefghijklmnopqrst");
+  });
+
+  it("a spoofed Host header never shows up in a link, in any mode, and with IMG_HOST the link is on the img address", async () => {
+    const TWO: Hosts = { tours: "tours.example.com", app: "app.example.com" };
+    const modes: { name: string; config: Parameters<typeof makeDeps>[0]; origin: string; want: string }[] = [
+      { name: "one address", config: {}, origin: "https://evil.example.net", want: "" },
+      { name: "one address with SITE_HOST", config: { siteHost: "site.example.org" }, origin: "https://evil.example.net", want: "https://site.example.org" },
+      { name: "two addresses", config: { hosts: TWO }, origin: "https://app.example.com", want: "https://tours.example.com" },
+      { name: "three addresses", config: { hosts: { ...TWO, img: "img.example.com" } }, origin: "https://tours.example.com", want: "https://img.example.com" },
+    ];
+    for (const mode of modes) {
+      const { deps } = await makeDeps(mode.config);
+      const { token } = await seedWorkspace(deps, "Acme");
+      const spoof = { host: "evil.example.net", "x-forwarded-host": "evil.example.net", forwarded: "host=evil.example.net" };
+      const at = { origin: mode.origin, headers: spoof };
+      const made = await send(deps, "POST", "/api/v1/media", { token, body: JSON.stringify(IMAGE), headers: { ...JSON_HEADERS, ...spoof }, origin: mode.origin });
+      expect(made.status, `${mode.name}: ${made.text}`).toBe(201);
+      const id = made.json.id as string;
+      expect((await send(deps, "PUT", `/api/v1/media/${id}/parts/0`, { token, body: fileOf(IMAGE) as NonNullable<RequestInit["body"]>, ...at })).status).toBe(204);
+      const answers = [
+        await send(deps, "POST", `/api/v1/media/${id}/commit`, { token, ...at }),
+        await send(deps, "GET", `/api/v1/media/${id}`, { token, ...at }),
+        await send(deps, "GET", "/api/v1/media?kind=image", { token, ...at }),
+      ];
+      const linkId = answers[0].json.link_id as string;
+      for (const r of answers) {
+        expect(r.status, mode.name).toBe(200);
+        expect(r.text, mode.name).not.toContain("evil");
+      }
+      expect([answers[0].json.link, answers[1].json.link, answers[2].json.items[0].link], mode.name).toEqual(Array(3).fill(`${mode.want}/i/${linkId}`));
+    }
+  });
+});
+
+describe("the store", () => {
+  it("parts and previews are kept in the private store: nothing under m/ is ever written to the public store", async () => {
+    const { deps, draftKeys, publicKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    const writes: string[] = [];
+    const pub = deps.pub;
+    deps.pub = {
+      put: (key, body, meta) => (writes.push(`put ${key}`), pub.put(key, body, meta)),
+      get: (key) => (writes.push(`get ${key}`), pub.get(key)),
+      delete: (keys) => (writes.push(`delete ${keys.join(" ")}`), pub.delete(keys)),
+    };
+    const { id } = await sendItem(deps, token, CLIP);
+    expect((await putPreview(deps, token, id, png(10, 10, 100))).status).toBe(204);
+    expect((await putPreview(deps, token, id, jpeg(10, 10, 100))).status).toBe(204);
+    expect((await commit(deps, token, id)).status).toBe(200);
+    expect((await send(deps, "GET", `/api/v1/media/${id}/preview`, { token })).status).toBe(200);
+    expect((await list(deps, token, "kind=clip")).status).toBe(200);
+    expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`, `m/${id}/part-001`, `m/${id}/part-002`, `m/${id}/preview.jpg`]);
+    expect((await remove(deps, token, id)).status).toBe(204);
+    // An unfinished item swept a day on, too.
+    let now = Date.now();
+    deps.now = () => now;
+    await sendItem(deps, token, IMAGE);
+    now += MEDIA_MAX_AGE_MS + 1;
+    expect((await create(deps, token, IMAGE)).status).toBe(201);
+    expect(writes).toEqual([]);
+    expect(await publicKeys()).toEqual([]);
+  });
+
+  it("the uploads' and tours' own clean-up never reaches an item's objects", async () => {
+    const { deps, draftKeys } = await makeDeps({ retiredGraceMs: 0 });
+    const { token } = await seedWorkspace(deps, "Acme");
+    const online = (await shareItem(deps, token, CLIP)).id as string;
+    const { id: unfinished } = await sendItem(deps, token, IMAGE);
+    const before = (await draftKeys()).filter((k) => k.startsWith("m/"));
+    expect(before).toHaveLength(4);
+    // Every draft key the upload routes write is under u/.
+    const tour = await uploadTour(deps, token, fixtures.v3 as Json);
+    expect((await draftKeys()).filter((k) => !k.startsWith("m/")).every((k) => k.startsWith("u/"))).toBe(true);
+    // An aborted upload, a publish and unpublish, and a deleted tour remove only their own files.
+    const open = await createUpload(deps, token, fixtures.v1 as Json);
+    expect((await abort(deps, token, open.json.upload_id)).status).toBe(204);
+    expect((await send(deps, "POST", `/api/v1/tours/${tour.tour_id}/publish`, { token })).status).toBeLessThan(300);
+    expect((await send(deps, "POST", `/api/v1/tours/${tour.tour_id}/unpublish`, { token })).status).toBeLessThan(300);
+    let gone = await send(deps, "DELETE", `/api/v1/tours/${tour.tour_id}`, { token });
+    while (gone.status === 202) gone = await send(deps, "DELETE", `/api/v1/tours/${tour.tour_id}`, { token });
+    expect(gone.status).toBe(200);
+    expect((await send(deps, "GET", "/api/v1/tours", { token })).status).toBe(200);
+    expect((await draftKeys()).filter((k) => k.startsWith("m/"))).toEqual(before);
+    expect((await draftKeys()).filter((k) => !k.startsWith("m/"))).toEqual([]);
+    expect((await get(deps, token, online)).json.state).toBe("online");
+    expect((await get(deps, token, unfinished)).json.state).toBe("uploading");
   });
 });
 
@@ -242,7 +330,7 @@ describe("what a create refuses", () => {
 
 describe("parts", () => {
   it("part 0 that is HTML, SVG, an executable or another type than declared is refused, and nothing is stored", async () => {
-    const { deps, publicKeys } = await makeDeps();
+    const { deps, draftKeys } = await makeDeps();
     const { token } = await seedWorkspace(deps, "Acme");
     const pad = (head: Uint8Array, total: number) => {
       const out = new Uint8Array(total).fill(0x20);
@@ -271,11 +359,11 @@ describe("parts", () => {
       expect(r.text, what).not.toContain("script");
     }
     expect(await count(deps, "media_part")).toBe(0);
-    expect((await publicKeys()).filter((k) => k.startsWith("m/"))).toEqual([]);
+    expect((await draftKeys()).filter((k) => k.startsWith("m/"))).toEqual([]);
   });
 
   it("a wrong length, a part number out of range, a part after commit and a commit that lacks a part are refused", async () => {
-    const { deps, publicKeys } = await makeDeps();
+    const { deps, draftKeys } = await makeDeps();
     const { token } = await seedWorkspace(deps, "Acme");
     const made = await create(deps, token, CLIP);
     const id = made.json.id as string;
@@ -314,7 +402,7 @@ describe("parts", () => {
     refused(await putPart(deps, token, id, 1, partOf(file, 1)), 409, "already_online");
     refused(await putPreview(deps, token, id, png(10, 10, 100)), 409, "already_online");
     expect(await readAll(deps, `m/${id}/part-002`)).toEqual(partOf(other, 2));
-    expect(await objectsOf(publicKeys, id)).toHaveLength(3);
+    expect(await objectsOf(draftKeys, id)).toHaveLength(3);
   });
 
   it("parts whose stored sizes do not add up to the declared bytes are not committed", async () => {
@@ -330,20 +418,20 @@ describe("parts", () => {
   });
 
   it("the preview is a PNG or JPEG of at most 100,000 bytes and 512 pixels, and a new one replaces the old", async () => {
-    const { deps, publicKeys } = await makeDeps();
+    const { deps, draftKeys } = await makeDeps();
     const { token } = await seedWorkspace(deps, "Acme");
     const { id } = await sendItem(deps, token, IMAGE);
     refused(await putPreview(deps, token, id, png(513, 10, 1000)), 400, "bad_image");
     refused(await putPreview(deps, token, id, gif(10, 10, 1000)), 400, "bad_image");
     refused(await putPreview(deps, token, id, new TextEncoder().encode("<svg/>")), 400, "bad_image");
     refused(await putPreview(deps, token, id, png(10, 10, PREVIEW_RULE.maxBytes + 1)), 413, "too_large");
-    expect(await objectsOf(publicKeys, id)).toEqual([`m/${id}/part-000`]);
+    expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`]);
     expect((await send(deps, "GET", `/api/v1/media/${id}/preview`, { token })).json).toEqual({ error: "not_found", detail: "this item has no preview" });
 
     expect((await putPreview(deps, token, id, png(512, 512, PREVIEW_RULE.maxBytes))).status).toBe(204);
     expect((await putPreview(deps, token, id, jpeg(100, 50, 2000))).status).toBe(204);
     // The PNG it replaced is gone; one preview is left, served as what it is.
-    expect(await objectsOf(publicKeys, id)).toEqual([`m/${id}/part-000`, `m/${id}/preview.jpg`]);
+    expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`, `m/${id}/preview.jpg`]);
     const p = await send(deps, "GET", `/api/v1/media/${id}/preview`, { token });
     expect([p.status, p.headers.get("content-type"), p.bytes.length]).toEqual([200, "image/jpeg", 2000]);
     expect(await deps.db.first("SELECT preview_type, preview_bytes FROM media WHERE id = ?", [id])).toEqual({ preview_type: "jpg", preview_bytes: 2000 });
@@ -354,7 +442,7 @@ describe("the storage allowance", () => {
   const usageOf = async (deps: Deps, token: string) => (await send(deps, "GET", "/api/v1/usage", { token })).json;
 
   it("an item over the allowance is refused before any part is stored, with the item's own sentence", async () => {
-    const { deps, publicKeys } = await makeDeps({ storageAllowanceBytes: 3 * MB });
+    const { deps, draftKeys } = await makeDeps({ storageAllowanceBytes: 3 * MB });
     const { token } = await seedWorkspace(deps, "Acme");
     const r = await create(deps, token, { ...CLIP, bytes: 3 * MB + 1 });
     expect(r.status).toBe(413);
@@ -363,7 +451,7 @@ describe("the storage allowance", () => {
     const image = await create(deps, token, { ...IMAGE, content_type: "image/jpeg", bytes: 3 * MB + 1, width: 10, height: 10 });
     expect(image.json.detail).toMatch(/^this image needs 3\.1 MB of room/);
     expect(await count(deps, "media")).toBe(0);
-    expect(await publicKeys()).toEqual([]);
+    expect(await draftKeys()).toEqual([]);
     // Exactly the allowance fits.
     expect((await create(deps, token, { ...CLIP, bytes: 3 * MB })).status).toBe(201);
     expect((await usageOf(deps, token)).used_bytes).toBe(3 * MB);
@@ -440,7 +528,7 @@ describe("the storage allowance", () => {
 
 describe("delete and sweep", () => {
   it("delete removes an item in any state, its rows and every object, and a second delete is 404", async () => {
-    const { deps, publicKeys } = await makeDeps();
+    const { deps, draftKeys } = await makeDeps();
     const { token } = await seedWorkspace(deps, "Acme");
     const empty = (await create(deps, token, CLIP)).json.id as string;
     const half = await create(deps, token, CLIP);
@@ -451,19 +539,19 @@ describe("delete and sweep", () => {
     for (const id of [empty, half.json.id, online.id]) {
       const r = await remove(deps, token, id);
       expect([r.status, r.text], id).toEqual([204, ""]);
-      expect(await objectsOf(publicKeys, id), id).toEqual([]);
+      expect(await objectsOf(draftKeys, id), id).toEqual([]);
       expect((await get(deps, token, id)).json).toEqual(NO_ITEM);
       expect((await remove(deps, token, id)).json).toEqual(NO_ITEM);
     }
     expect([await count(deps, "media"), await count(deps, "media_part")]).toEqual([0, 0]);
-    expect(await publicKeys()).toEqual([]);
+    expect(await draftKeys()).toEqual([]);
   });
 
   it("a delete whose files could not all be removed says so and is repeated; the item is gone for everything else at once", async () => {
-    const { deps, publicKeys } = await makeDeps();
+    const { deps, draftKeys } = await makeDeps();
     const { token } = await seedWorkspace(deps, "Acme");
     const item = await shareItem(deps, token, CLIP);
-    const broken: Deps = { ...deps, pub: { ...deps.pub, delete: () => Promise.reject(new Error("the store is down")) } };
+    const broken: Deps = { ...deps, drafts: { ...deps.drafts, delete: () => Promise.reject(new Error("the store is down")) } };
     const log = console.error;
     console.error = () => {};
     let cut: Call;
@@ -478,35 +566,35 @@ describe("delete and sweep", () => {
     expect((await list(deps, token, "kind=clip")).json.items).toEqual([]);
     expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(0);
     refused(await commit(deps, token, item.id), 404, "not_found");
-    expect(await objectsOf(publicKeys, item.id)).toHaveLength(3);
+    expect(await objectsOf(draftKeys, item.id)).toHaveLength(3);
     // The repeat finishes it.
     expect((await remove(deps, token, item.id)).status).toBe(204);
-    expect(await objectsOf(publicKeys, item.id)).toEqual([]);
+    expect(await objectsOf(draftKeys, item.id)).toEqual([]);
     expect(await count(deps, "media")).toBe(0);
   });
 
   it("a part that lands after its item was deleted is removed by the request that wrote it", async () => {
-    const { deps, publicKeys } = await makeDeps();
+    const { deps, draftKeys } = await makeDeps();
     const { token } = await seedWorkspace(deps, "Acme");
     const id = (await create(deps, token, IMAGE)).json.id as string;
     // The delete runs while the part is being written: between the claim and the store's put.
     const slow: Deps = {
       ...deps,
-      pub: {
-        ...deps.pub,
+      drafts: {
+        ...deps.drafts,
         put: async (key, body, meta) => {
           expect((await remove(deps, token, id)).status).toBe(204);
-          return deps.pub.put(key, body, meta);
+          return deps.drafts.put(key, body, meta);
         },
       },
     };
     expect((await putPart(slow, token, id, 0, fileOf(IMAGE))).json).toEqual(NO_ITEM);
-    expect(await objectsOf(publicKeys, id)).toEqual([]);
+    expect(await objectsOf(draftKeys, id)).toEqual([]);
     expect([await count(deps, "media"), await count(deps, "media_part")]).toEqual([0, 0]);
   });
 
   it("unfinished items are swept a day on, by the workspace's own next create, at most five at a time; online ones stay", SLOW, async () => {
-    const { deps, publicKeys } = await makeDeps();
+    const { deps, draftKeys } = await makeDeps();
     const { token } = await seedWorkspace(deps, "Acme");
     const other = await seedWorkspace(deps, "Other");
     let now = 1_800_000_000_000;
@@ -527,11 +615,11 @@ describe("delete and sweep", () => {
     const left = await deps.db.all<{ id: string; state: string }>("SELECT id, state FROM media WHERE id IN (" + stale.map(() => "?").join(", ") + ") ORDER BY id", stale);
     expect(left.map((x) => x.state)).toEqual(["closing", "closing"]);
     await create(deps, token, IMAGE);
-    for (const id of stale) expect(await objectsOf(publicKeys, id), id).toEqual([]);
+    for (const id of stale) expect(await objectsOf(draftKeys, id), id).toEqual([]);
     expect(await deps.db.first("SELECT count(*) AS n FROM media WHERE id IN (" + stale.map(() => "?").join(", ") + ")", stale)).toEqual({ n: 0 });
     // The online item, the newer one and the other workspace's stay.
     for (const id of [online.id, fresh, theirs]) expect(await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM media WHERE id = ?", [id]), id).toEqual({ n: 1 });
-    expect(await objectsOf(publicKeys, theirs)).toEqual([`m/${theirs}/part-000`]);
+    expect(await objectsOf(draftKeys, theirs)).toEqual([`m/${theirs}/part-000`]);
   });
 });
 
@@ -609,13 +697,13 @@ describe("credentials", () => {
 
 describe("the call budget", () => {
   it("the largest clip is created, sent, committed, listed and deleted with no request over 40 calls", SLOW, async () => {
-    const { deps, publicKeys } = await makeDeps();
+    const { deps, draftKeys } = await makeDeps();
     const { token } = await seedWorkspace(deps, "Acme");
     const spec: Spec = { ...CLIP, bytes: DEFAULT_MEDIA_LIMITS.clipMaxBytes };
     const { id, calls } = await sendItem(deps, token, spec);
     expect(calls).toHaveLength(1 + Math.ceil(spec.bytes / PART_BYTES));
     expect(calls.length - 1).toBe(27);
-    expect(await objectsOf(publicKeys, id)).toHaveLength(27);
+    expect(await objectsOf(draftKeys, id)).toHaveLength(27);
     expect((await putPreview(deps, token, id, png(10, 10, 100))).calls).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
     const done = await commit(deps, token, id);
     expect(done.status).toBe(200);
@@ -623,7 +711,7 @@ describe("the call budget", () => {
     expect(listed.json.items.map((i: Json) => i.id)).toEqual([id]);
     const gone = await remove(deps, token, id);
     expect(gone.status).toBe(204);
-    expect(await objectsOf(publicKeys, id)).toEqual([]);
+    expect(await objectsOf(draftKeys, id)).toEqual([]);
     for (const c of [...calls, done.calls, listed.calls, gone.calls]) expect(c).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
     // The delete is a handful of calls whatever the number of parts: one store delete takes them all.
     expect(gone.calls).toBeLessThanOrEqual(8);
