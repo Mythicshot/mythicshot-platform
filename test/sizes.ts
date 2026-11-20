@@ -1,8 +1,9 @@
 // The one table of how a size is written, everywhere a person reads one: the server's
-// formatBytes (src/usage.ts, used in the storage-full sentence) and the account page's
-// script (formatBytes inside SIGNIN_JS, src/signin/page.ts), which is plain text served to
-// the browser and cannot import the server's module. Both are held to this table, in
-// test/usage.test.ts and test/node-signin-pages.test.ts, so they cannot drift apart.
+// formatBytes (src/usage.ts, used in the storage-full sentence) and the dashboard's shared
+// script (Dash.formatBytes inside DASH_JS, src/dash/script.ts), which is plain text served
+// to the browser and cannot import the server's module. Both are held to this table, in
+// test/usage.test.ts and test/node-dash-pages.test.ts, so they cannot drift apart. (The old
+// account page's own copy went with it when /account became a dashboard page.)
 //
 // The rule: under 1024 the exact number of bytes; otherwise 1024 to the next unit, at most
 // one decimal and no trailing ".0"; a value that rounds to 1024 of a unit is 1 of the next;

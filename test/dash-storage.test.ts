@@ -74,7 +74,10 @@ const STORAGE_WORDING = [
   "Uploads in progress",
   "Largest tours",
   "Tour",
+  // Proposed: the names a screen reader gives the bar's column and the buttons' column; the eye does not see them.
+  "Share",
   "Size",
+  "Actions",
   "Tours page",
   ".",
   "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.",
@@ -278,6 +281,8 @@ describe("the Storage page", () => {
     const asked = [...STORAGE_JS.matchAll(/\$\("([a-z-]+)"\)/g)].map((m) => m[1]);
     expect(asked.length).toBeGreaterThan(10);
     for (const id of asked) expect(ids.has(id), `#${id}`).toBe(true);
+    // The empty headers have names a screen reader reads and the eye does not see.
+    expect(all.filter((e) => e.tagName === "th").map((th) => [th.textContent, th.all().map((c) => c.className)])).toEqual([["Tour", []], ["Share", ["vh"]], ["Size", []], ["Actions", ["vh"]]]);
     const phone = [...DASH_CSS.matchAll(/@media \(max-width: 720px\) \{\n([\s\S]*?)\n\}/g)].map((m) => m[1]).join("\n");
     expect(phone).toContain(".largest .mini-cell { display: none; }");
     expect(DASH_CSS).not.toMatch(/overflow-x|100vw/);

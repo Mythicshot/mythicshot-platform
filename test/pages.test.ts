@@ -1,5 +1,5 @@
-// The sign-in pages: /signin, /signin/link and /account, with their one stylesheet and
-// one script. What their answers are (headers, where they answer, that they cost no
+// The sign-in pages: /signin and /signin/link, with their one stylesheet and one script
+// (the account page is a dashboard page now: test/dash-account.test.ts). What their answers are (headers, where they answer, that they cost no
 // database or storage call and hold nothing about anyone), the exact wording, and what
 // the script text may and may not do. What the script does when it runs is tested under
 // Node in test/node-signin-pages.test.ts, where it can be run against a stand-in document.
@@ -11,7 +11,7 @@ import type { Hosts } from "../src/hosts.ts";
 import { ACCOUNT_PAGE_HEADERS } from "../src/pages.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { inviteContactFrom } from "../src/signin/invite.ts";
-import { ACCOUNT_HTML, LINK_HTML, SIGNIN_CSS, SIGNIN_HTML, SIGNIN_JS, signinHtml } from "../src/signin/page.ts";
+import { LINK_HTML, SIGNIN_CSS, SIGNIN_HTML, SIGNIN_JS, signinHtml } from "../src/signin/page.ts";
 import { send, type Call } from "./bundle.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
@@ -28,7 +28,6 @@ type Served = { path: string; body: string; type: string };
 const PAGES: Served[] = [
   { path: "/signin", body: SIGNIN_HTML, type: "text/html; charset=utf-8" },
   { path: "/signin/link", body: LINK_HTML, type: "text/html; charset=utf-8" },
-  { path: "/account", body: ACCOUNT_HTML, type: "text/html; charset=utf-8" },
 ];
 const FILES: Served[] = [
   { path: "/signin/signin.css", body: SIGNIN_CSS, type: "text/css; charset=utf-8" },
@@ -37,7 +36,7 @@ const FILES: Served[] = [
 const ALL = [...PAGES, ...FILES];
 const KEYS = ALL.map((s) => `GET ${s.path}`);
 
-/** The headers every one of the five answers carries, the content type aside. */
+/** The headers every one of the four answers carries, the content type aside. */
 const SECURITY: Record<string, string> = {
   "content-security-policy": POLICY,
   "x-frame-options": "DENY",
@@ -91,44 +90,16 @@ const WORDING: Record<string, string[]> = {
     "A link works once and for 15 minutes. Ask for a new one and use the newest mail.",
     "Send me a new link",
   ],
-  "/account": [
-    BRAND,
-    NOSCRIPT,
-    "Signed in",
-    "Storage",
-    "You are over your storage allowance. New uploads are refused until you delete tours or get more room.",
-    "Tours and their pictures count. Deleting a tour frees its space within a few minutes.",
-    "Where you are signed in",
-    "Sign out",
-    "Sign out everywhere",
-    "Tours are managed from Mythicshot for now. A dashboard is coming to this page.",
-  ],
 };
-// The account page's title is the site's name alone until its script knows someone is signed in.
-const TITLES: Record<string, string> = { "/signin": "Sign in", "/signin/link": "Finish signing in", "/account": "Mythicshot" };
+const TITLES: Record<string, string> = { "/signin": "Sign in", "/signin/link": "Finish signing in" };
 
 /** Every text the script itself puts on a page, by its key in the script's TEXT. */
 const SCRIPT_TEXT: Record<string, string> = {
   badEmail: "That does not look like an email address.",
   tooMany: "Too many requests. Wait a few minutes and try again.",
   failed: "Something went wrong. Try again in a moment.",
-  notEnded: "That session could not be ended. Reload the page.",
   sending: "Sending…",
   signingIn: "Signing in…",
-  signingOut: "Signing out…",
-  signedIn: "Signed in",
-  signedInAs: "Signed in as ",
-  of: " of ",
-  used: " used",
-  dot: " · ",
-  oneTour: "1 tour",
-  tours: " tours",
-  thisBrowser: "This browser",
-  since: "since ",
-  lastUsed: "last used ",
-  signOut: "Sign out",
-  oneByte: "1 byte",
-  bytes: " bytes",
 };
 
 /** The script's TEXT object, read from the script's own text. */
@@ -275,43 +246,23 @@ describe("the sign-in pages", () => {
     // Leaving a page goes only to a fixed address of this site.
     const navigations = [...SIGNIN_JS.matchAll(/location\.(replace|assign)\(([^)]*)\)/g)].map((m) => m[2]);
     expect(navigations.length).toBeGreaterThan(0);
-    for (const target of navigations) expect(["\"/signin\"", "\"/account\""], target).toContain(target);
+    // After signing in a person lands on the Tours page; the account page is a dashboard page now.
+    expect(navigations.sort()).toEqual(['"/signin"', '"/tours"', '"/tours"']);
     // The address is never assigned to, by any name: every use of location is one of these.
     expect(SIGNIN_JS).not.toMatch(/\blocation\s*=(?!=)/);
     expect(SIGNIN_JS).not.toMatch(/\b(?:window|document|self|top|parent|globalThis)\s*\.\s*location\b/);
     expect(SIGNIN_JS).not.toMatch(/\blocation\s*\[/);
     const uses = [...SIGNIN_JS.matchAll(/\blocation\b\s*(\.\s*[a-zA-Z]+)?/g)].map((m) => (m[1] ?? "").replace(/\s/g, ""));
     expect(new Set(uses)).toEqual(new Set([".hash", ".pathname", ".search", ".replace", ".assign"]));
-    // Every request goes to the API of this site, by a fixed path or a session's id.
-    const requests = [...SIGNIN_JS.matchAll(/\bcall\("([A-Z]+)", ("[^"]*"(?: \+ encodeURIComponent\(id\))?)/g)].map((m) => `${m[1]} ${m[2]}`);
-    expect(requests.sort()).toEqual(
-      [
-        'DELETE "/api/v1/sessions/" + encodeURIComponent(id)',
-        'GET "/api/v1/session"',
-        'GET "/api/v1/session"',
-        'GET "/api/v1/sessions"',
-        'GET "/api/v1/usage"',
-        'POST "/api/v1/signin/complete"',
-        'POST "/api/v1/signin/request"',
-        'POST "/api/v1/signout"',
-        'POST "/api/v1/signout/everywhere"',
-      ].sort(),
-    );
+    // Every request goes to the API of this site, by a fixed path. The account page's own
+    // requests (the sessions, the sign-outs) are the dashboard's now: test/dash-account.test.ts.
+    const requests = [...SIGNIN_JS.matchAll(/\bcall\("([A-Z]+)", ("[^"]*")/g)].map((m) => `${m[1]} ${m[2]}`);
+    expect(requests.sort()).toEqual(['GET "/api/v1/session"', 'POST "/api/v1/signin/complete"', 'POST "/api/v1/signin/request"'].sort());
     expect(SIGNIN_JS.match(/\bfetch\(/g), "one place makes every request").toHaveLength(1);
     expect(SIGNIN_JS).toContain('credentials: "same-origin"');
     expect(SIGNIN_JS).toContain('referrerPolicy: "no-referrer"');
-    // The anti-forgery value lives in one variable and goes only into the request header.
-    for (const m of SIGNIN_JS.matchAll(/\bcsrf\b/g)) {
-      const line = SIGNIN_JS.slice(SIGNIN_JS.lastIndexOf("\n", m.index) + 1, SIGNIN_JS.indexOf("\n", m.index)).trim();
-      expect(/^(?:var csrf = "";|csrf = res\.data\.csrf;|if \(csrf !== undefined\) headers\["X-Csrf-Token"\] = csrf;|function call\(method, path, body, csrf\) \{|.*call\("(?:POST|DELETE)", [^;]*, undefined, csrf\)|if \(typeof res\.data\.csrf !== "string"|\/\/)/.test(line), `a use of csrf: ${line}`).toBe(true);
-    }
-  });
-
-  it("the account page sends the anti-forgery header with both sign-outs", () => {
-    expect(SIGNIN_JS).toContain('call("POST", "/api/v1/signout", undefined, csrf)');
-    expect(SIGNIN_JS).toContain('call("POST", "/api/v1/signout/everywhere", undefined, csrf)');
-    expect(SIGNIN_JS).toContain('call("DELETE", "/api/v1/sessions/" + encodeURIComponent(id), undefined, csrf)');
-    expect(SIGNIN_JS).toContain('headers["X-Csrf-Token"] = csrf;');
+    // No request of these pages is made with a session, so none carries the anti-forgery value.
+    expect(SIGNIN_JS).not.toMatch(/csrf/i);
     // A JSON body is labelled as JSON.
     expect(SIGNIN_JS).toContain('headers["content-type"] = "application/json";');
   });
@@ -454,7 +405,7 @@ describe("the owner's wording decisions", () => {
       expect(r.headers.get("content-security-policy"), String(raw)).toBe(POLICY);
       if (line === INVITE) expect(r.text, String(raw)).toBe(SIGNIN_HTML);
       // The other pages never change with it.
-      expect((await send(deps, "GET", "/account", { origin: APP })).text).toBe(ACCOUNT_HTML);
+      expect((await send(deps, "GET", "/signin/link", { origin: APP })).text).toBe(LINK_HTML);
     }
   });
 
@@ -466,24 +417,18 @@ describe("the owner's wording decisions", () => {
     for (const v of [undefined, "", "  ", 42, { a: 1 }]) expect(entry.inviteContactFromWorkerEnv({ INVITE_CONTACT: v }), JSON.stringify(v)).toBeNull();
   });
 
-  it("the over-allowance sentence, the messages and the busy labels are the approved text", () => {
-    const doc = new FakeDocument(ACCOUNT_HTML);
-    const over = doc.getElementById("usage-over")!;
-    expect(over.textContent).toBe("You are over your storage allowance. New uploads are refused until you delete tours or get more room.");
-    expect(over.hidden).toBe(true);
-    expect(over.className).toBe("over");
-    expect(SIGNIN_CSS).toMatch(/\.over \{[^}]*color: var\(--warn\)/);
+  it("the messages and the busy labels are the approved text", () => {
+    // The over-allowance sentence moved with the storage block to the Storage page (test/dash-storage.test.ts),
+    // and the account page's own messages to test/dash-account.test.ts.
     const text = scriptText();
-    expect([text.badEmail, text.tooMany, text.failed, text.notEnded, text.sending, text.signingIn, text.signingOut]).toEqual([
+    expect([text.badEmail, text.tooMany, text.failed, text.sending, text.signingIn]).toEqual([
       "That does not look like an email address.",
       "Too many requests. Wait a few minutes and try again.",
       "Something went wrong. Try again in a moment.",
-      "That session could not be ended. Reload the page.",
       "Sending…",
       "Signing in…",
-      "Signing out…",
     ]);
-    for (const page of [SIGNIN_HTML, LINK_HTML, ACCOUNT_HTML]) expect(page).toContain('<noscript><p class="message">This page needs JavaScript.</p></noscript>');
+    for (const page of [SIGNIN_HTML, LINK_HTML]) expect(page).toContain('<noscript><p class="message">This page needs JavaScript.</p></noscript>');
   });
 
   it("the README names INVITE_CONTACT in one line of its settings table", () => {

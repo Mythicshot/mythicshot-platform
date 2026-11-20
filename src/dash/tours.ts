@@ -43,7 +43,7 @@ const TOURS_MAIN = `  <div id="tours-page">
   </section>
   </div>
   <div class="backdrop" id="delete-dialog" hidden>
-    <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-text">
+    <div class="dialog" id="delete-box" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-text">
       <h2 id="delete-title" tabindex="-1"></h2>
       <p class="sub" id="delete-text">Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.</p>
       <p class="message" id="delete-message" role="status" aria-live="polite" hidden></p>
@@ -99,6 +99,8 @@ export const TOURS_JS = `(function () {
   var TOUR_PATH = /^\\/t\\/[a-z0-9]{1,64}$/;
   // What the page behind the question is, made inert while it is open.
   var BEHIND = ["dash-top", "tours-page"];
+  // The question before a delete (Dash.question, src/dash/script.ts).
+  var question = Dash.question({ backdrop: "delete-dialog", box: "delete-box", role: "alertdialog", title: "delete-title", message: "delete-message", behind: BEHIND, buttons: ["delete-keep", "delete-go"] });
 
   var $ = function (id) { return document.getElementById(id); };
   var workspace = "";
@@ -481,92 +483,45 @@ export const TOURS_JS = `(function () {
 
   // ---- The question before a delete ----
 
-  function behind(inert) {
-    BEHIND.forEach(function (id) {
-      var e = $(id);
-      if (inert) {
-        e.setAttribute("inert", "");
-        e.setAttribute("aria-hidden", "true");
-      } else {
-        e.removeAttribute("inert");
-        e.removeAttribute("aria-hidden");
-      }
-    });
-  }
-
   function ask(t) {
     if (working) return;
-    asking = { t: t };
-    $("delete-title").textContent = TEXT.askBefore + String(t.title) + TEXT.askAfter;
-    sayIn($("delete-message"), "");
-    $("delete-dialog").hidden = false;
-    behind(true);
-    $("delete-keep").focus();
-  }
-
-  // Closes the question; the focus goes to the More it came from, as the list now shows it.
-  function closeAsk(refocus) {
-    if (asking === null) return;
-    var id = asking.t.id;
-    asking = null;
-    $("delete-dialog").hidden = true;
-    behind(false);
-    if (!refocus) return;
-    var more = moreOf[id];
-    if (more !== undefined) more.focus();
-    else $("h-page").focus();
+    var opened = question.open({
+      title: TEXT.askBefore + String(t.title) + TEXT.askAfter,
+      focus: "delete-keep",
+      // The focus goes back to the More it came from, as the list shows it by then.
+      back: function () { return moreOf[t.id]; },
+      fallback: "h-page",
+      onClose: function () { asking = null; },
+    });
+    if (opened) asking = { t: t };
   }
 
   function startPage() {
-    var keep = $("delete-keep");
-    var go = $("delete-go");
-    var dialog = $("delete-dialog");
-    keep.addEventListener("click", function () { if (!working) closeAsk(true); });
-    // A click on the backdrop, outside the question itself, is Keep it.
-    dialog.addEventListener("click", function (ev) { if (ev.target === dialog && !working) closeAsk(true); });
-    go.addEventListener("click", function () {
+    $("delete-keep").addEventListener("click", function () { question.dismiss(); });
+    $("delete-go").addEventListener("click", function () {
       if (asking === null || working) return;
       var t = asking.t;
       working = true;
-      sayIn($("delete-message"), "");
-      keep.disabled = true;
-      go.disabled = true;
-      busy(go, true, TEXT.deleting);
+      question.busy(true, "delete-go", TEXT.deleting);
+      question.say("");
       rowsDisabled(true);
       changeThen(t.id, "delete", {
         before: function (ok) {
-          if (ok) closeAsk(false);
+          if (ok) question.close(false);
         },
         after: function (ok, res, shown) {
           working = false;
-          keep.disabled = false;
-          go.disabled = false;
-          busy(go, false);
+          question.busy(false, "delete-go");
           if (!shown) rowsDisabled(false);
           if (ok) {
             say(shown ? "" : TEXT.notReloaded);
             $("h-page").focus();
             return;
           }
-          sayIn($("delete-message"), problem("delete", res));
-          go.focus();
+          question.say(problem("delete", res));
+          $("delete-go").focus();
         },
       });
-    });
-    // While the question is open, Escape closes it and Tab keeps the focus on its two
-    // buttons, wherever the focus was: the page behind is inert.
-    document.addEventListener("keydown", function (ev) {
-      if (asking === null) return;
-      if (ev.key === "Escape") {
-        ev.preventDefault();
-        if (!working) closeAsk(true);
-        return;
-      }
-      if (ev.key !== "Tab") return;
-      ev.preventDefault();
-      var at = document.activeElement;
-      if (ev.shiftKey) (at === keep ? go : at === go ? keep : go).focus();
-      else (at === keep ? go : keep).focus();
     });
     // A click outside the open menu closes it.
     document.body.addEventListener("click", function (ev) {

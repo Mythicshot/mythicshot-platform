@@ -206,12 +206,12 @@ const UNITS = ["KB", "MB", "GB"] as const;
  * number of bytes (`0 bytes`, `1 byte`, `1023 bytes`); otherwise 1024 to the next unit,
  * at most one decimal and no trailing ".0" (`512 KB`, `14.2 MB`, `1.2 GB`, `5 GB`). A value
  * that rounds to 1024 of a unit is 1 of the next. GB is the largest unit, so a larger size
- * is a longer number of GB. The account page's script (src/signin/page.ts) cannot import
- * this, so both are held to the one table in test/sizes.ts.
+ * is a longer number of GB. The dashboard's shared script (src/dash/script.ts) cannot
+ * import this, so both are held to the one table in test/sizes.ts.
  */
 export function formatBytes(n: number): string {
   // No caller passes a negative or non-finite size; if one did, it reads as nothing rather
-  // than "-5 bytes" or "NaN GB". The account page's script has no such guard and is left as
+  // than "-5 bytes" or "NaN GB". The dashboard's script has no such guard and is left as
   // it is: it only ever shows numbers the API answered.
   if (!Number.isFinite(n) || n < 0) return "0 bytes";
   if (n < 1024) return n === 1 ? "1 byte" : `${n} bytes`;

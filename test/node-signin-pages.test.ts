@@ -12,26 +12,17 @@ import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
 import { createApp } from "../src/app.ts";
 import type { Deps } from "../src/ports.ts";
-import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
-import { ACCOUNT_HTML, LINK_HTML, SIGNIN_HTML, SIGNIN_JS } from "../src/signin/page.ts";
+import { SESSION_COOKIE, createSignInCode } from "../src/sessions.ts";
+import { LINK_HTML, SIGNIN_HTML, SIGNIN_JS } from "../src/signin/page.ts";
 import { NODE_SETTINGS, configFromEnv } from "../src/node/config.ts";
 import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
-import { SIZE_TABLE } from "./sizes.ts";
 
 const APP = "https://app.example.com";
 const CODE = "dpl_" + "0123456789abcdef0123456789abcdef01234567";
 const CSRF = "c".repeat(64);
 const FIREFOX = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
-const CHROME_WIN = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 /** "Now" for the page: 19 November 2026, noon UTC, so the day is the same in nearly every time zone. */
 const NOW = Date.UTC(2026, 10, 19, 12);
-const day = (y: number, m: number, d: number) => Date.UTC(y, m - 1, d, 12);
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-/** A date as the page writes it, in this process's time zone, with the page's "now" in 2026. */
-const shown = (ms: number) => {
-  const d = new Date(ms);
-  return `${d.getDate()} ${MONTHS[d.getMonth()]}${d.getFullYear() === 2026 ? "" : " " + d.getFullYear()}`;
-};
 
 type Answer = { status: number; json?: unknown; headers?: Record<string, string> } | "network";
 type Fetched = { method: string; path: string; headers: Record<string, string>; body: string | undefined; init: Record<string, unknown> };
@@ -194,11 +185,11 @@ describe("the sign-in page", () => {
     expect(tab.left()).toBeNull();
   });
 
-  it("sends someone who is signed in on to the account page", async () => {
+  it("sends someone who is signed in on to the Tours page", async () => {
     const tab = openPage(SIGNIN_HTML, `${APP}/signin`, answers({ "GET /api/v1/session": { status: 200, json: { account: {}, csrf: CSRF } } }));
     await tab.settle();
-    expect(tab.left()).toBe("/account");
-    expect(tab.log).toContain("replace /account");
+    expect(tab.left()).toBe("/tours");
+    expect(tab.log).toContain("replace /tours");
   });
 
   it("refuses what is not an address without asking the server", async () => {
@@ -316,7 +307,7 @@ describe("the page a sign-in link opens", () => {
     expect(tab.doc.root.all().some((e) => e.textContent.includes(CODE) || [...e.attrs.values()].some((v) => v.includes(CODE)))).toBe(false);
   });
 
-  it("sends the code once, in the body, when the button is pressed, and goes to the account page", async () => {
+  it("sends the code once, in the body, when the button is pressed, and goes to the Tours page", async () => {
     const server = later();
     const tab = openPage(LINK_HTML, `${APP}/signin/link#c=${CODE}`, server.respond);
     tab.$("finish-button").click();
@@ -331,8 +322,8 @@ describe("the page a sign-in link opens", () => {
     expect(tab.$("finish-button").click()).toBeNull();
     server.answer({ status: 200, json: { ok: true } });
     await tab.settle();
-    expect(tab.left()).toBe("/account");
-    expect(tab.log.filter((l) => l.startsWith("replace "))).toEqual(["replace /account"]);
+    expect(tab.left()).toBe("/tours");
+    expect(tab.log.filter((l) => l.startsWith("replace "))).toEqual(["replace /tours"]);
     expect(tab.fetched).toHaveLength(1);
   });
 
@@ -392,7 +383,7 @@ describe("the page a sign-in link opens", () => {
     }
     tab.$("finish-button").click();
     await tab.settle();
-    expect(tab.left()).toBe("/account");
+    expect(tab.left()).toBe("/tours");
     expect(tab.fetched.map((f) => JSON.parse(f.body!).code)).toEqual([CODE, CODE, CODE, CODE]);
   });
 
@@ -410,243 +401,18 @@ describe("the page a sign-in link opens", () => {
   });
 });
 
-// ---- The account page ----
+// ---- The settings the sign-in page reads ----
+//
+// The account page's tests moved to test/node-dash-account.test.ts when /account became a
+// dashboard page; its storage block's to the Storage page's (test/node-dash-storage.test.ts).
 
-type SessionRow = { id: string; label: string; created_at: number; last_used_at: number; expires_at: number; current: boolean };
-const ME = "ses_" + "a".repeat(24);
-const OTHER = "ses_" + "b".repeat(24);
-const THIRD = "ses_" + "c".repeat(24);
-
-function sessionAnswer(username: string | null = "alice", email = "alice@example.com"): Answer {
-  return { status: 200, json: { account: { id: "usr_x", username, email, admin: false }, workspace: { id: "ws_x", name: "Acme" }, session: { id: ME, created_at: day(2026, 11, 2), expires_at: NOW + 1 }, csrf: CSRF } };
-}
-function usageAnswer(used: number, allowance: number | null, tours: number, over = allowance !== null && used > allowance): Answer {
-  return { status: 200, json: { used_bytes: used, allowance_bytes: allowance, over, tours, counted: { pictures: used, logos: 0, uploads_in_progress: 0 } } };
-}
-const ROWS: SessionRow[] = [
-  { id: ME, label: "Firefox on Linux", created_at: day(2026, 11, 2), last_used_at: NOW, expires_at: NOW + 1, current: true },
-  { id: OTHER, label: "Chrome on Windows", created_at: day(2026, 1, 5), last_used_at: day(2026, 11, 18), expires_at: NOW + 1, current: false },
-  { id: THIRD, label: "Safari on iOS", created_at: day(2025, 2, 1), last_used_at: day(2025, 3, 3), expires_at: NOW + 1, current: false },
-];
-const sessionsAnswer = (rows: SessionRow[] = ROWS): Answer => ({ status: 200, json: { sessions: rows } });
-
-function account(more: Record<string, Answer | Answer[]> = {}, base: { session?: Answer; usage?: Answer; sessions?: Answer } = {}): Tab {
-  return openPage(
-    ACCOUNT_HTML,
-    `${APP}/account`,
-    answers({ "GET /api/v1/session": base.session ?? sessionAnswer(), "GET /api/v1/usage": base.usage ?? usageAnswer(1_288_490_189, 5 * 1024 ** 3, 12), "GET /api/v1/sessions": base.sessions ?? sessionsAnswer(), ...more }),
-  );
-}
-
-describe("the account page", () => {
-  it("sends a visitor who is not signed in to the sign-in page and shows nothing", async () => {
-    const tab = openPage(ACCOUNT_HTML, `${APP}/account`, answers({ "GET /api/v1/session": SIGNED_OUT }));
-    await tab.settle();
-    expect(tab.left()).toBe("/signin");
-    expect(tab.$("account").hidden).toBe(true);
-    expect(tab.fetched.map((f) => f.path)).toEqual(["/api/v1/session"]);
-    // While it is sent away, the tab's title is the site's name alone.
-    expect(tab.doc.title).toBe("Mythicshot");
-  });
-
-  it("shows who is signed in, the storage and where, in the approved words", async () => {
-    const tab = account();
-    expect(tab.$("account").hidden).toBe(true);
-    expect(tab.doc.title).toBe("Mythicshot");
-    await tab.settle();
-    expect(tab.doc.title).toBe("Signed in");
-    expect(tab.shows()).toEqual([
-      "Mythicshot",
-      "Signed in as alice",
-      "alice@example.com",
-      "Storage",
-      "1.2 GB of 5 GB used · 12 tours",
-      "Tours and their pictures count. Deleting a tour frees its space within a few minutes.",
-      "Where you are signed in",
-      "This browser | Firefox on Linux | since 2 Nov",
-      "Chrome on Windows | last used 18 Nov",
-      "Sign out",
-      "Safari on iOS | last used 3 Mar 2025",
-      "Sign out",
-      "Sign out",
-      "Sign out everywhere",
-      "Tours are managed from Mythicshot for now. A dashboard is coming to this page.",
-    ]);
-    expect(tab.$("usage-bar").hidden).toBe(false);
-    expect(tab.$("usage-fill").style.width).toBe("24%");
-    expect(tab.$("usage-bar").hasAttribute("data-over")).toBe(false);
-    // Each row's button names its row for a screen reader, by reference.
-    const rows = tab.$("sessions").all().filter((e) => e.tagName === "li");
-    expect(rows).toHaveLength(3);
-    expect(rows[0].all().some((e) => e.tagName === "button")).toBe(false);
-    for (const row of rows.slice(1)) {
-      const button = row.all().find((e) => e.tagName === "button")!;
-      expect(button.getAttribute("type")).toBe("button");
-      const named = tab.doc.getElementById(button.getAttribute("aria-describedby")!)!;
-      expect(row.contains(named)).toBe(true);
-    }
-    expect(tab.fetched.map((f) => `${f.method} ${f.path}`).sort()).toEqual(["GET /api/v1/session", "GET /api/v1/sessions", "GET /api/v1/usage"]);
-    for (const f of tab.fetched) expect([f.init.credentials, f.headers], f.path).toEqual(["same-origin", {}]);
-  });
-
-  it("without a username the heading is Signed in, and nothing the server sends becomes markup", async () => {
-    const tab = account({}, { session: sessionAnswer(null, "<b>bold</b>@example.com"), sessions: sessionsAnswer([{ ...ROWS[0], label: "<img src=x onerror=alert(1)>" }]) });
-    await tab.settle();
-    expect(tab.$("h-account").textContent).toBe("Signed in");
-    expect(tab.$("account-email").textContent).toBe("<b>bold</b>@example.com");
-    expect(tab.$("account-email").all()).toEqual([]);
-    const label = tab.$("sessions").all().find((e) => e.textContent === "<img src=x onerror=alert(1)>")!;
-    expect(label.all()).toEqual([]);
-    const evil = account({}, { session: sessionAnswer("<script>x</script>") });
-    await evil.settle();
-    expect(evil.$("h-account").textContent).toBe("Signed in as <script>x</script>");
-    expect(evil.$("h-account").all()).toEqual([]);
-  });
-
-  it("the storage line and bar under, at and over the allowance and with no limit", async () => {
-    const GB = 1024 ** 3;
-    const cases: [Answer, string, string | null, boolean][] = [
-      [usageAnswer(0, 5 * GB, 0), "0 bytes of 5 GB used · 0 tours", "0%", false],
-      [usageAnswer(512 * 1024, 1 * GB, 1), "512 KB of 1 GB used · 1 tour", "0.05%", false],
-      [usageAnswer(5 * GB, 5 * GB, 2), "5 GB of 5 GB used · 2 tours", "100%", false],
-      [usageAnswer(6 * GB, 5 * GB, 3), "6 GB of 5 GB used · 3 tours", "100%", true],
-      [usageAnswer(1, 0, 1), "1 byte of 0 bytes used · 1 tour", "100%", true],
-      [usageAnswer(1_288_490_189, null, 12), "1.2 GB used · 12 tours", null, false],
-    ];
-    const OVER = "You are over your storage allowance. New uploads are refused until you delete tours or get more room.";
-    for (const [usage, line, width, over] of cases) {
-      const tab = account({}, { usage });
-      await tab.settle();
-      expect(tab.$("usage-text").textContent, line).toBe(line);
-      expect(tab.$("usage-bar").hidden, line).toBe(width === null);
-      if (width !== null) expect(tab.$("usage-fill").style.width, line).toBe(width);
-      expect(tab.$("usage-bar").getAttribute("data-over"), line).toBe(over ? "true" : null);
-      // Over the allowance, the sentence shows under the bar and its line; otherwise it is not there.
-      expect(tab.$("usage-over").hidden, line).toBe(!over);
-      expect(tab.shows().includes(OVER), line).toBe(over);
-      if (over) expect(tab.shows().slice(4, 6), line).toEqual([line, OVER]);
-    }
-  });
-
-  it("sizes read in the owner's style: 1024 to a unit, at most one decimal, no trailing .0", async () => {
-    // The one table the server's formatBytes is held to as well (test/sizes.ts).
-    const table = SIZE_TABLE;
-    for (const [n, size] of table) {
-      const tab = account({}, { usage: usageAnswer(n, null, 1) });
-      await tab.settle();
-      expect(tab.$("usage-text").textContent, String(n)).toBe(`${size} used · 1 tour`);
-    }
-  });
-
+describe("the Node settings of the sign-in page", () => {
   it("INVITE_CONTACT is read from the Node settings as text, and a value it cannot use never stops the start", () => {
     expect(configFromEnv({ INVITE_CONTACT: " hello@example.com " }).inviteContact).toBe("hello@example.com");
     expect(configFromEnv({ INVITE_CONTACT: "https://example.com/invite" }).inviteContact).toBe("https://example.com/invite");
     expect(() => configFromEnv({ INVITE_CONTACT: "javascript:alert(1)" })).not.toThrow();
     for (const v of [undefined, "", "   "]) expect("inviteContact" in configFromEnv({ INVITE_CONTACT: v }), String(v)).toBe(false);
     expect(NODE_SETTINGS).toContain("INVITE_CONTACT");
-  });
-
-  it("ending another session sends the anti-forgery header and removes its row", async () => {
-    const tab = account({ [`DELETE /api/v1/sessions/${OTHER}`]: { status: 204 } });
-    await tab.settle();
-    const row = tab.$("sessions").all().filter((e) => e.tagName === "li")[1];
-    row.all().find((e) => e.tagName === "button")!.click();
-    await tab.settle();
-    const del = tab.fetched.find((f) => f.method === "DELETE")!;
-    expect(del.path).toBe(`/api/v1/sessions/${OTHER}`);
-    expect(del.headers).toEqual({ "X-Csrf-Token": CSRF });
-    expect(del.body).toBeUndefined();
-    expect(del.init.credentials).toBe("same-origin");
-    expect(tab.$("sessions").contains(row)).toBe(false);
-    expect(tab.$("sessions").all().filter((e) => e.tagName === "li")).toHaveLength(2);
-    expect(tab.$("account-message").textContent).toBe("");
-    expect(tab.left()).toBeNull();
-    // Focus does not fall to the page's start with the row.
-    expect(tab.doc.activeElement?.id).toBe("h-where");
-  });
-
-  it("a session that could not be ended keeps its row and says so", async () => {
-    for (const answer of [{ status: 404, json: { error: "not_found" } }, { status: 403, json: { error: "bad_csrf" } }, { status: 500, json: {} }, "network"] as Answer[]) {
-      const tab = account({ [`DELETE /api/v1/sessions/${OTHER}`]: answer });
-      await tab.settle();
-      const row = tab.$("sessions").all().filter((e) => e.tagName === "li")[1];
-      const button = row.all().find((e) => e.tagName === "button")!;
-      button.click();
-      expect(button.textContent).toBe("Signing out…");
-      await tab.settle();
-      expect(tab.$("account-message").textContent).toBe("That session could not be ended. Reload the page.");
-      expect(tab.$("sessions").contains(row)).toBe(true);
-      expect(button.textContent).toBe("Sign out");
-      expect(button.disabled).toBe(false);
-    }
-  });
-
-  it("ending the current session from the list is a sign-out, and so is a 401 on the way", async () => {
-    // A list that names this browser's session without marking it current.
-    const rows = [{ ...ROWS[0], current: false }, ROWS[1]];
-    const own = account({ [`DELETE /api/v1/sessions/${ME}`]: { status: 204 } }, { sessions: sessionsAnswer(rows) });
-    await own.settle();
-    own.$("sessions").all().filter((e) => e.tagName === "button")[0].click();
-    await own.settle();
-    expect(own.left()).toBe("/signin");
-    const gone = account({ [`DELETE /api/v1/sessions/${OTHER}`]: SIGNED_OUT });
-    await gone.settle();
-    gone.$("sessions").all().filter((e) => e.tagName === "button")[0].click();
-    await gone.settle();
-    expect(gone.left()).toBe("/signin");
-  });
-
-  it("both sign-outs send the anti-forgery header and end on the sign-in page", async () => {
-    for (const [id, path] of [["signout", "/api/v1/signout"], ["signout-everywhere", "/api/v1/signout/everywhere"]]) {
-      const server = later();
-      const tab = openPage(ACCOUNT_HTML, `${APP}/account`, (req) =>
-        req.method === "POST" ? server.respond(req) : answers({ "GET /api/v1/session": sessionAnswer(), "GET /api/v1/usage": usageAnswer(0, null, 0), "GET /api/v1/sessions": sessionsAnswer() })(req),
-      );
-      await tab.settle();
-      tab.$(id).click();
-      await tab.settle();
-      const post = tab.fetched.find((f) => f.method === "POST")!;
-      expect([post.path, post.headers, post.body], id).toEqual([path, { "X-Csrf-Token": CSRF }, undefined]);
-      expect(tab.$(id).textContent, id).toBe("Signing out…");
-      expect(tab.$("signout").disabled && tab.$("signout-everywhere").disabled, id).toBe(true);
-      server.answer({ status: 204 });
-      await tab.settle();
-      expect(tab.left(), id).toBe("/signin");
-      expect(tab.log.filter((l) => l.startsWith("replace ")), id).toEqual(["replace /signin"]);
-    }
-  });
-
-  it("a sign-out that fails says so and gives the buttons back", async () => {
-    for (const answer of [{ status: 500, json: {} }, { status: 403, json: { error: "bad_csrf" } }, "network"] as Answer[]) {
-      const tab = account({ "POST /api/v1/signout": answer });
-      await tab.settle();
-      tab.$("signout").click();
-      await tab.settle();
-      expect(tab.$("account-message").textContent).toBe("Something went wrong. Try again in a moment.");
-      expect(tab.$("signout").textContent).toBe("Sign out");
-      expect(tab.$("signout").disabled || tab.$("signout-everywhere").disabled).toBe(false);
-      expect(tab.left()).toBeNull();
-    }
-    // A 401 means the session already ended: signed out all the same.
-    const ended = account({ "POST /api/v1/signout/everywhere": SIGNED_OUT });
-    await ended.settle();
-    ended.$("signout-everywhere").click();
-    await ended.settle();
-    expect(ended.left()).toBe("/signin");
-  });
-
-  it("when the session cannot be read, or the storage or the list cannot, the page says so", async () => {
-    const broken = openPage(ACCOUNT_HTML, `${APP}/account`, answers({ "GET /api/v1/session": "network" }));
-    await broken.settle();
-    expect(broken.shows()).toEqual(["Mythicshot", "Something went wrong. Try again in a moment."]);
-    expect(broken.left()).toBeNull();
-    for (const base of [{ usage: { status: 500, json: {} } }, { sessions: "network" as Answer }] as { usage?: Answer; sessions?: Answer }[]) {
-      const tab = account({}, base);
-      await tab.settle();
-      expect(tab.$("account").hidden).toBe(false);
-      expect(tab.$("account-message").textContent).toBe("Something went wrong. Try again in a moment.");
-      expect(tab.$("h-account").textContent).toBe("Signed in as alice");
-    }
   });
 });
 
@@ -672,8 +438,8 @@ function browser(deps: Deps, agent = FIREFOX) {
 }
 
 describe("the pages against the real app", () => {
-  it("asking, opening the link, pressing, the account page, ending another session and signing out everywhere", async () => {
-    const made = await makeDeps({ hosts: { tours: "tours.example.com", app: "app.example.com" }, storageAllowanceBytes: 1_000_000 });
+  it("asking, opening the link, pressing, and landing on the Tours page signed in", async () => {
+    const made = await makeDeps({ hosts: { tours: "tours.example.com", app: "app.example.com" } });
     const { deps, mail } = made;
     const owner = await seedAccount(deps, { admin: true, username: "owner" });
     const me = browser(deps);
@@ -694,45 +460,14 @@ describe("the pages against the real app", () => {
     expect(opened.url()).toBe(`${APP}/signin/link`);
     opened.$("finish-button").click();
     await opened.settle();
-    expect(opened.left()).toBe("/account");
+    expect(opened.left()).toBe("/tours");
     expect(me.jar.cookie).toMatch(new RegExp(`^${SESSION_COOKIE}=dps_[0-9a-f]{64}$`));
-
-    // Another browser of the same account.
-    const elsewhere = await redeemSignInCode(deps, await createSignInCode(deps, owner.userId), CHROME_WIN, null);
-    expect(elsewhere).not.toBeNull();
-
-    const page = me.open(ACCOUNT_HTML, `${APP}/account`);
-    await page.settle();
-    const lines = page.shows();
-    expect(lines.slice(0, 5)).toEqual(["Mythicshot", "Signed in as owner", owner.email, "Storage", "0 bytes of 976.6 KB used · 0 tours"]);
-    const stored = await deps.db.all<{ id: string; created_at: number; last_used_at: number }>("SELECT id, created_at, last_used_at FROM session WHERE user_id = ? AND revoked_at IS NULL", [owner.userId]);
-    const mine = stored.find((r) => r.id !== elsewhere!.sessionId)!;
-    const theirs = stored.find((r) => r.id === elsewhere!.sessionId)!;
-    expect(lines.filter((l) => l.includes(" | "))).toEqual([`This browser | Firefox on Linux | since ${shown(mine.created_at)}`, `Chrome on Windows | last used ${shown(theirs.last_used_at)}`]);
-
-    // Ending the other browser's session.
-    page.$("sessions").all().filter((e) => e.tagName === "button")[0].click();
-    await page.settle();
-    expect(page.$("account-message").textContent).toBe("");
-    expect(page.$("sessions").all().filter((e) => e.tagName === "li")).toHaveLength(1);
-    const other = await deps.db.first<{ revoked_at: number | null }>("SELECT revoked_at FROM session WHERE id = ?", [elsewhere!.sessionId]);
-    expect(other!.revoked_at).not.toBeNull();
-
-    // Signing out everywhere.
-    page.$("signout-everywhere").click();
-    await page.settle();
-    expect(page.left()).toBe("/signin");
-    expect(me.jar.cookie).toBeNull();
+    // The session is live: the account page's part of this walk is in test/node-dash-account.test.ts.
     const live = await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM session WHERE user_id = ? AND revoked_at IS NULL", [owner.userId]);
-    expect(live!.n).toBe(0);
-
-    // The account page now sends the visitor to sign in.
-    const after = me.open(ACCOUNT_HTML, `${APP}/account`);
-    await after.settle();
-    expect(after.left()).toBe("/signin");
+    expect(live!.n).toBe(1);
   });
 
-  it("the plain sign-out ends this session only, and the link works once", async () => {
+  it("the link works once", async () => {
     const made = await makeDeps({ hosts: { tours: "tours.example.com", app: "app.example.com" } });
     const { deps } = made;
     const owner = await seedAccount(deps, { admin: true, username: "owner" });
@@ -741,23 +476,12 @@ describe("the pages against the real app", () => {
     const first = me.open(LINK_HTML, `${APP}/signin/link#c=${code}`);
     first.$("finish-button").click();
     await first.settle();
-    expect(first.left()).toBe("/account");
+    expect(first.left()).toBe("/tours");
     // The same link again, in another browser: the dead-link state.
     const thief = browser(deps).open(LINK_HTML, `${APP}/signin/link#c=${code}`);
     thief.$("finish-button").click();
     await thief.settle();
     expect(thief.$("dead").hidden).toBe(false);
     expect(thief.left()).toBeNull();
-
-    const elsewhere = await redeemSignInCode(deps, await createSignInCode(deps, owner.userId), CHROME_WIN, null);
-    const page = me.open(ACCOUNT_HTML, `${APP}/account`);
-    await page.settle();
-    page.$("signout").click();
-    await page.settle();
-    expect(page.left()).toBe("/signin");
-    expect(me.jar.cookie).toBeNull();
-    const rows = await deps.db.all<{ id: string; revoked_at: number | null }>("SELECT id, revoked_at FROM session WHERE user_id = ? ORDER BY created_at", [owner.userId]);
-    expect(rows.find((r) => r.id === elsewhere!.sessionId)!.revoked_at).toBeNull();
-    expect(rows.filter((r) => r.revoked_at !== null)).toHaveLength(1);
   });
 });

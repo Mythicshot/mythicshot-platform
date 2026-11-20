@@ -16,6 +16,7 @@ import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { send, type Call } from "./bundle.ts";
+import { expectNoForbiddenApis, expectPageShape } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -199,7 +200,7 @@ describe("the dashboard's pages and files", () => {
     }
     // The workspace's name ("Account" for these accounts) is fetched by the script, never in the page.
     // The Admin page's heading is the mockup's word "Accounts", on /admin alone; any other text holding "Account" still fails.
-    for (const s of PAGES) expect(textNodes(new FakeDocument(s.body).body).filter((t) => t.includes("Account") && t !== "Account" && !(s.path === "/admin" && t === "Accounts")), s.path).toEqual([]);
+    for (const s of PAGES) expectPageShape(s.body, s.path, s.path === "/admin" ? ["Accounts"] : []);
   });
 
   it("a member's page carries no admin data: the Admin tab is hidden, leads only to /admin, and only the script can show it", () => {
@@ -300,10 +301,11 @@ describe("the dashboard's pages and files", () => {
     expect(TOURS_TEXT.askBefore + "Loot master setup" + TOURS_TEXT.askAfter).toBe('Delete "Loot master setup"?');
     expect(doc.getElementById("delete-keep")!.textContent).toBe("Keep it");
     expect(doc.getElementById("delete-go")!.textContent).toBe("Delete tour");
-    // The scripts set text only through textContent, and ask nothing with confirm().
-    for (const js of SCRIPTS) {
-      for (const api of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "createContextualFragment", "DOMParser", "srcdoc", "confirm(", "alert(", "prompt("]) expect(js, api).not.toContain(api);
-    }
+    // The scripts set text only through textContent, ask nothing with confirm(), and leave the
+    // title alone (test/dash-checks.ts); the Admin page alone sets it, to "Page not found".
+    expectNoForbiddenApis(DASH_JS, "/dash/dash.js");
+    for (const p of DASH_PAGES) expectNoForbiddenApis(p.script.body, p.script.path, p.path === "/admin" ? ["document.title"] : []);
+    expect(SCRIPTS.length).toBe(DASH_PAGES.length + 1);
   });
 
   it("the bar holds the brand, the four tabs of this version in order, and a place for the username; no Images or GIFs", () => {
@@ -429,17 +431,16 @@ describe("the dashboard's pages and files", () => {
     for (const s of PAGES) {
       const doc = new FakeDocument(s.body);
       const all = doc.root.all();
-      expect(all.find((e) => e.tagName === "html")?.getAttribute("lang"), s.path).toBe("en");
+      // English, the phone viewport, and no div, span, p, li or td as a control (test/dash-checks.ts).
+      expectPageShape(s.body, s.path, s.path === "/admin" ? ["Accounts"] : []);
       for (const b of all.filter((e) => e.tagName === "button")) expect(b.getAttribute("type"), `${s.path} #${b.id}`).toBe("button");
       for (const a of all.filter((e) => e.tagName === "a")) expect(a.getAttribute("href"), s.path).toMatch(/^\//);
-      for (const e of all) expect(["div", "span", "p", "li", "td"].includes(e.tagName) && (e.hasAttribute("tabindex") || e.getAttribute("role") === "button"), `${s.path} <${e.tagName}> as a control`).toBe(false);
       const messages = all.filter((e) => /\b(?:message|load)\b/.test(e.className) && e.parent?.tagName !== "noscript");
       expect(messages.map((m) => m.id), s.path).toContain("dash-load");
       for (const m of messages) expect([m.getAttribute("role"), m.getAttribute("aria-live")], `${s.path} #${m.id}`).toEqual(["status", "polite"]);
       // A message line takes no room until it has a message.
       for (const m of messages.filter((e) => e.id !== "dash-load")) expect(m.hidden, `${s.path} #${m.id}`).toBe(true);
       for (const h of all.filter((e) => e.tagName === "h1" || e.tagName === "h2")) expect(h.getAttribute("tabindex"), `${s.path} #${h.id}`).toBe("-1");
-      expect(all.some((e) => e.tagName === "meta" && e.getAttribute("name") === "viewport" && e.getAttribute("content") === "width=device-width, initial-scale=1"), s.path).toBe(true);
     }
     expect(new FakeDocument(TOURS_HTML).root.all().filter((e) => /\bmessage\b/.test(e.className) && e.parent?.tagName !== "noscript").map((m) => m.id).sort()).toEqual(["delete-message", "tours-message"]);
     expect(DASH_CSS).not.toMatch(/\.message \{[^}]*min-height/);
