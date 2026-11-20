@@ -40,7 +40,7 @@ const RESERVED_NAMES = [
   "signin", "signout", "signup", "smtp", "staff", "staging", "static", "status", "storage",
   "superuser", "support", "sysadmin", "system", "team", "teams", "terms", "test", "tokens", "tour",
   "tours", "true", "trust", "undefined", "unknown", "upload", "uploads", "usage", "user", "users",
-  "web", "webmail", "webmaster", "workspace", "workspaces", "www", "you",
+  "view", "web", "webmail", "webmaster", "workspace", "workspaces", "www", "you",
 ] as const;
 
 export const RESERVED: ReadonlySet<string> = new Set<string>(RESERVED_NAMES);

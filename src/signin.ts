@@ -96,11 +96,19 @@ export function withHeader(res: Response, name: string, value: string): Response
  * anything is counted or looked up: the address takes sessions, the request comes from a
  * page of this address, and its body is labelled JSON and is a JSON object of at most
  * MAX_BODY_BYTES. Answers that object, or the refusal.
+ *
+ * `onHost` says which address takes the request: the address that takes sessions unless
+ * given. The viewer routes (src/viewers.ts) pass the one that takes the viewer cookie.
  */
-export async function ownJsonBody(req: Request, deps: Deps, needs: string): Promise<Record<string, unknown> | Response> {
-  // The host gate answers this for the tours address already. Checked again here: no
-  // link is asked for, and nobody signed in, on an address that takes no session.
-  if (!sessionHost(req, deps)) return json(404, { error: "not_found" });
+export async function ownJsonBody(
+  req: Request,
+  deps: Deps,
+  needs: string,
+  onHost: (req: Request, deps: Deps) => boolean = sessionHost,
+): Promise<Record<string, unknown> | Response> {
+  // The host gate answers this for the other address already. Checked again here: no
+  // link is asked for, and nobody signed in, on an address that does not take the cookie.
+  if (!onHost(req, deps)) return json(404, { error: "not_found" });
   if (!sameOriginChange(req)) return apiError(403, "bad_origin", "this request must come from the site's own pages");
   const type = (req.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
   if (type !== "application/json") return apiError(400, "bad_request", needs);
@@ -122,7 +130,7 @@ export async function ownJsonBody(req: Request, deps: Deps, needs: string): Prom
  * private one that every visitor behind a proxy would share) has no count of its own and
  * is never refused here.
  */
-async function networkLimit(req: Request, deps: Deps, limit: Limit): Promise<Response | null> {
+export async function networkLimit(req: Request, deps: Deps, limit: Limit): Promise<Response | null> {
   const key = await networkKey(clientAddressOf(req));
   if (key === null) return null;
   const counted = await hitLimit(deps, limit, key);

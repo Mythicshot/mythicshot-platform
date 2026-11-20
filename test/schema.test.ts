@@ -35,6 +35,8 @@ const TABLES = [
   "upload",
   "upload_step",
   "user",
+  "viewer_code",
+  "viewer_session",
   "workspace",
 ];
 
@@ -874,5 +876,75 @@ describe("schema", () => {
     expect(await count(deps, "media_object")).toBe(6);
     // An item with parts cannot be deleted out from under them.
     await rejection(deps.db.run("DELETE FROM media WHERE id = ?", ["med_" + "1".repeat(24)]));
+  });
+
+  // Viewers (migration 0015).
+
+  it("the viewer tables are strict, name no row, and hold an address, a slug, digests and ids of their own shapes", async () => {
+    const { deps } = await makeDeps();
+    for (const name of ["viewer_code", "viewer_session"]) {
+      const t = (await appTables(deps)).find((x) => x.name === name);
+      expect(t?.sql, name).toMatch(/\)\s*STRICT$/);
+      expect(t?.sql, name).not.toMatch(/references|cascade|set null|set default/i);
+    }
+    const indexes = await deps.db.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name IN ('viewer_code', 'viewer_session') AND sql IS NOT NULL ORDER BY name");
+    expect(indexes.map((i) => i.name)).toEqual(["viewer_code_expires", "viewer_session_expires"]);
+    let n = 0;
+    const code = (cols: { id?: string; email?: string; slug?: string; hash?: string; created?: number; expires?: number; used?: number | null; session?: string | null }) => {
+      n += 1;
+      return deps.db.run("INSERT INTO viewer_code (id, email, slug, code_hash, created_at, expires_at, used_at, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [
+        cols.id ?? "vco_" + n.toString(16).padStart(24, "0"),
+        cols.email ?? "a@example.com",
+        cols.slug ?? "abcdefgh23",
+        cols.hash ?? n.toString(16).padStart(64, "0"),
+        cols.created ?? NOW,
+        cols.expires ?? NOW + 1,
+        cols.used ?? null,
+        cols.session ?? null,
+      ]);
+    };
+    await code({});
+    await code({ used: NOW, session: "vse_" + "0".repeat(24) });
+    expect(isUniqueViolation(await rejection(code({ hash: "1".padStart(64, "0") })))).toBe(true);
+    for (const bad of [
+      { id: "vco_1" },
+      { id: "vse_" + "0".repeat(24) },
+      { id: SECRET },
+      { email: "A@example.com" },
+      { email: "a b@example.com" },
+      { email: "noatsign" },
+      { slug: "short" },
+      { slug: "ABCDEFGH23" },
+      { slug: "abcdefgh01" },
+      { hash: HASH_A.toUpperCase() },
+      { hash: "dpv_" + "0".repeat(40) },
+      { expires: NOW },
+      { used: NOW },
+      { session: "vse_" + "0".repeat(24) },
+      { used: NOW, session: "ses_" + "0".repeat(24) },
+    ]) {
+      expect(await code(bad).then(() => "stored", () => "refused"), JSON.stringify(bad)).toBe("refused");
+    }
+    await rejection(deps.db.run("INSERT INTO viewer_code (id, email, slug, code_hash, created_at, expires_at) VALUES ('vco_' || ?, 'a@example.com', 'abcdefgh2' || char(0), ?, 1, 2)", ["9".repeat(24), HASH_B]));
+    expect(await count(deps, "viewer_code")).toBe(2);
+
+    const MAX = 15_552_000_000;
+    const session = (cols: { id?: string; email?: string; hash?: string; created?: number; used?: number; expires?: number }) => {
+      n += 1;
+      return deps.db.run("INSERT INTO viewer_session (id, email, hash, created_at, last_used_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)", [
+        cols.id ?? "vse_" + n.toString(16).padStart(24, "0"),
+        cols.email ?? "a@example.com",
+        cols.hash ?? n.toString(16).padStart(64, "0"),
+        cols.created ?? NOW,
+        cols.used ?? NOW,
+        cols.expires ?? NOW + 1,
+      ]);
+    };
+    await session({});
+    await session({ expires: NOW + MAX });
+    for (const bad of [{ expires: NOW + MAX + 1 }, { expires: NOW }, { used: NOW - 1 }, { used: NOW + 5, expires: NOW + 5 }, { id: "ses_" + "0".repeat(24) }, { hash: SECRET }, { email: "a@example.com\n" }]) {
+      expect(await session(bad).then(() => "stored", () => "refused"), JSON.stringify(bad)).toBe("refused");
+    }
+    expect(await count(deps, "viewer_session")).toBe(2);
   });
 });

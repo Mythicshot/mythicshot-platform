@@ -1000,7 +1000,9 @@ describe("where the sign-in routes answer", () => {
     // The wider match by name alone finds exactly those and the four sign-in pages under /signin (GET /account has none of
     // these names), so a new route under such a name, a page or not, fails here until it is placed.
     const SIGNIN_PAGES = ["GET /signin", "GET /signin/link", "GET /signin/signin.css", "GET /signin/signin.js"];
-    expect(routes.filter((key) => /\/(signin|signout|sessions?)\b/.test(key)).sort()).toEqual([...KEYS, ...SIGNIN_PAGES].sort());
+    // The viewer's own sign-out and session (src/viewers.ts, test/viewers.test.ts) live on the tours address, under /api/v1/view/.
+    const VIEWER_KEYS = ["GET /api/v1/view/session", "POST /api/v1/view/signout"];
+    expect(routes.filter((key) => /\/(signin|signout|sessions?)\b/.test(key)).sort()).toEqual([...KEYS, ...SIGNIN_PAGES, ...VIEWER_KEYS].sort());
 
     const stored = await everythingStored(deps);
     const before = calls();

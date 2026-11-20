@@ -82,13 +82,22 @@ function stripBlanks(text: string): string {
  * and the name must be SESSION_COOKIE exactly, in its own case, with nothing decoded.
  */
 function sessionCookieValues(req: Request): string[] {
+  return cookieValues(req, SESSION_COOKIE);
+}
+
+/**
+ * The values of every cookie named exactly `name` in the request, as sent, read by the rule
+ * `sessionCookieValues` states. The viewer cookie (src/viewers.ts) is read with it too, so
+ * both cookies are told apart by their whole name and nothing else.
+ */
+export function cookieValues(req: Request, name: string): string[] {
   const header = req.headers.get("cookie");
   if (header === null) return [];
   const values: string[] = [];
   for (const part of header.split(";")) {
     const eq = part.indexOf("=");
     if (eq < 0) continue;
-    if (stripBlanks(part.slice(0, eq)) === SESSION_COOKIE) values.push(stripBlanks(part.slice(eq + 1)));
+    if (stripBlanks(part.slice(0, eq)) === name) values.push(stripBlanks(part.slice(eq + 1)));
   }
   return values;
 }
