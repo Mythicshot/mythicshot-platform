@@ -124,8 +124,7 @@ export const ADMIN_JS = `(function () {
     warnBefore: "That is less than this workspace uses. Nothing is deleted, but its new uploads are refused until it is under ",
     warnAfter: ".",
     warnEqualBefore: "That is exactly what this workspace uses. Nothing is deleted, but its new uploads are refused until it is under ",
-    zeroStandard: "An allowance of 0 refuses every upload from this workspace. Leave the field empty for the standard allowance.",
-    zeroNone: "An allowance of 0 refuses every upload from this workspace. Leave the field empty for no allowance.",
+    zero: "An allowance of 0 refuses every upload from this workspace.",
     badSize: "Write a size such as 500 MB or 10 GB.",
     save: "Save",
     saveAnyway: "Save anyway",
@@ -391,9 +390,10 @@ ${SIZE_JS}
   // field asks for the standard allowance.
   function warningFor(v) {
     if (v === undefined || asking === null) return "";
-    if (v === 0) return standard !== null ? TEXT.zeroStandard : TEXT.zeroNone;
+    // Decided on the allowance that would apply, typed or the standard one for an empty field.
     var wanted = v === null ? standard : v;
     if (wanted === null) return "";
+    if (wanted === 0) return TEXT.zero;
     if (wanted === asking.a.used_bytes) return TEXT.warnEqualBefore + Dash.formatBytes(wanted) + TEXT.warnAfter;
     if (wanted < asking.a.used_bytes) return TEXT.warnBefore + Dash.formatBytes(wanted) + TEXT.warnAfter;
     return "";

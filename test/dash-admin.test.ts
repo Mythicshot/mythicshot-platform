@@ -103,8 +103,7 @@ const ADMIN_TEXT: Record<string, string> = {
   warnAfter: ".",
   // Proposed (review follow-up): an allowance exactly what is used, and an allowance of 0.
   warnEqualBefore: "That is exactly what this workspace uses. Nothing is deleted, but its new uploads are refused until it is under ",
-  zeroStandard: "An allowance of 0 refuses every upload from this workspace. Leave the field empty for the standard allowance.",
-  zeroNone: "An allowance of 0 refuses every upload from this workspace. Leave the field empty for no allowance.",
+  zero: "An allowance of 0 refuses every upload from this workspace.",
   badSize: "Write a size such as 500 MB or 10 GB.",
   save: "Save",
   saveAnyway: "Save anyway",
