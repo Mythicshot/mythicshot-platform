@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { HOST_ROLES, normaliseHost, originOf, requestHost, resolveHosts, roleOf, type Hosts } from "../src/hosts.ts";
+import { HOST_ROLES, mediaOrigin, mediaRole, normaliseHost, OPTIONAL_HOST_ROLES, originOf, requestHost, resolveHosts, roleOf, type Hosts } from "../src/hosts.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
+const THREE: Hosts = { ...HOSTS, img: "img.example.com" };
 
 describe("host names", () => {
   it("normaliseHost lowercases, drops one trailing dot and the default ports", () => {
@@ -116,7 +117,55 @@ describe("host names", () => {
       ok: true,
       hosts: { tours: "tours.localhost:8787", app: "app.localhost:8787" },
     });
-    expect(HOST_ROLES).toEqual(["tours", "app"]);
+    expect(HOST_ROLES).toEqual(["tours", "app", "img"]);
+    expect(OPTIONAL_HOST_ROLES).toEqual(["img"]);
+    // Two addresses have no img key at all, not one that is undefined.
+    const two = resolveHosts({ tours: "tours.example.com", app: "app.example.com", img: "  " });
+    expect(two.ok && two.hosts !== null && Object.keys(two.hosts)).toEqual(["tours", "app"]);
+  });
+
+  it("resolveHosts takes the img address beside the other two, normalised", () => {
+    expect(resolveHosts({ tours: "tours.example.com", app: "app.example.com", img: " IMG.Example.com.:443 " })).toEqual({
+      ok: true,
+      hosts: { tours: "tours.example.com", app: "app.example.com", img: "img.example.com" },
+    });
+    expect(resolveHosts({ tours: "tours.localhost:8787", app: "app.localhost:8787", img: "img.localhost:8787" })).toEqual({
+      ok: true,
+      hosts: { tours: "tours.localhost:8787", app: "app.localhost:8787", img: "img.localhost:8787" },
+    });
+  });
+
+  it("resolveHosts refuses the img address without the other two", () => {
+    const imgOnly = { ok: false, problem: "IMG_HOST is set but TOURS_HOST and APP_HOST are not. IMG_HOST is an extra address beside those two: set them too, or leave IMG_HOST empty." };
+    expect(resolveHosts({ img: "img.example.com" })).toEqual(imgOnly);
+    expect(resolveHosts({ tours: "", app: " ", img: "img.example.com" })).toEqual(imgOnly);
+    expect(resolveHosts({ img: "https://img.example.com/" })).toEqual(imgOnly);
+    // With one of the two, the problem is the missing one, as without the img address.
+    expect(resolveHosts({ tours: "tours.example.com", img: "img.example.com" })).toEqual({
+      ok: false,
+      problem: "TOURS_HOST is set but APP_HOST is not. Set both for two addresses, or neither for one.",
+    });
+    expect(resolveHosts({ app: "app.example.com", img: "img.example.com" })).toEqual({
+      ok: false,
+      problem: "APP_HOST is set but TOURS_HOST is not. Set both for two addresses, or neither for one.",
+    });
+  });
+
+  it("resolveHosts checks the img address like the other two", () => {
+    expect(resolveHosts({ tours: "tours.example.com", app: "app.example.com", img: "https://img.example.com" })).toEqual({
+      ok: false,
+      problem: "IMG_HOST is not a host name. Write it like img.example.com, without https:// and without a path.",
+    });
+    for (const img of ["img.example.com/i", "*.example.com", "img_1.example.com", "[::1]"]) {
+      const r = resolveHosts({ tours: "tours.example.com", app: "app.example.com", img });
+      expect(r.ok, img).toBe(false);
+      expect(JSON.stringify(r), img).not.toContain(img);
+    }
+    const sameAsTours = { ok: false, problem: "TOURS_HOST and IMG_HOST name the same host. Two addresses need two different host names." };
+    const sameAsApp = { ok: false, problem: "APP_HOST and IMG_HOST name the same host. Two addresses need two different host names." };
+    expect(resolveHosts({ tours: "tours.example.com", app: "app.example.com", img: "tours.example.com" })).toEqual(sameAsTours);
+    expect(resolveHosts({ tours: "tours.example.com", app: "app.example.com", img: "Tours.Example.com.:8443" })).toEqual(sameAsTours);
+    expect(resolveHosts({ tours: "tours.example.com", app: "app.example.com", img: "app.example.com:80" })).toEqual(sameAsApp);
   });
 
   it("requestHost reads the address the request was sent to and no header", () => {
@@ -145,6 +194,33 @@ describe("host names", () => {
     expect(roleOf(local, "tours.localhost:8788")).toBeNull();
     // A name that is a property of every object is not a role.
     expect(roleOf(HOSTS, "constructor")).toBeNull();
+    // The img address is a role only when it is set.
+    expect(roleOf(THREE, "img.example.com")).toBe("img");
+    expect(roleOf(THREE, "tours.example.com")).toBe("tours");
+    expect(roleOf(THREE, "app.example.com")).toBe("app");
+    expect(roleOf(HOSTS, "img.example.com")).toBeNull();
+    expect(roleOf(THREE, "img.example.com:8443")).toBeNull();
+  });
+
+  it("mediaRole is the img address when it is set, else the tours address", () => {
+    expect(mediaRole(THREE)).toBe("img");
+    expect(mediaRole(HOSTS)).toBe("tours");
+  });
+
+  it("mediaOrigin is the img address, else the tours address, else the request's own address", () => {
+    const req = (url: string) => new Request(url, { headers: { "x-forwarded-host": "evil.example.net", "x-forwarded-proto": "http" } });
+    expect(mediaOrigin(THREE, req("https://app.example.com/api/v1/tours"))).toBe("https://img.example.com");
+    expect(mediaOrigin(HOSTS, req("https://app.example.com/api/v1/tours"))).toBe("https://tours.example.com");
+    expect(mediaOrigin({ tours: "tours.localhost:8787", app: "app.localhost:8787", img: "img.localhost:8787" }, req("http://app.localhost:8787/"))).toBe("http://img.localhost:8787");
+    expect(mediaOrigin({ tours: "tours.example.com:8443", app: "app.example.com" }, req("https://app.example.com/"))).toBe("https://tours.example.com:8443");
+    // One address: the host the request was sent to, with the scheme originOf gives it,
+    // so a proxy that ends HTTPS in front of the app still gives an https address.
+    for (const hosts of [null, undefined]) {
+      expect(mediaOrigin(hosts, req("http://tours.example.com/api/v1/tours"))).toBe("https://tours.example.com");
+      expect(mediaOrigin(hosts, req("https://Tours.Example.com:443/x"))).toBe("https://tours.example.com");
+      expect(mediaOrigin(hosts, req("http://localhost:3000/x"))).toBe("http://localhost:3000");
+      expect(mediaOrigin(hosts, req("https://tours.example.com:8443/x"))).toBe("https://tours.example.com:8443");
+    }
   });
 
   it("originOf is https, and http only for localhost names and 127.0.0.1", () => {
