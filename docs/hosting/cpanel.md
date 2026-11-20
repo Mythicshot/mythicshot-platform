@@ -27,6 +27,7 @@ Examples use `tours.example.com` for the platform's address and `you` for your c
 - [13. Troubleshooting](#13-troubleshooting)
 - [14. A second address for the app](#14-a-second-address-for-the-app)
 - [15. Make yourself the admin](#15-make-yourself-the-admin)
+- [16. Send sign-in mail](#16-send-sign-in-mail)
 - [What has been run where](#what-has-been-run-where)
 
 ## 1. What you need
@@ -433,6 +434,9 @@ cd ~/apps/tours && ./cpanel.sh status
 | With two addresses, a name shows an empty page with status 421 | The platform then refuses every name but the two in the settings file. Check the spelling of the names after `TOURS_HOST=` and `APP_HOST=`. To go back to one address, see the way back in [step 14](#14-a-second-address-for-the-app) |
 | After adding the two lines the app does not start | The app's log names the line that is wrong: both lines must be there, each must hold a plain host name, and the two names must differ. Put them right, or remove both, and restart |
 | The script says an address answers its health check but refuses every other request | The settings file holds `TOURS_HOST=` and `APP_HOST=` lines that name other addresses than the one you use. The platform then refuses its own name with status 421, tour links included, while its health address still answers. Correct the names in the two lines, or remove both, and restart |
+| The log says `mail: off, because` and the name of a setting | Mail is switched on, but that line of the settings file is missing or not usable, so the platform sends no mail and runs on. Put the line right as in [step 16](#16-send-sign-in-mail), check it with `./cpanel.sh admin mail-check`, and restart |
+| The log says `mail: a sign-in mail could not be sent` | The mail server did not take a sign-in mail; the word in brackets says why. Send a test mail as in [step 16](#16-send-sign-in-mail), step 5, which says the same in words |
+| The log says `mail: the mail thread could not start` | The part of the app that sends mail did not start, so no mail was sent, whatever the mail server would have said. When the reason is that it stopped before it was ready, the app's files are probably incomplete: update again from a newly unpacked archive, as in [step 9](#9-updates) |
 
 `./cpanel.sh status` shows the installed version, the folders, the size of the data folder, the newest backup and the health in one place. It changes nothing.
 
@@ -519,9 +523,7 @@ The subdomain `app.example.com` can stay or be removed in cPanel. With one addre
 
 ## 15. Make yourself the admin
 
-The version with accounts prepares sign-in with a link sent instead of a password. A site that was updated keeps working exactly as before: its tours, their links and its tokens are not changed, and nobody can sign in until the site has an admin. The admin is made once, by a command run on the hosting. There is no web page for it, and the setup code plays no part in it.
-
-The page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, get a new link with the recovery setting, as described below.
+The version with accounts brings sign-in with a link sent instead of a password, and the dashboard behind it. A site that was updated keeps working exactly as before: its tours, their links and its tokens are not changed, and nobody can sign in until the site has an admin. The admin is made once, by a command run on the hosting. There is no web page for it, and the setup code plays no part in it.
 
 1. Update to a version with accounts, as in [step 9](#9-updates), and see that `./cpanel.sh status` shows the health as ok.
 2. Run the command from the installed copy of the script, with your own email address and the username you want. The account that set up the site becomes the admin, with that address in place of the one typed in the setup wizard. Should the site's workspace hold several accounts, the oldest of them is the one made admin.
@@ -540,7 +542,7 @@ Open this link within 15 minutes to sign in:
 https://app.example.com/signin/link#…
 ```
 
-3. Once the version with the sign-in page is installed, open the link in your browser to sign in. It works once and for 15 minutes. With two addresses it is on the app address; with one address it is on the name in a `SITE_HOST=tours.example.com` line of the settings file. Without either, the command prints only the part after the address, `/signin/link#…`, and you put your site's address in front of it.
+3. Open the link in your browser and press "Sign in". It works once and for 15 minutes; the press lands you on the dashboard's Tours page, `/tours`. With two addresses it is on the app address; with one address it is on the name in a `SITE_HOST=tours.example.com` line of the settings file. Without either, the command prints only the part after the address, `/signin/link#…`, and you put your site's address in front of it.
 
 > [!WARNING]
 > The link signs in whoever opens it first, like a password for 15 minutes: open it in your own browser and never paste it into a chat, a ticket or a file.
@@ -549,7 +551,7 @@ https://app.example.com/signin/link#…
 
 Signing in normally is by a link sent by mail from the sign-in page, and needs no shell. The first admin's link above works once and for 15 minutes; making the admin is a one-time act, and the command is not a standing way in.
 
-**A new sign-in link is a recovery tool.** If the first link was not used, for example because the sign-in page arrives in a later version, or mail is not set up yet, turn the recovery setting on for one run: add the line `RECOVERY_LINKS=on` to the settings file, run the command with the address alone, then remove the line again. Without the line the command says `Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.` and makes nothing. With it, the command prints the link here and nowhere else, never mails it, records it in the audit, and ends with `Remove the line RECOVERY_LINKS=on from the settings file now.`
+**A new sign-in link is a recovery tool.** If the first link was not used in time, or later whenever someone cannot get a mailed link because mail is not set up yet or does not arrive, turn the recovery setting on for one run: add the line `RECOVERY_LINKS=on` to the settings file, run the command with the address alone, then remove the line again. Without the line the command says `Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.` and makes nothing. With it, the command prints the link here and nowhere else, never mails it, records it in the audit, and ends with `Remove the line RECOVERY_LINKS=on from the settings file now.`
 
 ```sh
 nano ~/apps/tours-config.env
@@ -565,7 +567,7 @@ cd ~/apps/tours && ./cpanel.sh admin --email you@example.com
 
 Then open the settings file again, remove the line and save. The app itself never reads this setting, so it needs no restart either way.
 
-The same command has three more uses: `./cpanel.sh admin mail-check` says whether mail is set up without showing any setting, `./cpanel.sh admin audit` shows the last sign-ins and admin changes, and `./cpanel.sh admin --help` lists them. Options of the script itself, such as `--app-root` or `--dry-run`, go before the command's own: `./cpanel.sh admin --dry-run first-admin --email you@example.com --username yourname` prints what it would run and runs nothing.
+The same command has more uses: `./cpanel.sh admin mail-check` says whether mail is set up without showing any setting (see [step 16](#16-send-sign-in-mail)), `./cpanel.sh admin change-email` changes an account's address while mail is off (see [Change an address on the server](#change-an-address-on-the-server)), `./cpanel.sh admin audit` shows the last sign-ins and admin changes, and `./cpanel.sh admin --help` lists them. Options of the script itself, such as `--app-root` or `--dry-run`, go before the command's own: `./cpanel.sh admin --dry-run first-admin --email you@example.com --username yourname` prints what it would run and runs nothing.
 
 The command runs beside the running app, without a restart, and changes only the database: making the admin is one step that is written whole or not at all, and the link and its record in the audit follow it. It does not apply a database update itself: on a site that was not updated yet it says `The database is from an older version. Update the site first.` and changes nothing. If it says `This site's setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.`, see [If the setup did not finish](#if-the-setup-did-not-finish) below.
 
@@ -593,6 +595,80 @@ cd ~/apps/tours && ./cpanel.sh backup
 4. Start the app again in **Setup Node.js App**. It makes a new, empty database.
 5. Open the setup wizard with the setup code from the settings file, as in [step 7](#7-open-the-setup-wizard), then make yourself the admin as above.
 
+## 16. Send sign-in mail
+
+Until mail is set up, the sign-in page answers as usual but sends no link, and an email address cannot be changed from the dashboard. Signing in then works only with links printed by the command of [step 15](#15-make-yourself-the-admin). This step lets the platform send its sign-in mails through a mailbox of yours. The settings themselves are explained in [Mail](../../README.md#mail) in the README.
+
+1. Have a mailbox to send from, such as `no-reply@example.com`, and its password. In cPanel, mailboxes are made on the page for email accounts. You also need the host name of its mail server for sending, such as `mail.example.com`, and the port where that server takes SMTP over TLS from the first byte, usually 465. Your hosting provider's help pages give both. **Unconfirmed:** whether your hosting lets an app send through port 465; ask your hosting provider if the test in step 5 says `connect` or `timeout`.
+2. Open the settings file in a text editor and add these lines at the end, with your own values. Type the password yourself, in double quotes. Change nothing else, and save.
+
+```sh
+nano ~/apps/tours-config.env
+```
+
+```text
+MAIL_MODE=smtp
+MAIL_FROM=no-reply@example.com
+SMTP_HOST=mail.example.com
+SMTP_USER=no-reply@example.com
+SMTP_PASSWORD="<password>"
+SITE_HOST=tours.example.com
+```
+
+Add `SMTP_PORT=` and the port only when it is not 465. Leave out the `SITE_HOST` line when the platform has two addresses, as in [step 14](#14-a-second-address-for-the-app): sign-in links then use the app address.
+
+3. Check the lines. The command reads the settings file as it is now, so this works before the restart, and it contacts nothing.
+
+```sh
+cd ~/apps/tours && ./cpanel.sh admin mail-check
+```
+
+It should say `Mail is set to SMTP: host, port, user, password and sender are set.` If it says `Mail is off because` and a setting's name, that line is missing or not usable: put it right and check again.
+
+4. Restart the app, so that it reads the new lines.
+
+```sh
+touch ~/apps/tours/tmp/restart.txt
+```
+
+5. Send one test mail to an address of yours. It goes from the command straight to the mail server.
+
+```sh
+cd ~/apps/tours && ./cpanel.sh admin mail-check --send-to you@example.com
+```
+
+**How to tell it worked:** the command ends with `A test mail was handed to the mail server for you@example.com.` and the mail arrives. Then open `https://tours.example.com/signin` (with two addresses, the app address), type the admin's address and press the button: the sign-in mail arrives within a few minutes. If the command says `The mail server did not take the test mail` with `auth` in brackets, the user or the password is wrong; with `connect`, `tls` or `timeout`, the host name or the port. A mail that was handed over but does not arrive is often in the spam folder: see [Mail records](../../README.md#mail-records) in the README.
+
+> [!WARNING]
+> Every backup the script makes holds a copy of the settings file, the mailbox password included: keep each backup as private as the file, and change the mailbox password if one leaves your hands.
+
+To switch mail off again, change the first line to `MAIL_MODE=off` and restart as in step 4.
+
+### Change an address on the server
+
+When an account's email address is wrong and mail is off, so it cannot be changed from the dashboard, the command changes it directly. Like a new sign-in link, it works only while the recovery line is in the settings file.
+
+1. Add the line `RECOVERY_LINKS=on` to the settings file, as in [step 15](#15-make-yourself-the-admin).
+
+```sh
+nano ~/apps/tours-config.env
+```
+
+2. Run the command with the account's username and the new address.
+
+```sh
+cd ~/apps/tours && ./cpanel.sh admin change-email --username yourname --email new@example.com
+```
+
+It prints `The account "yourname" now signs in with new@example.com.` and `Remove the line RECOVERY_LINKS=on from the settings file now.` Without the line it says `Changing an email address here is off. To do it, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.` and changes nothing.
+
+3. Remove the line from the settings file again and save. The app needs no restart either way.
+
+> [!WARNING]
+> The command sends no mail, to the old or the new address, and takes effect at once: check the username and the address twice, because a wrong address leaves the account with no way to sign in by mail.
+
+**How to tell it worked:** the command printed the two lines above. The account's open sign-in links stop working, and it signs in with the new address from now on; while mail is off, get it a link as in [step 15](#15-make-yourself-the-admin). When it changes nothing, it says why in one line: `No account has that username. Nothing was changed.`, `That email address belongs to another account. Nothing was changed.`, `That is already the account's email address. Nothing was changed.` or `That is not an email address. Nothing was changed.`
+
 ## What has been run where
 
 **Run by hand on real hosting,** on one shared cPanel account at one provider (CloudLinux, with the app run by Passenger):
@@ -619,6 +695,7 @@ cd ~/apps/tours && ./cpanel.sh backup
 - Resuming an update that was cut off, and the commands to go back. Both were run against stand-ins, with the cut made at the points the tests can reach.
 - The second address of [step 14](#14-a-second-address-for-the-app): the `--app-domain` option, the check before an update records it, and the check that each address reports its own role. All of it was run against stand-ins only.
 - `./cpanel.sh admin` of [step 15](#15-make-yourself-the-admin): the script's part was run against stand-ins, and once with a real Node.js and the real `app.cjs` in front of a stand-in command; the command itself was run against a real database on a development computer only. The backup that refuses a `sqlite3` tool older than 3.37 was run against a stand-in.
+- Sending mail, in [step 16](#16-send-sign-in-mail): the mail client and the thread it runs in were run only against a fake mail server on a development computer, and no mail has been sent through this guide's steps on real hosting.
 - The restore steps in [step 11](#11-restore-from-a-backup), and the labels of cPanel's pages and buttons throughout, which are written from memory of cPanel and may differ at your provider.
 
 **Not yet confirmed on real hosting,** in the order to check them on the first real install:

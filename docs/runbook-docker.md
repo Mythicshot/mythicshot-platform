@@ -25,6 +25,7 @@ Examples use `tours.example.com` for the platform's address, `203.0.113.10` and 
 - [11. Uninstall](#11-uninstall)
 - [Behind a Cloudflare Tunnel](#behind-a-cloudflare-tunnel)
 - [Two addresses](#two-addresses)
+- [Accounts and mail](#accounts-and-mail)
 - [Troubleshooting by symptom](#troubleshooting-by-symptom)
 - [Pages this runbook relies on](#pages-this-runbook-relies-on)
 
@@ -400,9 +401,7 @@ Keeping Debian and Docker patched is yours to do, for example with `apt-get upda
 
 ### Make yourself the admin
 
-The version with accounts prepares sign-in with a link sent instead of a password. An updated site keeps working exactly as before, its tours, links and tokens unchanged, and nobody can sign in until the site has an admin. The admin is made once, by a command run in the app container, with the settings the app itself runs with; there is no web page for it, and the setup code plays no part in it.
-
-The page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, get a new link with the recovery setting, as in step 3.
+The version with accounts brings sign-in with a link sent instead of a password, and the dashboard behind it. An updated site keeps working exactly as before, its tours, links and tokens unchanged, and nobody can sign in until the site has an admin. The admin is made once, by a command run in the app container, with the settings the app itself runs with; there is no web page for it, and the setup code plays no part in it.
 
 1. From a root shell in `/opt/demo-platform`, run the command with your own email address and the username you want. The account that set up the site becomes the admin, with that address in place of the one typed in the setup wizard; should its workspace hold several accounts, the oldest of them.
 
@@ -414,14 +413,14 @@ It prints `The admin account "yourname" was created.`, says that your tours, the
 
 If it says `The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.`, the admin exists and only the link is missing: get one as in step 3, where the settings file is `.env`.
 
-2. Once the version with the sign-in page is installed, open the link in your browser. It works once and for 15 minutes. Run the first command again and it says `This site already has an admin. Nothing was changed.`
+2. Open the link in your browser and press "Sign in". It works once and for 15 minutes; the press lands you on the dashboard's Tours page, `/tours`. Run the first command again and it says `This site already has an admin. Nothing was changed.`
 
 > [!WARNING]
 > The link signs in whoever opens it first, like a password for 15 minutes: open it in your own browser and never paste it into a chat, a ticket or a file.
 
 Signing in normally is by a link sent by mail from the sign-in page, and needs no shell. Making the admin is a one-time act, and the command is not a standing way in.
 
-3. A new link is a recovery tool. If the first link was not used, for example because the sign-in page arrives in a later version, turn the recovery setting on for one run: add the line `RECOVERY_LINKS=on` to `.env`, recreate the app container so that it sees the line, ask for the link, then remove the line again and recreate the container once more. Each recreate restarts the app for a moment. Without the line the command says that recovery links are off and makes nothing; with it, it prints the link here only, never mails it, records it in the audit, and ends by reminding you to remove the line.
+3. A new link is a recovery tool. If the first link was not used in time, or later whenever someone cannot get a mailed link because mail is not set up or does not arrive, turn the recovery setting on for one run: add the line `RECOVERY_LINKS=on` to `.env`, recreate the app container so that it sees the line, ask for the link, then remove the line again and recreate the container once more. Each recreate restarts the app for a moment. Without the line the command says that recovery links are off and makes nothing; with it, it prints the link here only, never mails it, records it in the audit, and ends by reminding you to remove the line.
 
 ```sh
 nano .env
@@ -441,7 +440,7 @@ The line must be in `.env` and the container recreated: the command reads the se
 
 The recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the server: whoever can change `.env` or the data folder can change the site directly.
 
-The command also has `mail-check`, which says whether mail is set up without showing any setting, and `audit`, which shows the last sign-ins and admin changes; `--help` lists them. Its usage text names it the way `DEMO_PLATFORM_ADMIN_NAME` says when a wrapper sets that, as `cpanel.sh admin` does; nothing else reads it. It runs beside the app without a restart and changes only the database: making the admin is one step that is written whole or not at all, and the link and its record in the audit follow it. It applies no database update itself.
+The command also has `mail-check`, which says whether mail is set up without showing any setting, `change-email`, which changes an account's address while mail is off, and `audit`, which shows the last sign-ins and admin changes; `--help` lists them, and [Accounts and mail](#accounts-and-mail) uses each. Its usage text names it the way `DEMO_PLATFORM_ADMIN_NAME` says when a wrapper sets that, as `cpanel.sh admin` does; nothing else reads it. It runs beside the app without a restart and changes only the database: making the admin is one step that is written whole or not at all, and the link and its record in the audit follow it. It applies no database update itself.
 
 > [!WARNING]
 > Never open the database with the server's `sqlite3` tool: an older one cannot read the platform's tables, so use the app's own commands, which run on the app's Node.js.
@@ -1015,6 +1014,108 @@ The tours address is the same name before and after, so tour links that are alre
 ### Two addresses on the other routes
 
 The server guides in [docs/hosting](hosting/README.md) install through this runbook, so this section holds for them as it is. The [Fly.io guide](hosting/fly.md) does not use `install.sh`, and its steps for two addresses wait for a later version. Shared cPanel hosting has its own steps, in [A second address for the app](hosting/cpanel.md#14-a-second-address-for-the-app), and so has Cloudflare, in [Two addresses](runbook-cloudflare.md#two-addresses) of that runbook.
+
+## Accounts and mail
+
+What an operator does for the site's accounts: switching mail on, and what to do when mail does not arrive, someone is locked out, an address is wrong or a workspace is over its allowance. How accounts, sign-in, the dashboard and the email change behave is in the README: [Accounts and signing in](../README.md#accounts-and-signing-in), [The dashboard](../README.md#the-dashboard) and [Changing an email address](../README.md#changing-an-email-address).
+
+Every command below runs from a root shell in `/opt/demo-platform`. The server command runs inside the app container with the settings the container was created with, so after a change to `.env` recreate the container first, with this command. The app writes its log lines to the container's log, which `docker compose logs app` shows; no line holds an address, a code or a setting's value.
+
+```sh
+docker compose up -d --force-recreate --wait app
+```
+
+### Mail
+
+1. Have a mailbox to send from, such as `no-reply@example.com`, its password, and its mail server's host name and port for SMTP over TLS from the first byte (usually 465). Whoever runs the mailbox gives them.
+2. Open `.env` with `nano .env` and add the lines of [Switch mail on](../README.md#switch-mail-on) in the README, with your own values. Type the password yourself, in single quotes, such as `SMTP_PASSWORD='<password>'`, and choose one without a single quote in it. Add `SITE_HOST=tours.example.com` with your own domain unless the install has two addresses. On the tunnel route the same lines work: its stack file passes each of them to the app by name.
+3. Recreate the app container with the command above, then check the settings as the app now has them.
+
+```sh
+docker compose exec app node dist/node/admin.js mail-check
+```
+
+It says `Mail is set to SMTP: host, port, user, password and sender are set.` when mail is on. It contacts nothing, so a wrong password shows only in the next step.
+
+4. Send one test mail to an address of yours.
+
+```sh
+docker compose exec app node dist/node/admin.js mail-check --send-to you@example.com
+```
+
+**How to tell it worked:** it ends with `A test mail was handed to the mail server for you@example.com.`, the mail arrives, and a sign-in link asked for on the sign-in page arrives too.
+
+The backup archives leave `.env` out, so on a new server, after [Move to a new server](#10-move-to-a-new-server), add the mail lines again.
+
+> [!WARNING]
+> `.env` now holds the mailbox password: keep the file to root, never copy it into a ticket or a repository, and change the mailbox password if it was ever shown anywhere.
+
+### Mail does not arrive
+
+Go through these in order, and stop at the first one that explains it.
+
+1. Run `docker compose exec app node dist/node/admin.js mail-check`. `Mail is off.` means mail was never switched on. `Mail is off because` names the line of `.env` to put right, or says that no address for links is set. Fix `.env` and recreate the container.
+2. Check that the site has an admin and that the address is the account's: links go only to an active account, on a site with an admin. The dashboard's Admin page lists every account's address.
+3. Read `docker compose logs app` around the time of the request. `signin: an address asked for more sign-in links than its limit; none was sent` means the address asked more than 3 times in 15 minutes or 10 times that day. `signin: the hourly limit of sign-in mails was reached; none was sent` means the site sent 100 sign-in mails that hour. Both end by themselves.
+4. `mail: a sign-in mail could not be sent` with a word in brackets means the mail server did not take the mail. `auth` is the user or the password; `connect`, `tls` or `timeout` is the host name, the port, or a firewall between the server and the mail server; `refused` is the mail server turning the mail down, or the mail waiting too long behind others. `mail: the mail thread could not start` means the part of the app that sends mail did not start, so nothing reached the mail server at all: rebuild and load the image again as in [step 8](#8-update).
+5. Send a test mail with `--send-to`, as in step 4 of [Mail](#mail). If it is handed over and still does not arrive, look in the spam folder, and check the sender domain's records, as in [Mail records](../README.md#mail-records) in the README.
+6. Meanwhile, the person can sign in with a recovery link, as in the next section.
+
+### Someone is locked out
+
+- **No sign-in mail reaches them.** Print a recovery link as in step 3 of [Make yourself the admin](#make-yourself-the-admin), with their address after `--email`, and hand it to them by a way nobody else reads. Then find out why the mail does not arrive, as above.
+- **They asked too often.** An address gets 3 links in 15 minutes and 10 a day, the day counted from midnight UTC. Wait, or print a recovery link.
+- **They no longer have the mailbox.** Change their address as in the next section, then let them ask for a link at the new address, or print one.
+- **Nobody can sign in at all.** The site may have no admin yet: make one as in [Make yourself the admin](#make-yourself-the-admin).
+
+A person's sessions end only from their own Account page; there is no command for it.
+
+### An account's address is wrong
+
+A signed-in person changes their own address on the Account page while mail is on. When mail is off, or they cannot sign in, the server command changes it directly. It works only while `.env` holds `RECOVERY_LINKS=on`, exactly like a recovery link: add the line with `nano .env`, recreate the container, run the command, then remove the line and recreate the container again.
+
+```sh
+docker compose exec app node dist/node/admin.js change-email --username yourname --email new@example.com
+```
+
+It prints `The account "yourname" now signs in with new@example.com.` and `Remove the line RECOVERY_LINKS=on from the settings file now.` Without the line it says `Changing an email address here is off. To do it, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.` When it changes nothing it says why in one line: `No account has that username. Nothing was changed.`, `That email address belongs to another account. Nothing was changed.`, `That is already the account's email address. Nothing was changed.` or `That is not an email address. Nothing was changed.` The change ends the account's open sign-in links and is recorded in the audit record as `email_changed_on_server`; the account's sessions stay signed in.
+
+> [!WARNING]
+> The command sends no mail, to the old or the new address, and takes effect at once: check the username and the address twice, because a wrong address leaves the account with no way to sign in by mail.
+
+### A workspace is over its allowance
+
+Nothing is deleted or taken offline: the workspace's tours keep playing, and only uploads that need room are refused, as in [Over the allowance](../README.md#over-the-allowance) in the README. The way out is one of these:
+
+1. The person deletes tours they no longer need, on the dashboard's Tours or Storage page. The room is free at once.
+2. The admin raises that workspace's allowance with "Set allowance" on the Admin page, or empties it to go back to the standard allowance.
+3. To change the standard allowance of every workspace, change or remove the `STORAGE_ALLOWANCE_BYTES` line in `.env` and recreate the container.
+
+An upload that was started and never finished holds its room until it is removed, which happens once it is more than 24 hours old and the workspace starts another upload.
+
+### Read the audit record
+
+The audit record lists what was done with accounts: sign-ins, sign-outs, links printed, allowances set and email changes. It holds ids, never an email address, a code or a token.
+
+```sh
+docker compose exec app node dist/node/admin.js audit --last 50
+```
+
+It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Each row is one line of fields separated by two spaces: the time in UTC, the event, then `account=`, `workspace=` and `subject=` with the ids that are set, and for `allowance_set` the old and the new number of bytes, such as `{"old_bytes":null,"new_bytes":1073741824}`, where `null` stands for the standard allowance. An empty record prints `The audit record is empty.`
+
+| Event | What happened |
+|---|---|
+| `first_admin` | The first admin was made with `first-admin` |
+| `signin_link_sent` | A sign-in link was made to be mailed; the mail itself may still have failed |
+| `signin_link_printed` | A link was printed by the server command |
+| `signin` | A link was used and a session started; the subject is the session |
+| `signout` | A session was ended by its own sign-out |
+| `session_revoked` | Another session of the account was ended from the Account page |
+| `signout_everywhere` | Every session of the account was ended |
+| `allowance_set` | The admin set a workspace's allowance; the subject is the workspace |
+| `email_change_requested` | The account asked to change its address. It is recorded for every request, whether a link was sent or not, so it does not tell whether the new address was free |
+| `email_changed` | The account's address was changed by its confirmed link |
+| `email_changed_on_server` | The account's address was changed with `change-email` |
 
 ## Troubleshooting by symptom
 

@@ -11,7 +11,8 @@
 // Rules this file keeps, each with a test in test/node-mail-thread.test.ts:
 // - The settings, the password with them, go to the worker once, when it is made, in its
 //   workerData. A message to the worker holds an id and the mail (to, subject, text); a
-//   message back holds the id and either ok or a fixed reason and a yes or no. Nothing a
+//   message back holds the id and either ok or a fixed reason and a yes or no, except the
+//   worker's first, `{ ready: true }`, which says it loaded and serves mail. Nothing a
 //   server said, no setting and no password ever comes back, and an error the worker
 //   raises is never read: only that it happened.
 // - Failures are the client's own SmtpError, with the same five fixed reasons and the
@@ -24,6 +25,9 @@
 //   send after it died, at most MAIL_WORKER_STARTS_PER_MINUTE times a minute. It holds the
 //   event loop only while a mail is on its way, so an idle worker never keeps the process.
 // - The worker writes nowhere: its standard output and error are taken here and never read.
+// - A worker that cannot start (it cannot be made, was made too often in the last minute,
+//   or stopped before it said it was ready) is said in one fixed line on this side,
+//   startFailedLine, so the log never makes it look as if a mail server refused.
 import { Worker } from "node:worker_threads";
 import type { Mail, Mailer } from "../mail.ts";
 import { SMTP_LIMITS, SmtpError, type SmtpReason, type SmtpSettings } from "./smtp.ts";
@@ -50,6 +54,8 @@ export const MAIL_WORKER_GRACE_MS = 2_000;
  */
 export const MAIL_WORKER_URL = new URL(`./mail-worker${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url);
 
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object";
+
 /** What goes to the worker: an id and one mail. */
 export type MailRequest = { id: number; to: string; subject: string; text: string };
 
@@ -59,9 +65,30 @@ export type MailAnswer = { id: number; ok: true } | { id: number; ok: false; rea
 /** The data the worker is made with. */
 export type MailWorkerData = { settings: SmtpSettings };
 
-const REASONS: readonly SmtpReason[] = ["connect", "tls", "auth", "refused", "timeout"];
+/** The worker's first message, once it has loaded and serves mail. It holds nothing else. */
+export type MailReady = { ready: true };
 
-const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object";
+/** True for exactly the worker's ready message. */
+function isReady(message: unknown): boolean {
+  return isRecord(message) && message.ready === true && Object.keys(message).length === 1;
+}
+
+/** Why the mail thread could not start: the only words that reach its line. */
+export const START_REASONS = {
+  notMade: "it could not be made",
+  tooOften: `it was started ${MAIL_WORKER_STARTS_PER_MINUTE} times in the last minute`,
+  notReady: "it stopped before it was ready",
+} as const;
+
+/**
+ * The one line written when the mail thread cannot start, with one of the fixed reasons
+ * above. It never holds a setting, an address or anything the thread said.
+ */
+export function startFailedLine(reason: (typeof START_REASONS)[keyof typeof START_REASONS]): string {
+  return `mail: the mail thread could not start (${reason}); no mail was sent`;
+}
+
+const REASONS: readonly SmtpReason[] = ["connect", "tls", "auth", "refused", "timeout"];
 
 /**
  * The worker's answer for a failed send. Only the reason and the yes or no are taken from
@@ -89,12 +116,13 @@ export function failureOf(answer: unknown): SmtpError | null {
 }
 
 /** The side of a message port the worker serves: messages in, answers out. */
-export type MailPort = { on(event: "message", listener: (message: unknown) => void): unknown; postMessage(message: MailAnswer): void };
+export type MailPort = { on(event: "message", listener: (message: unknown) => void): unknown; postMessage(message: MailAnswer | MailReady): void };
 
 /**
- * The worker's loop: each message is one mail for `mailer`, sent one after the other, and
- * answered with its id. A message that is not a mail is answered `refused`, not sent.
- * Never retries, and never throws into the port.
+ * The worker's loop: first `{ ready: true }`, once the loop listens; then each message is
+ * one mail for `mailer`, sent one after the other, and answered with its id. A message
+ * that is not a mail is answered `refused`, not sent. Never retries, and never throws into
+ * the port.
  */
 export function serveMail(port: MailPort, mailer: Mailer): void {
   let chain: Promise<void> = Promise.resolve();
@@ -120,6 +148,11 @@ export function serveMail(port: MailPort, mailer: Mailer): void {
   port.on("message", (message) => {
     chain = chain.then(() => one(message));
   });
+  try {
+    port.postMessage({ ready: true });
+  } catch {
+    // A port that is gone has nobody to tell.
+  }
 }
 
 /** A mailer whose work can be ended: `close` refuses what waits, ends what is on its way, and stops the worker. */
@@ -136,6 +169,8 @@ export type WorkerMailerOptions = {
   queueWaitMs?: number;
   runLimitMs?: number;
   now?: () => number;
+  /** Where the line for a thread that cannot start goes (tests); the error log by default. */
+  log?: (line: string) => void;
 };
 
 type Pending = { request: MailRequest; resolve: () => void; reject: (error: SmtpError) => void; timer: ReturnType<typeof setTimeout> | null };
@@ -161,6 +196,7 @@ export function workerMailer(s: SmtpSettings, options: WorkerMailerOptions = {})
   const queueWaitMs = options.queueWaitMs ?? MAIL_QUEUE_WAIT_MS;
   const runLimitMs = options.runLimitMs ?? SMTP_LIMITS.totalMs + MAIL_WORKER_GRACE_MS;
   const now = options.now ?? (() => Date.now());
+  const log = options.log ?? ((line: string) => console.error(line));
   // Copied once: what the caller does to its object later changes nothing here.
   const settings: SmtpSettings = isRecord(s) ? { host: s.host, port: s.port, user: s.user, password: s.password, from: s.from, helo: s.helo } : (s as SmtpSettings);
 
@@ -203,9 +239,14 @@ export function workerMailer(s: SmtpSettings, options: WorkerMailerOptions = {})
   const make = (): Worker | null => {
     const at = now();
     while (startedAt.length > 0 && at - startedAt[0] >= 60_000) startedAt.shift();
-    if (startedAt.length >= MAIL_WORKER_STARTS_PER_MINUTE) return null;
+    if (startedAt.length >= MAIL_WORKER_STARTS_PER_MINUTE) {
+      log(startFailedLine(START_REASONS.tooOften));
+      return null;
+    }
     startedAt.push(at);
     starts += 1;
+    // Set by the worker's first message: until then, a worker that stops never started.
+    let ready = false;
     let made: Worker;
     try {
       const workerData: MailWorkerData = { settings };
@@ -217,10 +258,16 @@ export function workerMailer(s: SmtpSettings, options: WorkerMailerOptions = {})
       // from loading at all.
       made = new Worker(workerUrl, { workerData, env: {}, execArgv: [], stdout: true, stderr: true, name: "mail" });
     } catch {
+      log(startFailedLine(START_REASONS.notMade));
       return null;
     }
     made.on("message", (answer: unknown) => {
-      if (made !== worker || current === null) return;
+      if (made !== worker) return;
+      if (isReady(answer)) {
+        ready = true;
+        return;
+      }
+      if (current === null) return;
       if (!isRecord(answer) || answer.id !== current.request.id) {
         void drop(new SmtpError("refused", true));
         return;
@@ -235,7 +282,9 @@ export function workerMailer(s: SmtpSettings, options: WorkerMailerOptions = {})
     });
     // The error itself is never read: it could hold anything.
     const died = () => {
-      if (made === worker) void drop(new SmtpError("refused", true));
+      if (made !== worker) return;
+      if (!ready) log(startFailedLine(START_REASONS.notReady));
+      void drop(new SmtpError("refused", true));
     };
     made.on("error", died);
     made.on("messageerror", died);

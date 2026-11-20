@@ -267,6 +267,164 @@ TOURS_HOST and APP_HOST name the same host. Two addresses need two different hos
 
 To go back to one address, remove both settings (on Docker, the `APP_DOMAIN` line) and restart the app; each of the three pages above gives the steps. The tours address is the same name before and after, so links to tours that are already out there keep working both ways.
 
+## Accounts and signing in
+
+People sign in to the site in a browser to use [the dashboard](#the-dashboard). With two addresses the sign-in page and the dashboard are on the app address; with one address they are on that address. Mythicshot does not sign in: it keeps using its API token.
+
+### Signing in by link
+
+There is no password. The sign-in page, `/signin`, asks for an email address and mails a link to it. Its answer is the same for every address ("If <address> has an account, a sign-in link is on its way."), so the page cannot be used to find out who has an account.
+
+A link is mailed only when all of these hold: the address belongs to an active account, the site has an admin (see [The first admin](#the-first-admin)), mail is set up (see [Mail](#mail)), and the address has not asked too often. Each address gets at most 3 links in 15 minutes and 10 a day; past that the page answers as always and nothing is sent. One network may ask 10 times in 15 minutes and is then told to wait, but only where the site knows the visitor's network address (see `CLIENT_ADDRESS_HEADER` in [Settings](#settings)). The whole site sends at most 100 sign-in mails an hour.
+
+A link works once and for 15 minutes. Opening it shows a "Sign in" button, and only pressing the button signs in, so a mail program that opens links to check them uses nothing up. After the press the browser lands on the dashboard's Tours page, `/tours`. A newer link does not cancel an older one: each works until it is used or its 15 minutes are over.
+
+### Sessions
+
+A browser that signed in stays signed in for 30 days of use: the session ends 30 days after it was last used, so a session in use every day never ends by itself. Only a digest of the session's cookie is stored.
+
+Sessions end on the Account page of the dashboard, which lists where the account is signed in. "Sign out" ends this browser's session, the "Sign out" beside another session ends that one, and "Sign out everywhere" ends every session of the account. None of them touches an API token: Mythicshot keeps working.
+
+### The first admin
+
+A site has no admin until somebody with access to the server makes one, and until then no sign-in link is sent or accepted, so an updated site works as it did before accounts: its tours, their links and its tokens stay as they are. The admin is made once, with the server command `first-admin`, which also prints a first sign-in link, so the first sign-in needs no mail. The steps are in each hosting guide: [Make yourself the admin](docs/hosting/cpanel.md#15-make-yourself-the-admin) for shared cPanel hosting, and [Make yourself the admin](docs/runbook-docker.md#make-yourself-the-admin) for Docker.
+
+A Cloudflare install has no server command, so an admin cannot be made there and nobody can sign in on it in this version. Its tokens, tours and storage allowance work as before.
+
+### Recovery links
+
+When someone cannot get a mailed link, because mail is off or does not arrive, the server command `signin-link` prints one for an account that exists. It is a recovery tool, off unless the settings hold `RECOVERY_LINKS=on`, and it is turned on for one run only:
+
+1. Add the line `RECOVERY_LINKS=on` to the settings: the settings file on shared hosting, or `.env` on Docker, where the app container is then recreated so that it sees the line.
+2. Run `signin-link --email <address>`. It prints `Open this link within 15 minutes to sign in:`, the link, and `Remove the line RECOVERY_LINKS=on from the settings file now.` Nothing is mailed.
+3. Remove the line again (on Docker, recreate the container once more).
+
+Without the line the command makes nothing and says so. For every other reason it refuses with one sentence, `No link was made. Check the address, and that the site has an admin.` Each printed link is recorded in the audit record as `signin_link_printed`. The exact commands for each hosting kind are in the guides linked under [The first admin](#the-first-admin).
+
+> [!warning] A printed link is a key for 15 minutes
+> Whoever opens it first is signed in as that account: hand it only to its owner, by a way nobody else reads.
+
+### Who to ask for an invite
+
+Nobody can be invited in this version, and the sign-in page says "Mythicshot is invite-only for now." The optional setting `INVITE_CONTACT` adds who to ask: an email address, shown after "Ask for an invite:" as a mail link, or an `https://` address, shown as the link "Ask for an invite". Anything else, unset included, shows the sentence alone and never stops the site. It goes where the other settings go: the settings file, `.env`, or on Cloudflare a var in `wrangler.deploy.jsonc`, which `npm run setup:cloudflare -- update` keeps.
+
+## The dashboard
+
+The dashboard is the set of pages a signed-in person uses on the app address (or the one address). `/` sends a signed-in browser to the Tours page and anyone else to the sign-in page. Tours are recorded, edited and renamed in Mythicshot; the dashboard lists them, shares them, publishes and unpublishes them, and deletes them.
+
+| Page | What it does |
+|---|---|
+| Tours, `/tours` | Lists the workspace's tours, most recently changed first, each with its steps, size, the day it changed and whether it is published or has changes waiting. "Copy link" and "Open" for a published tour; "Publish", "Publish changes", "Unpublish" and "Delete". Delete asks first and cannot be undone; the recording on the computer is not touched |
+| Storage, `/storage` | What the workspace uses: against its allowance with a bar when it has one, what takes the room (tours, logos, uploads in progress), and its largest tours with "Delete". A workspace over its allowance sees a warning |
+| Account, `/account` | The username, the email address and the workspace; where the account is signed in, with the sign-outs of [Sessions](#sessions); and, on a site whose mail is on, changing the email address (see [Changing an email address](#changing-an-email-address)). The username cannot be changed in this version |
+| Admin, `/admin` | For the site's admin only: every account and its storage, and each workspace's allowance. The tab is shown only to the admin, and everyone else gets "not found" from the routes behind it |
+
+### What the admin sees
+
+The Admin page shows one line for the whole site (the number of accounts, what all workspaces use together, and the standard allowance) and one row per account: its username, email address, status and whether it is the admin, its workspace's name, its number of tours, the bytes it uses and its allowance. It never shows a tour's title, link, pictures or anything else in a workspace, and it has no way into one: the admin's own session reaches other workspaces only through these figures. The page says so itself: "You see how much each workspace uses, never what is in it."
+
+### Allowances
+
+The standard allowance is the setting `STORAGE_ALLOWANCE_BYTES` (see [Storage allowance](#storage-allowance)); without it there is no limit. It is changed in the settings and takes effect when the app restarts, or on Cloudflare at the next deploy.
+
+The admin sets one workspace's own allowance with "Set allowance" on its row, in the question "Storage allowance for" and the workspace's name. The field takes a number with `B`, `KB`, `MB` or `GB` after it (in any case, `byte` and `bytes` too, or nothing for bytes), counted 1,024 to the next unit, such as `500 MB`, `10 GB` or `1.5 GB`. A fraction is written with a point, never a comma, and is rounded to the nearest byte; bytes themselves take none, and `TB` or any other unit is refused with "Write a size such as 500 MB or 10 GB." An empty field goes back to the standard allowance.
+
+An allowance that leaves the workspace no room is taken only after a warning, and the button then reads "Save anyway"; nothing is deleted either way. Below what the workspace uses the warning is "That is less than this workspace uses. Nothing is deleted, but its new uploads are refused until it is under" and the size; at exactly what it uses, "That is exactly what this workspace uses. Nothing is deleted, but its new uploads are refused until it is under" and the size; at 0, "An allowance of 0 refuses every upload from this workspace." An empty field is judged by the standard allowance it stands for. Every change is recorded in the audit record as `allowance_set`, with the old and the new number of bytes.
+
+### Over the allowance
+
+A workspace is over its allowance when it uses more than the allowance; using exactly the allowance is not over. Being over deletes and unpublishes nothing: its tours, links and pictures stay online, and listing, publishing, unpublishing, renaming and deleting work. Only uploads that need room are refused, as described in [Storage allowance](#storage-allowance), until tours are deleted or the allowance is raised. The Storage page then shows "You are over your storage allowance. New uploads are refused until you delete tours or get more room.", and the Admin page marks the row.
+
+## Changing an email address
+
+On a site whose mail is on, a signed-in person changes their own address on the Account page:
+
+1. Beside "Email address" they press "Change", type the new address under "New email address" and press "Send the link". The page then says "Check" and the new address, and "Open the link we sent there to finish. It works once and for 15 minutes. Until then you keep signing in with" and the present address.
+2. The site mails the new address, with the subject `Confirm your new Mythicshot email address`. The mail reads `Open this link to make this the email address of your Mythicshot account:`, then the link, then `It works once and for 15 minutes, and you need to be signed in to that Mythicshot account when you open it. Until you confirm it there, nothing changes. If you did not ask for this, ignore this mail.` It names neither the account nor its present address.
+3. The link opens the page "Confirm your new email address", with "Press the button to make this your Mythicshot email address." and a "Confirm" button. Opening the link changes nothing, so a mail program that opens links to check them does no harm; only pressing "Confirm", within 15 minutes, changes the address. The page then says "Your email address is now" and the new address, and "Sign-in links go to this address from now on. We sent a notice to" and the old one.
+4. The person must be signed in to that account when they press it. In a browser that is not signed in, the page says "Sign in first" and "Sign in with your current email address, then open the link from your mail again."; the link is not carried across the sign-in, so they open it from the mail once more afterwards. A link that was used, ran out, was replaced or belongs to another account gives "This link no longer works. Ask for a new one from your account page." and "If you have more than one account, sign in to the one that asked for the change and open the link again."
+5. The old address is sent a notice, with the subject `Your Mythicshot email address was changed`. It reads `The email address of the Mythicshot account "<username>" was changed to n…@example.com.`, with the new address mostly hidden as shown, then `If this was you, there is nothing to do.` and `If it was not, answer this mail or contact the person who runs this site.` It asks nothing.
+
+The old address is told so that a change its owner did not make does not go unnoticed. It is not asked to approve, so that a person who has lost the old mailbox can still change it; the change already needs a session of that account and the new mailbox.
+
+The page answers the same whether the new address is free, belongs to another account or is the account's own, so it cannot be used to find out who has an account. For an address another account has, no link is mailed and its owner is sent nothing. Asking again replaces the earlier request, whose link then no longer works; a link also works only once. The change ends the account's open sign-in links, which went to the old address, and keeps its sessions signed in.
+
+| Limit | Counted per | At most |
+|---|---|---|
+| Change requests | Account | 3 in 15 minutes, 10 a day |
+| Change requests for the same new address | Account and address | 2 in 15 minutes, 5 a day |
+| Change requests for one address | Address, from all accounts together | 6 in 15 minutes, 20 a day |
+| Tries of a link's code | Account | 20 in 15 minutes |
+| Email-change mails | The whole site | 30 an hour, apart from the 100 sign-in mails |
+
+Over any of the first four, the page says "Too many requests. Wait a few minutes and try again." Over the site's hourly number, the page answers as always and no link is sent. A day is counted from midnight UTC, and the other periods also start at fixed times rather than at the first request.
+
+The new address a person typed is kept in the database, even after its link was used or ran out, until the same account asks for a change again and the new request takes its place.
+
+### While mail is off
+
+A site whose mail is off cannot mail the link, so the Account page shows no "Change" button but the line "This site cannot send mail, so an email address cannot be changed here.", and the request answers with that same sentence. The server command `change-email --username <name> --email <address>` changes an address at once instead. It is behind the same `RECOVERY_LINKS=on` line as recovery links, turned on for one run in the same way, and it sends no mail at all: neither the old nor the new address is told. It also ends the account's open sign-in links and any email change the account had asked for, records `email_changed_on_server` in the audit record, and keeps the account's sessions signed in. It works the same on a site whose mail is on. The steps for shared hosting are in [Change an address on the server](docs/hosting/cpanel.md#change-an-address-on-the-server).
+
+## Mail
+
+The Node target sends two kinds of mail: sign-in links, and the link and notice of an email change. Mail is off until it is switched on. A Cloudflare install sends no mail in this version.
+
+### Switch mail on
+
+These lines switch it on, with the sender's address, the mail server's host name and the mailbox's sign-in. The mail server must take SMTP over TLS from the first byte, which is port 465 unless `SMTP_PORT` says another.
+
+```text
+MAIL_MODE=smtp
+MAIL_FROM=no-reply@example.com
+SMTP_HOST=mail.example.com
+SMTP_USER=no-reply@example.com
+SMTP_PASSWORD="<password>"
+```
+
+On one address the site also needs `SITE_HOST`, the host name its links use, such as `SITE_HOST=tours.example.com`; with two addresses links use the app address. Each setting is explained in [Settings](#settings).
+
+| Hosting | Where the lines go | Then |
+|---|---|---|
+| Shared cPanel hosting | The settings file beside the app folder | Restart the app; see [Send sign-in mail](docs/hosting/cpanel.md#16-send-sign-in-mail) |
+| Docker on Debian | `.env` in `/opt/demo-platform` | Recreate the app container; see [Mail](docs/runbook-docker.md#mail) in the Docker runbook |
+| Node started by hand, or Fly | The environment the app starts with | Restart the app |
+| Cloudflare | Nowhere: a Worker sends no mail in this version | |
+
+The site's owner types the mailbox password into the file themselves, in an editor on the server. It never goes into a chat, a ticket, a command line or a file anyone else reads. How each kind of file treats quotes, `#` and `$` in a password is in [The mail settings in a settings file](#the-mail-settings-in-a-settings-file): in the settings file of shared hosting write it in double quotes, and in Docker's `.env` in single quotes.
+
+> [!warning] The mailbox password is a secret
+> Anyone who reads it can send mail as your sender address: keep it in the settings only, and change it if it was ever pasted anywhere else.
+
+### Check it
+
+The server command `mail-check` says whether the site would send mail, without showing any setting: `./cpanel.sh admin mail-check` on shared hosting, `docker compose exec app node dist/node/admin.js mail-check` on Docker. It reads the settings as the app does and contacts nothing, so it cannot see a wrong password, host name or port. It prints one line:
+
+| Line | Exit code | Meaning |
+|---|---|---|
+| `Mail is set to SMTP: host, port, user, password and sender are set.` | 0 | Mail is on |
+| `Mail is off.` | 0 | Mail is off by choice |
+| `Mail is off because <SETTING> is missing or not usable.` | 1 | Mail is switched on but that setting must be fixed; mail stays off |
+| `Mail is off because no address for sign-in links is set. Set APP_HOST and TOURS_HOST, or SITE_HOST.` | 1 | Mail is switched on but links would have no address |
+
+With `--send-to <address>` it also sends one real test mail to that address, straight to the mail server rather than through the mail thread, with the subject "Test mail from" and the site's host name. It then says `A test mail was handed to the mail server for <address>.` and exits with 0, or says `The mail server did not take the test mail (<reason>).`, with one of the reasons `connect`, `tls`, `auth`, `refused`, `timeout` or `unknown`, and exits with 1. While mail is off it sends nothing and exits with 1. A test mail that was handed over can still be dropped later, by the mail server or the recipient's.
+
+### What the site does while mail is off
+
+The sign-in page answers exactly as it does with mail on, and says a link is on its way, but no link is sent: the admin prints one with a [recovery link](#recovery-links) instead. The Account page does not offer an email change (see [While mail is off](#while-mail-is-off) under the email change). When mail is switched on but cannot be used, the site still starts, mail stays off, and the start writes one line that names the setting and never a value, such as `mail: off, because SMTP_PORT is missing or not usable. The site runs; sign-in mails are not sent.`
+
+### Mail records
+
+Receiving mail servers trust a sender's domain by three DNS records: SPF lists the servers that may send its mail, DKIM publishes the key each mail is signed with, and DMARC says what to do with a mail that fails those checks. Get the exact records from whoever runs the mailbox and add them before mail is switched on: without them sign-in mails may be put in spam or refused.
+
+## Security notes
+
+- **Who has an account cannot be told from outside.** Asking for a sign-in link answers with the same status, body and headers whether or not the address has an account, after the same database work in the same order; everything only an account gets (its code, its audit row and its mail) is done after the answer, and the mail is sent from a separate thread so it cannot slow the next request. Asking for an email change does the same for addresses that are free and taken, and every refusal of an admin route is the same "not found".
+- **One small timing difference is accepted.** An account's two writes touch more index pages than the stand-in writes made for an address without one, so a small difference remains: about 5 percentage points at one gap when it was measured. A reviewer put it at roughly 900 requests for one address to tell the two apart, against a limit of 10 a day for that address, each of which mails the address. Should it ever be fixed, the stand-in writes go to throwaway tables of the same shape.
+- **Links are single use and short-lived.** A sign-in link and an email-change link each work once and for 15 minutes. Their code travels after the `#` of the link, which a browser sends to no server, so it reaches no server log and no referrer, and the page a sign-in link opens removes it from the address bar before anything else.
+- **Secrets are stored as digests only.** API tokens, sign-in codes, email-change codes and session cookies are kept as SHA-256 digests. No code, cookie, token, digest, mail password or email address is written to a log line, an error or the audit record.
+- **Workspaces are kept apart by access rules, not by encryption.** Every request is resolved to one workspace and reads and writes only its rows, and the tests try every route with another workspace's ids; the admin's routes are the one exception, and they answer each account's name, address and figures and its workspace's name, never what a workspace holds. The operator of the server can still read the whole database and every stored picture: the data is not encrypted against them.
+- **The rate limits can be used against an address.** Anyone can use up an address's sign-in links (3 in 15 minutes, 10 a day) by asking for them, so its owner gets no link until the period ends; the admin can print a [recovery link](#recovery-links) meanwhile. A few accounts that work together can likewise use up the email-change requests for one address, or the site's 30 email-change mails an hour. The counters are kept under digests of the addresses, so a copy of the database cannot be read as a list of them, but a guessed address can be tested against it.
+
 ## Develop
 
 Requires Node 24 or later.
@@ -331,7 +489,7 @@ Nothing in the code is tied to a hostname, account or bucket name.
 | `APP_HOST` | both | Optional, and only together with `TOURS_HOST`: the host name of the app address, such as `app.example.com`, in the same form. It must be a different name than the tours address. |
 | `STORAGE_ALLOWANCE_BYTES` | both | Optional: the storage allowance of a workspace in bytes, digits only, such as `1073741824` for 1 GB. Unset or empty (the default): no limit. See [Storage allowance](#storage-allowance). Any other value stops the start on Node with one line, and on Cloudflare answers 500 `misconfigured` on every path until it is fixed. |
 | `SITE_HOST` | both | Optional, for a site on one address only: the host name sign-in links use, such as `tours.example.com`, without `https://` and without a path. Ignored when `APP_HOST` is set, since links then use the app address. It is used for links only, and no request is checked against it. A value that is not a host name never stops the site: it then has no address for links, and no sign-in mail is sent. |
-| `INVITE_CONTACT` | both | Optional: who to ask for an invite, an email address such as `hello@example.com` or an `https://` address, shown after "Mythicshot is invite-only for now." on the sign-in page; unset or anything else shows that sentence alone and never stops the site. |
+| `INVITE_CONTACT` | both | Optional: who to ask for an invite, an email address such as `hello@example.com` or an `https://` address, shown after "Mythicshot is invite-only for now." on the sign-in page; unset or anything else shows that sentence alone and never stops the site. On Cloudflare it is a var in the install's `wrangler.deploy.jsonc`, which `npm run setup:cloudflare -- update` keeps. See [Who to ask for an invite](#who-to-ask-for-an-invite). |
 | `MAIL_MODE` | Node | `off` (the default, also when unset) or `smtp`. With `off` the site sends no mail and reads none of the mail settings below. With `smtp` it sends sign-in mails through the mail server those settings name. Mail that is switched on but cannot be used (a mail setting that is missing or malformed, or no address for links from `APP_HOST` or `SITE_HOST`) never stops the site: mail stays off, and the start writes one line that names the setting and never a value. A Cloudflare install sends no mail in this version. |
 | `MAIL_FROM` | Node | With `MAIL_MODE=smtp`: the sender's address, such as `no-reply@example.com`, the address alone without a name around it. |
 | `SMTP_HOST` | Node | With `MAIL_MODE=smtp`: the host name of the mail server, such as `mail.example.com`, without a port. |
@@ -350,7 +508,7 @@ The container stack's `.env`, written by `install.sh`, also holds `DOMAIN`, `ACM
 
 Mail is off until `MAIL_MODE=smtp` is set together with `MAIL_FROM`, `SMTP_HOST`, `SMTP_USER` and `SMTP_PASSWORD` (and `SMTP_PORT` when the mail server does not use 465); a site on one address also needs `SITE_HOST`. The site checks the settings when it starts and does not contact the mail server then: a wrong password, a wrong host name or a wrong port shows only when the first mail is tried.
 
-The Node site sends each mail from a separate thread of its own process, made when the first mail is sent, so the site's answers to requests never wait on a mail server. Mails go one at a time; up to 16 more wait their turn, and a mail beyond that, or one that has waited 30 seconds, is not sent and the log says so in one line (`mail: a sign-in mail could not be sent (refused)`). If that thread fails, it is made again for the next mail, at most five times a minute. On a stop, a mail on its way gets the time left before the stop's deadline and is then cut off; it is never sent a second time. The admin command's mail check sends its test mail directly, without the thread.
+The Node site sends each mail from a separate thread of its own process, made when the first mail is sent, so the site's answers to requests never wait on a mail server. Mails go one at a time; up to 16 more wait their turn, and a mail beyond that, or one that has waited 30 seconds, is not sent and the log says so in one line (`mail: a sign-in mail could not be sent (refused)`). If that thread fails, it is made again for the next mail, at most five times a minute. A thread that cannot start (it could not be made, it was made five times in the last minute, or it stopped before it was ready, as when its file is missing from the build) is said in its own line, `mail: the mail thread could not start (it stopped before it was ready); no mail was sent`, with that reason in the brackets, before the line of the mail it could not send. The thread is started with an empty environment and none of the app's Node.js options, so a `NODE_OPTIONS` value given to the app (such as `--require`) does not reach the thread that sends mail; what Node.js reads once for the whole process when it starts, such as extra trusted certificates, does. On a stop, a mail on its way gets the time left before the stop's deadline and is then cut off; it is never sent a second time. The admin command's mail check sends its test mail directly, without the thread.
 
 The site refuses an `SMTP_PASSWORD` that is empty, longer than 255 characters, or holds a control character such as a tab or a line break; mail then stays off and the start says so in one line that names the setting. Any other password is used exactly as the site receives it, spaces at either end included. What the site receives depends on who reads the file:
 
@@ -377,7 +535,7 @@ The site refuses an `SMTP_PASSWORD` that is empty, longer than 255 characters, o
 | `scripts/setup-cloudflare.ts` | The guided Cloudflare setup, `npm run setup:cloudflare` |
 | `deploy/cpanel/`, `scripts/package-cpanel.ts` | Shared cPanel hosting: the startup file, the install script and its tests, and the archive builder, `npm run package:cpanel` |
 | `migrations/` | SQL migrations, one set for both targets |
-| `docs/` | The two hosting runbooks, the hosting guides, and the list of what to check on the documentation page in a browser |
+| `docs/` | The two hosting runbooks, the hosting guides, and the lists of what to check in a browser: the documentation page, the sign-in pages and the dashboard |
 | `test/contract/` | Adapter contract suites run against both targets |
 | `wrangler.jsonc` | Worker bindings; the database id and bucket names are placeholders. Each install's own copy is `wrangler.deploy.jsonc`, ignored by Git |
 

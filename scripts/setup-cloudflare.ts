@@ -218,7 +218,7 @@ export type Install = {
 const HOST_VARS = ["TOURS_HOST", "APP_HOST"] as const;
 
 /** Vars wrangler.jsonc does not carry, which an install may set by hand and `update` must not drop. */
-const KEPT_VARS = ["STORAGE_ALLOWANCE_BYTES", "SITE_HOST"] as const;
+const KEPT_VARS = ["STORAGE_ALLOWANCE_BYTES", "SITE_HOST", "INVITE_CONTACT"] as const;
 
 /** The comment line in wrangler.deploy.jsonc that records a confirmed address not attached yet. */
 const PENDING_LINE = /^\/\/ setup:cloudflare: address (\S+) confirmed, not attached yet; attached before: (\S+)$/m;
@@ -300,8 +300,8 @@ export function deployConfigText(root: string, install: Install & { databaseId: 
   else delete c.routes;
   // The two address vars stay empty, as in wrangler.jsonc, unless the install's own file
   // had them set by hand: then they are written back exactly as they were.
-  // A storage allowance or a link host (SITE_HOST) set by hand in the install's file is
-  // written back as it was, too.
+  // A storage allowance, a link host (SITE_HOST) or who to ask for an invite
+  // (INVITE_CONTACT) set by hand in the install's file is written back as it was, too.
   c.vars = { ...(c.vars ?? {}), PUBLIC_IMAGE_BASE: install.publicImageBase, ...(install.hostVars ?? {}), ...(install.keptVars ?? {}) };
   const pending =
     install.domain && install.pending
@@ -311,7 +311,7 @@ export function deployConfigText(root: string, install: Install & { databaseId: 
     "// This install's Wrangler configuration, written by `npm run setup:cloudflare` from\n" +
     "// wrangler.jsonc. Ignored by Git; holds no secret. `update` rewrites it, keeping the\n" +
     "// name, database id, address, PUBLIC_IMAGE_BASE, TOURS_HOST, APP_HOST,\n" +
-    "// STORAGE_ALLOWANCE_BYTES and SITE_HOST.\n" +
+    "// STORAGE_ALLOWANCE_BYTES, SITE_HOST and INVITE_CONTACT.\n" +
     pending +
     JSON.stringify(c, null, 2) +
     "\n"

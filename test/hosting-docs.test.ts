@@ -23,7 +23,8 @@ import adminTs from "../src/node/admin.ts?raw";
 import hostGateTs from "../src/host-gate.ts?raw";
 
 const HOSTING = import.meta.glob("../docs/hosting/*.md", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
-const RUNBOOKS = import.meta.glob("../docs/*.md", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+/** The runbooks and the README, which a guide may link into by heading. */
+const RUNBOOKS = import.meta.glob(["../docs/*.md", "../README.md"], { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 
 /** Every file a guide may link to; only the keys are used. */
 const REPO_FILES = Object.keys(
@@ -614,8 +615,8 @@ describe("the shared cPanel hosting guide", () => {
   it("has a numbered section on a second address, after the troubleshooting and before the closing section", () => {
     const have = sections(guide);
     expect(have.indexOf("A second address for the app")).toBe(have.indexOf("Troubleshooting") + 1);
-    // Only the section on the first admin, added after it, stands between it and the closing section.
-    expect(have.indexOf("A second address for the app")).toBe(have.indexOf("What has been run where") - 2);
+    // Only the sections on the first admin and on mail, added after it, stand between it and the closing section.
+    expect(have.indexOf("A second address for the app")).toBe(have.indexOf("What has been run where") - 3);
     expect(guide).toMatch(/^- \[\d+\. A second address for the app\]\(#\d+-a-second-address-for-the-app\)$/m);
     // The numbers of the sections before it did not move: links to them still hold.
     expect(guide).toMatch(/^## 13\. Troubleshooting$/m);
@@ -624,11 +625,11 @@ describe("the shared cPanel hosting guide", () => {
 
   it("has a numbered section on making the first admin, with the command, what it prints and a warning against the hosting's sqlite3 tool", () => {
     const have = sections(guide);
-    // Added last, so no number before it moved.
-    expect(have.indexOf("Make yourself the admin")).toBe(have.indexOf("What has been run where") - 1);
+    // Added after the second address, so no number before it moved; only the section on mail follows it.
+    expect(have.indexOf("Make yourself the admin")).toBe(have.indexOf("What has been run where") - 2);
     expect(guide).toMatch(/^## 15\. Make yourself the admin$/m);
     const from = guide.search(/^## 15\. Make yourself the admin$/m);
-    const part = guide.slice(from, guide.indexOf("## What has been run where"));
+    const part = guide.slice(from, guide.indexOf("## 16. Send sign-in mail"));
     // The command as the owner approved it, from the installed copy, and the words it prints.
     expect(lines).toContain("cd ~/apps/tours && ./cpanel.sh admin --email you@example.com --username yourname");
     expect(part).toContain(
@@ -646,10 +647,9 @@ describe("the shared cPanel hosting guide", () => {
     expect(guide).toMatch(/^\*\*After the update that brings accounts,\*\*[^\n]*\[step 15\]\(#15-make-yourself-the-admin\)\.$/m);
     expect(part).toMatch(/^> \[!WARNING\]\n> The link signs in whoever opens it first/m);
     expect(part).toMatch(/^> \[!WARNING\]\n> Never open the database with the hosting's `sqlite3` tool/m);
-    // The sign-in page is not in this version: the guide says so, and does not claim a sign-in works yet.
-    expect(part).toContain(
-      "\nThe page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, get a new link with the recovery setting, as described below.\n",
-    );
+    // The sign-in page is in this version: the guide no longer says it is to come.
+    expect(part).not.toMatch(/later version|arrives in|Once the version with the sign-in page/);
+    expect(part).toContain("3. Open the link in your browser and press \"Sign in\". It works once and for 15 minutes; the press lands you on the dashboard's Tours page, `/tours`.");
     expect(part).not.toMatch(/ends with the link and no other line|in one step/);
     expect(part).toContain("The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.");
     // A link for an existing account is a recovery tool: on for one run, off again; signing in normally needs no shell.
@@ -690,6 +690,26 @@ describe("the shared cPanel hosting guide", () => {
     expect(cpanelSh).toContain("  admin       Run the site's admin command, for example: admin first-admin --email you@example.com --username yourname");
   });
 
+  it("has a last numbered section on mail: the settings, the check before the restart, a test mail, and changing an address on the server", () => {
+    const have = sections(guide);
+    expect(have.indexOf("Send sign-in mail")).toBe(have.indexOf("What has been run where") - 1);
+    expect(guide).toMatch(/^## 16\. Send sign-in mail$/m);
+    const part = guide.slice(guide.search(/^## 16\. Send sign-in mail$/m), guide.indexOf("## What has been run where"));
+    const code = codeLines(part);
+    // The five lines, the password in double quotes, and the link host for one address.
+    for (const line of ["MAIL_MODE=smtp", "MAIL_FROM=no-reply@example.com", "SMTP_HOST=mail.example.com", "SMTP_USER=no-reply@example.com", 'SMTP_PASSWORD="<password>"', "SITE_HOST=tours.example.com"]) expect(code, line).toContain(line);
+    // Check, restart, test mail: in that order.
+    const order = ["cd ~/apps/tours && ./cpanel.sh admin mail-check", "touch ~/apps/tours/tmp/restart.txt", "cd ~/apps/tours && ./cpanel.sh admin mail-check --send-to you@example.com"].map((c) => part.indexOf(c));
+    expect(order.every((at) => at > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // The recovery step for a wrong address, behind the recovery line, and its warning.
+    expect(part).toMatch(/^### Change an address on the server$/m);
+    expect(code).toContain("cd ~/apps/tours && ./cpanel.sh admin change-email --username yourname --email new@example.com");
+    expect(part).toMatch(/^> \[!WARNING\]\n> The command sends no mail, to the old or the new address/m);
+    expect(part).toMatch(/^> \[!WARNING\]\n> Every backup the script makes holds a copy of the settings file, the mailbox password included/m);
+    for (const said of ["Changing an email address here is off.", "Remove the line RECOVERY_LINKS=on from the settings file now.", "No account has that username. Nothing was changed."]) expect(adminTs, said).toContain(said);
+  });
+
   it("the Docker runbook makes the first admin with the same command, run in the container", () => {
     const runbook = allDocs["docs/runbook-docker.md"];
     const code = codeLines(runbook);
@@ -697,9 +717,10 @@ describe("the shared cPanel hosting guide", () => {
     expect(code).toContain("docker compose exec app node dist/node/admin.js signin-link --email you@example.com");
     expect(runbook).toMatch(/> \[!WARNING\]\n> Never open the database with the server's `sqlite3` tool/);
     expect(runbook).toMatch(/> \[!WARNING\]\n> The link signs in whoever opens it first/);
-    expect(runbook).toContain(
-      "\nThe page this link opens arrives in a later version of the platform. Until then the command makes the admin, but the link leads to a page that is not found and expires unused. After that update, get a new link with the recovery setting, as in step 3.\n",
-    );
+    // The sign-in page is in this version: the runbook no longer says it is to come.
+    const admin = runbook.slice(runbook.indexOf("### Make yourself the admin"), runbook.indexOf("### If the setup did not finish"));
+    expect(admin).not.toMatch(/later version|arrives in|Once the version with the sign-in page/);
+    expect(admin).toContain("2. Open the link in your browser and press \"Sign in\". It works once and for 15 minutes; the press lands you on the dashboard's Tours page, `/tours`.");
     expect(runbook).toContain("The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.");
     expect(runbook).toMatch(/`RECOVERY_LINKS=on`[^\n]*`\.env`[^\n]*remove the line again/);
     expect(runbook).toMatch(/by a link sent by mail[^\n]*needs no shell/);
