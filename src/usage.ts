@@ -94,7 +94,8 @@ const mediaCountOf = (kind: "image" | "clip") => `(SELECT count(*) FROM media m 
  * scope: the bytes of its steps and the recorded size of its logo (null counts as
  * nothing). It is PICTURES and LOGOS for one tour, so over a workspace's tours these sizes
  * add up to exactly the usage's pictures plus logos; the usage's used_bytes is that plus
- * the room open uploads hold, which belongs to no tour yet. Like the usage, it counts no
+ * the room open uploads hold, which belongs to no tour yet, plus the shared images and GIFs
+ * (MEDIA). Like the usage, it counts no
  * published copy and no file that waits to be cleaned up. It takes no parameter.
  */
 export const TOUR_BYTES_SQL = "((SELECT coalesce(sum(s.bytes), 0) FROM step s WHERE s.tour_id = t.id) + coalesce(t.logo_bytes, 0))";
