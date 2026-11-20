@@ -9,7 +9,7 @@ import { createApp } from "../src/app.ts";
 import { EMAIL_CHANGE_LINES, EMAIL_CHANGE_MS, confirmEmailChange } from "../src/email-change.ts";
 import { emailChangedMail, emailChangeLink, emailChangeMail, maskEmail } from "../src/mail.ts";
 import type { Config, Db, Deps } from "../src/ports.ts";
-import { LIMITS_EMAIL_CHANGE, LIMITS_SIGNIN, SITE_KEY, accountKey, recipientKey } from "../src/rate.ts";
+import { LIMITS_EMAIL_CHANGE, LIMITS_SIGNIN, SITE_KEY, accountKey, pairKey, recipientKey } from "../src/rate.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { PAD_BUCKET } from "../src/signin.ts";
 import { send, type Call, type SendOptions } from "./bundle.ts";
@@ -181,8 +181,9 @@ describe("asking for an email change", () => {
     expect(seen(free)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
     expect(seen(taken)).toEqual(seen(free));
     expect(seen(own)).toEqual(seen(free));
-    // Before the answer: the session, the four counts, the one read, the mail cap, the sweep.
-    expect(freeCalls.before).toEqual(["all", "first", "first", "first", "first", "first", "first", "run"]);
+    // Before the answer: the session, the six counts (two per account, two per account and
+    // address, two per address), the one read, the mail cap, the sweep.
+    expect(freeCalls.before).toEqual(["all", "first", "first", "first", "first", "first", "first", "first", "first", "run"]);
     expect(takenCalls.before).toEqual(freeCalls.before);
     expect(ownCalls.before).toEqual(freeCalls.before);
     // After it, one batch of the very same two statements each way, statement for statement:
@@ -356,33 +357,52 @@ describe("asking for an email change", () => {
     expect([day.status, day.text]).toEqual([429, RATE_LIMITED]);
     expect(mail.sent).toHaveLength(9);
     // The counters hold digests, never the account's id or an address.
-    const keys = await deps.db.all<{ key: string }>("SELECT key FROM rate_counter WHERE bucket LIKE 'email%'");
+    const keys = await deps.db.all<{ key: string }>("SELECT key FROM rate_counter WHERE bucket LIKE 'email%' AND bucket <> ?", [LIMITS_EMAIL_CHANGE.mailSite.bucket]);
     for (const { key } of keys) expect(key).toMatch(/^[0-9a-f]{64}$/);
     expect(keys.map((k) => k.key)).toContain(await accountKey(a.userId));
   });
 
-  it("counts per new address, from any account, and whether or not it is taken", async () => {
-    const { deps, mail, admin, a, b } = await site();
+  it("counts per account and address: one account using up its tries for an address limits only itself", async () => {
+    const { deps, mail, a, b } = await site();
     const sa = await signIn(deps, a.userId);
     const sb = await signIn(deps, b.userId);
-    const sAdmin = await signIn(deps, admin.userId);
     expect((await ask(deps, sa, NEW)).text).toBe(OK);
-    expect((await ask(deps, sb, NEW)).text).toBe(OK);
-    expect((await ask(deps, sAdmin, NEW)).text).toBe(OK);
+    expect((await ask(deps, sa, NEW)).text).toBe(OK);
     const over = await ask(deps, sa, NEW);
     expect([over.status, over.text]).toEqual([429, RATE_LIMITED]);
+    // The other account's first request for that address is not refused, and gets its link.
+    const first = await ask(deps, sb, NEW);
+    expect(seen(first)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
     expect(mail.sent.map((m) => m.to)).toEqual([NEW, NEW, NEW]);
-    // A taken address is counted the same, so the 429 says nothing about it.
-    for (const s of [sa, sAdmin, sb]) expect((await ask(deps, s, b.email)).text).toBe(OK);
-    expect((await ask(deps, sAdmin, b.email)).text).toBe(RATE_LIMITED);
-    expect(await deps.db.first("SELECT count FROM rate_counter WHERE bucket = ? AND key = ?", [LIMITS_EMAIL_CHANGE.requestRecipient.bucket, await recipientKey(b.email)])).toEqual({ count: 4 });
+    // The pair's counter holds a digest of the two, never the account's id or the address.
+    const pair = await deps.db.all<{ key: string }>("SELECT key FROM rate_counter WHERE bucket = ?", [LIMITS_EMAIL_CHANGE.requestPair.bucket]);
+    expect(pair.map((r) => r.key).sort()).toEqual([await pairKey(a.userId, NEW), await pairKey(b.userId, NEW)].sort());
+    for (const { key } of pair) expect(key).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("a mail the site's hourly cap stops is not sent; the answer is the same and one fixed line is written", async () => {
-    const { deps, mail, a } = await site();
+  it("counts per address across all accounts, higher, and whether or not the address is taken", async () => {
+    const { deps, mail, b } = await site();
+    const sessions: Signed[] = [];
+    for (let i = 0; i < 7; i++) sessions.push(await signIn(deps, (await seedAccount(deps)).userId));
+    for (const s of sessions.slice(0, 6)) expect((await ask(deps, s, NEW)).text).toBe(OK);
+    const over = await ask(deps, sessions[6], NEW);
+    expect([over.status, over.text]).toEqual([429, RATE_LIMITED]);
+    expect(mail.sent).toHaveLength(6);
+    // A taken address is counted the same, so the 429 says nothing about it.
+    for (const s of sessions.slice(0, 6)) expect((await ask(deps, s, b.email)).text).toBe(OK);
+    expect((await ask(deps, sessions[6], b.email)).text).toBe(RATE_LIMITED);
+    expect(await deps.db.first("SELECT count FROM rate_counter WHERE bucket = ? AND key = ?", [LIMITS_EMAIL_CHANGE.requestRecipient.bucket, await recipientKey(b.email)])).toEqual({ count: 7 });
+    expect(LIMITS_EMAIL_CHANGE.requestRecipient.most).toBeGreaterThan(LIMITS_EMAIL_CHANGE.requestPair.most);
+    expect(LIMITS_EMAIL_CHANGE.requestRecipientDay.most).toBeGreaterThan(LIMITS_EMAIL_CHANGE.requestPairDay.most);
+  });
+
+  it("email change has its own hourly mail cap: when it is reached the answer is the same, nothing is sent, one fixed line is written, and sign-in mail still goes", async () => {
+    const { deps, mail, a, b } = await site();
     const s = await signIn(deps, a.userId);
-    const hour = LIMITS_SIGNIN.mailSite.windowMs;
-    await deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?)", [LIMITS_SIGNIN.mailSite.bucket, SITE_KEY, NOW - (NOW % hour), LIMITS_SIGNIN.mailSite.most]);
+    const cap = LIMITS_EMAIL_CHANGE.mailSite;
+    expect(cap.bucket).not.toBe(LIMITS_SIGNIN.mailSite.bucket);
+    expect(cap.most).toBeLessThan(LIMITS_SIGNIN.mailSite.most);
+    await deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?)", [cap.bucket, SITE_KEY, NOW - (NOW % cap.windowMs), cap.most]);
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const r = await ask(deps, s, NEW);
     expect(seen(r)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
@@ -390,6 +410,22 @@ describe("asking for an email change", () => {
     // No change is left open: the request ended any earlier one, as every request does.
     expect(await countOf(deps, "email_change WHERE used_at IS NULL")).toBe(0);
     expect(errors.mock.calls).toEqual([[EMAIL_CHANGE_LINES.hour]]);
+    // Sign-in mail is not counted against it, and is not stopped by it.
+    expect(await countOf(deps, `rate_counter WHERE bucket = '${LIMITS_SIGNIN.mailSite.bucket}'`)).toBe(0);
+    const link = await send(deps, "POST", "/api/v1/signin/request", { origin: APP, body: JSON.stringify({ email: b.email }), headers: { "content-type": "application/json", origin: APP, "sec-fetch-site": "same-origin" } });
+    expect(link.text).toBe(OK);
+    expect(mail.sent.map((m) => m.to)).toEqual([b.email]);
+  });
+
+  it("the sign-in mail cap does not stop an email-change link, and a link is counted under email change's own cap only", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const signinCap = LIMITS_SIGNIN.mailSite;
+    await deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?)", [signinCap.bucket, SITE_KEY, NOW - (NOW % signinCap.windowMs), signinCap.most]);
+    expect((await ask(deps, s, NEW)).text).toBe(OK);
+    expect(mail.sent.map((m) => m.to)).toEqual([NEW]);
+    expect(await deps.db.first("SELECT count FROM rate_counter WHERE bucket = ? AND key = ?", [signinCap.bucket, SITE_KEY])).toEqual({ count: signinCap.most });
+    expect(await deps.db.first("SELECT count FROM rate_counter WHERE bucket = ? AND key = ?", [LIMITS_EMAIL_CHANGE.mailSite.bucket, SITE_KEY])).toEqual({ count: 1 });
   });
 
   it("a mail that cannot be sent is one fixed line without the address, and the change waits for a new request", async () => {

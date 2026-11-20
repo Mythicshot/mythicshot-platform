@@ -51,10 +51,10 @@ export const LIMITS_SIGNIN = {
 
 /**
  * The limits on changing an account's email address. Every request is from a signed-in
- * account, so it is counted per account and per address asked for, not per network. Each
- * limit has a bucket of its own, as in LIMITS_SIGNIN. Over any of them: 429. The mail a
- * request sends is also counted against the site's cap, LIMITS_SIGNIN.mailSite, which every
- * mail the site sends shares.
+ * account, so it is counted per account, per account and address, and per address, not per
+ * network. Each limit has a bucket of its own, as in LIMITS_SIGNIN. Over any of the request
+ * limits: 429. Every count is made for every request, whether or not the address is free,
+ * so a 429 says nothing about who has an account.
  */
 export const LIMITS_EMAIL_CHANGE = {
   /** Change requests of one account, keyed by `accountKey`. */
@@ -62,15 +62,29 @@ export const LIMITS_EMAIL_CHANGE = {
   /** The same key, over a day. */
   requestAccountDay: { bucket: "email_account_day", windowMs: 86_400_000, most: 10 },
   /**
-   * Change requests for one new address, from any account, keyed by `recipientKey`. Counted
-   * for every request, whether or not the address is free, so the count says nothing about
-   * who has an account; it keeps a mailbox from being sent link after link.
+   * Change requests of one account for one address, keyed by `pairKey`. An account that
+   * asks for one address again and again limits itself and nobody else.
    */
-  requestRecipient: { bucket: "email_recipient", windowMs: 900_000, most: 3 },
+  requestPair: { bucket: "email_pair", windowMs: 900_000, most: 2 },
   /** The same key, over a day. */
-  requestRecipientDay: { bucket: "email_recipient_day", windowMs: 86_400_000, most: 10 },
+  requestPairDay: { bucket: "email_pair_day", windowMs: 86_400_000, most: 5 },
+  /**
+   * Change requests for one address from all accounts together, keyed by `recipientKey`:
+   * higher than the pair's, so it takes several accounts to reach it. It keeps one mailbox
+   * from being sent link after link by many accounts.
+   */
+  requestRecipient: { bucket: "email_recipient", windowMs: 900_000, most: 6 },
+  /** The same key, over a day. */
+  requestRecipientDay: { bucket: "email_recipient_day", windowMs: 86_400_000, most: 20 },
   /** Code tries of one account, keyed by `accountKey`. A code is 160 random bits; this only stops a page that loops. */
   confirmAccount: { bucket: "email_confirm_account", windowMs: 900_000, most: 20 },
+  /**
+   * Email-change links mailed by the whole site in an hour, apart from sign-in's cap
+   * (LIMITS_SIGNIN.mailSite) and well below it, so email changes can never use up the mail
+   * sign-in needs. Counted under SITE_KEY only for a link about to be sent, else under
+   * SITE_QUIET_KEY, as sign-in's cap is. Over: the usual answer, nothing sent, one line.
+   */
+  mailSite: { bucket: "email_mail_site", windowMs: 3_600_000, most: 30 },
 } as const satisfies Record<string, Limit>;
 
 /** The key of a counter that counts for the whole site. */
@@ -126,6 +140,17 @@ export async function recipientKey(email: string): Promise<string> {
 export async function accountKey(userId: string): Promise<string> {
   if (typeof userId !== "string" || userId === "") throw new Error("bad account");
   return sha256Hex("rate account\n" + userId);
+}
+
+/**
+ * The key one account's requests for one address are counted under: 64 hex characters, the
+ * digest of a fixed prefix, the account's id and the address as `parseEmail` stores it.
+ * Rejects with "bad account" or "bad email" for anything that is not text.
+ */
+export async function pairKey(userId: string, email: string): Promise<string> {
+  if (typeof userId !== "string" || userId === "") throw new Error("bad account");
+  if (typeof email !== "string") throw new Error("bad email");
+  return sha256Hex("rate account address\n" + userId + "\n" + email.trim().toLowerCase());
 }
 
 const IPV4 = /^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$/;

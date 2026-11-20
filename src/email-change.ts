@@ -36,7 +36,7 @@ import { hashToken, newId, requireAuth } from "./auth.ts";
 import { apiError, json } from "./http.ts";
 import { emailChangedMail, emailChangeLink, emailChangeMail, linkOrigin } from "./mail.ts";
 import { canMailLinks, deferOf, isNotNullViolation, isUniqueViolation, mailOf, type Deps } from "./ports.ts";
-import { LIMITS_EMAIL_CHANGE, LIMITS_SIGNIN, SITE_KEY, SITE_QUIET_KEY, accountKey, hitLimit, recipientKey, sweepCounters } from "./rate.ts";
+import { LIMITS_EMAIL_CHANGE, SITE_KEY, SITE_QUIET_KEY, accountKey, hitLimit, pairKey, recipientKey, sweepCounters } from "./rate.ts";
 import { MAIL_REASONS, afterTheAnswer, ownJsonBody, withHeader } from "./signin.ts";
 
 /** A change's link works for 15 minutes, as a sign-in link does. */
@@ -54,7 +54,7 @@ export const EMAIL_CHANGE_SAYS = {
 
 /** The fixed log lines. None holds an address, a code or a count. */
 export const EMAIL_CHANGE_LINES = {
-  hour: "email: the hourly limit of mails was reached; no email-change link was sent",
+  hour: "email: the hourly limit of email-change mails was reached; no email-change link was sent",
   notMade: "email: an email-change link could not be made; none was sent",
   noticeOff: "email: mail is off, so no notice of an email change was sent",
 } as const;
@@ -207,12 +207,13 @@ export function emailChangeRoutes(app: Hono, deps: Deps): void {
   /**
    * Asks for a change of the caller's email address. A well-formed address answers 200
    * `{"ok":true}` whether it is free, another account's or the caller's own; a link is
-   * mailed to it only when it is free and the site's mail cap allows.
+   * mailed to it only when it is free and email change's own mail cap allows.
    *
-   * Before the answer, the same database calls for every well-formed address: the four
-   * counts (two per account, two per address, all counted whatever the first says), the
-   * one read of who has the address, the site's mail cap (under the quiet key when nothing
-   * will be sent) and the counter sweep. Then one job for every request, after the answer.
+   * Before the answer, the same database calls for every well-formed address: the six
+   * counts (two per account, two per account and address, two per address, all counted
+   * whatever the first says), the one read of who has the address, email change's mail cap
+   * (under the quiet key when nothing will be sent) and the counter sweep. Then one job for
+   * every request, after the answer.
    */
   app.post("/api/v1/account/email", async (c) => {
     const req = c.req.raw;
@@ -228,10 +229,13 @@ export function emailChangeRoutes(app: Hono, deps: Deps): void {
 
     const userId = auth.session.userId;
     const account = await accountKey(userId);
+    const pair = await pairKey(userId, email);
     const recipient = await recipientKey(email);
     const counts = [
       await hitLimit(deps, LIMITS_EMAIL_CHANGE.requestAccount, account),
       await hitLimit(deps, LIMITS_EMAIL_CHANGE.requestAccountDay, account),
+      await hitLimit(deps, LIMITS_EMAIL_CHANGE.requestPair, pair),
+      await hitLimit(deps, LIMITS_EMAIL_CHANGE.requestPairDay, pair),
       await hitLimit(deps, LIMITS_EMAIL_CHANGE.requestRecipient, recipient),
       await hitLimit(deps, LIMITS_EMAIL_CHANGE.requestRecipientDay, recipient),
     ].filter((counted) => counted.over);
@@ -241,8 +245,9 @@ export function emailChangeRoutes(app: Hono, deps: Deps): void {
     // One read says whether the address is free. Nothing of the answer depends on it.
     const holder = await deps.db.first<{ id: string }>("SELECT id FROM user WHERE email = ?", [email]);
     const free = holder === null;
-    // The site's cap counts only mails about to be sent; any other request makes the same call under the quiet key.
-    const cap = await hitLimit(deps, LIMITS_SIGNIN.mailSite, free ? SITE_KEY : SITE_QUIET_KEY);
+    // Email change's own cap, apart from sign-in's, counts only mails about to be sent; any
+    // other request makes the same call under the quiet key.
+    const cap = await hitLimit(deps, LIMITS_EMAIL_CHANGE.mailSite, free ? SITE_KEY : SITE_QUIET_KEY);
     await sweepCounters(deps);
 
     // canMailLinks said there is an address for links; it comes from the settings alone.

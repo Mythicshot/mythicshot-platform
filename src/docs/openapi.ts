@@ -935,7 +935,7 @@ function paths(): OpenApiDoc["paths"] {
       post: {
         tags: ["Accounts"],
         summary: "Ask to change the email address",
-        description: `Mails a link to the new address; the account's address changes only when that link is opened (POST /api/v1/account/email/confirm), once and within ${EMAIL_CHANGE_MS / 60_000} minutes. Asking again replaces the earlier link. The answer is the same whether the new address is free, belongs to another account or is the account's own, so it does not tell who has an account; only a free address is sent a link, and no other mail is sent. It does not wait for the mail. One account, and one new address, can be asked for only a few times in a quarter hour and in a day. ${NOT_FROM_THE_PAGE}`,
+        description: `Mails a link to the new address; the account's address changes only when that link is opened (POST /api/v1/account/email/confirm), once and within ${EMAIL_CHANGE_MS / 60_000} minutes. Asking again replaces the earlier link. The answer is the same whether the new address is free, belongs to another account or is the account's own, so it does not tell who has an account; only a free address is sent a link, and no other mail is sent. It does not wait for the mail. Each account, each account for one address, and each address from all accounts together, can be asked for only a few times in a quarter hour and in a day; an account that asks too often for one address limits only itself, not others asking for it. ${NOT_FROM_THE_PAGE}`,
         operationId: "requestEmailChange",
         security: SESSION,
         requestBody: { required: true, content: json(ref("EmailChangeRequest")) },
