@@ -30,7 +30,9 @@ export const DASH_JS = `var Dash = (function () {
   // Every request goes through here. A change made with the session carries the
   // anti-forgery value from GET /api/v1/session. A path must be one absolute path of this
   // site; anything else (another origin, a protocol-relative or relative path) is refused
-  // before any request.
+  // before any request. It answers { status, data, retryAfter }: data is the parsed JSON
+  // body (null when there is none), retryAfter the answer's retry-after header as sent
+  // (null without one), for a page that tells a person how long to wait.
   function api(method, path, body) {
     if (typeof path !== "string" || !/^\\/(?![\\/\\\\])/.test(path)) throw new TypeError("path");
     var headers = {};
@@ -44,7 +46,7 @@ export const DASH_JS = `var Dash = (function () {
       return r.text().then(function (t) {
         var data = null;
         try { data = t ? JSON.parse(t) : null; } catch (e) { data = null; }
-        return { status: r.status, data: data };
+        return { status: r.status, data: data, retryAfter: r.headers.get("retry-after") };
       });
     });
   }
@@ -74,12 +76,14 @@ export const DASH_JS = `var Dash = (function () {
     return n + TEXT.bytes;
   }
 
-  // Day and short month, with the year when it is not this year, as the account page writes it.
-  function dateOf(ms) {
+  // Day and short month, with the year when it is not this year, as the account page writes
+  // it; with withYear true, always with the year ("20 Nov 2026"), as the Connections page
+  // writes it.
+  function dateOf(ms, withYear) {
     if (typeof ms !== "number" || !isFinite(ms)) return "";
     var d = new Date(ms);
     var text = d.getDate() + " " + MONTHS[d.getMonth()];
-    return d.getFullYear() === new Date().getFullYear() ? text : text + " " + d.getFullYear();
+    return withYear !== true && d.getFullYear() === new Date().getFullYear() ? text : text + " " + d.getFullYear();
   }
 
   function signedOut() {
