@@ -17,6 +17,10 @@ import type { Deps } from "../src/ports.ts";
 import installSh from "../deploy/install.sh?raw";
 import NOTICES from "../THIRD-PARTY-NOTICES.md?raw";
 import setupCloudflareTs from "../scripts/setup-cloudflare.ts?raw";
+import adminTs from "../src/node/admin.ts?raw";
+import configTs from "../src/node/config.ts?raw";
+import mailThreadTs from "../src/node/mail-thread.ts?raw";
+import signinTs from "../src/signin.ts?raw";
 
 const DOCS = import.meta.glob(["../README.md", "../LICENSE", "../docs/*.md"], {
   query: "?raw",
@@ -197,6 +201,9 @@ function variablesRead(): Set<string> {
   return out;
 }
 
+/** Variables Node.js itself reads, which a doc may name to say what they do and do not reach. */
+const NODE_OWN = new Set(["NODE_OPTIONS"]);
+
 /** Environment variables a doc names: inline spans that are one upper-case name, and NAME= or $NAME in code blocks. */
 function variablesNamed(md: string): Set<string> {
   const out = new Set<string>();
@@ -360,10 +367,10 @@ describe("the docs", () => {
     expect(docs[DOCKER]).toMatch(/^\| `--app-domain=<name>` \| Only with `install`: /m);
   });
 
-  it("every environment variable the docs name is read by the code", () => {
+  it("every environment variable the docs name is read by the code, or by Node.js itself", () => {
     const read = variablesRead();
     expect(read).toContain("SETUP_CODE");
-    for (const p of MARKDOWN) for (const v of variablesNamed(docs[p])) expect(read, `${p}: ${v}`).toContain(v);
+    for (const p of MARKDOWN) for (const v of variablesNamed(docs[p])) expect(read.has(v) || NODE_OWN.has(v), `${p}: ${v}`).toBe(true);
   });
 
   it("every setting the app reads is named in the docs", () => {
@@ -415,6 +422,65 @@ describe("the docs", () => {
 
   it("both runbooks give the same setup-recovery SQL", () => {
     expect(recoverySql(docs[DOCKER])).toBe(recoverySql(docs[CLOUDFLARE]));
+  });
+});
+
+describe("the sentences the guides quote from the server command and the log", () => {
+  /** README, the runbooks and the cPanel guide, where the operator's steps are written. */
+  const guides = [docs[README], docs[DOCKER], docs[CLOUDFLARE], linkable["docs/hosting/cpanel.md"]].join("\n");
+
+  it("every fixed sentence of the admin command a guide quotes is the command's own, word for word", () => {
+    const said = [
+      "Open this link within 15 minutes to sign in:",
+      "Remove the line RECOVERY_LINKS=on from the settings file now.",
+      "No link was made. Check the address, and that the site has an admin.",
+      "Recovery links are off. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.",
+      "Changing an email address here is off. To do it, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.",
+      "No account has that username. Nothing was changed.",
+      "That email address belongs to another account. Nothing was changed.",
+      "That is already the account's email address. Nothing was changed.",
+      "That is not an email address. Nothing was changed.",
+      "Mail is off.",
+      "Mail is set to SMTP: host, port, user, password and sender are set.",
+      "Mail is off because no address for sign-in links is set. Set APP_HOST and TOURS_HOST, or SITE_HOST.",
+      "The audit record is empty.",
+    ];
+    for (const s of said) {
+      expect(adminTs, s).toContain(s);
+      expect(guides, s).toContain(`\`${s}\``);
+    }
+  });
+
+  it("every sentence of the admin command with a value in it is quoted from its template, with the guide's example values", () => {
+    const templates: [string, string[]][] = [
+      ["`Mail is off because ${mail.setting} is missing or not usable.`", ["`Mail is off because <SETTING> is missing or not usable.`"]],
+      ['`The account "${parsed.username.trim().toLowerCase()}" now signs in with ${changed.email}.`', ['`The account "yourname" now signs in with new@example.com.`']],
+      ["`A test mail was handed to the mail server for ${to}.`", ["`A test mail was handed to the mail server for <address>.`", "`A test mail was handed to the mail server for you@example.com.`"]],
+      ["`The mail server did not take the test mail (${err instanceof SmtpError ? err.reason : \"unknown\"}).`", ["`The mail server did not take the test mail (<reason>).`"]],
+      ["subject: `Test mail from ${host}`", ['subject "Test mail from"']],
+    ];
+    for (const [template, quoted] of templates) {
+      expect(adminTs, template).toContain(template);
+      for (const q of quoted) expect(guides, q).toContain(q);
+    }
+  });
+
+  it("the log lines a guide quotes are the code's own", () => {
+    expect(mailThreadTs).toContain("`mail: the mail thread could not start (${reason}); no mail was sent`");
+    expect(mailThreadTs).toContain('notReady: "it stopped before it was ready"');
+    expect(docs[README]).toContain("`mail: the mail thread could not start (it stopped before it was ready); no mail was sent`");
+    expect(signinTs).toContain("`mail: a sign-in mail could not be sent (${");
+    expect(signinTs).toContain('"signin: an address asked for more sign-in links than its limit; none was sent"');
+    expect(signinTs).toContain('"signin: the hourly limit of sign-in mails was reached; none was sent"');
+    expect(docs[DOCKER]).toContain("`signin: an address asked for more sign-in links than its limit; none was sent`");
+    expect(docs[DOCKER]).toContain("`signin: the hourly limit of sign-in mails was reached; none was sent`");
+    expect(configTs).toContain("`mail: off, because ${setting} is missing or not usable. The site runs; sign-in mails are not sent.`");
+    expect(docs[README]).toContain("`mail: off, because SMTP_PORT is missing or not usable. The site runs; sign-in mails are not sent.`");
+  });
+
+  it("the README says the mail thread does not take the app's NODE_OPTIONS, as the code makes it", () => {
+    expect(mailThreadTs).toContain("env: {}, execArgv: []");
+    expect(docs[README]).toMatch(/started with an empty environment and none of the app's Node\.js options, so a `NODE_OPTIONS` value given to the app/);
   });
 });
 

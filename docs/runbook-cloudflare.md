@@ -22,6 +22,7 @@ Examples use `tours.example.com` for your own address, `images.example.com` for 
 - [If the setup wizard's answer was lost](#if-the-setup-wizards-answer-was-lost)
 - [Removal](#removal)
 - [Costs](#costs)
+- [Accounts and mail](#accounts-and-mail)
 - [Troubleshooting by symptom](#troubleshooting-by-symptom)
 - [Pages this runbook relies on](#pages-this-runbook-relies-on)
 
@@ -333,7 +334,7 @@ Keep the code only until you finish the wizard. Neither Wrangler nor the dashboa
 npm ci
 ```
 
-3. Run the update. It refreshes `wrangler.deploy.jsonc` from the new `wrangler.jsonc` (keeping your name, database id, address and `PUBLIC_IMAGE_BASE`, and a `TOURS_HOST` and `APP_HOST` that were set by hand), applies any new migrations, then deploys. Add `--dry-run` to see the commands first. **Unconfirmed:** migrating before deploying assumes each migration only adds to the schema, which holds for the migrations so far.
+3. Run the update. It refreshes `wrangler.deploy.jsonc` from the new `wrangler.jsonc` (keeping your name, database id, address and `PUBLIC_IMAGE_BASE`, and the vars `TOURS_HOST`, `APP_HOST`, `STORAGE_ALLOWANCE_BYTES`, `SITE_HOST` and `INVITE_CONTACT` when they were set by hand), applies any new migrations, then deploys. Add `--dry-run` to see the commands first. **Unconfirmed:** migrating before deploying assumes each migration only adds to the schema, which holds for the migrations so far.
 
 ```sh
 npm run setup:cloudflare -- update
@@ -478,6 +479,22 @@ The API documentation page (`/docs`, see [API documentation](../README.md#api-do
 **Unconfirmed:** whether the Free plan's 10 ms of CPU time allows the first answer of the viewer's script. That file is 1,685,697 bytes, and the Worker turns it into bytes once, on the first request for it after a start, then keeps them: in plain Node on a desktop computer that first answer took about 20 ms and every later one about 0.5 ms; the page itself took under 2 ms the first time. A browser asks for the file once and then keeps it for a year, so the request is rare. If Cloudflare refuses it for CPU (error 1102 on `/docs/viewer.<hash>.js`, and a documentation page without its reference), the rest of the site is not affected: say so before changing anything, since the way out is to serve these files as static assets, which is not built.
 
 **Unconfirmed:** the Worker's startup time. With the viewer built in, every cold start parses a script of about 2.3 MB before it answers anything, and that is true for a tour page and an API request as much as for the documentation page. It has not been measured on Cloudflare: at the first deploy of this version, check that the deploy is accepted (Cloudflare refuses a Worker whose startup takes too long; the [Workers limits page](https://developers.cloudflare.com/workers/platform/limits/) gives the time allowed) and that the first tour page after a quiet period opens as quickly as before. If either this or the CPU limit above is hit, the follow-up is the same: serve the documentation page's four files (the viewer's script and stylesheet, and the page's own two) as static assets instead of from the Worker's script.
+
+## Accounts and mail
+
+The database of a Cloudflare install holds accounts as the Node target's does: the setup wizard makes the owner's. But in this version a Worker sends no mail, whatever mail vars it is given, and the server command that makes the first admin, prints recovery links, changes an address and reads the audit record runs on the Node target only. So a Cloudflare install has no admin, its sign-in page sends no link, and nobody can sign in to its dashboard. Mythicshot, the API tokens, tours, publishing and the storage allowance work as before. How accounts behave where they can be used is in [Accounts and signing in](../README.md#accounts-and-signing-in) in the README.
+
+What that means for the operator's usual tasks:
+
+| Task | On Cloudflare in this version |
+|---|---|
+| Mail does not arrive | None is sent: a Worker has no mailer. Nothing needs fixing, and Mythicshot is not affected |
+| Someone is locked out | Nobody can sign in to the dashboard here. Mythicshot keeps working with its token |
+| An account's address is wrong | There is no command to change it here. Nothing on a Cloudflare install uses the address yet, since no mail is sent and nobody signs in |
+| A workspace is over its allowance | Delete tours with Mythicshot or the API (see [The tour API](../README.md#the-tour-api)), or raise or remove the `STORAGE_ALLOWANCE_BYTES` var in `wrangler.deploy.jsonc` and run `npm run setup:cloudflare -- update`, which keeps the var. A workspace's own allowance is set on the dashboard's Admin page, which needs an admin, so it cannot be set here |
+| Read the audit record | It stays empty: everything it records needs an admin or a sign-in |
+
+The var `INVITE_CONTACT`, who to ask for an invite, works here: the sign-in page shows it, and `update` keeps it, as it keeps `SITE_HOST` and `STORAGE_ALLOWANCE_BYTES`. Their meaning is in [Settings](../README.md#settings) in the README.
 
 ## Troubleshooting by symptom
 
