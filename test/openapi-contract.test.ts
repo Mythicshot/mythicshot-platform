@@ -466,11 +466,11 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     vi.spyOn(console, "error").mockImplementation(() => {});
 
     // Without a token, and with one no server knows: every request that needs one.
-    const idFor = (path: string) => (path.includes("/uploads/") ? NO_UPLOAD : path.includes("/sessions/") ? "ses_" + "0".repeat(24) : path.includes("/workspaces/") ? NO_WORKSPACE : NO_TOUR);
+    const idFor = (path: string) => (path.includes("/uploads/") ? NO_UPLOAD : path.includes("/sessions/") ? "ses_" + "0".repeat(24) : path.includes("/workspaces/") ? NO_WORKSPACE : path.includes("/tokens/") ? "tok_" + "0".repeat(24) : NO_TOUR);
     const example = (op: Op) => op.path.replace("{id}", idFor(op.path)).replace("{step_id}", NO_STEP).replace("{n}", "1");
     const guarded = OPS.filter((op) => op.op.security.length > 0);
-    // All but health and the two sign-in requests.
-    expect(guarded).toHaveLength(OPS.length - 3);
+    // All but health, the two sign-in requests and the app's two requests while it connects.
+    expect(guarded).toHaveLength(OPS.length - 5);
     for (const op of guarded) {
       for (const token of [null, NO_TOKEN]) {
         const r = await api.call(op.method, example(op), { token });
@@ -900,6 +900,97 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     refused(await preview(a.token, small, png(10, 10, 1001)), 413, "storage_full");
   });
 
+  it("every answer of connecting the app and of the token list is as documented", async () => {
+    // Two addresses, so the connected answer names them; then one address, where it does not.
+    const hosts = { tours: "tours.example.com", app: "app.example.com" };
+    const { deps } = await makeDeps({ hosts });
+    const clock = { now: 1_800_000_000_000 };
+    deps.now = () => clock.now;
+    const api = client(deps);
+    await seedAccount(deps, { admin: true });
+    const a = await seedAccount(deps);
+    const APP = "https://app.example.com";
+    const TOURS = "https://tours.example.com";
+    const made = await redeemSignInCode(deps, await createSignInCode(deps, a.userId), null, null);
+    if (made === null) throw new Error("the sign-in was refused");
+    const cookie = `${SESSION_COOKIE}=${made.secret}`;
+    const page = { cookie, origin: APP, "x-csrf-token": await csrfFor(made.secret), "content-type": JSON_TYPE };
+    const fromNetwork = (address: string) => (d: Deps) => ({ fetch: (req: Request) => (setClientAddress(req, address), createApp(d).fetch(req)) });
+    const start = (body: unknown, more: Opts = {}) => api.call("POST", "/api/v1/connect/start", { origin: TOURS, ...more, body: typeof body === "string" ? body : JSON.stringify(body), headers: { ...JSON_HEADERS, ...more.headers } });
+    const poll = (body: unknown, more: Opts = {}) => api.call("POST", "/api/v1/connect/token", { origin: TOURS, ...more, body: typeof body === "string" ? body : JSON.stringify(body), headers: { ...JSON_HEADERS, ...more.headers } });
+    const settle = (how: string, body: unknown, more: Opts = {}) => api.call("POST", `/api/v1/connect/${how}`, { origin: APP, headers: page, body: typeof body === "string" ? body : JSON.stringify(body), ...more });
+    const lookup = (code: string, more: Opts = {}) => settle("lookup", { user_code: code }, more);
+
+    // Starting, and its refusals.
+    const r = await start({ device_name: "Laptop" });
+    expect(r.status).toBe(201);
+    refused(await start("not json"), 400, "bad_request");
+    refused(await start({ device_name: "" }), 400, "bad_device_name");
+    refused(await start({ device_name: "x" }, { token: a.token }), 400, "credentials_not_allowed");
+    for (let i = 0; i < 10; i++) expect((await start({ device_name: `n${i}` }, { app: fromNetwork("203.0.113.70") })).status).toBeLessThan(500);
+    refused(await start({ device_name: "x" }, { app: fromNetwork("203.0.113.70") }), 429, "rate_limited");
+
+    // Asking for the token: pending, too soon, the refusals.
+    expect((await poll({ device_code: r.json.device_code })).json).toEqual({ status: "pending" });
+    refused(await poll({ device_code: r.json.device_code }), 429, "slow_down");
+    refused(await poll({ device_code: "dpd_" + "0".repeat(40) }), 410, "expired_code");
+    refused(await poll("[]"), 400, "bad_request");
+    refused(await poll({ device_code: r.json.device_code }, { headers: { cookie } }), 400, "credentials_not_allowed");
+    for (let i = 0; i < 360; i++) await send(deps, "POST", "/api/v1/connect/token", { body: "{}", headers: JSON_HEADERS, app: fromNetwork("203.0.113.71") });
+    refused(await poll({ device_code: r.json.device_code }, { app: fromNetwork("203.0.113.71") }), 429, "rate_limited");
+
+    // The dashboard: lookup, confirm, and the token, with both addresses.
+    expect((await lookup(r.json.user_code)).json).toEqual({ device_name: "Laptop", asked_at: clock.now, same_network: false });
+    refused(await lookup(r.json.user_code, { headers: JSON_HEADERS, token: a.token }), 401, "unauthorized");
+    refused(await settle("lookup", "{"), 400, "bad_request");
+    refused(await settle("confirm", "{"), 400, "bad_request");
+    refused(await settle("refuse", "{"), 400, "bad_request");
+    refused(await settle("confirm", { user_code: r.json.user_code }, { headers: JSON_HEADERS, token: a.token }), 401, "unauthorized");
+    refused(await settle("refuse", { user_code: r.json.user_code }, { headers: JSON_HEADERS, token: a.token }), 401, "unauthorized");
+    expect((await settle("confirm", { user_code: r.json.user_code })).status).toBe(204);
+    refused(await lookup(r.json.user_code), 404, "not_found");
+    refused(await settle("confirm", { user_code: r.json.user_code }), 404, "not_found");
+    const other = await start({ device_name: "Other" });
+    expect((await settle("refuse", { user_code: other.json.user_code })).status).toBe(204);
+    refused(await settle("refuse", { user_code: other.json.user_code }), 404, "not_found");
+    clock.now += 5000;
+    const got = await poll({ device_code: r.json.device_code });
+    expect(got.json.addresses).toEqual(hosts);
+    expect(got.json.account).toEqual({ username: null });
+    // A fifth wrong code: everything is 429 for the rest of the window.
+    for (let i = 0; i < 2; i++) refused(await lookup("ABCD-EFGH"), 404, "not_found");
+    for (const call of [await lookup("ABCD-EFGH"), await settle("confirm", { user_code: "ABCD-EFGH" }), await settle("refuse", { user_code: "ABCD-EFGH" })]) refused(call, 429, "rate_limited");
+
+    // The token list.
+    const list = await api.call("GET", "/api/v1/tokens", { origin: APP, headers: { cookie } });
+    expect(list.json.tokens.map((t: Json) => t.kind)).toEqual(["sign_in", "setup"]);
+    refused(await api.call("GET", "/api/v1/tokens", { origin: APP, token: a.token }), 401, "unauthorized");
+    const id = list.json.tokens[0].id as string;
+    const renamed = await api.call("PATCH", `/api/v1/tokens/${id}`, { origin: APP, headers: page, body: JSON.stringify({ name: "Studio" }) });
+    expect(renamed.json.name).toBe("Studio");
+    refused(await api.call("PATCH", `/api/v1/tokens/${id}`, { origin: APP, headers: page, body: "[]" }), 400, "bad_request");
+    refused(await api.call("PATCH", `/api/v1/tokens/${id}`, { origin: APP, headers: page, body: JSON.stringify({ name: "" }) }), 400, "bad_name");
+    refused(await api.call("PATCH", `/api/v1/tokens/${id}`, { origin: APP, token: a.token, body: JSON.stringify({ name: "x" }), headers: JSON_HEADERS }), 401, "unauthorized");
+    refused(await api.call("PATCH", `/api/v1/tokens/tok_${"0".repeat(24)}`, { origin: APP, headers: page, body: JSON.stringify({ name: "x" }) }), 404, "not_found");
+    refused(await api.call("DELETE", `/api/v1/tokens/${id}`, { origin: APP, token: a.token }), 401, "unauthorized");
+    expect((await api.call("DELETE", `/api/v1/tokens/${id}`, { origin: APP, headers: page })).status).toBe(204);
+    refused(await api.call("DELETE", `/api/v1/tokens/${id}`, { origin: APP, headers: page }), 404, "not_found");
+
+    // One address: the connected answer has no addresses.
+    const one = await makeDeps();
+    const oneApi = client(one.deps);
+    await seedAccount(one.deps, { admin: true });
+    const b = await seedAccount(one.deps);
+    const bMade = await redeemSignInCode(one.deps, await createSignInCode(one.deps, b.userId), null, null);
+    if (bMade === null) throw new Error("the sign-in was refused");
+    const started = await oneApi.call("POST", "/api/v1/connect/start", { body: JSON.stringify({ device_name: "Desk" }), headers: JSON_HEADERS });
+    const bPage = { cookie: `${SESSION_COOKIE}=${bMade.secret}`, origin: "https://tours.example.com", "x-csrf-token": await csrfFor(bMade.secret), "content-type": JSON_TYPE };
+    expect((await oneApi.call("POST", "/api/v1/connect/confirm", { headers: bPage, body: JSON.stringify({ user_code: started.json.user_code }) })).status).toBe(204);
+    const oneGot = await oneApi.call("POST", "/api/v1/connect/token", { body: JSON.stringify({ device_code: started.json.device_code }), headers: JSON_HEADERS });
+    expect(oneGot.json.status).toBe("connected");
+    expect(Object.hasOwn(oneGot.json, "addresses")).toBe(false);
+  });
+
   it("the answers any request can get are as the introduction says", async () => {
     const intro = DOC.info.description;
     const hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -1118,9 +1209,18 @@ describe("the error codes in the code", () => {
     expect(mediaPlain.length, "media.ts: an error answer not built in place").toBe([...media.matchAll(/\berror: "/g)].length);
     for (const m of mediaPlain) inCode.add(`${m[1]} ${m[2]}`);
     expect([...inCode]).toEqual(expect.arrayContaining(["413 media_too_large", "429 too_many_items", "400 bad_media", "409 already_online"]));
-    // These eight are the only modules that answer with apiError (src/http.ts defines it).
+    // Connecting the app and the token list answer with apiError alone, every call with its status and code in place.
+    for (const file of ["connect.ts", "tokens.ts"]) {
+      const text = source(file);
+      const literal = [...text.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
+      expect(literal.length, `${file}: an apiError call without a literal status and code`).toBe([...text.matchAll(/\bapiError\(/g)].length);
+      expect([...text.matchAll(/\berror: "/g)], `${file}: an error answer not built by apiError`).toHaveLength(0);
+      for (const m of literal) inCode.add(`${m[1]} ${m[2]}`);
+    }
+    expect([...inCode]).toEqual(expect.arrayContaining(["410 expired_code", "429 slow_down", "400 credentials_not_allowed", "400 bad_device_name", "400 bad_name"]));
+    // These ten are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/admin-api.ts", "../src/email-change.ts", "../src/http.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tours.ts", "../src/uploads.ts"]);
+    expect(callers).toEqual(["../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.

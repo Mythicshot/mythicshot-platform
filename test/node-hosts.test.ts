@@ -12,7 +12,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { makeDeps } from "#harness";
 import { createApp } from "../src/app.ts";
-import { guardTarget } from "../src/node/config.ts";
+import { PROXY_HINT, guardTarget } from "../src/node/config.ts";
 import type { Config } from "../src/ports.ts";
 
 const ENTRY = fileURLToPath(new URL("../src/node/entry.ts", import.meta.url));
@@ -192,7 +192,8 @@ describe("the real Node startup", () => {
       expect([421, 400], target).toContain(r.status);
       expect(r.body, target).not.toContain("address");
     }
-    expect(stderr).toBe("");
+    // Asked from 127.0.0.1 with no CLIENT_ADDRESS_HEADER: the one line about a proxy, and nothing else.
+    expect(stderr).toBe(`${PROXY_HINT}\n`);
   }, 90_000);
 
   it("with one address answers an absolute request target as before", async () => {
@@ -202,7 +203,7 @@ describe("the real Node startup", () => {
     expect(absolute.body).toBe(NO_ROLE);
     expect((await ask(port, UNKNOWN, "http://tours.example.com/api/v1/me")).status).toBe(401);
     expect((await ask(port, UNKNOWN, "/healthz")).body).toBe(NO_ROLE);
-    expect(stderr).toBe("");
+    expect(stderr).toBe(`${PROXY_HINT}\n`);
   }, 90_000);
 });
 

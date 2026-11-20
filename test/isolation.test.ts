@@ -5,7 +5,7 @@
 // an id that never existed (status, body and headers, byte for byte), when a row of any
 // table changed, or when anything was written to or deleted from either store.
 //
-// Every route of the app is in exactly one of seven tables, keyed "<METHOD> <route path>"
+// Every route of the app is in exactly one of eight tables, keyed "<METHOD> <route path>"
 // exactly as in `createApp(deps).routes`:
 // - CASES: routes with an id in the path. Each lists the requests in which one workspace
 //   names the other's ids, with the exact answer.
@@ -16,6 +16,9 @@
 //   other, and belong to the caller's.
 // - SELF: routes with no id that change only the caller's own session or account.
 // - OPEN: routes with no owner at all, each with its reason.
+// - CONNECT: the desktop app's two requests while it connects, which take no credential and
+//   belong to no workspace until a signed-in person confirms the request; then its token
+//   belongs to the confirming workspace alone, which a test of its own checks.
 // - ADMIN: routes that cross workspaces on purpose, for the site's admin alone, each with
 //   the list of fields it may answer. Only an admin's session reaches them; everyone else
 //   gets one 404. They answer counts and the allowance, never a tour, picture, token or
@@ -48,10 +51,11 @@ import { openapi, type OpenApiDoc } from "../src/docs/openapi.ts";
 import type { Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
 import { LIMITS_SIGNIN } from "../src/rate.ts";
+import { POLL_GAP_MS } from "../src/connect.ts";
 import { PAD_BUCKET } from "../src/signin.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { ORIGIN, commit, logoPng, putStep, send, stepImage, type Call, type Json } from "./bundle.ts";
-import { OWNED, SHARED, createReplace, dumpOf, inventedIds, manifestOf, mediaPart, namesIn, needlesOf, snapshotOf, tablesOf, world, type Ids, type Side, type World } from "./isolation-world.ts";
+import { OWNED, SHARED, TRY_BUCKETS, createReplace, dumpOf, inventedIds, manifestOf, mediaPart, namesIn, needlesOf, snapshotOf, tablesOf, world, type Ids, type Side, type World } from "./isolation-world.ts";
 
 const SLOW = { timeout: 120_000 };
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -69,6 +73,8 @@ const NO_STEP = notFound("step");
 const NO_UPLOAD = notFound("upload");
 const NO_SESSION = notFound("session");
 const NO_ITEM = notFound("item");
+const NO_TOKEN = notFound("token");
+const NO_REQUEST = notFound("request");
 /** What a credential that may not be used here gets: a token on a route that takes only a session, a session on the tours address. */
 const NOBODY: Expect = { status: 401, body: { error: "unauthorized" } };
 /** Aborting an upload answers 204 whatever the id: there is nothing to tell apart. */
@@ -99,6 +105,18 @@ type Req = {
 type Entry = (theirs: Ids, mine: Ids) => Req[];
 
 const tourPath = (id: string, rest = "") => `/api/v1/tours/${id}${rest}`;
+/** Each of the other workspace's tokens: its first, its revoked one, and the one connecting the app made. */
+const theirTokens = (t: Ids): [string, string][] => [
+  ["their workspace's first token", t.tokens.live],
+  ["their revoked token", t.tokens.revoked],
+  ["the token connecting the app made for them", t.tokens.connected],
+];
+/** Each of the other workspace's requests to connect, by its short code. */
+const theirCodes = (t: Ids): [string, string][] => [
+  ["their confirmed request, not collected yet", t.connect.confirmed],
+  ["their confirmed request whose token was collected", t.connect.collected],
+  ["the request they refused", t.connect.refused],
+];
 const uploadPath = (id: string, rest = "") => `/api/v1/uploads/${id}${rest}`;
 const mediaPath = (id: string, rest = "") => `/api/v1/media/${id}${rest}`;
 /** Each of the other workspace's tours, in every state a tour can be in. */
@@ -176,6 +194,8 @@ const CASES: Record<string, Entry> = {
     { what: "their online clip", method: "GET", path: mediaPath(t.media.clip), expect: NO_ITEM },
     { what: "their unfinished item", method: "GET", path: mediaPath(t.media.uploading), expect: NO_ITEM },
   ],
+  "PATCH /api/v1/tokens/:id": (t) => theirTokens(t).map(([what, id]) => ({ what, method: "PATCH", path: `/api/v1/tokens/${id}`, json: { name: "Taken over" }, only: "session" as const, expect: NO_TOKEN })),
+  "DELETE /api/v1/tokens/:id": (t) => theirTokens(t).map(([what, id]) => ({ what, method: "DELETE", path: `/api/v1/tokens/${id}`, only: "session" as const, expect: NO_TOKEN })),
   "GET /api/v1/media/:id/preview": (t) => [
     { what: "the preview of their online image", method: "GET", path: mediaPath(t.media.image, "/preview"), expect: NO_ITEM },
     { what: "the preview of their unfinished item", method: "GET", path: mediaPath(t.media.uploading, "/preview"), expect: NO_ITEM },
@@ -186,6 +206,9 @@ const CASES: Record<string, Entry> = {
 const createInto = (t: Ids, target: Json, more: Json = {}) => ({ manifest: manifestOf(t.pictures.draft.map((s) => s.bytes), "Taken over"), target, ...more });
 
 const BODY_IDS: Record<string, Entry> = {
+  "POST /api/v1/connect/lookup": (t) => theirCodes(t).map(([what, code]) => ({ what, method: "POST", path: "/api/v1/connect/lookup", json: { user_code: code }, field: "user_code", only: "session" as const, expect: NO_REQUEST })),
+  "POST /api/v1/connect/confirm": (t) => theirCodes(t).map(([what, code]) => ({ what, method: "POST", path: "/api/v1/connect/confirm", json: { user_code: code }, field: "user_code", only: "session" as const, expect: NO_REQUEST })),
+  "POST /api/v1/connect/refuse": (t) => theirCodes(t).map(([what, code]) => ({ what, method: "POST", path: "/api/v1/connect/refuse", json: { user_code: code }, field: "user_code", only: "session" as const, expect: NO_REQUEST })),
   "POST /api/v1/uploads": (t, m) => [
     { what: "a new chapter for their draft tour", method: "POST", path: "/api/v1/uploads", json: createInto(t, { kind: "chapter", tour_id: t.draft.tour }), field: "tour_id", expect: NO_TOUR },
     { what: "a new chapter for their published tour", method: "POST", path: "/api/v1/uploads", json: createInto(t, { kind: "chapter", tour_id: t.published.tour }), field: "tour_id", expect: NO_TOUR },
@@ -223,6 +246,7 @@ const LISTS: Record<string, { path: string; holds: string; only?: "token" | "ses
   "GET /api/v1/setup/connected": { path: "/api/v1/setup/connected", holds: "whether the caller's own token was used", only: "token" },
   "GET /api/v1/session": { path: "/api/v1/session", holds: "the caller's account, workspace, session and anti-forgery value", only: "session" },
   "GET /api/v1/sessions": { path: "/api/v1/sessions", holds: "the live sessions of the caller's own account", only: "session" },
+  "GET /api/v1/tokens": { path: "/api/v1/tokens", holds: "the caller's workspace's tokens that are not revoked: ids, names, times and kinds", only: "session" },
 };
 
 type Sample = { method: string; path: string; json?: unknown; headers?: Record<string, string> };
@@ -376,8 +400,18 @@ const ADMIN: Record<string, { reason: string; request: (w: World) => Sample; fie
   },
 };
 
+/**
+ * The desktop app's requests while it connects: no credential, and no workspace until a
+ * signed-in person confirms the request. Each with its reason; the test "a connection is the
+ * confirming workspace's alone" sends them.
+ */
+const CONNECT: Record<string, { reason: string }> = {
+  "POST /api/v1/connect/start": { reason: "starts a request that belongs to no workspace: its codes go to the app alone, and only the person who types the short code decides whose it becomes" },
+  "POST /api/v1/connect/token": { reason: "gives a confirmed request's token, once, to whoever holds its 160-bit device code; the token belongs to the confirming workspace alone" },
+};
+
 type Tables = Record<string, Record<string, unknown>>;
-const TABLES: Tables = { CASES, BODY_IDS, LISTS, CREATES, OPEN, SELF, ADMIN };
+const TABLES: Tables = { CASES, BODY_IDS, LISTS, CREATES, OPEN, SELF, ADMIN, CONNECT };
 
 // ---- The route list against the tables ----
 
@@ -479,7 +513,10 @@ const [BY_TOKEN, BY_SESSION] = CREDENTIALS as [(typeof CREDENTIALS)[number], (ty
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
-function fire(deps: Deps, r: Req | Sample, credential: Credential, origin?: string): Promise<Call> {
+async function fire(deps: Deps, r: Req | Sample, credential: Credential, origin?: string): Promise<Call> {
+  // The suite tries other workspaces' short codes far more often than the limit on wrong
+  // codes allows; that limit has its own tests (test/connect.test.ts), so it starts afresh here.
+  if (r.path.startsWith("/api/v1/connect/")) await deps.db.run(`DELETE FROM rate_counter WHERE bucket IN (${TRY_BUCKETS.map(() => "?").join(", ")})`, [...TRY_BUCKETS]);
   const headers = { ...(r.json !== undefined ? JSON_HEADERS : {}), ...("headers" in r ? r.headers : {}), ...credential.headers, ...(credential.page ? { origin: origin ?? ORIGIN } : {}) };
   const body = r.json !== undefined ? JSON.stringify(r.json) : "bytes" in r ? r.bytes : undefined;
   return send(deps, r.method, r.path, { token: credential.token, body: body as RequestInit["body"], headers, origin });
@@ -799,8 +836,8 @@ describe("one workspace against another", () => {
     expect(mine.a.length).toBeGreaterThan(80);
 
     const first = { a: await answers(w.a), b: await answers(w.b) };
-    // Three lists take one credential, the others both.
-    expect(Object.keys(first.a)).toHaveLength(Object.keys(LISTS).length * 2 - 3);
+    // Four lists take one credential, the others both.
+    expect(Object.keys(first.a)).toHaveLength(Object.keys(LISTS).length * 2 - 4);
     for (const key of Object.keys(first.a)) {
       expect(first.a[key].status, key).toBe(200);
       expect(first.b[key].status, key).toBe(200);
@@ -888,7 +925,14 @@ describe("one workspace against another", () => {
     ];
     for (const r of steps) expect(r.status, r.text).toBeLessThan(300);
     const second = { a: await answers(w.a), b: await answers(w.b) };
-    expect(second.b).toEqual(first.b);
+    // The token list holds when each token was last used, and the second workspace's own token
+    // was used by the requests above; nothing else of its answers may differ.
+    const unused = (all: Record<string, { status: number; body: string }>) => {
+      const list = all["GET /api/v1/tokens by session"];
+      const tokens = (JSON.parse(list.body).tokens as Json[]).map((t) => ({ ...t, last_used_at: "(its own use)" }));
+      return { ...all, "GET /api/v1/tokens by session": { status: list.status, body: JSON.stringify({ tokens }) } };
+    };
+    expect(unused(second.b)).toEqual(unused(first.b));
     expect(second.a["GET /api/v1/usage by token"].body).not.toBe(first.a["GET /api/v1/usage by token"].body);
     expect(second.a["GET /api/v1/tours by session"].body).not.toBe(first.a["GET /api/v1/tours by session"].body);
 
@@ -1005,6 +1049,59 @@ describe("one workspace against another", () => {
     expect(w.writes()).toEqual([]);
   });
 
+  it("a connection is the confirming workspace's alone: the other cannot look it up, settle it or revoke its token, and the token reaches nothing of the other", SLOW, async () => {
+    const w = await build();
+    const { deps } = w;
+    const app = (path: string, json: unknown, credential: Credential = { token: null }) => fire(deps, { method: "POST", path, json }, credential);
+    expect(Object.keys(CONNECT).sort()).toEqual(["POST /api/v1/connect/start", "POST /api/v1/connect/token"]);
+    for (const [mine, theirs] of directions(w)) {
+      const before = await snapshotOf(deps, theirs, w.keys);
+      w.tick(POLL_GAP_MS);
+      // The app starts a request, with no credential: one that sends one is refused, and nothing is stored.
+      for (const credential of [BY_TOKEN.of(mine), BY_SESSION.of(mine), BY_TOKEN.of(theirs)]) {
+        for (const path of Object.keys(CONNECT).map((k) => k.split(" ")[1])) {
+          const refused = await app(path, { device_name: "x", device_code: "dpd_" + "0".repeat(40) }, credential);
+          expect([refused.status, refused.json.error], path).toEqual([400, "credentials_not_allowed"]);
+        }
+      }
+      const started = await app("/api/v1/connect/start", { device_name: `${mine.name} new laptop` });
+      expect(started.status, started.text).toBe(201);
+      const code = started.json.user_code as string;
+      // The caller confirms it; then the other workspace finds nothing and changes nothing.
+      expect((await fire(deps, { method: "POST", path: "/api/v1/connect/confirm", json: { user_code: code } }, BY_SESSION.of(mine))).status).toBe(204);
+      for (const req of [
+        { method: "POST", path: "/api/v1/connect/lookup", json: { user_code: code } },
+        { method: "POST", path: "/api/v1/connect/confirm", json: { user_code: code } },
+        { method: "POST", path: "/api/v1/connect/refuse", json: { user_code: code } },
+      ]) {
+        const r = await fire(deps, req, BY_SESSION.of(theirs));
+        expect({ status: r.status, body: r.json }, `${req.method} ${req.path} by ${theirs.name}`).toEqual(NO_REQUEST);
+      }
+      const confirmed = await deps.db.first<{ workspace_id: string; confirmed_by: string; refused_at: number | null }>("SELECT workspace_id, confirmed_by, refused_at FROM connect_request WHERE device_name = ?", [`${mine.name} new laptop`]);
+      expect(confirmed).toEqual({ workspace_id: mine.workspaceId, confirmed_by: mine.userId, refused_at: null });
+
+      // The app collects the token: the caller's workspace's, and nothing of the other's.
+      const got = await app("/api/v1/connect/token", { device_code: started.json.device_code });
+      expect(got.json.status, got.text).toBe("connected");
+      expect(got.json.workspace).toEqual({ id: mine.workspaceId, name: mine.workspaceName });
+      const token = got.json.token as string;
+      const tours = await send(deps, "GET", "/api/v1/tours", { token });
+      expect(tours.json.tours.map((t: Json) => t.id).sort()).toEqual([mine.ids.published.tour, mine.ids.draft.tour, mine.ids.publishing.tour].sort());
+      for (const n of namesIn(theirs.ids)) expect(tours.text.includes(n), n).toBe(false);
+      expect((await send(deps, "PATCH", tourPath(theirs.ids.draft.tour), { token, body: JSON.stringify({ title: "Taken over" }), headers: JSON_HEADERS })).json).toEqual(NO_TOUR.body);
+      // The other workspace can neither see the token in its list nor revoke or rename it; the caller sees it.
+      const tokenId = (await deps.db.first<{ id: string }>("SELECT id FROM api_token WHERE hash = ?", [await hashToken(token)]))!.id;
+      const theirList = await fire(deps, { method: "GET", path: "/api/v1/tokens" }, BY_SESSION.of(theirs));
+      expect(theirList.text.includes(tokenId)).toBe(false);
+      expect((await fire(deps, { method: "GET", path: "/api/v1/tokens" }, BY_SESSION.of(mine))).text).toContain(tokenId);
+      expect((await fire(deps, { method: "DELETE", path: `/api/v1/tokens/${tokenId}` }, BY_SESSION.of(theirs))).json).toEqual(NO_TOKEN.body);
+      expect((await fire(deps, { method: "PATCH", path: `/api/v1/tokens/${tokenId}`, json: { name: "Mine now" } }, BY_SESSION.of(theirs))).json).toEqual(NO_TOKEN.body);
+      expect((await send(deps, "GET", "/api/v1/me", { token })).json.workspace).toBe(mine.workspaceName);
+      // Nothing of the other workspace changed.
+      expect(await snapshotOf(deps, theirs, w.keys), `connecting ${mine.name} changed something of ${theirs.name}`).toEqual(before);
+    }
+  });
+
   it("an upload cannot target another workspace's tour or chapter", SLOW, async () => {
     const w = await build();
     const { deps, a, b } = w;
@@ -1056,7 +1153,8 @@ describe("one workspace against another", () => {
     const w = await build({ hosts: HOSTS });
     const everyUse = [w.a.tokenId, w.b.tokenId, w.a.session.id, w.b.session.id];
     const start = await dumpOf(w.deps, w.keys, { files: true, touched: everyUse });
-    const needles = needlesOf(await snapshotOf(w.deps, w.a, w.keys), [w.a.token, w.a.workspaceName, w.a.email, w.a.session.secret, w.a.session.csrf]);
+    // The fixed name every workspace's first token has tells nothing, and the token list holds it for both.
+    const needles = needlesOf(await snapshotOf(w.deps, w.a, w.keys), [w.a.token, w.a.workspaceName, w.a.email, w.a.session.secret, w.a.session.csrf]).filter((n) => n !== "First token");
     for (const origin of [TOURS, APP]) {
       for (const [mine, theirs] of directions(w)) {
         const real = everyCase(theirs.ids, mine.ids);
@@ -1367,7 +1465,7 @@ describe("the admin routes", () => {
       expect(await look(), what).toEqual(before);
     }
     // Every list and summary the admin's session gets holds nothing of the other workspace.
-    const needles = needlesOf(await snapshotOf(deps, b, w.keys), [b.token, b.workspaceName, b.email, b.session.secret, b.session.csrf]);
+    const needles = needlesOf(await snapshotOf(deps, b, w.keys), [b.token, b.workspaceName, b.email, b.session.secret, b.session.csrf]).filter((n) => n !== "First token");
     for (const [key, list] of Object.entries(LISTS)) {
       if (list.only === "token") continue;
       const r = await fire(deps, { method: "GET", path: list.path }, BY_SESSION.of(a));

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { linkOrigin, NO_MAIL, type Mailer } from "../src/mail.ts";
-import { clientAddressFrom, clientAddressReader, configFromEnv, guardTarget, isPathTarget, mailFromEnv } from "../src/node/config.ts";
+import { PROXY_HINT, clientAddressFrom, clientAddressReader, configFromEnv, guardTarget, isPathTarget, mailFromEnv, proxyHint } from "../src/node/config.ts";
 import type { ClosableMailer } from "../src/node/mail-thread.ts";
 import type { SmtpSettings } from "../src/node/smtp.ts";
 import type { Config } from "../src/ports.ts";
@@ -466,6 +466,31 @@ describe("the client address on the Node target", () => {
     // A header Node joins with ", " is taken, whatever its name.
     for (const name of ["x-real-ip", "x-forwarded-for", "cf-connecting-ip", "x-client-address", "true-client-ip", "forwarded-for"]) expect(clientAddressReader(name).problem, name).toBeNull();
   });
+
+  it("without CLIENT_ADDRESS_HEADER, the first request from a private, local or missing socket address writes one line naming the setting, once per process, and changes nothing", () => {
+    expect(PROXY_HINT).toContain("CLIENT_ADDRESS_HEADER");
+    expect(PROXY_HINT).not.toMatch(/[0-9]+\.[0-9]+\.[0-9]+|::/);
+    for (const address of ["127.0.0.1", "::1", "10.1.2.3", "192.168.0.9", "172.18.0.4", "fd00::7", "::ffff:127.0.0.1", undefined]) {
+      for (const raw of [undefined, "", "  "]) {
+        const lines: string[] = [];
+        const hint = proxyHint(raw, (line) => lines.push(line));
+        for (let i = 0; i < 5; i++) hint(incoming({}, address));
+        hint(incoming({}, "203.0.113.7"));
+        expect(lines, `${address} ${JSON.stringify(raw)}`).toEqual([PROXY_HINT]);
+      }
+    }
+    // A public address says nothing, and nor does anything once the header is set.
+    const quiet: string[] = [];
+    const publicHint = proxyHint(undefined, (line) => quiet.push(line));
+    for (const address of ["203.0.113.7", "2001:db8::1", "8.8.8.8"]) publicHint(incoming({}, address));
+    for (const raw of ["X-Real-IP", "not a header"]) {
+      const hint = proxyHint(raw, (line) => quiet.push(line));
+      hint(incoming({}, "127.0.0.1"));
+    }
+    expect(quiet).toEqual([]);
+    // What the reader gives is unchanged by it.
+    expect(clientAddressReader(undefined).read(incoming({}, "127.0.0.1"))).toBe("127.0.0.1");
+  });
 });
 
 describe("the real Node startup with mail settings", () => {
@@ -514,16 +539,17 @@ describe("the real Node startup with mail settings", () => {
     const plain = await start({});
     const expected = await health(plain.port);
     expect(expected.status).toBe(200);
-    expect(plain.out().stderr).toBe("");
+    // The test asks from 127.0.0.1 with no CLIENT_ADDRESS_HEADER: the one line about a proxy, at the first request.
+    expect(plain.out().stderr).toBe(PROXY_HINT + "\n");
     await end();
 
     const cases: [Record<string, string>, string][] = [
-      [{ ...BLOCK, SMTP_HOST: "smtps://made-up.example.com", ...ONE }, mailOff("SMTP_HOST") + "\n"],
-      [{ ...BLOCK }, NO_LINK_HOST + "\n"],
+      [{ ...BLOCK, SMTP_HOST: "smtps://made-up.example.com", ...ONE }, mailOff("SMTP_HOST") + "\n" + PROXY_HINT + "\n"],
+      [{ ...BLOCK }, NO_LINK_HOST + "\n" + PROXY_HINT + "\n"],
       [{ ...BLOCK, ...ONE, CLIENT_ADDRESS_HEADER: "made-up header" }, BAD_HEADER + "\n"],
-      // A block that can be used, and mail that is off, write nothing; neither contacts the mail server at the start.
+      // A block that can be used, and mail that is off, write nothing about mail; neither contacts the mail server at the start.
       [{ ...BLOCK, ...ONE, SMTP_HOST: "127.0.0.1", SMTP_PORT: "9", CLIENT_ADDRESS_HEADER: "x-real-ip" }, ""],
-      [{ ...BLOCK, MAIL_MODE: "off" }, ""],
+      [{ ...BLOCK, MAIL_MODE: "off" }, PROXY_HINT + "\n"],
     ];
     for (const [settings, line] of cases) {
       const site = await start(settings);

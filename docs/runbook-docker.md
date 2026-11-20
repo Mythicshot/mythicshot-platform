@@ -1114,7 +1114,7 @@ An upload that was started and never finished holds its room until it is removed
 
 ### Read the audit record
 
-The audit record lists what was done with accounts: sign-ins, sign-outs, links printed, allowances set and email changes. It holds ids, never an email address, a code or a token.
+The audit record lists what was done with accounts: sign-ins, sign-outs, links printed, allowances set, email changes, connections of the app and tokens renamed or revoked. It holds ids, never an email address, a code or a token.
 
 ```sh
 docker compose exec app node dist/node/admin.js audit --last 50
@@ -1135,11 +1135,17 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `email_change_requested` | The account asked to change its address. It is recorded for every request, whether a link was sent or not, so it does not tell whether the new address was free |
 | `email_changed` | The account's address was changed by its confirmed link |
 | `email_changed_on_server` | The account's address was changed with `change-email` |
+| `connection_confirmed` | The account confirmed a request to connect the app, for its workspace; the subject is the id the app's token will have, and the detail names the request, such as `{"request":"crq_…"}`. The device's name is not recorded: it is the token's name in the token list |
+| `connection_refused` | The account refused a request to connect the app; the subject is the request |
+| `connection_collected` | The app collected the token of a confirmed request, and the token was made; the subject is the token, and the account is the one that confirmed |
+| `token_renamed` | A token of the workspace was renamed; the subject is the token |
+| `token_revoked` | A token of the workspace was revoked; the subject is the token |
 
 ## Troubleshooting by symptom
 
 | Symptom | Likely cause | What to do |
 |---|---|---|
+| The app log says `client address: requests come from a private or local address, which is how a proxy in front of the app looks; set CLIENT_ADDRESS_HEADER to the header your proxy writes the visitor's address in, or the limits per network (signing in, connecting the app) cannot tell visitors apart` | Caddy hands requests to the app from the stack's private network, so the app sees Caddy's address, not the visitor's, and the limits per network on signing in and on connecting Mythicshot cannot tell visitors apart | Add `CLIENT_ADDRESS_HEADER=` with the name of the header the proxy in front writes the visitor's address in to `.env`, then run `sudo bash install.sh` again. **Unconfirmed:** which header that is on your route; set only one your own proxy writes on every request, or a visitor could choose the address. Without it the site still works, and only that limit is not applied. |
 | `ERROR: this needs root` | Run without `sudo` | Run `sudo bash install.sh`. |
 | `ERROR: this system is ... Use --force to try anyway.` | Not Debian 13 or 12 | Use Debian 13. `--force` tries anyway, untested. |
 | `Docker is installed as a snap` | A snap of Docker cannot use `/opt/demo-platform` | Remove the snap (its images and containers go with it) and run the script again. |

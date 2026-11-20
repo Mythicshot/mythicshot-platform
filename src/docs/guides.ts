@@ -157,7 +157,7 @@ export const GUIDES: readonly Guide[] = [
  */
 export const CODE_MEANINGS: Readonly<Record<string, string>> = {
   unauthorized: "The token is missing, malformed, unknown or revoked. This answer has no detail.",
-  not_found: "Nothing with that id in this workspace, or no request has that address.",
+  not_found: "Nothing with that id in this workspace, no request waiting under that short code, or no request has that address.",
   bad_request: "The body is not what the request expects.",
   bad_title: "The title breaks the rule for a title; the detail says how.",
   bad_manifest: "The manifest breaks a rule; the detail names the field.",
@@ -187,7 +187,12 @@ export const CODE_MEANINGS: Readonly<Record<string, string>> = {
   bad_csrf: "A change made with a session did not carry that session's anti-forgery value.",
   mixed_credentials: "The request carried both a token and a session. Send one.",
   link_invalid: "The sign-in link has expired or was already used; ask for a new one.",
-  rate_limited: "Too many sign-in requests from this network, or too many email-change requests for an account or an address. The retry-after header says how long to wait.",
+  rate_limited: "Too many sign-in requests from this network, too many email-change requests for an account or an address, too many requests to connect the app from this network (or too many of them waiting), or too many wrong short codes from an account or a network. The retry-after header says how long to wait.",
+  credentials_not_allowed: "The app's requests while it connects take no token and no session cookie; send neither.",
+  bad_device_name: "The device name must be 1 to 60 characters of text, without control or formatting characters.",
+  bad_name: "A token's name must be 1 to 60 characters of text, without control or formatting characters.",
+  expired_code: "The device code can give no token: it is unknown, expired, refused or already used. Start again.",
+  slow_down: "The app asked for its token again before the interval was up; wait 5 seconds more.",
   bad_allowance: "The storage allowance must be a whole number of bytes from 0 to 9007199254740991, or null for the site's default.",
   internal: "The server failed; nothing about the failure is given.",
   misconfigured: "On Cloudflare, the two addresses in the settings cannot be used together.",
