@@ -149,7 +149,7 @@ function stopPublishes(ws: string, now: number): Stmt[] {
  * row it fails, and the whole batch is undone). Then, children before parents (foreign keys
  * never cascade): its requests to connect the app, its tokens, sessions, sign-in codes,
  * email change and rate counters, the invites to its address and its name on the invites it
- * sent (where the invite table exists), its sign-in methods and membership, the account,
+ * sent, its sign-in methods and membership, the account,
  * and the workspace. Everything here is named by the account's or the workspace's id, or by a
  * counter key made from them, so nothing of another workspace can be reached.
  */
@@ -159,23 +159,17 @@ async function finalStatements(deps: Deps, t: Target, adminId: string): Promise<
   // The rate counters keyed to the account: its own, its workspace's, and its own requests
   // for its address and for the address of its open email change, if any. Counters keyed to
   // an address alone are the address's, not the account's, and run out by themselves.
-  // In the same read: whether the invite table exists (migration 0012, which a build may
-  // run beside or before), so the invite statements are only sent where it does.
-  const found = await deps.db.first<{ new_email: string | null; invites: number }>(
-    "SELECT (SELECT new_email FROM email_change WHERE user_id = ?) AS new_email, EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'invite') AS invites",
-    [uid],
-  );
+  const found = await deps.db.first<{ new_email: string }>("SELECT new_email FROM email_change WHERE user_id = ?", [uid]);
   const newEmail = found?.new_email ?? null;
   const keys = [await accountKey(uid), await workspaceKey(ws), await pairKey(uid, t.email), ...(newEmail === null ? [] : [await pairKey(uid, newEmail)])];
-  // Invites to the account's own address (none can be open while the account exists, but
-  // none may outlive it), and invites it sent, which stay valid with nobody named as sender.
-  const invites: Stmt[] =
-    found?.invites === 1
-      ? [
-          { sql: "DELETE FROM invite WHERE email = ?", params: [t.email] },
-          { sql: "UPDATE invite SET invited_by = NULL WHERE invited_by = ?", params: [uid] },
-        ]
-      : [];
+  // Invites (migration 0012, which every database has once its migrations ran: both
+  // targets run them before serving): one to the account's own address (none can be open
+  // while the account exists, but none may outlive it) goes, and those it sent stay valid
+  // with nobody named as their sender.
+  const invites: Stmt[] = [
+    { sql: "DELETE FROM invite WHERE email = ?", params: [t.email] },
+    { sql: "UPDATE invite SET invited_by = NULL WHERE invited_by = ?", params: [uid] },
+  ];
   const nothingLeft = ["tour", "tour_deletion", "upload", "media"].map((table) => `NOT EXISTS (SELECT 1 FROM ${table} WHERE workspace_id = ?)`).join(" AND ");
   return [
     {

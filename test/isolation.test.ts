@@ -49,7 +49,7 @@
 import { describe, expect, it } from "vitest";
 import { makeDeps } from "#harness";
 import { createApp } from "../src/app.ts";
-import { hashToken, newToken } from "../src/auth.ts";
+import { hashToken, newId, newToken } from "../src/auth.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { openapi, type OpenApiDoc } from "../src/docs/openapi.ts";
 import type { Hosts } from "../src/hosts.ts";
@@ -1632,6 +1632,12 @@ describe("deleting an account", () => {
     const ofA = new Set(needlesOf(beforeA, [a.workspaceId, a.userId, a.email]));
     const needles = needlesOf(beforeB, [b.workspaceId, b.userId, b.email, b.session.id, ...namesIn(b.ids)]).filter((n) => !ofA.has(n));
     const auditBefore = await deps.db.all<Json>("SELECT * FROM audit ORDER BY id");
+    // Invites belong to no workspace (SHARED). The site holds the first side's open invite; one
+    // sent by the second side's account and one to its address are written here, as an admin's
+    // and a stale one would be.
+    await deps.db.run("INSERT INTO invite (id, email, code_hash, invited_by, created_at, expires_at) VALUES (?, 'from-bravo@example.com', ?, ?, ?, ?)", [newId("inv"), "b".repeat(64), b.userId, deps.now(), deps.now() + 86_400_000]);
+    await deps.db.run("INSERT INTO invite (id, email, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)", [newId("inv"), b.email, "c".repeat(64), a.userId, deps.now(), deps.now() + 86_400_000]);
+    const invitesBefore = await deps.db.all<Json>("SELECT * FROM invite ORDER BY id");
 
     let r = await asAdmin(w, "DELETE", `/api/v1/admin/accounts/${b.userId}`, { username: b.email });
     for (let i = 0; r.status === 202 && i < 20; i++) {
@@ -1649,6 +1655,10 @@ describe("deleting an account", () => {
       const where = OWNED[table];
       if (where !== undefined) expect(await deps.db.all(`SELECT * FROM "${table}" WHERE ${where}`, Array(where.split("?").length - 1).fill(b.workspaceId)), table).toEqual([]);
     }
+    // Invites: the one to the deleted address is gone, the one it sent stays with no sender, and the first side's is untouched.
+    const invitesAfter = await deps.db.all<Json>("SELECT * FROM invite ORDER BY id");
+    expect(invitesAfter).toEqual(invitesBefore.filter((i) => i.email !== b.email).map((i) => (i.invited_by === b.userId ? { ...i, invited_by: null } : i)));
+    expect(invitesAfter.find((i) => i.id === w.invite.id)).toEqual(invitesBefore.find((i) => i.id === w.invite.id));
     // The audit record keeps what it had, and one row more: who deleted which account, by ids alone.
     const auditAfter = await deps.db.all<Json>("SELECT * FROM audit ORDER BY id");
     const added = auditAfter.filter((row) => !auditBefore.some((x) => x.id === row.id));

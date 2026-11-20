@@ -534,31 +534,40 @@ describe("a workspace of more than one account", () => {
   });
 });
 
-// ---- Invites (migration 0012, merged from another branch) ----
+// ---- Invites ----
 
-describe("invites, where the table exists", () => {
-  it("a delete removes invites to the account's address and keeps the ones it sent, with no sender", SLOW, async () => {
-    const { deps } = await makeDeps();
+describe("invites", () => {
+  it("a delete removes an invite to the account's address, and an invite it sent stays valid and can be accepted, with no inviter named", SLOW, async () => {
+    const { deps, mail } = await makeDeps({ siteHost: "tours.example.com" });
     const admin = await seedAccount(deps, { admin: true });
-    const member = await seedAccount(deps, { username: "rook" });
+    const sender = await seedAccount(deps, { admin: true, username: "rook" });
     const s = await signInAs(deps, admin.userId);
-    // The shape this needs of the table: an address and the sender. A database with the real table keeps it.
-    await deps.db.run("CREATE TABLE IF NOT EXISTS invite (id TEXT PRIMARY KEY NOT NULL, email TEXT NOT NULL, invited_by TEXT REFERENCES user (id)) STRICT");
-    await deps.db.run("INSERT INTO invite (id, email, invited_by) VALUES ('inv_1', ?, ?)", [member.email, admin.userId]);
-    await deps.db.run("INSERT INTO invite (id, email, invited_by) VALUES ('inv_2', 'friend@example.com', ?)", [member.userId]);
-    await deps.db.run("INSERT INTO invite (id, email, invited_by) VALUES ('inv_3', 'other@example.com', ?)", [admin.userId]);
-    expect((await send(deps, "POST", account(member.userId, "/disable"), { headers: page(s) })).status).toBe(204);
+    const senderSession = await signInAs(deps, sender.userId);
+    const SITE = "https://tours.example.com";
+    // The second admin invites an address through the API; its code is in the mail.
+    const sent = await send(deps, "POST", "/api/v1/admin/invites", { headers: { ...page(senderSession), origin: SITE, ...JSON_HEADERS }, body: JSON.stringify({ email: "friend@example.com" }), origin: SITE });
+    expect(sent.status, sent.text).toBe(201);
+    const code = (mail.sent[mail.sent.length - 1].text.match(/dpi_[0-9a-f]{40}/) ?? [""])[0];
+    const check = () => send(deps, "POST", "/api/v1/invite/check", { headers: { ...JSON_HEADERS, origin: SITE }, body: JSON.stringify({ code }), origin: SITE });
+    expect((await check()).json.invited_by).toBe("rook");
+    // An invite to the sender's own address cannot be made through the API while the account exists; one is written here.
+    await deps.db.run("INSERT INTO invite (id, email, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)", [newId("inv"), sender.email, "e".repeat(64), admin.userId, deps.now(), deps.now() + 86_400_000]);
+
+    expect((await send(deps, "POST", account(sender.userId, "/disable"), { headers: page(s) })).status).toBe(204);
     // Disabling cancels nothing there.
-    expect(await deps.db.all("SELECT id, invited_by FROM invite ORDER BY id")).toEqual([
-      { id: "inv_1", invited_by: admin.userId },
-      { id: "inv_2", invited_by: member.userId },
-      { id: "inv_3", invited_by: admin.userId },
-    ]);
-    const r = await send(deps, "DELETE", account(member.userId), { headers: { ...page(s), ...JSON_HEADERS }, body: JSON.stringify({ username: "rook" }) });
+    expect(await deps.db.all("SELECT email, invited_by FROM invite ORDER BY email")).toEqual([
+      { email: sender.email, invited_by: admin.userId },
+      { email: "friend@example.com", invited_by: sender.userId },
+    ].sort((x, y) => (x.email < y.email ? -1 : 1)));
+    const r = await send(deps, "DELETE", account(sender.userId), { headers: { ...page(s), ...JSON_HEADERS }, body: JSON.stringify({ username: "rook" }) });
     expect(r.status, r.text).toBe(200);
-    expect(await deps.db.all("SELECT id, email, invited_by FROM invite ORDER BY id")).toEqual([
-      { id: "inv_2", email: "friend@example.com", invited_by: null },
-      { id: "inv_3", email: "other@example.com", invited_by: admin.userId },
-    ]);
+    expect(await deps.db.all("SELECT id, email, invited_by FROM invite ORDER BY email")).toEqual([{ id: sent.json.id, email: "friend@example.com", invited_by: null }]);
+
+    // The invite it sent still works: its page names no inviter, and accepting it makes the account.
+    const found = await check();
+    expect(found.json).toEqual({ email: "friend@example.com", invited_by: null, expires_at: expect.any(Number) });
+    const accepted = await send(deps, "POST", "/api/v1/invite/accept", { headers: { ...JSON_HEADERS, origin: SITE }, body: JSON.stringify({ code, username: "friend" }), origin: SITE });
+    expect([accepted.status, accepted.json]).toEqual([200, { ok: true }]);
+    expect(await deps.db.first("SELECT username FROM user WHERE email = 'friend@example.com'")).toEqual({ username: "friend" });
   });
 });
