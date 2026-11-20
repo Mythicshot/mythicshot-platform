@@ -117,6 +117,9 @@ const TEXT: Record<string, string> = {
   // Proposed in review: the same for Not me.
   lostRefuse: "The answer was lost on the way. The code no longer works, so nothing can be connected with it.",
   notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
+  // Invite mockup 7: the welcome of a new account, around its username.
+  welcomeBefore: "Welcome, ",
+  welcomeAfter: ". Your workspace is ready. Connect Mythicshot on your computer to start sharing: open Workspace in Mythicshot, press Sign in, and type the code it shows below.",
 };
 
 const CLASS_NAMES = ["note plain", "btn sm quiet", "btn sm danger", "t name", "confirm-facts confirm-elsewhere confirm-warn", "confirm-facts confirm-warn"];
@@ -225,6 +228,13 @@ describe("the Connections page", () => {
     expect(TEXT.askBefore + "Work laptop" + TEXT.askAfter).toBe('Disconnect "Work laptop"?');
     expect(TEXT.signedIn + TEXT.dot + TEXT.connectedOn + "20 Nov 2026" + TEXT.dot + TEXT.lastUsed + TEXT.todayInLine).toBe("Signed in from Mythicshot · connected 20 Nov 2026 · last used today");
     expect("2" + TEXT.minutesAgo).toBe("2 minutes ago");
+    expect(TEXT.welcomeBefore + "mara" + TEXT.welcomeAfter).toBe(
+      "Welcome, mara. Your workspace is ready. Connect Mythicshot on your computer to start sharing: open Workspace in Mythicshot, press Sign in, and type the code it shows below.",
+    );
+    // The welcome's place: the green note above the heading, empty and hidden until the script fills it.
+    const welcome = doc.getElementById("connections-welcome")!;
+    expect([welcome.tagName, welcome.className, welcome.hidden, welcome.children.length]).toEqual(["p", "note", true, 0]);
+    expect(welcome.parent!.children.filter((c) => c instanceof Object && "tagName" in c).map((c) => (c as { id: string }).id).slice(0, 2)).toEqual(["connections-welcome", "h-page"]);
   });
 
   it("the code field: an accessible name, no autofill, capitals, no spelling, and the code never in an address", () => {
@@ -241,7 +251,8 @@ describe("the Connections page", () => {
     expect(CONNECTIONS_JS).toContain(`var CODE = /^[${USER_CODE_ALPHABET}]{8}$/;`);
     // Every request, by method and path.
     const calls = [...CONNECTIONS_JS.matchAll(/Dash\.api\("([A-Z]+)", ([^,)]+)/g)].map((m) => `${m[1]} ${m[2]}`);
-    expect(calls).toEqual(["POST LOOKUP", 'POST how === "confirm" ? CONFIRM : REFUSE', "GET TOKENS", 'PATCH TOKENS + "/" + encodeURIComponent(id', 'DELETE TOKENS + "/" + encodeURIComponent(id']);
+    expect(calls).toEqual(["POST LOOKUP", 'POST how === "confirm" ? CONFIRM : REFUSE', "GET TOKENS", 'PATCH TOKENS + "/" + encodeURIComponent(id', 'DELETE TOKENS + "/" + encodeURIComponent(id', "GET USAGE"]);
+    expect(CONNECTIONS_JS).toContain('var USAGE = "/api/v1/usage";');
     expect(CONNECTIONS_JS).toContain("var TOKEN_ID = /^tok_[0-9a-f]{24}$/;");
     // Nothing is stored, logged or read from the address, and no request leaves through anything but Dash.api.
     const forbidden = ["location", "history", "localStorage", "sessionStorage", "indexedDB", "cookie", "caches", "postMessage", "window.name", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "fetch(", "csrf", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer", "innerHTML", "navigator."];
