@@ -61,7 +61,8 @@ import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { ORIGIN, commit, logoPng, putStep, send, stepImage, type Call, type Json } from "./bundle.ts";
 import { OWNED, SHARED, TRY_BUCKETS, createReplace, dumpOf, inventedIds, manifestOf, mediaPart, namesIn, needlesOf, snapshotOf, tablesOf, world, type Ids, type Side, type World } from "./isolation-world.ts";
 
-const SLOW = { timeout: 120_000 };
+// The world holds a restricted tour and a switch in progress as well, so every case runs over more tours.
+const SLOW = { timeout: 300_000 };
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
 const TOURS = "https://tours.example.com";
 const APP = "https://app.example.com";
