@@ -74,6 +74,8 @@ export const UNDOCUMENTED_ROUTES: Readonly<Record<string, string>> = {
   "GET /account": "the dashboard's Account page, for people in a browser; it calls the session and email-change requests described here",
   "GET /signin/signin.css": "the sign-in pages' own stylesheet",
   "GET /signin/signin.js": "the sign-in pages' own script",
+  "GET /invite": "the page an invite's link opens, for people in a browser; it calls the invite check and accept requests described here",
+  "GET /invite/invite.js": "the invite page's own script",
   "GET /": "sends a browser on to the dashboard or the sign-in page; not part of the API",
   "GET /tours": "the dashboard's Tours page, for people in a browser; it calls the tour requests described here",
   "GET /dash/tours.js": "the Tours page's own script",

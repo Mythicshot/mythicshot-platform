@@ -332,6 +332,8 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
   "GET /account": { reason: "the dashboard's Account page, fixed text the same for everyone; the account and sessions it shows its script asks the API for", samples: () => [{ method: "GET", path: "/account" }] },
   "GET /signin/signin.css": { reason: "the sign-in pages' stylesheet, fixed text", samples: () => [{ method: "GET", path: "/signin/signin.css" }] },
   "GET /signin/signin.js": { reason: "the sign-in pages' script, fixed text", samples: () => [{ method: "GET", path: "/signin/signin.js" }] },
+  "GET /invite": { reason: "the page an invite's link opens, fixed text the same for everyone; the code stays in the browser and goes to the API only in request bodies", samples: () => [{ method: "GET", path: "/invite" }] },
+  "GET /invite/invite.js": { reason: "the invite page's script, fixed text", samples: () => [{ method: "GET", path: "/invite/invite.js" }] },
   "GET /": {
     reason: "sends a browser to the Tours page when it sends a session cookie and to the sign-in page when not, without looking the cookie up",
     samples: () => [{ method: "GET", path: "/" }],
