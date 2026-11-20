@@ -238,6 +238,8 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
   "GET /dash/tours.js": { reason: "the Tours page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/tours.js" }] },
   "GET /dash/dash.css": { reason: "the dashboard's stylesheet, fixed text", samples: () => [{ method: "GET", path: "/dash/dash.css" }] },
   "GET /dash/dash.js": { reason: "the dashboard's shared script, fixed text", samples: () => [{ method: "GET", path: "/dash/dash.js" }] },
+  "GET /storage": { reason: "the dashboard's Storage page, fixed text the same for everyone; the numbers it shows its script asks the API for", samples: () => [{ method: "GET", path: "/storage" }] },
+  "GET /dash/storage.js": { reason: "the Storage page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/storage.js" }] },
   "POST /api/v1/signin/request": {
     reason: "asks for a sign-in link: the answer is the same for every address and every caller, and a link goes only to the address's own mailbox",
     samples: () => [{ method: "POST", path: "/api/v1/signin/request", json: { email: "nobody-here@example.com" }, headers: { origin: ORIGIN } }],

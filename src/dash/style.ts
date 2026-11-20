@@ -165,4 +165,27 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
   .wide-only { display: none; }
   .narrow-only { display: inline; }
 }
+
+/* The Storage page. */
+.total { margin: 0; }
+.meter { height: 10px; margin: 0 0 8px; border-radius: 8px; background: var(--line); overflow: hidden; }
+.meter-fill { width: 0; height: 100%; border-radius: inherit; background: var(--accent); }
+.meter.over .meter-fill { background: var(--warn-bar); }
+.over-box { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--warn-bg); color: var(--warn-text); font-size: 0.9rem; }
+.card-title { font-size: 1rem; line-height: 1.3; font-weight: 650; margin: 0 0 8px; }
+.room { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 11px 0; border-top: 1px solid var(--line); font-size: 0.93rem; }
+.room:first-of-type { border-top: 0; }
+.room .r { color: var(--muted); font-variant-numeric: tabular-nums; }
+.largest { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+.largest th { text-align: left; font-size: 0.76rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 0 10px 8px 0; white-space: nowrap; }
+.largest td { padding: 11px 10px 11px 0; border-top: 1px solid var(--line); vertical-align: middle; }
+.largest .t { font-weight: 600; }
+.largest .n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.largest .mini-cell { width: 30%; }
+.largest .del { text-align: right; padding-right: 0; }
+.mini { height: 6px; border-radius: 6px; background: var(--line); overflow: hidden; }
+.mini-fill { width: 0; height: 100%; border-radius: inherit; background: var(--accent); }
+@media (max-width: 720px) {
+  .largest .mini-cell { display: none; }
+}
 `;

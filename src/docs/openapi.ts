@@ -73,6 +73,8 @@ export const UNDOCUMENTED_ROUTES: Readonly<Record<string, string>> = {
   "GET /dash/tours.js": "the Tours page's own script",
   "GET /dash/dash.css": "the dashboard's own stylesheet",
   "GET /dash/dash.js": "the dashboard's shared script",
+  "GET /storage": "the dashboard's Storage page, for people in a browser; it calls the usage and tour requests described here",
+  "GET /dash/storage.js": "the Storage page's own script",
   "GET /t/:slug": "the public tour page, for visitors; not part of the token API",
   "GET /p/:name": "a published picture, for visitors; not part of the token API",
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": "the tour player's own files, loaded by the tour page",

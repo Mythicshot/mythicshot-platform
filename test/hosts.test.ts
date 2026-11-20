@@ -95,6 +95,8 @@ const ROWS: Record<string, Row> = {
   "GET /dash/tours.js": page("/dash/tours.js"),
   "GET /dash/dash.css": page("/dash/dash.css"),
   "GET /dash/dash.js": page("/dash/dash.js"),
+  "GET /storage": page("/storage"),
+  "GET /dash/storage.js": page("/dash/storage.js"),
   "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421 },
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { method: "GET", path: "/player.js", one: 200, tours: 200, app: 404, unknown: 421 },
   "GET /t/:slug": { method: "GET", path: "/t/no-such-tour", one: 404, tours: 404, app: 308, unknown: 421 },
@@ -119,7 +121,7 @@ const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 /** The sign-in pages and their stylesheet and script. */
 const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account)(?:\/|$)/.test(k));
 /** The dashboard's pages and their files (src/dash/), and the address that sends a browser on to them. */
-const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:tours|dash\/)/.test(k));
+const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:tours|storage|dash\/)/.test(k));
 const ROOT_KEY = "GET /";
 const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
 const DOCS_PAGE_KEY = "GET /docs";
@@ -225,7 +227,7 @@ describe("the host-routing matrix", () => {
     for (const key of DASH_KEYS) expect(HOST_RULES[key], key).toBe("app");
     expect(HOST_RULES[ROOT_KEY]).toBe("app-redirect");
     expect(PAGE_KEYS.length).toBe(5);
-    expect(DASH_KEYS.length).toBe(4);
+    expect(DASH_KEYS.length).toBe(6);
     expect(SESSION_KEYS.length).toBe(7);
     expect(ADMIN_KEYS.length).toBe(3);
     expect(DESCRIPTION_KEYS.length).toBe(2);

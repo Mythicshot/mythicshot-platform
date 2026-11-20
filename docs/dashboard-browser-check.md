@@ -18,7 +18,7 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 - [ ] `http://localhost:3000/` while signed in lands on `/tours`; in a private window (nobody signed in) it lands on `/signin`. In the network panel the first answer is a `302` with `cache-control: no-store` and no body.
 - [ ] The bar across the top shows "Mythicshot", the tabs "Tours", "Storage", "Account" and "Admin" in that order, and the username `checker` on the right (an account without a username shows the word "Account" there, never an email address). "Tours" is marked as the current tab. There is no "Images" or "GIFs" tab.
 - [ ] View the page source: the Admin link is in it with `hidden` (the script shows it because `checker` is the admin), the username is not in it, and nothing else names an admin route. In a private window, `view-source:http://localhost:3000/tours` shows the very same text.
-- [ ] "Storage" and "Admin" lead to `/storage` and `/admin`, which answer `{"error":"not_found"}` until their pages are built. "Account" leads to today's account page.
+- [ ] "Storage" leads to `/storage` (checked below). "Admin" leads to `/admin`, which answers `{"error":"not_found"}` until its page is built. "Account" leads to today's account page.
 - [ ] The console shows no error and no policy violation ("Refused to …" or "Content Security Policy"); the network panel shows only requests to `localhost:3000`: the page, its stylesheet and its two scripts (all three under `/dash/`), and `GET /api/v1/session`, `/api/v1/me`, `/api/v1/tours` and `/api/v1/usage`.
 - [ ] The page's answer, the stylesheet and both scripts carry the same six headers as the sign-in pages: `content-security-policy: default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `x-frame-options: DENY`, `referrer-policy: no-referrer`, `cache-control: no-store`, `x-content-type-options: nosniff` and `cross-origin-opener-policy: same-origin`.
 
@@ -57,6 +57,22 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 - [ ] Tab and Shift+Tab stay on the two buttons, and the page behind cannot be clicked or reached with Tab. "Keep it", Escape and a click on the dimmed area around the question each close it and put the focus back on that row's "More", with no request sent.
 - [ ] "Delete tour" reads "Deleting…", sends `DELETE /api/v1/tours/tour_…` (again while it answers 202) with an `X-Csrf-Token` header, closes the question, and the row is gone, the line under the heading counts one tour fewer, and the focus is on the heading.
 - [ ] Delete every tour: the page shows "No tours yet" and "Record a tour in Mythicshot and choose Publish. It shows up here with a link to share." with no table and no hint.
+
+## The Storage page
+
+Do this part twice: first with the server started as in "Set up" (no allowance), then stopped and started again with the setting `STORAGE_ALLOWANCE_BYTES=5368709120` (5 GB) added to the same command. For the over-the-allowance step, restart it once more with `STORAGE_ALLOWANCE_BYTES=1024`.
+
+- [ ] "Storage" in the bar opens `/storage`, marked as the current tab. Under the heading "Storage" is the workspace's name. The network panel shows `GET /api/v1/session`, `/api/v1/usage` and `/api/v1/usage/largest`, and the page, its stylesheet and its two scripts under `/dash/` carry the six headers listed in "The bar".
+- [ ] Without an allowance: there is no bar, and the line reads "<size> used · <n> tours" (or "1 tour"), the size written as on the Tours page. Under it: "Tours and their pictures count. Deleting a tour frees its space within a few minutes."
+- [ ] With the 5 GB allowance: a bar in green above the line, filled to the share used (a thin sliver for a few megabytes), and the line reads "<size> of 5 GB used · <n> tours". The console shows no policy violation for the bar's width.
+- [ ] "What takes the room" lists "Tours", "Logos" and "Uploads in progress" with a size each; the three add up to the size in the line (to within rounding).
+- [ ] "Largest tours" lists the tours, largest first, each with a small bar (the first one full, the others in proportion), its size and a red "Delete". The title holding markup shows exactly as typed. Under the table: "All <n> tours are on the Tours page.", where "Tours page" is a link to `/tours` (with one tour: "Your tour is on the Tours page.").
+- [ ] With the 1024-byte allowance: the bar is full and amber, and under the line, on an amber background, "You are over your storage allowance. New uploads are refused until you delete tours or get more room.", then "Tours that are already online are not affected." The sentence about what counts is not shown. A published tour's link still plays.
+- [ ] "Delete" opens the same question as on the Tours page, with the tour's title, the same sentence and "Keep it" and "Delete tour"; the focus is on "Keep it". Tab and Shift+Tab stay on the two buttons, the bar and the page behind cannot be clicked or reached with Tab, and "Keep it", Escape and a click on the dimmed area each close it and put the focus back on that row's "Delete", with no request sent.
+- [ ] "Delete tour" reads "Deleting…", sends `DELETE /api/v1/tours/tour_…` (again while it answers 202) with an `X-Csrf-Token` header, closes the question, and the page reads `/api/v1/usage` and `/api/v1/usage/largest` again: the row is gone, the line counts one tour fewer and a smaller size, and the focus is on the heading.
+- [ ] With the server stopped, "Delete tour" gives "Something went wrong. Try again in a moment." in the question, which stays open with its buttons back. Start the server again.
+- [ ] Delete every tour: the line reads "0 bytes used · 0 tours" (or "0 bytes of 5 GB used · 0 tours"), "What takes the room" shows "0 bytes" three times, the hint is shown, and there is no "Largest tours" table.
+- [ ] At 380 pixels wide and at 320, the small bars in the table are left out, nothing scrolls sideways and a long title wraps; in dark mode the bars and the amber warning are readable.
 
 ## When something fails
 
