@@ -38,6 +38,19 @@ export function jpeg(width: number, height: number, total: number, fill = 0): Ui
   return padTo(head, total, fill);
 }
 
+const le16 = (n: number) => [n & 255, (n >>> 8) & 255];
+
+/** A GIF89a header for width x height (signature and logical screen descriptor), padded to exactly `total` bytes. */
+export function gif(width: number, height: number, total: number, fill = 0): Uint8Array {
+  return padTo([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, ...le16(width), ...le16(height), 0xf7, 0, 0], total, fill);
+}
+
+/** An MP4 that starts with a 24-byte `ftyp` box (major brand isom, two compatible brands), padded to exactly `total` bytes. */
+export function mp4(total: number, fill = 0): Uint8Array {
+  const ascii = (s: string) => [...s].map((ch) => ch.charCodeAt(0));
+  return padTo([...be32(24), ...ascii("ftyp"), ...ascii("isom"), ...be32(512), ...ascii("isom"), ...ascii("mp41")], total, fill);
+}
+
 /** The image a manifest step declares: right type, size and length. `fill` makes bytes differ between uploads. */
 export function stepImage(step: Json, fill = 0): Uint8Array {
   return String(step.image).endsWith(".png") ? png(step.width, step.height, step.bytes, fill) : jpeg(step.width, step.height, step.bytes, fill);
@@ -114,6 +127,8 @@ export function routeOf(path: string): string {
     .split("?")[0]
     .replace(/tour_[0-9a-f]{24}/g, ":id")
     .replace(/up_[0-9a-f]{24}/g, ":id")
+    .replace(/med_[0-9a-f]{24}/g, ":id")
+    .replace(/\/parts\/[^/]+$/, "/parts/:n")
     .replace(/ws_[0-9a-f]{24}/g, ":id")
     .replace(/st_[0-9a-f]{24}/g, ":step_id")
     .replace(/\/steps\/[^/]+$/, "/steps/:n")
