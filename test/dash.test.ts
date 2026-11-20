@@ -206,10 +206,24 @@ describe("the dashboard's pages and files", () => {
       const admin = new FakeDocument(p.html).getElementById("tab-admin")!;
       expect([admin.tagName, admin.getAttribute("href"), admin.hidden, admin.textContent], p.path).toEqual(["a", "/admin", true, "Admin"]);
     }
-    // Nothing else in a member's page or its scripts names an admin route or field.
-    for (const text of [DASH_JS, ...MEMBER_PAGES.flatMap((p) => [p.html, p.script.body])]) {
-      expect(text).not.toContain("/api/v1/admin");
-      expect(text).not.toMatch(/allowance|accounts|is_admin/);
+    // Nothing else in a member's page or its scripts names an admin route or field. The
+    // Storage page is about the person's own storage, so on /storage alone, and only there,
+    // two exact things are taken out before the check: the approved sentence of mockup 6 and
+    // the field allowance_bytes read from the person's own usage answer (u.allowance_bytes,
+    // GET /api/v1/usage, a member's route). Any other "allowance" there (an admin field, an
+    // admin's wording, a workspace's number) still fails, and /tours and the shared script are
+    // checked whole as before.
+    const OWN_ALLOWANCE = ["You are over your storage allowance. New uploads are refused until you delete tours or get more room.", "u.allowance_bytes"];
+    const own = (path: string, text: string) => (path === "/storage" ? OWN_ALLOWANCE.reduce((t, x) => t.split(x).join(""), text) : text);
+    for (const [path, text] of [["/dash/dash.js", DASH_JS], ...MEMBER_PAGES.flatMap((p) => [[p.path, p.html], [p.path, p.script.body]])]) {
+      expect(text, path).not.toContain("/api/v1/admin");
+      expect(own(path, text), path).not.toMatch(/allowance|accounts|is_admin/);
+    }
+    // What is taken out is there exactly as written: the sentence once in the page, the field only on the usage answer.
+    const storage = DASH_PAGES.find((p) => p.path === "/storage");
+    if (storage !== undefined) {
+      expect(storage.html.split(OWN_ALLOWANCE[0]).length - 1).toBe(1);
+      expect(storage.script.body.match(/allowance/g)?.length).toBe(storage.script.body.split(OWN_ALLOWANCE[1]).length - 1);
     }
     // The shared script shows the tab only on the session's own word, and for an admin only.
     expect(DASH_JS).toContain("var admin = who.admin === true;");
@@ -347,11 +361,17 @@ describe("the dashboard's pages and files", () => {
       expect(all.filter((e) => e.tagName === "form"), s.path).toEqual([]);
     }
     expect(DASH_CSS).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
-    // The scripts set no style attribute and add no handler attribute; the only style they touch is none.
-    for (const js of SCRIPTS) {
-      expect(js).not.toMatch(/setAttribute\("(?:style|on[a-z]+|src|srcdoc)"/);
-      expect(js).not.toMatch(/\.style\b/);
-      expect(js).not.toMatch(/\.on[a-z]+\s*=/);
+    // The scripts set no style attribute and add no handler attribute. The one style a page's
+    // script may touch is a bar's width through the CSSOM, `.style.width = `, which the policy
+    // allows (the account page sizes its bar the same way); only the Storage page has bars, so
+    // every other script may touch no style at all. Any other .style use, a style attribute,
+    // cssText, setProperty or style["..."] fails.
+    for (const [path, js] of [["/dash/dash.js", DASH_JS], ...DASH_PAGES.map((p) => [p.path, p.script.body])]) {
+      expect(js, path).not.toMatch(/setAttribute\(\s*["'](?:style|on[a-z]+|src|srcdoc)["']/);
+      expect(js, path).not.toMatch(/cssText|setProperty\(|\[\s*["']style["']\s*\]/);
+      const widths = path === "/storage" ? js.replace(/\.style\.width = /g, "") : js;
+      expect(widths, path).not.toMatch(/\.style\b/);
+      expect(js, path).not.toMatch(/\.on[a-z]+\s*=/);
     }
   });
 

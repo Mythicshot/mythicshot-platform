@@ -11,19 +11,22 @@
 // policy allows, as the account page sizes its bar; no style attribute is ever written.
 //
 // Delete asks the Tours page's question, with its sentences, in a question of this page's
-// own (the two should become one shared question once both pages have merged). While it is
-// open the rest of the page is inert, Escape and Tab are handled for the whole document, a
-// click on the backdrop closes it, and its buttons are disabled while the request runs.
-// After any outcome (deleted, refused, failed, no answer) the page reads the usage and the
-// largest tours again, so it never shows a size or a tour that is no longer true; when they
-// cannot be read, it shows none of them and says so.
+// own that behaves as the Tours page's does (src/dash/tours.ts is the reference; the two
+// should become one shared question in a later task). While it is open the bar and the page
+// are inert and hidden from screen readers, Escape and Tab are handled for the whole
+// document, a click on the backdrop is Keep it, and its buttons are disabled while the
+// request runs. A delete is done when the tour is gone: 200, 404 (already gone), or 500
+// cleanup_pending (gone, with files left for later requests to remove). After any outcome
+// the page reads the usage and the largest tours again; when that fails after a delete that
+// worked, the page says the change was made and asks for a reload. Message lines are hidden
+// while they have nothing to say.
 import { dashHtml } from "./shell.ts";
 
 const STORAGE_MAIN = `  <div id="storage-page">
   <h1 id="h-page" tabindex="-1">Storage</h1>
   <section id="storage" aria-labelledby="h-page" hidden>
     <p class="sub" id="storage-workspace"></p>
-    <p class="message" id="storage-message" role="status" aria-live="polite"></p>
+    <p class="message" id="storage-message" role="status" aria-live="polite" hidden></p>
     <div class="card">
       <div class="meter" id="storage-bar" aria-hidden="true" hidden><div class="meter-fill" id="storage-fill"></div></div>
       <p class="total" id="storage-total"></p>
@@ -32,13 +35,13 @@ const STORAGE_MAIN = `  <div id="storage-page">
       <p class="hint" id="storage-counts">Tours and their pictures count. Deleting a tour frees its space within a few minutes.</p>
     </div>
     <div class="card">
-      <h2 class="card-title" id="h-room">What takes the room</h2>
+      <h2 class="card-title" id="h-room" tabindex="-1">What takes the room</h2>
       <div class="room"><span>Tours</span><span class="r" id="room-tours"></span></div>
       <div class="room"><span>Logos</span><span class="r" id="room-logos"></span></div>
       <div class="room"><span>Uploads in progress</span><span class="r" id="room-uploads"></span></div>
     </div>
     <div class="card" id="largest" hidden>
-      <h2 class="card-title" id="h-largest">Largest tours</h2>
+      <h2 class="card-title" id="h-largest" tabindex="-1">Largest tours</h2>
       <table class="largest" aria-labelledby="h-largest">
         <thead><tr><th scope="col">Tour</th><th scope="col" class="mini-cell"></th><th scope="col" class="n">Size</th><th scope="col"></th></tr></thead>
         <tbody id="largest-rows"></tbody>
@@ -51,7 +54,7 @@ const STORAGE_MAIN = `  <div id="storage-page">
     <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-text">
       <h2 id="delete-title" tabindex="-1"></h2>
       <p class="sub" id="delete-text">Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.</p>
-      <p class="message" id="delete-message" role="status" aria-live="polite"></p>
+      <p class="message" id="delete-message" role="status" aria-live="polite" hidden></p>
       <div class="two">
         <button type="button" class="btn quiet" id="delete-keep">Keep it</button>
         <button type="button" class="btn danger" id="delete-go">Delete tour</button>
@@ -77,11 +80,14 @@ export const STORAGE_JS = `(function () {
     askBefore: 'Delete "',
     askAfter: '"?',
     deleting: "Deleting…",
-    busy: "This tour is being published. Try again when that is done.",
+    publishBusy: "This tour is being published. Try again when that is done.",
+    notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
   };
   // A delete is driven by at most this many requests.
   var MAX_ROUNDS = 1000;
   var TOUR_ID = /^tour_[0-9a-f]{24}$/;
+  // What the page behind the question is, made inert while it is open.
+  var BEHIND = ["dash-top", "storage-page"];
 
   var $ = function (id) { return document.getElementById(id); };
   // The tour the question is about, and whether its delete is running.
@@ -95,6 +101,12 @@ export const STORAGE_JS = `(function () {
     if (cls) e.className = cls;
     if (text !== undefined) e.textContent = text;
     return e;
+  }
+
+  // A message line is hidden while it has nothing to say.
+  function sayIn(line, text) {
+    line.textContent = text;
+    line.hidden = text === "";
   }
 
   function isSize(n) {
@@ -187,10 +199,10 @@ export const STORAGE_JS = `(function () {
 
   var workspace = "";
 
-  // The usage and the largest tours, read again every time. Resolves to true when shown,
-  // false when the visitor was sent to sign in, or the answer that failed (null for no answer),
-  // in which case nothing of the old numbers stays on the page.
-  function refresh() {
+  // The usage and the largest tours. Resolves to true when shown, false when the visitor
+  // was sent to sign in, or the answer that failed (null when no answer came); then the page
+  // keeps what it showed before.
+  function load() {
     return Promise.all([Dash.api("GET", "/api/v1/usage"), Dash.api("GET", "/api/v1/usage/largest")]).then(function (got) {
       if (got[0].status === 401 || got[1].status === 401) { Dash.signedOut(); return false; }
       var usage = got[0];
@@ -199,27 +211,22 @@ export const STORAGE_JS = `(function () {
       if (largest.status !== 200 || largest.data === null || typeof largest.data !== "object" || !Array.isArray(largest.data.tours)) return largest;
       show(usage.data, largest.data.tours, workspace);
       return true;
-    }).then(null, function () { return null; }).then(function (r) {
-      if (r !== true && r !== false) {
-        $("storage").hidden = true;
-        $("dash-load").textContent = Dash.failure(r);
-      }
-      return r;
-    });
+    }).then(null, function () { return null; });
   }
 
   // ---- The question before a delete ----
 
-  // While the question is open, everything but it is inert: the bar, the page and its message.
-  function setInert(on) {
-    var parts = [$("storage-page"), $("dash-load")];
-    var kids = document.body.children;
-    for (var i = 0; i < kids.length; i++) {
-      if (kids[i].tagName && String(kids[i].tagName).toLowerCase() === "header") parts.push(kids[i]);
-    }
-    parts.forEach(function (p) {
-      if (on) p.setAttribute("inert", "");
-      else p.removeAttribute("inert");
+  // While the question is open, the bar and the page behind it are inert.
+  function behind(inert) {
+    BEHIND.forEach(function (id) {
+      var e = $(id);
+      if (inert) {
+        e.setAttribute("inert", "");
+        e.setAttribute("aria-hidden", "true");
+      } else {
+        e.removeAttribute("inert");
+        e.removeAttribute("aria-hidden");
+      }
     });
   }
 
@@ -227,23 +234,24 @@ export const STORAGE_JS = `(function () {
     if (working || asking !== null) return;
     asking = { t: t };
     $("delete-title").textContent = TEXT.askBefore + String(t.title) + TEXT.askAfter;
-    $("delete-message").textContent = "";
+    sayIn($("delete-message"), "");
     $("delete-dialog").hidden = false;
-    setInert(true);
+    behind(true);
     $("delete-keep").focus();
   }
 
-  // Closes the question; the focus goes back to the tour's Delete when it is still listed,
-  // else (or when toHeading) to the page's heading.
-  function closeAsk(toHeading) {
-    if (asking === null || working) return;
+  // Closes the question; with refocus, the focus goes back to the tour's Delete when it is
+  // still listed, else to the page's heading.
+  function closeAsk(refocus) {
+    if (asking === null) return;
     var id = asking.t.id;
     asking = null;
     $("delete-dialog").hidden = true;
-    $("delete-message").textContent = "";
-    setInert(false);
+    sayIn($("delete-message"), "");
+    behind(false);
+    if (!refocus) return;
     var back = deleteOf[id];
-    if (toHeading !== true && back !== undefined && !$("storage").hidden) back.focus();
+    if (back !== undefined) back.focus();
     else $("h-page").focus();
   }
 
@@ -259,12 +267,16 @@ export const STORAGE_JS = `(function () {
     return next();
   }
 
-  // What a delete's last answer means: "" when the tour is gone (or was already), the
-  // sentence to show otherwise, or "out" when the session is gone.
-  function outcomeOf(res) {
-    if (res.status === 401) return "out";
-    if (res.status === 200 || res.status === 404) return "";
-    if (res.status === 409 && Dash.errorOf(res) === "publish_busy") return TEXT.busy;
+  // Whether the tour is gone (null: no answer came). One whose leftover files could not all
+  // be removed yet is gone too; later requests finish the cleaning.
+  function done(res) {
+    if (res === null) return false;
+    return res.status === 200 || res.status === 404 || (res.status === 500 && Dash.errorOf(res) === "cleanup_pending");
+  }
+
+  // The sentence for a delete that did not happen.
+  function problem(res) {
+    if (res !== null && res.status === 409 && Dash.errorOf(res) === "publish_busy") return TEXT.publishBusy;
     return Dash.failure(res);
   }
 
@@ -272,39 +284,49 @@ export const STORAGE_JS = `(function () {
     var dialog = $("delete-dialog");
     var keep = $("delete-keep");
     var go = $("delete-go");
-    keep.addEventListener("click", function () { closeAsk(false); });
+    keep.addEventListener("click", function () { if (!working) closeAsk(true); });
+    // A click on the backdrop, outside the question itself, is Keep it.
+    dialog.addEventListener("click", function (ev) { if (ev.target === dialog && !working) closeAsk(true); });
     go.addEventListener("click", function () {
       if (asking === null || working) return;
       var t = asking.t;
       working = true;
-      $("delete-message").textContent = "";
+      sayIn($("delete-message"), "");
+      sayIn($("storage-message"), "");
       keep.disabled = true;
       go.disabled = true;
       busy(go, true, TEXT.deleting);
-      run(t.id).then(outcomeOf, function () { return Dash.TEXT.failed; }).then(function (outcome) {
-        if (outcome === "out") { Dash.signedOut(); return; }
-        // Whatever happened, the page reads the numbers again before it says anything.
-        return refresh().then(function (r) {
+      function settle(res) {
+        if (res !== null && res.status === 401) { Dash.signedOut(); return; }
+        var ok = done(res);
+        if (ok) closeAsk(false);
+        // However the delete ended, the numbers are read again before the page says anything.
+        return load().then(function (r) {
           if (r === false) return;
           working = false;
           keep.disabled = false;
           go.disabled = false;
           busy(go, false);
-          if (outcome === "") { closeAsk(true); return; }
-          $("delete-message").textContent = outcome;
+          if (ok) {
+            sayIn($("storage-message"), r === true ? "" : TEXT.notReloaded);
+            $("h-page").focus();
+            return;
+          }
+          sayIn($("delete-message"), problem(res));
           go.focus();
         });
-      });
-    });
-    // A click on the backdrop, outside the question, closes it.
-    dialog.addEventListener("click", function (ev) {
-      if (ev.target === dialog) closeAsk(false);
+      }
+      run(t.id).then(settle, function () { return settle(null); });
     });
     // For the whole document while the question is open: Escape closes it; Tab and
-    // Shift+Tab stay on its two buttons (on its title while the delete runs).
+    // Shift+Tab stay on its two buttons, or on its title while the delete runs.
     document.addEventListener("keydown", function (ev) {
       if (asking === null) return;
-      if (ev.key === "Escape") { ev.preventDefault(); closeAsk(false); return; }
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        if (!working) closeAsk(true);
+        return;
+      }
       if (ev.key !== "Tab") return;
       ev.preventDefault();
       if (working) { $("delete-title").focus(); return; }
@@ -317,7 +339,9 @@ export const STORAGE_JS = `(function () {
   startPage();
   Dash.start(function (who) {
     workspace = who.workspace;
-    return refresh();
+    return load().then(function (r) {
+      if (r !== true && r !== false) $("dash-load").textContent = Dash.failure(r);
+    });
   });
 })();
 `;

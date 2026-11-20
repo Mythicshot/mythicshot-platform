@@ -24,6 +24,7 @@ const FIREFOX = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefo
 const FAILED = "Something went wrong. Try again in a moment.";
 const TOO_MANY = "Too many requests. Wait a few minutes and try again.";
 const BUSY = "This tour is being published. Try again when that is done.";
+const NOT_RELOADED = "The change was made, but the list could not be loaded again. Reload the page to see it.";
 const OVER = "You are over your storage allowance. New uploads are refused until you delete tours or get more room.";
 const ONLINE = "Tours that are already online are not affected.";
 const COUNTS = "Tours and their pictures count. Deleting a tour frees its space within a few minutes.";
@@ -80,15 +81,7 @@ function openStorage(respond: Responder): Tab {
     pending.push(p.catch(() => {}));
     return p;
   };
-  // The document as a browser's: its own keyboard events reach listeners on it (the stand-in
-  // sends every event up to its root element).
-  const document = new Proxy(doc, {
-    get(target, prop) {
-      if (prop === "addEventListener") return (type: string, fn: (e: unknown) => void) => target.root.addEventListener(type, fn);
-      return Reflect.get(target, prop, target);
-    },
-  });
-  const context: Record<string, unknown> = { document, location, fetch };
+  const context: Record<string, unknown> = { document: doc, location, fetch };
   for (const name of ["localStorage", "sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "window", "self", "top", "parent", "opener", "open", "postMessage", "setInterval", "setTimeout", "console", "alert", "confirm", "prompt", "history", "navigator"]) {
     Object.defineProperty(context, name, {
       get() {
@@ -168,7 +161,12 @@ const deleteOf = (row: FakeElement) => row.all().find((e) => e.tagName === "butt
 const fillOf = (row: FakeElement) => row.all().find((e) => e.className === "mini-fill")!;
 const line = (tab: Tab) => tab.$("storage-total").textContent;
 const room = (tab: Tab) => [tab.$("room-tours").textContent, tab.$("room-logos").textContent, tab.$("room-uploads").textContent];
-const inert = (tab: Tab) => [tab.doc.body.all().find((e) => e.tagName === "header")!, tab.$("storage-page"), tab.$("dash-load")].map((e) => e.hasAttribute("inert"));
+/** Whether the bar and the page behind the question are inert and hidden from screen readers (both or neither). */
+const inert = (tab: Tab) =>
+  [tab.$("dash-top"), tab.$("storage-page")].map((e) => {
+    expect(e.hasAttribute("inert"), `#${e.id}`).toBe(e.getAttribute("aria-hidden") === "true");
+    return e.hasAttribute("inert");
+  });
 const key = (el: FakeElement, k: string, shiftKey = false) => el.dispatch("keydown", { key: k, shiftKey });
 const gets = (tab: Tab, path: string) => tab.fetched.filter((f) => f.method === "GET" && f.path === path).length;
 
@@ -307,7 +305,7 @@ describe("deleting from the Storage page", () => {
   it("asks first with the Tours page's question; the page behind is inert, Escape, Keep it and the backdrop close it, and the focus comes back", async () => {
     const tab = openStorage(standard());
     await tab.settle();
-    expect(inert(tab)).toEqual([false, false, false]);
+    expect(inert(tab)).toEqual([false, false]);
     const del = deleteOf(rows(tab)[1]);
     del.click();
     const dialog = tab.$("delete-dialog");
@@ -315,7 +313,7 @@ describe("deleting from the Storage page", () => {
     expect(tab.$("delete-title").textContent).toBe('Delete "Timeline rehearsal walkthrough"?');
     expect(tab.shows().slice(-4)).toEqual(['Delete "Timeline rehearsal walkthrough"?', QUESTION, "Keep it", "Delete tour"]);
     expect(tab.doc.activeElement).toBe(tab.$("delete-keep"));
-    expect(inert(tab)).toEqual([true, true, true]);
+    expect(inert(tab)).toEqual([true, true]);
     // Tab and Shift+Tab stay on the two buttons, wherever the focus was, handled for the whole document.
     expect(key(tab.$("delete-keep"), "Tab").defaultPrevented).toBe(true);
     expect(tab.doc.activeElement).toBe(tab.$("delete-go"));
@@ -330,7 +328,7 @@ describe("deleting from the Storage page", () => {
     tab.doc.activeElement = tab.doc.body;
     expect(tab.pressOnPage("Escape")).toBe(true);
     expect(dialog.shown).toBe(false);
-    expect(inert(tab)).toEqual([false, false, false]);
+    expect(inert(tab)).toEqual([false, false]);
     expect(tab.doc.activeElement).toBe(del);
     // Closed, the page's keys are its own again.
     expect(tab.pressOnPage("Tab")).toBe(false);
@@ -345,7 +343,7 @@ describe("deleting from the Storage page", () => {
     expect(dialog.shown).toBe(true);
     dialog.click();
     expect(dialog.shown).toBe(false);
-    expect(inert(tab)).toEqual([false, false, false]);
+    expect(inert(tab)).toEqual([false, false]);
     expect(tab.doc.activeElement).toBe(del);
     expect(tab.fetched.filter((f) => f.method !== "GET")).toEqual([]);
   });
@@ -377,35 +375,42 @@ describe("deleting from the Storage page", () => {
       [`/api/v1/tours/${T2}`, CSRF, undefined],
     ]);
     expect(tab.$("delete-dialog").shown).toBe(false);
-    expect(inert(tab)).toEqual([false, false, false]);
+    expect(inert(tab)).toEqual([false, false]);
     expect([go.textContent, go.disabled, keep.disabled, go.getAttribute("aria-busy")]).toEqual(["Delete tour", false, false, null]);
     expect([gets(tab, "/api/v1/usage"), gets(tab, "/api/v1/usage/largest")]).toEqual([2, 2]);
     expect(rows(tab).map(titleOf)).toEqual(["Full onboarding, long cut", "Loot council vote, full round"]);
     expect(line(tab)).toBe("973.8 MB of 5 GB used · 11 tours");
     expect(tab.$("largest-all").textContent).toBe("All 11 tours are on the ");
     expect(tab.doc.activeElement).toBe(tab.$("h-page"));
-    expect(tab.$("storage-message").textContent).toBe("");
+    expect([tab.$("storage-message").textContent, tab.$("storage-message").hidden]).toEqual(["", true]);
+    expect([tab.$("delete-message").textContent, tab.$("delete-message").hidden]).toEqual(["", true]);
   });
 
-  it("a tour already gone counts as deleted", async () => {
-    const tab = openStorage(standard({ ["DELETE /api/v1/tours/" + T1]: { status: 404, json: { error: "not_found" } }, "GET /api/v1/usage/largest": [largest(M5_TOURS), largest(M5_TOURS.slice(1))] }));
-    await tab.settle();
-    deleteOf(rows(tab)[0]).click();
-    tab.$("delete-go").click();
-    await tab.settle();
-    expect(tab.$("delete-dialog").shown).toBe(false);
-    expect(rows(tab).map(titleOf)).toEqual(["Timeline rehearsal walkthrough", "Loot council vote, full round"]);
+  it("a tour already gone, or gone with files left to clean up (500 cleanup_pending), counts as deleted", async () => {
+    for (const answer of [{ status: 404, json: { error: "not_found" } }, { status: 500, json: { error: "cleanup_pending" } }]) {
+      const tab = openStorage(standard({ ["DELETE /api/v1/tours/" + T1]: answer, "GET /api/v1/usage/largest": [largest(M5_TOURS), largest(M5_TOURS.slice(1))] }));
+      await tab.settle();
+      deleteOf(rows(tab)[0]).click();
+      tab.$("delete-go").click();
+      await tab.settle();
+      const what = JSON.stringify(answer);
+      expect(tab.$("delete-dialog").shown, what).toBe(false);
+      expect(inert(tab), what).toEqual([false, false]);
+      expect(rows(tab).map(titleOf), what).toEqual(["Timeline rehearsal walkthrough", "Loot council vote, full round"]);
+      expect(tab.$("storage-message").hidden, what).toBe(true);
+      expect(tab.doc.activeElement, what).toBe(tab.$("h-page"));
+    }
   });
 
   it("a delete that fails keeps the question open with its sentence, gives the buttons back, and still reads the numbers again", async () => {
     for (const [answer, text] of [
-      [{ status: 500, json: { error: "cleanup_pending" } }, FAILED],
+      [{ status: 500, json: { error: "internal" } }, FAILED],
       [{ status: 409, json: { error: "publish_busy" } }, BUSY],
       [{ status: 429, json: { error: "rate_limited" } }, TOO_MANY],
       [{ status: 409, json: { error: "other" } }, FAILED],
       ["network", FAILED],
     ] as const) {
-      // After the failure the numbers have changed (a cleanup_pending tour is gone from the list already).
+      // After the failure the numbers have changed (another tab may have deleted it meanwhile): the page shows them as they are.
       const tab = openStorage(standard({ ["DELETE /api/v1/tours/" + T1]: answer as Answer, "GET /api/v1/usage/largest": [largest(M5_TOURS), largest(M5_TOURS.slice(1))], "GET /api/v1/usage": [usage(M5), usage({ ...M5, tours: 11 })] }));
       await tab.settle();
       deleteOf(rows(tab)[0]).click();
@@ -413,10 +418,11 @@ describe("deleting from the Storage page", () => {
       await tab.settle();
       const what = JSON.stringify(answer);
       expect(tab.$("delete-dialog").shown, what).toBe(true);
-      expect(tab.$("delete-message").textContent, what).toBe(text);
+      expect([tab.$("delete-message").textContent, tab.$("delete-message").hidden], what).toEqual([text, false]);
+      expect(tab.$("storage-message").hidden, what).toBe(true);
       expect([tab.$("delete-go").textContent, tab.$("delete-go").disabled, tab.$("delete-keep").disabled], what).toEqual(["Delete tour", false, false]);
       expect(tab.doc.activeElement, what).toBe(tab.$("delete-go"));
-      expect(inert(tab), what).toEqual([true, true, true]);
+      expect(inert(tab), what).toEqual([true, true]);
       expect([gets(tab, "/api/v1/usage"), gets(tab, "/api/v1/usage/largest")], what).toEqual([2, 2]);
       expect(rows(tab).map(titleOf), what).toEqual(["Timeline rehearsal walkthrough", "Loot council vote, full round"]);
       expect(line(tab), what).toBe("1.2 GB of 5 GB used · 11 tours");
@@ -424,20 +430,40 @@ describe("deleting from the Storage page", () => {
       tab.$("delete-keep").click();
       expect(tab.$("delete-dialog").shown, what).toBe(false);
       expect(tab.doc.activeElement, what).toBe(tab.$("h-page"));
-      expect(tab.$("delete-message").textContent, what).toBe("");
+      expect([tab.$("delete-message").textContent, tab.$("delete-message").hidden], what).toEqual(["", true]);
     }
   });
 
-  it("when the numbers cannot be read again after a delete, the page shows none of them and says so", async () => {
-    const tab = openStorage(standard({ ["DELETE /api/v1/tours/" + T1]: { status: 200, json: { deleted: true } }, "GET /api/v1/usage": [usage(M5), { status: 500, json: { error: "internal" } }] }));
+  it("when the numbers cannot be read again after a delete that worked, the page says the change was made and asks for a reload", async () => {
+    for (const reread of [{ status: 500, json: { error: "internal" } }, "network"] as const) {
+      const tab = openStorage(standard({ ["DELETE /api/v1/tours/" + T1]: { status: 200, json: { deleted: true } }, "GET /api/v1/usage": [usage(M5), reread as Answer] }));
+      await tab.settle();
+      deleteOf(rows(tab)[0]).click();
+      tab.$("delete-go").click();
+      await tab.settle();
+      expect(tab.$("delete-dialog").shown).toBe(false);
+      expect(inert(tab)).toEqual([false, false]);
+      expect([tab.$("storage-message").textContent, tab.$("storage-message").shown]).toEqual([NOT_RELOADED, true]);
+      expect(tab.doc.activeElement).toBe(tab.$("h-page"));
+      expect([tab.$("delete-go").disabled, tab.$("delete-go").textContent]).toEqual([false, "Delete tour"]);
+      // The next delete clears the sentence.
+      deleteOf(rows(tab)[1]).click();
+      expect(tab.$("delete-message").hidden).toBe(true);
+    }
+  });
+
+  it("when a delete fails and the numbers cannot be read again either, the question says why and the page keeps what it showed", async () => {
+    const tab = openStorage(standard({ ["DELETE /api/v1/tours/" + T1]: { status: 409, json: { error: "publish_busy" } }, "GET /api/v1/usage": [usage(M5), { status: 500, json: { error: "internal" } }] }));
     await tab.settle();
     deleteOf(rows(tab)[0]).click();
     tab.$("delete-go").click();
     await tab.settle();
-    expect(tab.$("delete-dialog").shown).toBe(false);
-    expect(tab.$("storage").hidden).toBe(true);
-    expect(tab.$("dash-load").textContent).toBe(FAILED);
-    expect(inert(tab)).toEqual([false, false, false]);
+    expect([tab.$("delete-dialog").shown, tab.$("delete-message").textContent]).toEqual([true, BUSY]);
+    expect(rows(tab).map(titleOf)).toEqual(M5_TOURS.map((t) => t.title));
+    expect(tab.doc.activeElement).toBe(tab.$("delete-go"));
+    // Keep it: the focus goes back to that tour's Delete, which is still listed.
+    tab.$("delete-keep").click();
+    expect(tab.doc.activeElement).toBe(deleteOf(rows(tab)[0]));
   });
 
   it("a lost session goes to /signin", async () => {

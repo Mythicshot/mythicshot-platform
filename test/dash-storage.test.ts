@@ -96,7 +96,8 @@ const STORAGE_TEXT: Record<string, string> = {
   askBefore: 'Delete "',
   askAfter: '"?',
   deleting: "Deleting…",
-  busy: "This tour is being published. Try again when that is done.",
+  publishBusy: "This tour is being published. Try again when that is done.",
+  notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
 };
 
 /** The strings with a space in the script that are not words for a person: class names. */
@@ -231,6 +232,7 @@ describe("the Storage page", () => {
     expect(STORAGE_HTML).not.toMatch(/https?:|\/\//i);
     expect(STORAGE_JS).not.toMatch(/setAttribute\("(?:style|on[a-z]+|src|srcdoc|href)"/);
     expect(STORAGE_JS).not.toMatch(/\.on[a-z]+\s*=/);
+    expect(STORAGE_JS).not.toMatch(/cssText|setProperty\(|\[\s*["']style["']\s*\]/);
     // The only style the script touches is a bar's width, through the CSSOM, which the policy allows.
     expect([...STORAGE_JS.matchAll(/\.style\b[^;]*;/g)].map((m) => m[0])).toEqual(['.style.width = pct(share) + "%";', '.style.width = pct(share) + "%";']);
     // The stylesheet has the page's own part, with the warning colour for the bar that is over.
@@ -258,6 +260,11 @@ describe("the Storage page", () => {
     const messages = all.filter((e) => /\b(?:message|load)\b/.test(e.className) && e.parent?.tagName !== "noscript");
     expect(messages.map((m) => m.id).sort()).toEqual(["dash-load", "delete-message", "storage-message"]);
     for (const m of messages) expect([m.getAttribute("role"), m.getAttribute("aria-live")], `#${m.id}`).toEqual(["status", "polite"]);
+    // A message line takes no room until it has a message.
+    for (const m of messages.filter((e) => e.id !== "dash-load")) expect(m.hidden, `#${m.id}`).toBe(true);
+    // The page behind the question, made inert while it is open: the shell's bar and this page's own part.
+    expect(STORAGE_JS).toContain('var BEHIND = ["dash-top", "storage-page"];');
+    expect(doc.getElementById("dash-top")!.tagName).toBe("header");
     expect(doc.getElementById("h-page")!.getAttribute("tabindex")).toBe("-1");
     expect(doc.getElementById("delete-title")!.getAttribute("tabindex")).toBe("-1");
     const dialog = all.find((e) => e.getAttribute("role") === "alertdialog")!;
