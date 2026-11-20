@@ -24,6 +24,14 @@
 // stops over them: a mail block it cannot use leaves mail off, with one line in the log
 // that names the setting and no value.
 //
+// The other optional settings are passed on the same way: STORAGE_ALLOWANCE_BYTES (the
+// storage allowance of a workspace, in bytes) and INVITE_CONTACT (who to ask for an
+// invite, shown on the sign-in page). PORT and PUBLIC_IMAGE_BASE are read by the app too
+// and passed on like any other line; the install writes neither.
+//
+// RECOVERY_LINKS is read only for the admin command below, and never put in the
+// environment: the command is handed it as an explicit yes or no.
+//
 // Tests: test/node-cpanel-app.test.ts.
 const fs = require("node:fs");
 const path = require("node:path");

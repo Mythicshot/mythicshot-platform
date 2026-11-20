@@ -3,11 +3,12 @@
 // that folder. A stand-in dist/node/entry.js prints the settings it was started with, so
 // each test sees what the real app would have seen.
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { NODE_SETTINGS } from "../src/node/config.ts";
 
 const APP_CJS = fileURLToPath(new URL("../deploy/cpanel/app.cjs", import.meta.url));
 /** A made-up value that must never show up in anything the startup file prints. */
@@ -139,6 +140,11 @@ describe("the cPanel startup file", () => {
     const r = start(l.app);
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/entry\.js/);
+  });
+
+  it("its header comment names every setting it passes on: each one the app reads, and the recovery setting", () => {
+    const header = readFileSync(APP_CJS, "utf8").split("\n").filter((l) => l.startsWith("//")).join("\n");
+    for (const name of [...NODE_SETTINGS, "RECOVERY_LINKS"]) expect(header, name).toMatch(new RegExp(`\\b${name}\\b`));
   });
 });
 
