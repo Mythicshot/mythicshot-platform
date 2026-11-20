@@ -1,4 +1,4 @@
-# Browser check of the dashboard: the bar, the Tours, Storage and Account pages, and changing an email address
+# Browser check of the dashboard: the bar, the Images, GIFs, Tours, Storage and Account pages, and changing an email address
 
 The tests run the dashboard's scripts against a stand-in document, and against the real app in the same process, but they cannot open a browser. This list is what a person goes through by hand before a dashboard page is called done: once in Chrome and once in Firefox, each with the developer tools open. Write down for each step whether it passed, and for anything that did not, what the page showed.
 
@@ -12,13 +12,14 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 1. Set up the scratch site, sign in as the admin `checker` and keep the wizard's token, exactly as in "Set up" of [the sign-in pages' check](signin-browser-check.md), steps 1 to 4, using the prefix `dashboard-check-` for the folder.
 2. Nobody can be invited in this version, so a scratch site has no second account that is not an admin. What a member sees of the Admin tab is held by the tests; here only the page source is looked at.
 3. Upload three tours with the owner's token, as the site's documentation page `http://localhost:3000/docs` shows in its guide "Upload and publish a tour" (or with Mythicshot). Publish two of them. Then upload a new version into one of the two published tours and do not publish it, so that it has changes waiting. Give one tour a title holding markup, such as `<b>bold</b> & "quoted"`.
+4. Share items with the owner's token through the shared item requests on the documentation page (`POST /api/v1/media`, then its parts, an optional preview, and the commit): three PNG or JPEG images, one of them without a title, one with the title `<b>bold</b> & "quoted"`, and two of them with a preview; and two GIFs and one MP4 clip, one of them without a title and one with a preview. For "Show more", share 51 small images more (a loop over the same requests).
 
 ## The bar
 
 - [ ] `http://localhost:3000/` while signed in lands on `/tours`; in a private window (nobody signed in) it lands on `/signin`. In the network panel the first answer is a `302` with `cache-control: no-store` and no body.
-- [ ] The bar across the top shows "Mythicshot", the tabs "Tours", "Storage", "Account" and "Admin" in that order, and the username `checker` on the right (an account without a username shows the word "Account" there, never an email address). "Tours" is marked as the current tab. There is no "Images" or "GIFs" tab.
+- [ ] The bar across the top shows "Mythicshot", the tabs "Images", "GIFs", "Tours", "Storage", "Account" and "Admin" in that order, and the username `checker` on the right (an account without a username shows the word "Account" there, never an email address). "Tours" is marked as the current tab: signing in and `/` still land on Tours.
 - [ ] View the page source: the Admin link is in it with `hidden` (the script shows it because `checker` is the admin), the username is not in it, and nothing else names an admin route. In a private window, `view-source:http://localhost:3000/tours` shows the very same text.
-- [ ] "Storage" leads to `/storage`, "Admin" to `/admin` and "Account" to `/account`, each checked below.
+- [ ] "Images" leads to `/images`, "GIFs" to `/gifs`, "Storage" to `/storage`, "Admin" to `/admin` and "Account" to `/account`, each checked below.
 - [ ] The console shows no error and no policy violation ("Refused to …" or "Content Security Policy"); the network panel shows only requests to `localhost:3000`: the page, its stylesheet and its two scripts (all three under `/dash/`), and `GET /api/v1/session`, `/api/v1/me`, `/api/v1/tours` and `/api/v1/usage`.
 - [ ] The page's answer, the stylesheet and both scripts carry the same six headers as the sign-in pages: `content-security-policy: default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `x-frame-options: DENY`, `referrer-policy: no-referrer`, `cache-control: no-store`, `x-content-type-options: nosniff` and `cross-origin-opener-policy: same-origin`.
 
@@ -58,8 +59,33 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 - [ ] "Delete tour" reads "Deleting…", sends `DELETE /api/v1/tours/tour_…` (again while it answers 202) with an `X-Csrf-Token` header, closes the question, and the row is gone, the line under the heading counts one tour fewer, and the focus is on the heading. While it runs, Tab and Shift+Tab keep the focus on the question's title, never on a greyed-out button.
 - [ ] Delete every tour: the page shows "No tours yet" and "Record a tour in Mythicshot and choose Publish. It shows up here with a link to share." with no table and no hint.
 
-## The Storage page
+## The Images page
 
+Do this part before sharing the 51 extra images, then the last steps again after them for "Show more".
+
+- [ ] "Images" in the bar opens `/images`, marked as the current tab; the tab's title is "Images". The network panel shows `GET /api/v1/session` and `GET /api/v1/media?kind=image`, then one `GET /api/v1/media/med_…/preview` for each image with a preview, all to `localhost:3000`; the page, its stylesheet and its two scripts under `/dash/` carry the six headers listed in "The bar". The console shows no error and no policy violation, also for the previews.
+- [ ] Under the heading "Images" the line reads "3 images in <workspace name> · <size> used", the size written as on the Tours page (the images' own sizes added up; the previews are not in it).
+- [ ] One row per image, newest first: a small preview at the left (the picture, or a plain two-tone box for an image without one), the title in bold ("Untitled image" for the one without), and under it "<width> × <height> · PNG" (or "JPEG"), " · localhost:3000/i/" and the first four characters of the link id followed by "…" (pointing at it shows the whole link); then its size and the day it was shared, such as "19 Nov"; then "Copy link", "Open" and a red "Delete". The title holding markup shows exactly as typed, never in bold.
+- [ ] Under the table: "Anyone with the link can see the image. Deleting it stops the link for everyone."
+- [ ] A preview request carries the session cookie and no `Referer` header, and answers `image/png` or `image/jpeg`. In the network panel, block the URL pattern `*/preview` and reload: each row shows the plain box instead, with no broken-image icon. Unblock it afterwards.
+- [ ] "Copy link" reads "Copied" for about two seconds; pasting into the address bar gives `http://localhost:3000/i/<link id>`. With the clipboard blocked for the site, a field with the whole link appears, selected. "Open" opens the link in a new tab, where `opener` in the console is `null` and the request carries no `Referer`.
+- [ ] "Delete" opens the question in the page, never a browser dialog: "Delete \"<title>\"?" ("Delete \"Untitled image\"?" for the one without a title), "Its link stops working for everyone and it is removed. This cannot be undone. The copy on your computer is not touched." and the buttons "Keep it" and "Delete image", with the focus on "Keep it". Tab and Shift+Tab stay on the two buttons; "Keep it", Escape and a click on the dimmed area each close it and put the focus back on that row's "Delete", with no request sent.
+- [ ] "Delete image" reads "Deleting…", sends `DELETE /api/v1/media/med_…` with an `X-Csrf-Token` header, closes the question, and `GET /api/v1/media?kind=image` is read again: the row is gone, the line counts one image fewer, and the focus is on the heading. Every row's buttons are greyed out from the press until the list is back. A double click on "Delete image" sends one request.
+- [ ] With the server stopped, "Delete image" gives "Something went wrong. Try again in a moment." in the question, which stays open with its buttons back. Start the server again.
+- [ ] Delete every image: the page shows "No images yet" and "Take a screenshot in Mythicshot and choose Publish to. It shows up here with a link to share." with no table and no hint.
+- [ ] With more than 50 images: the line reads "The newest 50 images in <workspace name>" with no size, and "Show more" is under the table. "Show more" sends `GET /api/v1/media?kind=image&cursor=…` (one request, also on a double click), adds the rest, puts the focus on the first new row's "Copy link", and goes away; the line then reads the whole count and size. Delete one row after that: both pages are read again.
+- [ ] At 380 pixels wide and at 320, each image is a block: the preview at the left, the title and "<width> × <height> · PNG · <size> · <day>" beside it, the buttons under them; the workspace's name is left out of the line, nothing scrolls sideways and a long title wraps. In dark mode the box, the preview's border and the red "Delete" are readable.
+
+## The GIFs page
+
+- [ ] "GIFs" in the bar opens `/gifs`, marked as the current tab; the tab's title is "GIFs". The network panel shows `GET /api/v1/media?kind=clip` (never `kind=image`), and only the clips are listed: no image from the page before is here, and no clip is on the Images page.
+- [ ] The line reads "3 GIFs in <workspace name> · <size> used". Each row's box carries a small play mark, over the preview or over the plain box; the details read "<n> s · <width> × <height> · localhost:3000/r/", four characters and "…", the length in whole seconds; "Untitled GIF" for the clip without a title, and the MP4 clip is listed like the GIFs.
+- [ ] Under the table: "Anyone with the link can watch the GIF. Deleting it stops the link for everyone."
+- [ ] "Delete" asks the same question with the clip's title and the buttons "Keep it" and "Delete GIF"; "Delete GIF" deletes it as on the Images page.
+- [ ] Delete every clip: the page shows "No GIFs yet" and "Record a clip in Mythicshot and choose Publish to. It shows up here with a link to share."
+- [ ] At 380 and 320 pixels wide the rows are blocks as on the Images page, with the play mark still in the box.
+
+## The Storage page
 Do this part twice: first with the server started as in "Set up" (no allowance), then stopped and started again with the setting `STORAGE_ALLOWANCE_BYTES=5368709120` (5 GB) added to the same command. For the over-the-allowance step, restart it once more with `STORAGE_ALLOWANCE_BYTES=1024`.
 
 - [ ] "Storage" in the bar opens `/storage`, marked as the current tab. Under the heading "Storage" is the workspace's name. The network panel shows `GET /api/v1/session`, `/api/v1/usage` and `/api/v1/usage/largest`, and the page, its stylesheet and its two scripts under `/dash/` carry the six headers listed in "The bar".
@@ -153,8 +179,9 @@ The dead-link and signed-out states can be checked on this scratch site with a m
 
 Set up the site with two addresses as in "Two addresses" of the sign-in pages' check.
 
-- [ ] `/tours`, `/storage`, `/account`, `/account/email`, and the stylesheet and scripts under `/dash/`, on the tours address answer `{"error":"not_found"}`; `/` on the tours address sends the browser to `/` on the app address, which sends it on to `/tours` or `/signin`.
+- [ ] `/images`, `/gifs`, `/tours`, `/storage`, `/account`, `/account/email`, and the stylesheet and scripts under `/dash/`, on the tours address answer `{"error":"not_found"}`; `/` on the tours address sends the browser to `/` on the app address, which sends it on to `/tours` or `/signin`.
 - [ ] On the app address, a published tour's "Open" and "Copy link" use the tours address: `http://` and the tours name, the port, `/t/<slug>`.
+- [ ] On the app address, an image's and a GIF's "Open" and "Copy link" use the address the site gives for shared items (the img address when it is set, else the tours address), with `/i/` or `/r/` and the link id; their previews still load from the app address.
 
 ## Afterwards
 
