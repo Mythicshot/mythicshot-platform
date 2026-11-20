@@ -28,6 +28,7 @@ const MEDIA = "med_0123456789abcdef01234567";
 const STEP = "st_0123456789abcdef01234567";
 const SESSION = "ses_0123456789abcdef01234567";
 const WORKSPACE = "ws_0123456789abcdef01234567";
+const ACCOUNT = "usr_0123456789abcdef01234567";
 const TOKEN = "tok_0123456789abcdef01234567";
 
 type Row = {
@@ -125,6 +126,10 @@ const ROWS: Record<string, Row> = {
   "GET /api/v1/admin/accounts": admin("GET", "/api/v1/admin/accounts"),
   "GET /api/v1/admin/summary": admin("GET", "/api/v1/admin/summary"),
   "PATCH /api/v1/admin/workspaces/:id": admin("PATCH", `/api/v1/admin/workspaces/${WORKSPACE}`, { storage_allowance_bytes: 1 }),
+  "POST /api/v1/admin/accounts/:id/disable": admin("POST", `/api/v1/admin/accounts/${ACCOUNT}/disable`),
+  "POST /api/v1/admin/accounts/:id/enable": admin("POST", `/api/v1/admin/accounts/${ACCOUNT}/enable`),
+  "GET /api/v1/admin/accounts/:id/removal": admin("GET", `/api/v1/admin/accounts/${ACCOUNT}/removal`),
+  "DELETE /api/v1/admin/accounts/:id": admin("DELETE", `/api/v1/admin/accounts/${ACCOUNT}`, { username: "rook" }),
   // The sign-in pages and their two files: on the app address only, like the session they lead to.
   "GET /signin": page("/signin"),
   "GET /signin/link": page("/signin/link"),
@@ -306,7 +311,7 @@ describe("the host-routing matrix", () => {
     for (const key of ["GET /dash/dash.css", "GET /dash/dash.js"]) expect(DASH_KEYS, key).toContain(key);
     // 9, the three requests that take a short code and the three of the token list.
     expect(SESSION_KEYS.length).toBe(15);
-    expect(ADMIN_KEYS.length).toBe(3);
+    expect(ADMIN_KEYS.length).toBe(7);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
     // 15, and the eight routes of shared items.

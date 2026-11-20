@@ -431,6 +431,8 @@ export const OWNED: Readonly<Record<string, string>> = {
   media_object: "media_id IN (SELECT id FROM media WHERE workspace_id = ?)",
   // A request to connect belongs to no workspace until it is confirmed, and then to the confirming one.
   connect_request: "workspace_id = ?",
+  // A delete of the workspace's account that has started and not finished.
+  account_removal: "workspace_id = ?",
 };
 
 /** Tables whose rows belong to no workspace, each with the reason. */

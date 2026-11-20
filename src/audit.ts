@@ -27,6 +27,9 @@ export const AUDIT_EVENTS = [
   "connection_collected",
   "token_renamed",
   "token_revoked",
+  "account_disabled",
+  "account_enabled",
+  "account_deleted",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 

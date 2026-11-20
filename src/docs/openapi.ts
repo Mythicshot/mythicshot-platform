@@ -10,10 +10,11 @@
 // It names no host: `servers` is "/", so a tool resolves every path against the address
 // it fetched the description from. The one example carries a placeholder address.
 import { ADMIN_PAGE, MAX_ALLOWANCE_BYTES } from "../admin-api.ts";
+import { PAGE_CACHE } from "../page.ts";
 import { LIMITS } from "../manifest.ts";
 import { CLIP_MAX_DURATION_MS, CLIP_MAX_SIDE, DEFAULT_MEDIA_LIMITS, LIST_PAGE, MAX_LOOSE_CLAIMS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, TITLE_MAX } from "../media.ts";
 import { LIMITS_CONNECT, LIMITS_MEDIA } from "../rate.ts";
-import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../publish.ts";
+import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, PUBLIC_CACHE, STALE_PUBLISH_MS } from "../publish.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
 import { DELETE_FILES_PER_CALL } from "../tours.ts";
 import { EMAIL_CHANGE_MS } from "../email-change.ts";
@@ -176,6 +177,7 @@ const setCookie = (description: string) => ({ "set-cookie": { description, schem
 const tourId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The tour's id, as the tour list and an upload's commit give it.", schema: { type: "string", pattern: "^tour_[0-9a-f]{24}$" } };
 const uploadId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The upload's id, from the answer that started it.", schema: { type: "string", pattern: "^up_[0-9a-f]{24}$" } };
 const stepId: OpenApiParameter = { name: "step_id", in: "path", required: true, description: "The step's id.", schema: { type: "string", pattern: "^st_[0-9a-f]{24}$" } };
+const accountId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The account's id, as the list of accounts gives it in id.", schema: { type: "string", pattern: "^usr_[0-9a-f]{24}$" } };
 const workspaceId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The workspace's id, as the list of accounts gives it in workspace_id.", schema: { type: "string", pattern: "^ws_[0-9a-f]{24}$" } };
 const mediaId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The item's id, from the answer that started it.", schema: { type: "string", pattern: "^med_[0-9a-f]{24}$" } };
 const tokenIdParam: OpenApiParameter = { name: "id", in: "path", required: true, description: "The token's id, as the list of tokens gives it.", schema: { type: "string", pattern: "^tok_[0-9a-f]{24}$" } };
@@ -554,7 +556,7 @@ function schemas(): Record<string, Schema> {
       },
     }),
     AdminAccount: object(
-      ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted"],
+      ["id", "username", "email", "status", "admin", "created_at", "deleting", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted"],
       {
         id: { type: "string", pattern: "^usr_[0-9a-f]{24}$", description: "The account's id." },
         username: { type: ["string", "null"], description: "null until the account has one." },
@@ -562,6 +564,7 @@ function schemas(): Record<string, Schema> {
         status: { type: "string", enum: ["active", "disabled"], description: "disabled: the account cannot sign in, and its workspace's tokens are refused." },
         admin: { type: "boolean", description: "true for the site's admin." },
         created_at: whole("When the account was made, in milliseconds since 1970."),
+        deleting: { type: "boolean", description: "true once a delete of the account has started and until it finishes: send DELETE /api/v1/admin/accounts/{id} again to finish it. Such an account stays disabled and cannot be enabled." },
         workspace_id: { type: "string", pattern: "^ws_[0-9a-f]{24}$", description: "The account's workspace: the id to set its allowance with." },
         workspace_name: { type: "string", description: "The workspace's name, as its owner wrote it. Show it as text: it may hold any characters." },
         tours: whole("How many tours the workspace has, drafts and published."),
@@ -598,6 +601,21 @@ function schemas(): Record<string, Schema> {
     }),
     AllowanceChange: object(["storage_allowance_bytes"], {
       storage_allowance_bytes: { type: ["integer", "null"], minimum: 0, maximum: MAX_ALLOWANCE_BYTES, description: "The workspace's allowance in bytes, or null to go back to the site's default." },
+    }),
+    AccountRemoval: object(
+      ["username", "email", "tours", "items", "connections", "used_bytes"],
+      {
+        username: { type: ["string", "null"], description: "The account's username, which the delete is confirmed with. null when it has none: then the delete is confirmed with email." },
+        email: { type: "string", description: "The address the account signs in with, as the list of accounts shows it. Once the account is deleted it is free again." },
+        tours: whole("The workspace's tours, drafts and published."),
+        items: whole("The workspace's shared images and clips that are online."),
+        connections: whole("The workspace's tokens that are not revoked: the computers and scripts that can publish to it."),
+        used_bytes: whole("What the workspace uses, in bytes, counted as GET /api/v1/usage counts it: what a delete frees."),
+      },
+      "What deleting the account removes, as counts. Nothing of the workspace's tours or items by name.",
+    ),
+    AccountDeleteConfirm: input(["username"], {
+      username: { type: "string", description: "The account's username exactly as stored, or, for an account with no username, its email address exactly as the list of accounts shows it." },
     }),
     AllowanceSet: object(
       ["workspace_id", "allowance_bytes", "storage_allowance_bytes", "used_bytes", "over"],
@@ -1442,6 +1460,69 @@ function paths(): OpenApiDoc["paths"] {
         },
       },
     },
+    "/api/v1/admin/accounts/{id}/disable": {
+      post: {
+        tags: ["Admin"],
+        summary: "Disable an account",
+        description: `For the site's admin: the account cannot sign in from now on. Every session of it ends at once, its unused sign-in links and its open email change stop working, and every token of its workspace is refused while it is disabled (the tokens are kept, and work again once it is enabled). A request to connect the app that it confirmed can no longer be collected. Nothing of its workspace is served: its tour pages, published pictures and shared items answer exactly as ones that do not exist. Nothing is deleted. A tour page may be cached for ${PAGE_CACHE.replace("public, max-age=", "")} seconds and a published picture for a year (${PUBLIC_CACHE}), so this stops new fetches only: a copy a browser or a cache already holds is not taken back. On a server whose PUBLIC_IMAGE_BASE points published pictures at a storage bucket's own public address, pictures never pass through the server, so it cannot stop them at all: they stay reachable at their addresses until the tour is unpublished or deleted. Already disabled: 204, and nothing changes. In the audit record as account_disabled. ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminDisableAccount",
+        security: SESSION,
+        parameters: [accountId],
+        responses: {
+          "204": empty("The account is disabled."),
+          "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header; and an account id that is malformed or names no account. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
+          "409": refusal("own_account: this is the caller's own account. last_admin: this is the site's last active admin.", "own_account", "last_admin"),
+        },
+      },
+    },
+    "/api/v1/admin/accounts/{id}/enable": {
+      post: {
+        tags: ["Admin"],
+        summary: "Enable a disabled account",
+        description: `For the site's admin: the account may sign in again. Only that changes: its tour pages, pictures, shared items and tokens work as before it was disabled, and the person signs in again to use the dashboard. Already active: 204, and nothing changes. In the audit record as account_enabled. ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminEnableAccount",
+        security: SESSION,
+        parameters: [accountId],
+        responses: {
+          "204": empty("The account is active."),
+          "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header; and an account id that is malformed or names no account. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
+          "409": refusal("own_account: this is the caller's own account. deleting: a delete of the account has started; it cannot be enabled, and the delete is finished by sending it again.", "own_account", "deleting"),
+        },
+      },
+    },
+    "/api/v1/admin/accounts/{id}/removal": {
+      get: {
+        tags: ["Admin"],
+        summary: "What deleting an account removes",
+        description: `For the site's admin: the counts the question before a delete shows. ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminAccountRemoval",
+        security: SESSION,
+        parameters: [accountId],
+        responses: {
+          "200": answer("The counts.", ref("AccountRemoval")),
+          "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header; and an account id that is malformed or names no account. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
+        },
+      },
+    },
+    "/api/v1/admin/accounts/{id}": {
+      delete: {
+        tags: ["Admin"],
+        summary: "Delete a disabled account, in steps",
+        description: `For the site's admin: removes a disabled account and everything of its workspace: every tour with its draft and published pictures, unfinished uploads, every shared item, the workspace's tokens and requests to connect the app, the account's sessions, sign-in links and email change, the workspace and the account. This cannot be undone. Its address and its username are free again afterwards, and the audit record keeps account_deleted with the ids of the admin, the workspace and the account. Only a disabled account can be deleted, and the body must name it. A large workspace takes several requests, each removing a bounded part: send the same request until it answers 200. A delete that is stopped at any point leaves the account disabled and listed (with deleting true), and sending it again finishes it; while it is unfinished the account cannot be enabled. A repeated request after the account is gone answers 404, so treat 404 as "gone". Published pictures already held by a browser or a cache are not taken back (see the disable request). ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminDeleteAccount",
+        security: SESSION,
+        parameters: [accountId],
+        requestBody: { required: true, content: json(ref("AccountDeleteConfirm")) },
+        responses: {
+          "200": answer("Nothing of the account is left.", ref("Deleted")),
+          "202": answer("The delete has more to do; done and total count the workspace's files. Send the same request again.", ref("InProgress")),
+          "400": refusal("bad_request: the body is not a JSON object holding username and nothing else. username_mismatch: username is not the account's username (or, when it has none, its email address) exactly.", "bad_request", "username_mismatch"),
+          "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header; and an account id that is malformed or names no account. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
+          "409": refusal("own_account: this is the caller's own account. not_disabled: the account is not disabled; disable it first. last_admin: this is the site's last admin. site_owner: the account owns the workspace the site was set up with, which cannot be deleted.", "own_account", "not_disabled", "last_admin", "site_owner"),
+          "500": refusal("Part of the account is removed, but some of its files could not be removed yet. Nothing is lost: send the same request again.", "cleanup_pending"),
+        },
+      },
+    },
     "/healthz": {
       get: {
         tags: ["Server"],
@@ -1468,7 +1549,7 @@ export function openapi(): OpenApiDoc {
       { name: "Workspace", description: "The workspace a token or a session belongs to." },
       { name: "Accounts", description: "Signing in with a link sent by mail, the browser sessions of an account, and changing its email address. The site's own pages use these." },
       { name: "Connections", description: "Connecting the desktop app with a short code a signed-in person confirms, and the workspace's tokens: list, rename and revoke. The app's two requests take no credential; the rest take the session." },
-      { name: "Admin", description: "For the site's admin alone: the site's storage in all, how each account uses its storage, and each workspace's allowance. To anyone else these answer 404." },
+      { name: "Admin", description: "For the site's admin alone: the site's storage in all, how each account uses its storage, each workspace's allowance, and disabling, enabling and deleting an account. To anyone else these answer 404." },
       { name: "Server", description: "Whether the server is up. Needs no token." },
     ],
     paths: paths(),

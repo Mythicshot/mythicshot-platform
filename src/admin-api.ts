@@ -6,8 +6,8 @@
 // place a caller sees beyond its own workspace. The summary answers three numbers: the
 // number of accounts, the bytes all workspaces use together and the site's standard
 // allowance. The list answers only this, per account: its
-// id, username, email, status, whether it is the admin, when it was made, its workspace's
-// id and name (the admin page's Workspace column), its tour count, the bytes it uses with the breakdown GET /api/v1/usage gives the
+// id, username, email, status, whether it is the admin, when it was made, whether its delete
+// has started, its workspace's id and name (the admin page's Workspace column), its tour count, the bytes it uses with the breakdown GET /api/v1/usage gives the
 // account itself (the shared images' and GIFs' bytes as two totals), and its allowance (the workspace's own number or null for the site's,
 // and the number in force). Never a tour's id, title, slug or link, a chapter or step, a
 // picture's address or file name, a shared item's id, title or link, a token, a session, or anything a tour's address could
@@ -110,6 +110,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       status: string;
       is_admin: number;
       created_at: number;
+      deleting: number;
       workspace_id: string;
       workspace_name: string;
       own: number | null;
@@ -129,13 +130,14 @@ export function adminRoutes(app: Hono, deps: Deps): void {
     // membership only, as everywhere else; every account has one (the migration and the
     // start of the server give it one).
     //
-    // For a later phase, when an account can be deleted: the cursor is found by looking the
-    // account up, so a cursor that names an account deleted since the previous page lists
-    // nobody, and the list is cut short there. Such a phase must page by the cursor's
-    // (created_at, id) values themselves, or keep deleted accounts' positions.
+    // The cursor is found by looking the account up, so a cursor that names an account
+    // deleted since the previous page (src/account-removal.ts) lists nobody, and the list is
+    // cut short there: a page that deletes an account reads the list again from the start.
+    // A later version may page by the cursor's (created_at, id) values themselves.
     const rows = await deps.db.all<Row>(
-      `SELECT p.id, p.username, p.email, p.status, p.is_admin, p.created_at, p.ws AS workspace_id, p.ws_name AS workspace_name, p.own, p.allowance, ${USAGE_COLUMNS}
+      `SELECT p.id, p.username, p.email, p.status, p.is_admin, p.created_at, p.deleting, p.ws AS workspace_id, p.ws_name AS workspace_name, p.own, p.allowance, ${USAGE_COLUMNS}
          FROM (SELECT u.id, u.username, u.email, u.status, u.is_admin, u.created_at, m.workspace_id AS ws, workspace.name AS ws_name,
+                      EXISTS (SELECT 1 FROM account_removal r WHERE r.user_id = u.id) AS deleting,
                       workspace.storage_allowance_bytes AS own, ${ALLOWANCE_SQL} AS allowance
                  FROM user u
                  JOIN membership m ON m.user_id = u.id
@@ -155,6 +157,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       status: r.status,
       admin: r.is_admin === 1,
       created_at: r.created_at,
+      deleting: r.deleting === 1,
       workspace_id: r.workspace_id,
       workspace_name: r.workspace_name,
       ...numbers(usageFromRow(r)),
@@ -195,10 +198,9 @@ export function adminRoutes(app: Hono, deps: Deps): void {
     const id = c.req.param("id");
     if (!WORKSPACE_ID.test(id)) return notFound();
 
-    // For a later phase, when a workspace can be deleted: a workspace deleted between the read
-    // below and the batch is not updated (no row matches), but the batch still writes its
-    // audit row, which then records a change that never happened. Such a phase must make the
-    // batch fail when no row was updated, as the old value's check does here.
+    // A workspace deleted between the read below and the batch (src/account-removal.ts) is
+    // not updated, and then the audit row, which guards the batch, fails it too: the next
+    // try reads no workspace and answers 404, so no change that never happened is recorded.
     for (let attempt = 1; ; attempt++) {
       const found = await deps.db.first<{ own: number | null }>("SELECT storage_allowance_bytes AS own FROM workspace WHERE id = ?", [id]);
       if (found === null) return notFound();
@@ -213,7 +215,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
             sql: "UPDATE workspace SET storage_allowance_bytes = ?, name = CASE WHEN storage_allowance_bytes IS ? THEN name ELSE NULL END WHERE id = ?",
             params: [wanted, old, id],
           },
-          auditStatement(deps, { event: "allowance_set", userId: adminId, workspaceId: id, subject: id, detail: { old_bytes: old, new_bytes: wanted } }),
+          auditStatement(deps, { event: "allowance_set", userId: adminId, workspaceId: id, subject: id, detail: { old_bytes: old, new_bytes: wanted } }, { onlyAfterOneChange: true }),
         ]);
         break;
       } catch (err) {

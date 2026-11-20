@@ -760,6 +760,91 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     refused(await api.call("PATCH", path, { token: admin.token, body: JSON.stringify({ storage_allowance_bytes: 1 }), headers: JSON_HEADERS }), 404, "not_found");
   });
 
+  it("every answer of disabling, enabling and deleting an account is as documented", async () => {
+    const { deps } = await makeDeps();
+    const api = client(deps);
+    const admin = await seedAccount(deps, { admin: true, username: "mara" });
+    const member = await seedAccount(deps, { username: "rook" });
+    const other = await seedAccount(deps, { admin: true });
+    const made = await redeemSignInCode(deps, await createSignInCode(deps, admin.userId), null, null);
+    if (made === null) throw new Error("the sign-in was refused");
+    const headers = { cookie: `${SESSION_COOKIE}=${made.secret}`, origin: "https://tours.example.com", "x-csrf-token": await csrfFor(made.secret), "content-type": JSON_TYPE };
+    const account = (id: string, rest = "") => `/api/v1/admin/accounts/${id}${rest}`;
+    const NO_ACCOUNT = "usr_" + "0".repeat(24);
+    const del = (id: string, body: unknown) => api.call("DELETE", account(id), { headers, body: typeof body === "string" ? body : JSON.stringify(body) });
+    await api.upload(member.token, small(2));
+
+    // What a delete would remove.
+    expect((await api.call("GET", account(member.userId, "/removal"), { headers })).json).toEqual({ username: "rook", email: member.email, tours: 1, items: 0, connections: 1, used_bytes: 240 });
+    refused(await api.call("GET", account(NO_ACCOUNT, "/removal"), { headers }), 404, "not_found");
+
+    // Disable and enable, each twice (the second changes nothing), and the refusals.
+    for (const how of ["disable", "enable", "disable"]) {
+      expect((await api.call("POST", account(member.userId, `/${how}`), { headers })).status).toBe(204);
+      expect((await api.call("POST", account(member.userId, `/${how}`), { headers })).status).toBe(204);
+    }
+    for (const how of ["disable", "enable"]) {
+      refused(await api.call("POST", account(admin.userId, `/${how}`), { headers }), 409, "own_account");
+      refused(await api.call("POST", account(NO_ACCOUNT, `/${how}`), { headers }), 404, "not_found");
+    }
+
+    // The delete's refusals.
+    refused(await del(member.userId, "[]"), 400, "bad_request");
+    refused(await del(member.userId, { username: "Rook" }), 400, "username_mismatch");
+    refused(await del(admin.userId, { username: "mara" }), 409, "own_account");
+    refused(await del(other.userId, { username: other.email }), 409, "not_disabled");
+    refused(await del(NO_ACCOUNT, { username: "rook" }), 404, "not_found");
+    await deps.db.run("INSERT INTO setup (id, workspace_id, completed_at) VALUES (1, ?, ?)", [member.workspaceId, deps.now()]);
+    refused(await del(member.userId, { username: "rook" }), 409, "site_owner");
+    await deps.db.run("DELETE FROM setup");
+
+    // The last active admin: with the caller disabled after its own check (a hook on the
+    // account's read stands in for another admin acting at that moment), the other admin
+    // is the last one, and can be neither disabled nor deleted.
+    const realFirst = deps.db.first.bind(deps.db);
+    const callerGone = (async (sql: string, params?: unknown[]) => {
+      if (sql.includes("AS other_admins")) await deps.db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [admin.userId]);
+      return realFirst(sql, params as never);
+    }) as typeof deps.db.first;
+    deps.db.first = callerGone;
+    refused(await api.call("POST", account(other.userId, "/disable"), { headers }), 409, "last_admin");
+    deps.db.first = realFirst;
+    await deps.db.run("UPDATE user SET status = 'active' WHERE id = ?", [admin.userId]);
+    expect((await api.call("POST", account(other.userId, "/disable"), { headers })).status).toBe(204);
+    deps.db.first = callerGone;
+    refused(await del(other.userId, { username: other.email }), 409, "last_admin");
+    deps.db.first = realFirst;
+    await deps.db.run("UPDATE user SET status = 'active' WHERE id = ?", [admin.userId]);
+
+    // A delete whose store fails part way: 500, and the account is now being deleted, so it cannot be enabled.
+    const realDelete = deps.drafts.delete.bind(deps.drafts);
+    deps.drafts.delete = () => Promise.reject(new Error("the store is down"));
+    const log = console.error;
+    console.error = () => {};
+    try {
+      refused(await del(member.userId, { username: "rook" }), 500, "cleanup_pending");
+    } finally {
+      console.error = log;
+      deps.drafts.delete = realDelete;
+    }
+    refused(await api.call("POST", account(member.userId, "/enable"), { headers }), 409, "deleting");
+
+    // A delete with more files than one request removes: rows naming files that do not
+    // exist are written first (removing a file that is already gone is not an error).
+    const gone = "tour_" + "1".repeat(24);
+    await deps.db.run("INSERT INTO tour_deletion (tour_id, workspace_id, total, created_at) VALUES (?, ?, 3000, ?)", [gone, member.workspaceId, deps.now()]);
+    await deps.db.run("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3000) INSERT INTO deleted_object (tour_id, store, image_key) SELECT ?, 'drafts', 'u/none/' || i FROM n", [gone]);
+    let r = await del(member.userId, { username: "rook" });
+    expect(r.status).toBe(202);
+    for (let i = 0; r.status === 202 && i < 20; i++) r = await del(member.userId, { username: "rook" });
+    expect(r.json).toEqual({ deleted: true });
+    refused(await del(member.userId, { username: "rook" }), 404, "not_found");
+
+    // Anyone else: the one 404.
+    refused(await api.call("POST", account(other.userId, "/enable"), { token: member.token }), 404, "not_found");
+    refused(await api.call("GET", account(other.userId, "/removal"), { token: admin.token }), 404, "not_found");
+  });
+
   it("every answer of shared items is as documented", async () => {
     const { deps, a, b } = await setup();
     const api = client(deps);
@@ -1233,6 +1318,15 @@ describe("the error codes in the code", () => {
     expect(adminPlain.length, "admin-api.ts: an error answer not built in place").toBe([...admin.matchAll(/\berror: "/g)].length);
     for (const m of adminPlain) inCode.add(`${m[1]} ${m[2]}`);
     expect([...inCode]).toEqual(expect.arrayContaining(["400 bad_allowance", "404 not_found"]));
+    // So do the routes that disable, enable and delete an account.
+    const removal = source("account-removal.ts");
+    const removalLiteral = [...removal.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
+    expect(removalLiteral.length, "account-removal.ts: an apiError call without a literal status and code").toBe([...removal.matchAll(/\bapiError\(/g)].length);
+    for (const m of removalLiteral) inCode.add(`${m[1]} ${m[2]}`);
+    const removalPlain = [...removal.matchAll(/\bjson\((\d{3}), \{ error: "([a-z_]+)"/g)];
+    expect(removalPlain.length, "account-removal.ts: an error answer not built in place").toBe([...removal.matchAll(/\berror: "/g)].length);
+    for (const m of removalPlain) inCode.add(`${m[1]} ${m[2]}`);
+    expect([...inCode]).toEqual(expect.arrayContaining(["409 own_account", "409 last_admin", "409 not_disabled", "409 deleting", "409 site_owner", "400 username_mismatch"]));
     // Shared items answer with apiError, and with plain JSON for the one refusal that carries the limits.
     const media = source("media.ts");
     const mediaLiteral = [...media.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
@@ -1251,9 +1345,9 @@ describe("the error codes in the code", () => {
       for (const m of literal) inCode.add(`${m[1]} ${m[2]}`);
     }
     expect([...inCode]).toEqual(expect.arrayContaining(["410 expired_code", "429 slow_down", "400 credentials_not_allowed", "400 bad_device_name", "400 bad_name"]));
-    // These ten are the only modules that answer with apiError (src/http.ts defines it).
+    // These eleven are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts"]);
+    expect(callers).toEqual(["../src/account-removal.ts", "../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.

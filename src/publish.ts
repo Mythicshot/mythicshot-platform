@@ -51,6 +51,7 @@
 // Keys are random and never reused, so a retired key past its grace can be deleted by any
 // request at any time. Nothing is ever found by listing the store.
 import type { Hono } from "hono";
+import { noDisabledAccount } from "./accounts.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
@@ -777,15 +778,23 @@ export function publishRoutes(app: Hono, deps: Deps): void {
 
   // Published images, without a token. Only a name of a live snapshot, or one a re-publish
   // replaced whose grace has not passed, is served; the drafts store is never read here. The type comes from the name, which publish took
-  // from the type sniffed at upload, never from the stored object's metadata.
+  // from the type sniffed at upload, never from the stored object's metadata. A name of a
+  // tour whose workspace has a disabled account answers as an unknown name. The answer is
+  // cached for a year (PUBLIC_CACHE), so that stops new fetches only: a copy a browser or a
+  // cache already holds is not taken back. With PUBLIC_IMAGE_BASE set to a bucket's own
+  // public address, pictures are fetched from the bucket and never pass through here, so
+  // the app cannot stop them at all while their files exist.
   app.get("/p/:name", async (c) => {
     const name = c.req.param("name");
     const missing = () => json(404, { error: "not_found" });
     if (!PUBLIC_NAME.test(name)) return missing();
     const key = "p/" + name;
+    // One call, as before the accounts could be disabled: the condition on the tour's
+    // workspace is part of the same statement, through the tour row each name already has.
     const live = await deps.db.first(
-      `SELECT 1 AS x FROM snapshot_object WHERE image_key = ?
-       UNION ALL SELECT 1 AS x FROM public_object WHERE image_key = ? AND state = 'retired' AND delete_after > ? LIMIT 1`,
+      `SELECT 1 AS x FROM snapshot_object o JOIN tour t ON t.id = o.tour_id WHERE o.image_key = ? AND ${noDisabledAccount("t.workspace_id")}
+       UNION ALL SELECT 1 AS x FROM public_object o JOIN tour t ON t.id = o.tour_id
+                  WHERE o.image_key = ? AND o.state = 'retired' AND o.delete_after > ? AND ${noDisabledAccount("t.workspace_id")} LIMIT 1`,
       [key, key, deps.now()],
     );
     if (live === null) return missing();

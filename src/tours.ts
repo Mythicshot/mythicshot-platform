@@ -93,8 +93,7 @@ async function deletionState(deps: Deps, auth: Auth, id: string): Promise<{ tour
  * later one acts only while both the deletion row and the tour row exist, which is true
  * only inside the batch that recorded it.
  */
-function removeTourStatements(auth: Auth, id: string, now: number): Stmt[] {
-  const ws = auth.workspaceId;
+export function removeTourStatements(ws: string, id: string, now: number): Stmt[] {
   const live = "EXISTS (SELECT 1 FROM tour_deletion d JOIN tour t ON t.id = d.tour_id AND t.workspace_id = d.workspace_id WHERE d.tour_id = ? AND d.workspace_id = ?)";
   const record = (store: "drafts" | "public", from: string): Stmt => ({
     sql: `INSERT OR IGNORE INTO deleted_object (tour_id, store, image_key) SELECT ?, '${store}', ${from} AND ${live}`,
@@ -134,6 +133,38 @@ function removeTourStatements(auth: Auth, id: string, now: number): Stmt[] {
       params: [id, ws, id, ws],
     },
   ];
+}
+
+/**
+ * One page of a deleted tour's files: deletes the next DELETE_FILES_PER_CALL files its
+ * deleted_object rows name from the two stores, then those rows, and once no row is left,
+ * the tour_deletion row. Returns how many files are left. At most six calls: the page, a
+ * delete per store, the rows, a count (only after a full page) and the last row. Throws
+ * when a store or the database fails; a row only goes after its file has, so the next call
+ * deletes the same keys again (a key already gone is not an error). Only rows of a
+ * deletion of this workspace are read, so no other workspace's file can be reached.
+ */
+export async function clearDeletionPage(deps: Deps, workspaceId: string, id: string): Promise<number> {
+  const files = await deps.db.all<{ store: "drafts" | "public"; image_key: string }>(
+    "SELECT o.store, o.image_key FROM deleted_object o JOIN tour_deletion d ON d.tour_id = o.tour_id WHERE o.tour_id = ? AND d.workspace_id = ? ORDER BY o.store, o.image_key LIMIT ?",
+    [id, workspaceId, DELETE_FILES_PER_CALL],
+  );
+  const drafts = files.filter((f) => f.store === "drafts").map((f) => f.image_key);
+  const pub = files.filter((f) => f.store === "public").map((f) => f.image_key);
+  // The files first, then their rows: a row only goes once its file has.
+  if (drafts.length > 0) await deps.drafts.delete(drafts);
+  if (pub.length > 0) await deps.pub.delete(pub);
+  const forget = (store: string, keys: string[]): Stmt => ({
+    sql: "DELETE FROM deleted_object WHERE tour_id = ? AND store = ? AND image_key IN (SELECT value FROM json_each(?))",
+    params: [id, store, JSON.stringify(keys)],
+  });
+  if (files.length > 0) await deps.db.batch([forget("drafts", drafts), forget("public", pub)]);
+  const left = files.length < DELETE_FILES_PER_CALL ? 0 : ((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM deleted_object WHERE tour_id = ?", [id]))?.n ?? 0);
+  if (left === 0) {
+    // Only while no file row is left, so a call racing this one can never strand a file.
+    await deps.db.run("DELETE FROM tour_deletion WHERE tour_id = ? AND workspace_id = ? AND NOT EXISTS (SELECT 1 FROM deleted_object WHERE tour_id = ?)", [id, workspaceId, id]);
+  }
+  return left;
 }
 
 export function tourRoutes(app: Hono, deps: Deps): void {
@@ -260,7 +291,7 @@ export function tourRoutes(app: Hono, deps: Deps): void {
       if (state.tour && state.job) return publishBusy();
     }
     if (state.tour) {
-      await deps.db.batch(removeTourStatements(auth, id, deps.now()));
+      await deps.db.batch(removeTourStatements(auth.workspaceId, id, deps.now()));
       state = await deletionState(deps, auth, id);
       // Still there: a publish started between the look and the batch, which then did nothing.
       if (state.tour) return publishBusy();
@@ -269,27 +300,7 @@ export function tourRoutes(app: Hono, deps: Deps): void {
 
     let left: number;
     try {
-      const files = await deps.db.all<{ store: "drafts" | "public"; image_key: string }>(
-        "SELECT store, image_key FROM deleted_object WHERE tour_id = ? ORDER BY store, image_key LIMIT ?",
-        [id, DELETE_FILES_PER_CALL],
-      );
-      const drafts = files.filter((f) => f.store === "drafts").map((f) => f.image_key);
-      const pub = files.filter((f) => f.store === "public").map((f) => f.image_key);
-      // The files first, then their rows: a row only goes once its file has.
-      if (drafts.length > 0) await deps.drafts.delete(drafts);
-      if (pub.length > 0) await deps.pub.delete(pub);
-      const forget = (store: string, keys: string[]): Stmt => ({
-        sql: "DELETE FROM deleted_object WHERE tour_id = ? AND store = ? AND image_key IN (SELECT value FROM json_each(?))",
-        params: [id, store, JSON.stringify(keys)],
-      });
-      if (files.length > 0) await deps.db.batch([forget("drafts", drafts), forget("public", pub)]);
-      left = files.length < DELETE_FILES_PER_CALL ? 0 : ((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM deleted_object WHERE tour_id = ?", [id]))?.n ?? 0);
-      if (left === 0) {
-        // Only while no file row is left, so a call racing this one can never strand a file.
-        await deps.db.run("DELETE FROM tour_deletion WHERE tour_id = ? AND workspace_id = ? AND NOT EXISTS (SELECT 1 FROM deleted_object WHERE tour_id = ?)", [
-          id, auth.workspaceId, id,
-        ]);
-      }
+      left = await clearDeletionPage(deps, auth.workspaceId, id);
     } catch {
       // Fixed text only: the error could carry anything a back end put in its message.
       console.error("delete: could not remove some files of a deleted tour; the next delete call retries");

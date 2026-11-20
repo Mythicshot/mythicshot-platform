@@ -95,6 +95,21 @@ export async function workspaceOf(deps: Deps, userId: string): Promise<string | 
 }
 
 /**
+ * The SQL condition that no account of the workspace `ws` names is disabled, for a public
+ * route to fold into the one lookup it already makes: an account belongs to a workspace by
+ * its membership or, for a row an older build wrote without one, by the workspace its own
+ * row names (the rule the token lookup in src/auth.ts holds). `ws` is a column of the
+ * query, such as `t.workspace_id`, never a value from a request. Two index lookups (the
+ * account table's workspace index and the membership's key), no added call.
+ */
+export function noDisabledAccount(ws: string): string {
+  return (
+    `NOT EXISTS (SELECT 1 FROM user du WHERE du.workspace_id = ${ws} AND du.status = 'disabled')` +
+    ` AND NOT EXISTS (SELECT 1 FROM membership dm JOIN user du ON du.id = dm.user_id WHERE dm.workspace_id = ${ws} AND du.status = 'disabled')`
+  );
+}
+
+/**
  * The statements that give every account lacking them its membership (owner of the
  * workspace its own row names) and its sign-in method (a link sent by mail), for the
  * caller to run in a batch. An account lacks them when a build from before accounts made

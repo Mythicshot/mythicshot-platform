@@ -109,6 +109,10 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /api/v1/admin/summary": "app",
   "GET /api/v1/admin/accounts": "app",
   "PATCH /api/v1/admin/workspaces/:id": "app",
+  "POST /api/v1/admin/accounts/:id/disable": "app",
+  "POST /api/v1/admin/accounts/:id/enable": "app",
+  "GET /api/v1/admin/accounts/:id/removal": "app",
+  "DELETE /api/v1/admin/accounts/:id": "app",
 
   // The sign-in pages and their two files. They lead to the session, whose cookie belongs
   // to the app address alone, so none of them answers on the tours address.
