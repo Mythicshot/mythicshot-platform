@@ -258,7 +258,7 @@ const SELF: Record<string, { path: string; ends: string }> = {
 };
 
 /** The fields of one account in the admin's list: who it is, its counts and its allowance. */
-const ACCOUNT_FIELDS = ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "counted.pictures", "counted.logos", "counted.uploads_in_progress"];
+const ACCOUNT_FIELDS = ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "counted.pictures", "counted.logos", "counted.uploads_in_progress"];
 
 /**
  * Routes that cross workspaces on purpose, for the site's admin alone: why, a request the
@@ -1104,8 +1104,10 @@ describe("the admin routes", () => {
       expect(r.headers.get("cache-control"), key).toBe("no-store");
       // Exactly the listed fields: none more, none missing.
       expect([...new Set(keyPaths(r.json))].sort(), key).toEqual([...entry.fields].sort());
-      // And no name of either workspace's content, by any of its names.
-      for (const n of [...before.a, ...before.b]) expect(r.text.includes(n), `${key} told the admin ${n}`).toBe(false);
+      // And no name of either workspace's content, by any of its names. The list of accounts
+      // alone names each workspace, for the admin page's Workspace column.
+      const named = key === "GET /api/v1/admin/accounts" ? [w.a.workspaceName, w.b.workspaceName] : [];
+      for (const n of [...before.a, ...before.b]) if (!named.includes(n)) expect(r.text.includes(n), `${key} told the admin ${n}`).toBe(false);
     }
   });
 

@@ -367,7 +367,7 @@ function schemas(): Record<string, Schema> {
       },
     }),
     AdminAccount: object(
-      ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted"],
+      ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted"],
       {
         id: { type: "string", pattern: "^usr_[0-9a-f]{24}$", description: "The account's id." },
         username: { type: ["string", "null"], description: "null until the account has one." },
@@ -376,6 +376,7 @@ function schemas(): Record<string, Schema> {
         admin: { type: "boolean", description: "true for the site's admin." },
         created_at: whole("When the account was made, in milliseconds since 1970."),
         workspace_id: { type: "string", pattern: "^ws_[0-9a-f]{24}$", description: "The account's workspace: the id to set its allowance with." },
+        workspace_name: { type: "string", description: "The workspace's name, as its owner wrote it. Show it as text: it may hold any characters." },
         tours: whole("How many tours the workspace has, drafts and published."),
         used_bytes: whole("What the workspace uses, in bytes, counted as GET /api/v1/usage counts it for the account itself."),
         allowance_bytes: { type: ["integer", "null"], description: "The allowance in force, in bytes: the workspace's own number, else the server's setting. null when there is no limit." },
@@ -942,7 +943,7 @@ function paths(): OpenApiDoc["paths"] {
       get: {
         tags: ["Admin"],
         summary: "List every account's storage use",
-        description: `For the site's admin: every account, in the order they were made, ${ADMIN_PAGE} at a time, with its workspace's id, its tour count, what it uses of its storage (counted as GET /api/v1/usage counts it for the account itself) and its allowance. Nothing of any workspace's tours is in it. Add ?after=<id>, with the next of the previous answer, for the next page. Every refusal is the one 404, whoever asks and whatever is wrong with the request. ${NOT_FROM_THE_PAGE}`,
+        description: `For the site's admin: every account, in the order they were made, ${ADMIN_PAGE} at a time, with its workspace's id and name, its tour count, what it uses of its storage (counted as GET /api/v1/usage counts it for the account itself) and its allowance. Nothing of any workspace's tours is in it. Add ?after=<id>, with the next of the previous answer, for the next page. Every refusal is the one 404, whoever asks and whatever is wrong with the request. ${NOT_FROM_THE_PAGE}`,
         operationId: "adminListAccounts",
         security: SESSION,
         responses: {
