@@ -922,6 +922,27 @@ describe("the two address settings (TOURS_HOST and APP_HOST)", () => {
     expect(readFileSync(path, "utf8").split("\n").slice(0, 4).join("\n")).toContain("INVITE_CONTACT");
   });
 
+  it("update keeps a hand-set IMG_HOST beside the two addresses", async () => {
+    const account = fakeAccount();
+    const first = harness(account);
+    expect(await first.run("--yes")).toBe(0);
+    const path = join(first.root, DEPLOY_CONFIG);
+    // wrangler.jsonc does not carry the var, so a new install's file has none.
+    expect(readFileSync(path, "utf8")).not.toContain('"IMG_HOST":');
+    const before = readFileSync(path, "utf8");
+    writeFileSync(path, before.replace('"TOURS_HOST": ""', '"TOURS_HOST": "tours.example.com"').replace('"APP_HOST": ""', '"APP_HOST": "app.example.com", "IMG_HOST": "made-up-img.example.com"'));
+    const kept = { ...VARS, TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com", IMG_HOST: "made-up-img.example.com" };
+    expect(deployed(first.root).vars).toEqual(kept);
+    for (const argv of [["update", "--yes"], ["--yes"], ["status"], ["update", "--yes"]]) {
+      const h = harness(account, { root: first.root });
+      expect(await h.run(...argv), argv.join(" ")).toBe(0);
+      expect(deployed(first.root).vars, argv.join(" ")).toEqual(kept);
+      expect((text(h.out) + text(h.err)).toLowerCase(), argv.join(" ")).not.toContain("made-up");
+    }
+    expect(readInstall(first.root)?.keptVars).toEqual({ IMG_HOST: "made-up-img.example.com" });
+    expect(readFileSync(path, "utf8").split("\n").slice(0, 4).join("\n")).toContain("IMG_HOST");
+  });
+
   it("update keeps both empty when they were empty", async () => {
     const account = fakeAccount();
     const first = harness(account);

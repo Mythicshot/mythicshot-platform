@@ -11,9 +11,11 @@
 //
 // Two more settings are optional and go together: TOURS_HOST and APP_HOST, the host names
 // of the tours address and the app address (such as tours.example.com and
-// app.example.com). With neither, the app serves one address. They are passed on like
-// every other line; the app itself checks them and stops at the start on a pair it
-// cannot use.
+// app.example.com). With neither, the app serves one address. A third, IMG_HOST, the
+// host name of an address for shared images and clips (such as img.example.com), is
+// optional too and only ever set beside the other two. They are passed on like every
+// other line; the app itself checks them and stops at the start on addresses it cannot
+// use.
 //
 // The optional mail settings are passed on the same way: MAIL_MODE (off, the default, or
 // smtp), MAIL_FROM, SMTP_HOST, SMTP_PORT, SMTP_USER and SMTP_PASSWORD, and with them

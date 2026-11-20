@@ -59,8 +59,15 @@ export function normaliseHost(raw: string): string | null {
 }
 
 /** The setting that holds a role's address, such as `TOURS_HOST`. */
-function settingOf(role: HostRole): string {
-  return `${role.toUpperCase()}_HOST`;
+export function settingOf(role: HostRole): `${Uppercase<HostRole>}_HOST` {
+  return `${role.toUpperCase() as Uppercase<HostRole>}_HOST`;
+}
+
+/** Every role's setting from an environment or a Worker's vars, keyed by role, each as found. */
+export function hostSettingsFrom<T>(env: Readonly<Partial<Record<string, T>>>): Partial<Record<HostRole, T>> {
+  const out: Partial<Record<HostRole, T>> = {};
+  for (const role of HOST_ROLES) out[role] = env[settingOf(role)];
+  return out;
 }
 
 /** A host without its port. */
