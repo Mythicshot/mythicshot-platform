@@ -8,6 +8,7 @@ Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on
 - The "Connect Mythicshot" card takes the code Mythicshot shows, in any case, with or without the dash. A code that cannot be one is refused in the page without a request. Continue names the computer and when it asked, and "Connect" or "Not me" settles that same code; closing the question leaves the request alone. After too many codes that did not work, Continue rests for the minutes the server gives. The code is only ever sent in a request body, never in an address, and is not stored.
 - After "Connect" the list is read again a few times over about half a minute, until the new computer shows up once Mythicshot has collected its token.
 - The question warns in one more line when the request came from a different network than the page's.
+- When no answer comes back to "Connect" or "Not me", the page looks the code up once: if the request is no longer open the question closes with a note that the computer shows in the list if it was connected, and the list is watched; if it is still open the question stays with the failure, so a second press never meets "does not work" by surprise.
 - The dashboard's shared script hands a page the answer's retry-after header, and writes a date with the year on request.
 
 ## 0.1.26 (2026-11-20)

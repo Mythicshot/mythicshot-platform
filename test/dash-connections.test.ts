@@ -112,10 +112,12 @@ const TEXT: Record<string, string> = {
   askAfter: '"?',
   badName: "A name is 1 to 60 characters, with no hidden characters.",
   alreadyGone: "That connection was already disconnected.",
+  // Proposed in review: when no answer came to Connect or Not me and the code is no longer open.
+  lostAnswer: "The answer was lost on the way. If the computer was connected, it shows in the list below within a few seconds; if not, press Sign in in Mythicshot again.",
   notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
 };
 
-const CLASS_NAMES = ["btn sm quiet", "btn sm danger", "t name", "confirm-facts confirm-elsewhere confirm-warn", "confirm-facts confirm-warn"];
+const CLASS_NAMES = ["note plain", "btn sm quiet", "btn sm danger", "t name", "confirm-facts confirm-elsewhere confirm-warn", "confirm-facts confirm-warn"];
 
 const seen = (c: Call) => ({ status: c.status, headers: [...c.headers.entries()].sort(), body: c.text });
 

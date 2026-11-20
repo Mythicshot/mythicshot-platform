@@ -20,7 +20,10 @@
 // outside close the question and send nothing: the request stays open until it expires. A
 // 404 from any of the three is the "does not work" sentence; a 429 says how many minutes to
 // wait (its retry-after, rounded up) and Continue stays disabled, and does nothing, until
-// then. The code is never read from or written to the page's address, storage or a log.
+// then. When no answer comes to Connect or Not me, the code is looked up once: a 404 (no
+// longer open) closes the question with a neutral note and the list is watched as after a
+// confirm; anything else keeps the question open with the failure. The code is never read
+// from or written to the page's address, storage or a log.
 //
 // After a confirm the token does not exist yet: Mythicshot makes it when it next asks, every
 // few seconds (src/connect.ts). So the list is read at once and then again after each pause
@@ -143,6 +146,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
     askAfter: '"?',
     badName: "A name is 1 to 60 characters, with no hidden characters.",
     alreadyGone: "That connection was already disconnected.",
+    lostAnswer: "The answer was lost on the way. If the computer was connected, it shows in the list below within a few seconds; if not, press Sign in in Mythicshot again.",
     notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
   };
   var TOKENS = "/api/v1/tokens";
@@ -259,14 +263,17 @@ export const CONNECTIONS_JS = String.raw`(function () {
     else input.removeAttribute("aria-invalid");
   }
 
-  function note(name) {
+  // The card's note: "<name> is connected…" in green, or a plain sentence (the lost answer's)
+  // in the card's quiet colours; note(null) hides it.
+  function note(name, plain) {
     var line = $("connect-note");
     line.textContent = "";
+    line.className = typeof plain === "string" ? "note plain" : "note";
     if (name !== null) {
       line.appendChild(el("span", "name", name));
       line.appendChild(el("span", "", TEXT.isConnected));
-    }
-    line.hidden = name === null;
+    } else if (typeof plain === "string") line.textContent = plain;
+    line.hidden = name === null && typeof plain !== "string";
   }
 
   function blocked() {
@@ -365,8 +372,30 @@ export const CONNECTIONS_JS = String.raw`(function () {
     var button = how === "confirm" ? "confirm-go" : "confirm-refuse";
     confirmQ.say("");
     confirmQ.busy(true, button, how === "confirm" ? TEXT.connecting : undefined);
+    // No answer came: it may have been settled all the same. The code is looked up once: a
+    // 404 means the request is no longer open (settled, or expired), so the question closes
+    // with the neutral note and the list is watched; anything else (a 200: it is still open)
+    // keeps the question open with the failure.
+    function lost() {
+      lookupRequest(p.code).then(function (res) { return res; }, function () { return null; }).then(function (res) {
+        if (res !== null && res.status === 401) { Dash.signedOut(); return; }
+        confirmQ.busy(false, button);
+        if (res !== null && res.status === 404) {
+          confirmQ.close(false);
+          $("connect-code").value = "";
+          codeSays("");
+          note(null, TEXT.lostAnswer);
+          watch();
+          $("connect-code").focus();
+          return;
+        }
+        confirmQ.say(Dash.TEXT.failed);
+        $(button).focus();
+      });
+    }
     function settle(res) {
       if (res !== null && res.status === 401) { Dash.signedOut(); return; }
+      if (res === null) { lost(); return; }
       confirmQ.busy(false, button);
       var input = $("connect-code");
       if (res !== null && (res.status === 204 || res.status === 404 || res.status === 429)) {
@@ -383,10 +412,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
         input.focus();
         return;
       }
-      // Not done. When no answer came to a confirm it may have been made all the same: the
-      // list is watched, so the computer shows up if it was.
-      if (res === null && how === "confirm") watch();
-      confirmQ.say(res === null ? Dash.TEXT.failed : Dash.failure(res));
+      confirmQ.say(Dash.failure(res));
       $(button).focus();
     }
     Dash.api("POST", how === "confirm" ? CONFIRM : REFUSE, { user_code: p.code }).then(settle, function () { settle(null); });

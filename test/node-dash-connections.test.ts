@@ -1,7 +1,8 @@
 // What the Connections page's script does when it runs: the page's document, the shared
 // /dash/dash.js and the page's own /dash/connections.js are run in one fresh Node `vm`
 // context against a stand-in document built from the page's own HTML (test/pages-dom.ts),
-// with a stand-in timer and fetch answered from the test. Node only: the Workers runtime runs
+// with a stand-in timer and a fetch answered from the test or handed to the real app (the
+// last part: start, lookup, confirm, collection and refuse through the actual routes). Node only: the Workers runtime runs
 // no code from a string.
 //
 // What this leaves unproven, for docs/dashboard-browser-check.md: real layout at phone width
@@ -9,8 +10,12 @@
 // reader, and the two-device sign-in with a real Mythicshot.
 import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
+import { makeDeps, seedAccount } from "#harness";
+import { createApp } from "../src/app.ts";
 import { CONNECTIONS_HTML, CONNECTIONS_JS } from "../src/dash/connections.ts";
 import { DASH_JS } from "../src/dash/script.ts";
+import type { Deps } from "../src/ports.ts";
+import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
 import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
 
 const CSRF = "c".repeat(64);
@@ -443,15 +448,71 @@ describe("the Connections page: connecting with a code", () => {
     expect([tab.$("confirm-dialog").shown, tab.$("connect-code").value, tab.$("connect-note").shown, tab.$("connect-message").shown]).toEqual([false, "", false, false]);
   });
 
-  it("a failed confirm never confirms and keeps the question open; a lost answer watches the list", async () => {
-    for (const [answer, text] of [[{ status: 500, json: { error: "internal" } }, FAILED], [{ status: 403, json: { error: "csrf" } }, FAILED], ["network", FAILED]] as [Answer, string][]) {
+  it("a failed confirm never confirms and keeps the question open", async () => {
+    for (const [answer, text] of [[{ status: 500, json: { error: "internal" } }, FAILED], [{ status: 403, json: { error: "bad_csrf" } }, FAILED]] as [Answer, string][]) {
       const tab = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/connect/confirm": answer }));
       tab.$("confirm-go").click();
       await tab.settle();
       expect([tab.$("confirm-dialog").shown, tab.$("confirm-message").textContent, tab.$("confirm-go").textContent, tab.$("confirm-go").disabled, tab.$("connect-note").shown], String(answer)).toEqual([true, text, "Connect", false, false]);
       expect(of(tab, "POST", "/api/v1/connect/confirm"), String(answer)).toHaveLength(1);
-      expect(of(tab, "GET", "/api/v1/tokens").length, String(answer)).toBe(answer === "network" ? 2 : 1);
+      // No second lookup and no watching of the list after an answer that says it failed.
+      expect([of(tab, "POST", "/api/v1/connect/lookup").length, of(tab, "GET", "/api/v1/tokens").length], String(answer)).toEqual([1, 1]);
     }
+  });
+
+  it("a lost answer to Connect or Not me looks the code up once: 404 closes with the neutral note and watches the list", async () => {
+    for (const [path, button] of [["/api/v1/connect/confirm", "confirm-go"], ["/api/v1/connect/refuse", "confirm-refuse"]]) {
+      const lists = [list(MOCKUP), list(MOCKUP), list([token(T4, "ALEX-DESKTOP-2", { created_at: NOW, last_used_at: null }), ...MOCKUP])];
+      const tab = await lookedUp(standard({ [LOOKUP]: [found(), NO_REQUEST], [`POST ${path}`]: "network", "GET /api/v1/tokens": lists }));
+      tab.$(button).click();
+      await tab.settle();
+      expect(of(tab, "POST", "/api/v1/connect/lookup").map((f) => f.body), path).toEqual([{ user_code: "K7QM2HXD" }, { user_code: "K7QM2HXD" }]);
+      expect(of(tab, "POST", path), path).toHaveLength(1);
+      expect([tab.$("confirm-dialog").shown, tab.$("connect-note").shown, tab.$("connect-note").textContent, tab.$("connect-note").className, tab.$("connect-code").value, tab.$("connect-message").shown, tab.doc.activeElement?.id], path).toEqual([
+        false,
+        true,
+        "The answer was lost on the way. If the computer was connected, it shows in the list below within a few seconds; if not, press Sign in in Mythicshot again.",
+        "note plain",
+        "",
+        false,
+        "connect-code",
+      ]);
+      // Watched as after a confirm: read now, then after the pauses until the new computer shows up.
+      expect(tab.pendingDelays(), path).toEqual([3000]);
+      tab.tick();
+      await tab.settle();
+      expect(rows(tab).map((r) => nameOf(r).textContent)[0], path).toBe("ALEX-DESKTOP-2");
+      expect(tab.pendingDelays(), path).toEqual([]);
+    }
+  });
+
+  it("a lost answer whose lookup says the code is still open (or gets no answer either) keeps the question open with the failure", async () => {
+    for (const second of [found(), "network", { status: 500 }] as Answer[]) {
+      const tab = await lookedUp(standard({ [LOOKUP]: [found(), second], "POST /api/v1/connect/confirm": "network" }));
+      tab.$("confirm-go").click();
+      await tab.settle();
+      expect([tab.$("confirm-dialog").shown, tab.$("confirm-message").textContent, tab.$("confirm-go").textContent, tab.$("confirm-go").disabled, tab.$("connect-note").shown, tab.$("connect-code").value], String(second)).toEqual([true, FAILED, "Connect", false, false, "K7QM-2HXD"]);
+      expect([of(tab, "POST", "/api/v1/connect/lookup").length, of(tab, "POST", "/api/v1/connect/confirm").length, of(tab, "GET", "/api/v1/tokens").length, tab.pendingDelays()], String(second)).toEqual([2, 1, 1, []]);
+    }
+    // While the second lookup runs, Connect stays busy and Escape does nothing.
+    let lookups = 0;
+    const h = holding((r) => r.path === "/api/v1/connect/lookup" && ++lookups > 1, standard({ [LOOKUP]: found(), "POST /api/v1/connect/confirm": "network" }));
+    const tab = await lookedUp(h.respond);
+    tab.$("confirm-go").click();
+    await tab.settle();
+    tab.$("confirm-go").click();
+    key(tab.$("confirm-go"), "Escape");
+    expect([tab.$("confirm-dialog").shown, tab.$("confirm-go").textContent, of(tab, "POST", "/api/v1/connect/confirm").length]).toEqual([true, "Connecting…", 1]);
+    h.answer(found());
+    await tab.settle();
+    expect(tab.$("confirm-message").textContent).toBe(FAILED);
+  });
+
+  it("a session that ends while a lost answer is checked goes to sign in", async () => {
+    const tab = await lookedUp(standard({ [LOOKUP]: [found(), SIGNED_OUT], "POST /api/v1/connect/confirm": "network" }));
+    tab.$("confirm-go").click();
+    await tab.settle();
+    expect(tab.left()).toBe("/signin");
   });
 
   it("a code that does not work, from the lookup or from Connect and Not me, says so", async () => {
@@ -668,5 +729,119 @@ describe("the Connections page: rename and disconnect", () => {
     tab.$("disconnect-go").click();
     await tab.settle();
     expect([tab.$("disconnect-dialog").shown, tab.$("connections-message").textContent]).toEqual([false, NOT_RELOADED]);
+  });
+});
+
+// ---- Against the real app ----
+
+const APP = "https://app.example.com";
+const FIREFOX = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
+
+/** A tab's fetch to the real app on the app address, as a browser sends it there, with a session cookie. */
+function browser(deps: Deps, cookie: string): Responder {
+  const app = createApp(deps);
+  return async (req) => {
+    const headers: Record<string, string> = { ...req.headers, "user-agent": FIREFOX, cookie };
+    if (req.method !== "GET" && req.method !== "HEAD") Object.assign(headers, { origin: APP, "sec-fetch-site": "same-origin" });
+    const res = await app.fetch(new Request(APP + req.path, { method: req.method, headers, body: req.body === undefined ? undefined : JSON.stringify(req.body) }));
+    const text = await res.text();
+    const retry = res.headers.get("retry-after");
+    return { status: res.status, json: text === "" ? undefined : JSON.parse(text), headers: retry === null ? {} : { "retry-after": retry } };
+  };
+}
+
+/** What the desktop app sends: no credential at all. */
+async function appAsks(deps: Deps, path: string, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
+  const res = await createApp(deps).fetch(new Request(APP + path, { method: "POST", headers: { "content-type": "application/json", "user-agent": "Mythicshot" }, body: JSON.stringify(body) }));
+  return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+}
+
+/** The app's next ask comes after its interval: the server's clock is moved on past the gap between two asks. */
+function later(deps: Deps, ms = 6_000): void {
+  const before = deps.now;
+  deps.now = () => before() + ms;
+}
+
+describe("the Connections page against the real app", () => {
+  async function setUp() {
+    const { deps } = await makeDeps({ hosts: { tours: "tours.example.com", app: "app.example.com" } });
+    await seedAccount(deps, { admin: true, username: "connreal-admin" });
+    const owner = await seedAccount(deps, { username: "connreal" });
+    const made = await redeemSignInCode(deps, await createSignInCode(deps, owner.userId), FIREFOX, null);
+    return { deps, cookie: `${SESSION_COOKIE}=${made!.secret}` };
+  }
+
+  it("start, lookup from the page, confirm, the app collects its token, and the list shows the new connection", async () => {
+    const { deps, cookie } = await setUp();
+    const started = await appAsks(deps, "/api/v1/connect/start", { device_name: "Checker <laptop>" });
+    expect(started.status).toBe(201);
+    expect(String(started.json.verify_url).endsWith("/connections")).toBe(true);
+    const code = String(started.json.user_code);
+    const tab = openPage(browser(deps, cookie));
+    await tab.settle();
+    expect(rows(tab).map((r) => [nameOf(r).textContent, lineOf(r).wide])).toEqual([["First token", "From setup"]]);
+    // Typed as a person might: lower case, a space for the dash.
+    type(tab, code.toLowerCase().replace("-", " "));
+    tab.$("connect-go").click();
+    await tab.settle();
+    expect(of(tab, "POST", "/api/v1/connect/lookup").map((f) => f.body)).toEqual([{ user_code: code.replace("-", "") }]);
+    expect([tab.$("confirm-dialog").shown, tab.$("confirm-device").textContent]).toEqual([true, "Checker <laptop>"]);
+    expect((await appAsks(deps, "/api/v1/connect/token", { device_code: started.json.device_code })).json.status).toBe("pending");
+    tab.$("confirm-go").click();
+    await tab.settle();
+    expect([tab.$("confirm-dialog").shown, tab.$("connect-note").textContent]).toEqual([false, "Checker <laptop> is connected. Mythicshot finishes signing in by itself within a few seconds."]);
+    // No token until the app collects it: the list read at once still has one row, and more reads are planned.
+    expect([rows(tab).length, tab.pendingDelays()]).toEqual([1, [3000]]);
+    later(deps);
+    const collected = await appAsks(deps, "/api/v1/connect/token", { device_code: started.json.device_code });
+    expect([collected.status, collected.json.status, typeof collected.json.token]).toEqual([200, "connected", "string"]);
+    tab.tick();
+    await tab.settle();
+    expect(rows(tab).map((r) => [nameOf(r).textContent, lineOf(r).wide])).toEqual([["Checker <laptop>", "Signed in from Mythicshot"], ["First token", "From setup"]]);
+    const listed = (await browser(deps, cookie)({ method: "GET", path: "/api/v1/tokens", headers: {}, body: undefined })) as { json: { tokens: { name: string; kind: string }[] } };
+    expect(listed.json.tokens.map((t) => [t.name, t.kind])).toEqual([["Checker <laptop>", "sign_in"], ["First token", "setup"]]);
+    expect(tab.pendingDelays()).toEqual([]);
+  });
+
+  it("Not me refuses: the app's ask for the token answers 410, and nothing is added", async () => {
+    const { deps, cookie } = await setUp();
+    const started = await appAsks(deps, "/api/v1/connect/start", { device_name: "Somebody else" });
+    const tab = openPage(browser(deps, cookie));
+    await tab.settle();
+    type(tab, String(started.json.user_code));
+    tab.$("connect-go").click();
+    await tab.settle();
+    tab.$("confirm-refuse").click();
+    await tab.settle();
+    expect([tab.$("confirm-dialog").shown, tab.$("connect-code").value, tab.$("connect-note").shown]).toEqual([false, "", false]);
+    const asked = await appAsks(deps, "/api/v1/connect/token", { device_code: started.json.device_code });
+    expect([asked.status, asked.json.error]).toEqual([410, "expired_code"]);
+    // The same code again does not work.
+    type(tab, String(started.json.user_code));
+    tab.$("connect-go").click();
+    await tab.settle();
+    expect(tab.$("connect-message").textContent).toBe(BAD_CODE);
+    expect(rows(tab).map((r) => nameOf(r).textContent)).toEqual(["First token"]);
+  });
+
+  it("a confirm that went through but whose answer was lost: the second lookup gets the real 404 and the page closes with the note", async () => {
+    const { deps, cookie } = await setUp();
+    const started = await appAsks(deps, "/api/v1/connect/start", { device_name: "Lossy" });
+    const real = browser(deps, cookie);
+    const tab = openPage(async (req) => {
+      const a = await real(req);
+      return req.path === "/api/v1/connect/confirm" ? "network" : a;
+    });
+    await tab.settle();
+    type(tab, String(started.json.user_code));
+    tab.$("connect-go").click();
+    await tab.settle();
+    tab.$("confirm-go").click();
+    await tab.settle();
+    expect([tab.$("confirm-dialog").shown, tab.$("connect-note").textContent]).toEqual([false, "The answer was lost on the way. If the computer was connected, it shows in the list below within a few seconds; if not, press Sign in in Mythicshot again."]);
+    expect((await appAsks(deps, "/api/v1/connect/token", { device_code: started.json.device_code })).json.status).toBe("connected");
+    tab.tick();
+    await tab.settle();
+    expect(rows(tab).map((r) => nameOf(r).textContent)).toEqual(["Lossy", "First token"]);
   });
 });
