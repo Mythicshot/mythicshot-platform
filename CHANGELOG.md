@@ -9,6 +9,7 @@ Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on
 - `GET /api/v1/usage` adds `images` and `gifs` (items online) and, in `counted`, the bytes of images and of GIFs, split from the items' share of `used_bytes`. An item still being sent counts there, and one being deleted until its files are gone. The numbers in `counted` add up to `used_bytes`.
 - `GET /api/v1/usage/largest` adds `largest`: the ten largest tours, images and GIFs together, each with its kind. The `tours` list is unchanged.
 - The admin's list shows the bytes of images and of GIFs as two totals, and nothing else of anyone's items.
+- Dashboard, Images and GIFs pages: the line under the heading shows the whole count and size from the first load ("48 images in <workspace> · 64 MB used"), and again after a delete, even while "Show more" has more to load.
 
 ## 0.1.23 (2026-11-20)
 
