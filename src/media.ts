@@ -1,59 +1,72 @@
 // Shared items: a workspace shares a single image (a PNG or a JPEG) or a short clip (a GIF
-// or an MP4). This file is the authenticated API only: start an item, send its parts and
-// an optional preview picture, commit it, read it, list a workspace's items and delete
-// one. Every query is scoped by the workspace of the caller (a token or a session, through
-// requireAuth exactly as the upload routes take it), and another workspace's item answers
-// as one that never existed. A disabled account's workspace is refused by requireAuth
-// itself, before any of this runs, as for the uploads.
+// or an MP4). This file is the authenticated API, and the one lookup the public serving
+// routes use (onlineItemFiles): start an item, send its parts and an optional preview
+// picture, commit it, read it, list a workspace's items and delete one. Every query is
+// scoped by the workspace of the caller (a token or a session, through requireAuth exactly
+// as the upload routes take it), and another workspace's item answers as one that never
+// existed. A disabled account's workspace is refused by requireAuth itself, before any of
+// this runs, as for the uploads.
 //
 // The protocol:
 // - POST /api/v1/media declares the item. One statement checks the storage allowance and
 //   writes the row, whose declared bytes from then on count as used (src/usage.ts), so two
 //   creates at the same moment can never pass the allowance together. The answer says how
 //   many parts to send and how long each is: PART_BYTES each, the last one the rest.
-// - PUT .../parts/:n stores part n as its own object. Part 0 is checked against the
-//   declared type (and, for a PNG, JPEG or GIF, the declared width and height) from its
-//   own bytes. Sending a part again replaces it.
+// - PUT .../parts/:n stores part n. Part 0 is checked against the declared type (and, for
+//   a PNG, JPEG or GIF, the declared width and height) from its own bytes. Sending a part
+//   again replaces it.
 // - PUT .../preview stores the optional preview picture, checked like a logo.
 // - POST .../commit checks that every part is stored and that they add up to the declared
-//   bytes, and puts the item online. From then on nothing of it changes until it is deleted.
-// - DELETE removes the item in any state, its rows and every object it could have written.
+//   bytes, and puts the item online. From then on none of the bytes it serves can change.
+// - DELETE removes the item in any state, its rows and every object it wrote.
+// An item not committed within MEDIA_MAX_AGE_MS answers as one that was swept, whether or
+// not a sweep has run yet, and is swept by the workspace's next create.
 //
-// Bookkeeping that keeps a delete exact and a commit all-or-nothing:
-// - A part's row is written before its object, with a random claim token, and marked
-//   stored (claim cleared) once the object is written, only by the request whose claim it
-//   holds. A commit takes effect only while no part and no preview is claimed, so a part
-//   still being written can never land in an item that is already online.
-// - A delete (and the sweep) first sets the item `closing`. Every statement that writes
-//   for an item takes effect only while it is `uploading`, so a request that finds the item
-//   closing or gone after it wrote an object removes that object itself; anything left is
-//   under a key the item's row names, which the delete or a later sweep removes.
-// - Keys are `m/<item id>/part-NNN` (n from 000) and `m/<item id>/preview.png` or `.jpg`,
-//   named from the row alone, so a delete names every key the item could have written,
-//   even one whose request was cut off before its row was finished, and never another's.
+// Every object is written under a key of its own claim, and a row names it before it is
+// written. That gives three things, whatever the order requests meet in:
+// (a) Every object under `m/` is named by a row until it has been deleted. A request first
+//     inserts a `media_object` row (item, part number or -1 for the preview, a random claim
+//     token, the time), only while the item is uploading, and only then writes the object
+//     at `m/<id>/part-NNN.<claim>` or `m/<id>/preview.<claim>.<png|jpg>`. A delete or the
+//     sweep deletes the key of every claim row, and removes a claim row only once its object
+//     cannot appear any more: it was stored (written before the item closed), or it is
+//     older than CLAIM_LIFETIME_MS, longer than any request lives. The item row goes only
+//     with its last claim row; a younger claim keeps it closing until a later delete, a
+//     later sweep, or that request's own clean-up finishes it.
+// (b) Once online, none of the bytes an item serves can change. The object a part or the
+//     preview serves is its `current` claim, made current only by the statement that marks
+//     that claim stored, which takes effect only while the item is uploading. A request that
+//     lost or came late writes under its own key, so it can never overwrite what is served,
+//     and deletes its own object. Only claims that are no longer current are ever deleted
+//     while an item is online, and a claim that was current once never becomes current again.
+// (c) An item's bytes count toward the allowance until its row is removed, which happens
+//     only with its last object: the usage counts every item row, closing ones too, and
+//     every preview claim row (src/usage.ts). A delete that finishes in its own request
+//     frees the room at once; one answered cleanup_pending counts until it is retried.
 //
 // Where the objects live: the private store (`deps.drafts`), never the public one. The
 // public store can be a bucket with a public domain of its own (PUBLIC_IMAGE_BASE), where
 // an object is reachable without the app: an unfinished item, one being deleted, one of a
 // disabled account, and every online item would then be served past the checks the
-// serving route makes. Items are always served through the app (a later task reads the
-// parts and sets its own fixed headers), so nothing needs them in the public store, and
-// nothing is copied at commit. Their keys are under `m/`; everything else in the private
-// store is under `u/` (src/uploads.ts writes every draft key there, and the upload abort
-// and sweep, the tour delete and the replaced-picture clean-up delete only keys taken from
-// step, upload and replaced rows, which are those `u/` keys), so no other clean-up can
-// reach an item's object, and an item's delete names only its own `m/<id>/` keys.
+// serving route makes. Items are always served through the app (it reads the parts through
+// onlineItemFiles and sets its own fixed headers), so nothing needs them in the public
+// store, and nothing is copied at commit. Their keys are under `m/`; everything else in
+// the private store is under `u/` (src/uploads.ts writes every draft key there, and the
+// upload abort and sweep, the tour delete and the replaced-picture clean-up delete only
+// keys taken from step, upload and replaced rows, which are those `u/` keys), so no other
+// clean-up can reach an item's object, and an item's delete names only its own claims.
 import type { Hono } from "hono";
 import { newId, newLinkId, requireAuth, type Auth } from "./auth.ts";
 import { mediaOrigin } from "./hosts.ts";
+import { MAX_PARTS, PART_BYTES, mediaLimitsProblem } from "./limits.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
-import { isUniqueViolation, type Config, type Deps } from "./ports.ts";
-import { LIMITS_MEDIA, hitLimit, workspaceKey } from "./rate.ts";
+import { isUniqueViolation, type Config, type Deps, type Stmt } from "./ports.ts";
+import { LIMITS_MEDIA, hitLimit, workspaceKey, type Limit } from "./rate.ts";
 import { checkImage, mediaInfo, type ImageType, type MediaType } from "./sniff.ts";
 import { ALLOWANCE_OF_SQL, USED_SQL, allowanceParams, storageFull, usageOf } from "./usage.ts";
 
-/** The longest request body: a part. Every part but the last is exactly this long. */
-export const PART_BYTES = 2_000_000;
+/** The longest request body (a part: every part but the last is exactly this long), and the most parts an item may have. */
+export { MAX_PARTS, PART_BYTES, mediaLimitsProblem };
 /** The limits a deployment may change in its config (see Config in src/ports.ts), with their defaults. */
 export const DEFAULT_MEDIA_LIMITS = { imageMaxBytes: 10 * 1024 * 1024, imageMaxSide: 8192, clipMaxBytes: 50 * 1024 * 1024 } as const;
 /** The most pixels a clip may declare on a side. A ceiling against nonsense, not a setting. */
@@ -64,16 +77,23 @@ export const CLIP_MAX_DURATION_MS = 600_000;
 export const PREVIEW_RULE = { maxBytes: 100_000, maxSide: 512 } as const;
 /** The longest title, in characters. */
 export const TITLE_MAX = 120;
-/** An item not committed within this long is swept by the workspace's next create. */
+/** An item not committed within this long answers as swept, and is swept by the workspace's next create. */
 export const MEDIA_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long a claim that was never marked stored may still see its object written: longer
+ * than any request that writes one lives. After it, a delete takes the claim as dead.
+ */
+export const CLAIM_LIFETIME_MS = 5 * 60 * 1000;
 /** Items one list page holds. */
 export const LIST_PAGE = 50;
-/** Items one create removes at most while sweeping, to bound its work: two calls each. */
+/** Items one create removes at most while sweeping, to bound its work: three calls each. */
 const SWEEP_LIMIT = 5;
 /** The create's JSON body: a few short fields and a title. */
 const CREATE_BODY_BYTES = 4096;
 /** Attempts at a fresh link id when one collides with an existing item's. */
 const LINK_ATTEMPTS = 5;
+/** The part number a preview's claim row carries. */
+const PREVIEW = -1;
 
 const ITEM_ID = /^med_[0-9a-f]{24}$/;
 const PART_NUMBER = /^(0|[1-9][0-9]{0,2})$/;
@@ -85,11 +105,15 @@ const TYPE_NAME: Record<MediaType, string> = { png: "PNG", jpg: "JPEG", gif: "GI
 const PREVIEW_TYPE: Record<ImageType, string> = { png: "image/png", jpg: "image/jpeg" };
 /** A control, format or surrogate character, or a line or paragraph separator: none may be in a title. */
 const FORBIDDEN_IN_TITLE = /[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029]/u;
-/** Every object is written as not to be cached; whatever serves an item later sets its own headers. */
+/** Every object is written as not to be cached; whatever serves an item sets its own headers. */
 const NO_CACHE = "no-store";
 
-/** The limits this deployment uses. */
-export function mediaLimits(config: Config): { imageMaxBytes: number; imageMaxSide: number; clipMaxBytes: number } {
+type Limits = { imageMaxBytes: number; imageMaxSide: number; clipMaxBytes: number };
+
+/** The limits this deployment uses. Throws the problem for settings mediaLimitsProblem refuses. */
+export function mediaLimits(config: Config): Limits {
+  const problem = mediaLimitsProblem(config);
+  if (problem !== null) throw new Error(problem);
   return {
     imageMaxBytes: config.mediaImageMaxBytes ?? DEFAULT_MEDIA_LIMITS.imageMaxBytes,
     imageMaxSide: config.mediaImageMaxSide ?? DEFAULT_MEDIA_LIMITS.imageMaxSide,
@@ -107,20 +131,9 @@ function partLength(bytes: number, parts: number, n: number): number {
   return n < parts - 1 ? PART_BYTES : bytes - PART_BYTES * (parts - 1);
 }
 
-function partKey(id: string, n: number): string {
-  return `m/${id}/part-${String(n).padStart(3, "0")}`;
-}
-
-function previewKey(id: string, type: ImageType): string {
-  return `m/${id}/preview.${type}`;
-}
-
-/** Every key an item could have written: one per part and a preview of either type. */
-function possibleKeys(id: string, parts: number): string[] {
-  const keys: string[] = [];
-  for (let n = 0; n < parts; n++) keys.push(partKey(id, n));
-  keys.push(previewKey(id, "png"), previewKey(id, "jpg"));
-  return keys;
+/** The key of one claim's object: a part's, or (n = -1) the preview's of type `ext`. */
+function objectKey(id: string, o: { n: number; claim: string; ext: ImageType | null }): string {
+  return o.n === PREVIEW ? `m/${id}/preview.${o.claim}.${o.ext ?? "png"}` : `m/${id}/part-${String(o.n).padStart(3, "0")}.${o.claim}`;
 }
 
 /** The path of an item's public page: /i/<link id> for an image, /r/<link id> for a clip. */
@@ -140,7 +153,7 @@ export function mediaLink(config: Config, item: { kind: MediaKind; link_id: stri
   return mediaOrigin({ hosts: config.hosts ?? null, ...(typeof config.siteHost === "string" ? { siteHost: config.siteHost } : {}) }) + mediaPath(item);
 }
 
-/** A random token naming one request's claim on a part or a preview: 24 hex characters. */
+/** A random token naming one request's claim: 24 hex characters. */
 function claimToken(): string {
   return newId("med").slice(4);
 }
@@ -157,22 +170,37 @@ type ItemRow = {
   duration_ms: number | null;
   title: string | null;
   state: "uploading" | "online" | "closing";
+  created_at: number;
+  /** The current preview's type, its size and its claim, or null when the item has none. */
   preview_type: ImageType | null;
   preview_bytes: number | null;
   preview_claim: string | null;
-  preview_stored_at: number | null;
-  created_at: number;
 };
 
-const ITEM_COLUMNS = "id, link_id, kind, content_type, bytes, parts, width, height, duration_ms, title, state, preview_type, preview_bytes, preview_claim, preview_stored_at, created_at";
+/** The current preview claim of the item row `m` in scope, one column of it. */
+const currentPreview = (column: string) => `(SELECT o.${column} FROM media_object o WHERE o.media_id = m.id AND o.n = -1 AND o.current = 1)`;
+const ITEM_COLUMNS = `m.id, m.link_id, m.kind, m.content_type, m.bytes, m.parts, m.width, m.height, m.duration_ms, m.title, m.state, m.created_at,
+  ${currentPreview("ext")} AS preview_type, ${currentPreview("bytes")} AS preview_bytes, ${currentPreview("claim")} AS preview_claim`;
 
+/** An item of this workspace that requests may still act on: not closing, and not left unfinished past MEDIA_MAX_AGE_MS. */
 async function loadItem(deps: Deps, auth: Auth, id: string): Promise<ItemRow | null> {
   if (!ITEM_ID.test(id)) return null;
-  return deps.db.first<ItemRow>(`SELECT ${ITEM_COLUMNS} FROM media WHERE id = ? AND workspace_id = ?`, [id, auth.workspaceId]);
+  const row = await deps.db.first<ItemRow>(`SELECT ${ITEM_COLUMNS} FROM media m WHERE m.id = ? AND m.workspace_id = ?`, [id, auth.workspaceId]);
+  if (row === null || row.state === "closing") return null;
+  if (row.state === "uploading" && row.created_at < deps.now() - MEDIA_MAX_AGE_MS) return null;
+  return row;
 }
+
+/** The condition, over an item row `media` in scope, that it is uploading and not past its age. Two parameters: the workspace id, the age floor. */
+const OPEN_ITEM = "media.workspace_id = ? AND media.state = 'uploading' AND media.created_at >= ?";
 
 const noItem = () => apiError(404, "not_found", "no such item");
 const alreadyOnline = () => apiError(409, "already_online", "the item is online and cannot change any more; delete it and start again to change it");
+const tooMany = (limit: Limit, what: string, retryAfter: number) => {
+  const res = apiError(429, "too_many_items", `this workspace ${what} ${limit.most} times in the last hour; try again later`);
+  res.headers.set("retry-after", String(retryAfter));
+  return res;
+};
 
 /** What every answer about one item says: the fields of the list, from its row. */
 function itemOut(deps: Deps, row: ItemRow) {
@@ -187,7 +215,7 @@ function itemOut(deps: Deps, row: ItemRow) {
     height: row.height,
     duration_ms: row.duration_ms,
     created_at: row.created_at,
-    has_preview: row.preview_stored_at !== null,
+    has_preview: row.preview_claim !== null,
     path: mediaPath(row),
     link: mediaLink(deps.config, row),
   };
@@ -198,42 +226,125 @@ function committedOut(deps: Deps, row: ItemRow) {
   return { id: row.id, link_id: row.link_id, kind: row.kind, path: mediaPath(row), link: mediaLink(deps.config, row) };
 }
 
+type ClaimRow = { n: number; claim: string; ext: ImageType | null; stored_at: number | null; claimed_at: number };
+
 /**
- * Removes an item of this workspace that is already marked closing: every object it could
- * have written, then its rows. Two calls, whatever the number of parts: one store delete
- * takes up to 1,000 keys (src/budget.ts counts it as one call, R2 deletes them in one
- * operation, and the Node store deletes them one by one within that call) and an item has at most 999 parts and two possible previews. The rows go only
- * while the item is still closing, and only once its objects have.
+ * Removes what it can of an item of this workspace that is already closing: deletes the
+ * object of every claim row, then removes the claim rows whose object cannot appear any
+ * more (stored, or older than CLAIM_LIFETIME_MS), and the item row once none is left.
+ * Three calls, whatever the number of parts: one store delete takes up to 1,000 keys
+ * (src/budget.ts counts it as one call, R2 deletes them in one operation, and the Node
+ * store deletes them one by one within that call). True when the item is gone.
  */
-async function removeClosing(deps: Deps, workspaceId: string, item: { id: string; parts: number }): Promise<void> {
-  await deps.drafts.delete(possibleKeys(item.id, item.parts));
+async function removeClosing(deps: Deps, workspaceId: string, id: string): Promise<boolean> {
+  const rows = await deps.db.all<ClaimRow>(
+    "SELECT o.n, o.claim, o.ext, o.stored_at, o.claimed_at FROM media_object o JOIN media m ON m.id = o.media_id WHERE o.media_id = ? AND m.workspace_id = ? AND m.state = 'closing'",
+    [id, workspaceId],
+  );
+  if (rows.length > 0) await deps.drafts.delete(rows.map((o) => objectKey(id, o)));
+  const floor = deps.now() - CLAIM_LIFETIME_MS;
+  const done = rows.filter((o) => o.stored_at !== null || o.claimed_at < floor).map((o) => o.claim);
   await deps.db.batch([
-    { sql: "DELETE FROM media_part WHERE media_id IN (SELECT id FROM media WHERE id = ? AND workspace_id = ? AND state = 'closing')", params: [item.id, workspaceId] },
-    { sql: "DELETE FROM media WHERE id = ? AND workspace_id = ? AND state = 'closing'", params: [item.id, workspaceId] },
+    {
+      sql: "DELETE FROM media_object WHERE media_id IN (SELECT id FROM media WHERE id = ? AND workspace_id = ? AND state = 'closing') AND claim IN (SELECT value FROM json_each(?))",
+      params: [id, workspaceId, JSON.stringify(done)],
+    },
+    { sql: "DELETE FROM media WHERE id = ? AND workspace_id = ? AND state = 'closing' AND NOT EXISTS (SELECT 1 FROM media_object WHERE media_id = ?)", params: [id, workspaceId, id] },
   ]);
+  return done.length === rows.length;
 }
 
 /**
  * Closes every item of the workspace still unfinished after MEDIA_MAX_AGE_MS, in one
- * statement, then removes up to SWEEP_LIMIT of its closing items (objects and rows), the
- * oldest first: those just closed, and any whose delete was cut off. Closing comes first
- * and covers all of them: from then on none can be committed and none counts against the
- * allowance. What could not be removed now is tried again by a later sweep.
+ * statement, then removes up to SWEEP_LIMIT of its closing items, the oldest first: those
+ * just closed, and any whose delete was cut off. An item that still holds a claim younger
+ * than CLAIM_LIFETIME_MS is skipped by the LIMIT, so it cannot keep the others waiting.
+ * What could not be removed now is tried again by a later sweep.
  */
 async function sweep(deps: Deps, workspaceId: string): Promise<void> {
-  await deps.db.run("UPDATE media SET state = 'closing' WHERE workspace_id = ? AND state = 'uploading' AND created_at < ?", [workspaceId, deps.now() - MEDIA_MAX_AGE_MS]);
-  const closing = await deps.db.all<{ id: string; parts: number }>(
-    "SELECT id, parts FROM media WHERE workspace_id = ? AND state = 'closing' ORDER BY created_at, id LIMIT ?",
-    [workspaceId, SWEEP_LIMIT],
+  const now = deps.now();
+  await deps.db.run("UPDATE media SET state = 'closing' WHERE workspace_id = ? AND state = 'uploading' AND created_at < ?", [workspaceId, now - MEDIA_MAX_AGE_MS]);
+  const closing = await deps.db.all<{ id: string }>(
+    `SELECT m.id FROM media m WHERE m.workspace_id = ? AND m.state = 'closing'
+        AND NOT EXISTS (SELECT 1 FROM media_object o WHERE o.media_id = m.id AND o.stored_at IS NULL AND o.claimed_at >= ?)
+      ORDER BY m.created_at, m.id LIMIT ?`,
+    [workspaceId, now - CLAIM_LIFETIME_MS, SWEEP_LIMIT],
   );
   for (const item of closing) {
     try {
-      await removeClosing(deps, workspaceId, item);
+      await removeClosing(deps, workspaceId, item.id);
     } catch {
       // Fixed text only: the error could carry anything a back end put in its message.
       console.error(`sweep: could not remove a closing item ${item.id}; will retry later`);
     }
   }
+}
+
+/**
+ * Stores one object for an item under a new claim of its own: the claim row (by `claim`,
+ * one statement that holds the item's conditions), the object, then one batch that marks
+ * the claim stored and current in place of the claim that was, only while the item is
+ * uploading. Then the claims of that part (or preview) that were current before and are
+ * not any more are deleted, objects first. Seven calls at most. Answers 204, or what the
+ * item has become meanwhile.
+ */
+async function storeClaim(
+  deps: Deps,
+  auth: Auth,
+  item: ItemRow,
+  o: { n: number; ext: ImageType | null; bytes: number; data: Uint8Array; contentType: string },
+  claim: (token: string, now: number) => Stmt,
+  refused: () => Promise<Response>,
+): Promise<Response> {
+  const token = claimToken();
+  const key = objectKey(item.id, { n: o.n, claim: token, ext: o.ext });
+  const stmt = claim(token, deps.now());
+  const made = await deps.db.run(stmt.sql, stmt.params);
+  if (made.changes === 0) return refused();
+  // The object goes under this claim's own key: nothing it writes can replace what another
+  // claim stored, whatever the order of the two.
+  let marked = false;
+  try {
+    await deps.drafts.put(key, o.data, { contentType: o.contentType, cacheControl: NO_CACHE });
+    const open = `EXISTS (SELECT 1 FROM media WHERE media.id = ? AND ${OPEN_ITEM})`;
+    const floor = deps.now() - MEDIA_MAX_AGE_MS;
+    await deps.db.batch([
+      {
+        sql: `UPDATE media_object SET current = 0 WHERE media_id = ? AND n = ? AND current = 1 AND ${open}
+                AND EXISTS (SELECT 1 FROM media_object c WHERE c.media_id = ? AND c.claim = ? AND c.stored_at IS NULL)`,
+        params: [item.id, o.n, item.id, auth.workspaceId, floor, item.id, token],
+      },
+      { sql: `UPDATE media_object SET stored_at = ?, current = 1 WHERE media_id = ? AND claim = ? AND stored_at IS NULL AND ${open}`, params: [deps.now(), item.id, token, item.id, auth.workspaceId, floor] },
+    ]);
+    const rows = await deps.db.all<ClaimRow & { current: number }>("SELECT n, claim, ext, stored_at, claimed_at, current FROM media_object WHERE media_id = ? AND n = ?", [item.id, o.n]);
+    marked = rows.some((r) => r.claim === token && r.current === 1);
+    if (marked) {
+      // What this claim replaced is served no more and can never be served again: it goes.
+      const old = rows.filter((r) => r.claim !== token && r.current === 0 && r.stored_at !== null);
+      if (old.length > 0) {
+        await deps.drafts.delete(old.map((r) => objectKey(item.id, r)));
+        await deps.db.run("DELETE FROM media_object WHERE media_id = ? AND current = 0 AND stored_at IS NOT NULL AND claim IN (SELECT value FROM json_each(?))", [item.id, JSON.stringify(old.map((r) => r.claim))]);
+      }
+      return noContent();
+    }
+  } finally {
+    if (!marked) {
+      // Not stored (the store failed, or the item was finished, deleted or swept meanwhile):
+      // this claim's object is nobody's, and this request removes it, then its row. If the
+      // request ends before that, the row still names the object for the delete or sweep.
+      try {
+        await deps.drafts.delete([key]);
+        await deps.db.batch([
+          { sql: "DELETE FROM media_object WHERE media_id = ? AND claim = ? AND stored_at IS NULL", params: [item.id, token] },
+          { sql: "DELETE FROM media WHERE id = ? AND workspace_id = ? AND state = 'closing' AND NOT EXISTS (SELECT 1 FROM media_object WHERE media_id = ?)", params: [item.id, auth.workspaceId, item.id] },
+        ]);
+      } catch {
+        console.error("media: could not remove an object that was not stored; the item's delete or sweep removes it");
+      }
+    }
+  }
+  const after = await loadItem(deps, auth, item.id);
+  return after?.state === "online" ? alreadyOnline() : noItem();
 }
 
 type Declared = { kind: MediaKind; contentType: string; bytes: number; width: number; height: number; durationMs: number | null; title: string | null };
@@ -309,6 +420,54 @@ function decodeCursor(cursor: string): { createdAt: number; id: string } | null 
   return { createdAt: Number(m[1]), id: m[2] };
 }
 
+/** What the public serving routes need of an online item: its fields, and the private store's keys of its parts (in order) and preview. */
+export type OnlineItemFiles = {
+  id: string;
+  kind: MediaKind;
+  contentType: string;
+  bytes: number;
+  width: number;
+  height: number;
+  durationMs: number | null;
+  title: string | null;
+  /** The keys in `deps.drafts` of parts 0 to parts - 1, in order: read and send them one after another. */
+  parts: string[];
+  /** The preview's key in `deps.drafts` and its type as read from its bytes, or null. */
+  preview: { key: string; type: ImageType } | null;
+};
+
+/**
+ * The files of the online item with this link id, for the public serving routes: null for
+ * a link id no item has, an item that is not online (unfinished, or being deleted), and an
+ * item of a workspace with a disabled account (the same condition the token lookup holds,
+ * src/auth.ts). Two database calls, no store call. What it answers cannot change while
+ * the item is online: the keys are its current claims, which change only while uploading.
+ */
+export async function onlineItemFiles(deps: Deps, linkId: string): Promise<OnlineItemFiles | null> {
+  if (!/^[a-z2-7]{20}$/.test(linkId)) return null;
+  const item = await deps.db.first<ItemRow>(
+    `SELECT ${ITEM_COLUMNS} FROM media m WHERE m.link_id = ? AND m.state = 'online'
+        AND NOT EXISTS (SELECT 1 FROM user u WHERE u.status = 'disabled'
+                          AND (u.workspace_id = m.workspace_id OR u.id IN (SELECT ms.user_id FROM membership ms WHERE ms.workspace_id = m.workspace_id)))`,
+    [linkId],
+  );
+  if (item === null) return null;
+  const parts = await deps.db.all<{ n: number; claim: string }>("SELECT n, claim FROM media_object WHERE media_id = ? AND current = 1 AND n >= 0 ORDER BY n", [item.id]);
+  if (parts.length !== item.parts || parts.some((p, i) => p.n !== i)) return null;
+  return {
+    id: item.id,
+    kind: item.kind,
+    contentType: item.content_type,
+    bytes: item.bytes,
+    width: item.width,
+    height: item.height,
+    durationMs: item.duration_ms,
+    title: item.title,
+    parts: parts.map((p) => objectKey(item.id, { n: p.n, claim: p.claim, ext: null })),
+    preview: item.preview_claim === null || item.preview_type === null ? null : { key: objectKey(item.id, { n: PREVIEW, claim: item.preview_claim, ext: item.preview_type }), type: item.preview_type },
+  };
+}
+
 export function mediaRoutes(app: Hono, deps: Deps): void {
   // Start an item. 201 {id, parts, part_bytes}.
   app.post("/api/v1/media", async (c) => {
@@ -326,11 +485,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     if (d instanceof Response) return d;
 
     const limit = await hitLimit(deps, LIMITS_MEDIA.create, await workspaceKey(auth.workspaceId));
-    if (limit.over) {
-      const res = apiError(429, "too_many_items", `this workspace started ${LIMITS_MEDIA.create.most} items in the last hour; try again later`);
-      res.headers.set("retry-after", String(limit.retryAfterSeconds));
-      return res;
-    }
+    if (limit.over) return tooMany(LIMITS_MEDIA.create, "started items", limit.retryAfterSeconds);
 
     // Housekeeping only: whatever goes wrong in it, this request carries on.
     try {
@@ -384,7 +539,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
     const item = await loadItem(deps, auth, c.req.param("id"));
-    if (item === null || item.state === "closing") return noItem();
+    if (item === null) return noItem();
     if (item.state === "online") return alreadyOnline();
     const nText = c.req.param("n");
     const n = PART_NUMBER.test(nText) ? Number(nText) : -1;
@@ -410,45 +565,23 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
         return apiError(400, "bad_media", "the picture's width and height differ from the declared ones");
       }
     }
+    const limit = await hitLimit(deps, LIMITS_MEDIA.part, await workspaceKey(auth.workspaceId));
+    if (limit.over) return tooMany(LIMITS_MEDIA.part, "sent parts", limit.retryAfterSeconds);
 
-    // Claim the part: only while the item is still uploading. Sending a part again takes
-    // the claim over, so a request that died never blocks its part.
-    const token = claimToken();
-    const key = partKey(item.id, n);
-    const claim = await deps.db.run(
-      `INSERT INTO media_part (media_id, n, bytes, claim, stored_at)
-       SELECT id, ?, ?, ?, NULL FROM media WHERE id = ? AND workspace_id = ? AND state = 'uploading'
-       ON CONFLICT (media_id, n) DO UPDATE SET bytes = excluded.bytes, claim = excluded.claim, stored_at = NULL`,
-      [n, data.byteLength, token, item.id, auth.workspaceId],
+    return storeClaim(
+      deps,
+      auth,
+      item,
+      { n, ext: null, bytes: data.byteLength, data, contentType: item.content_type },
+      (token, now) => ({
+        sql: `INSERT INTO media_object (media_id, n, claim, ext, bytes, claimed_at, current) SELECT id, ?, ?, NULL, ?, ?, 0 FROM media WHERE id = ? AND ${OPEN_ITEM}`,
+        params: [n, token, data.byteLength, now, item.id, auth.workspaceId, now - MEDIA_MAX_AGE_MS],
+      }),
+      async () => {
+        const now = await loadItem(deps, auth, item.id);
+        return now?.state === "online" ? alreadyOnline() : noItem();
+      },
     );
-    if (claim.changes === 0) {
-      const now = await loadItem(deps, auth, item.id);
-      return now?.state === "online" ? alreadyOnline() : noItem();
-    }
-    try {
-      await deps.drafts.put(key, data, { contentType: item.content_type, cacheControl: NO_CACHE });
-    } catch (err) {
-      // The part is not stored: its row goes, if it is still this request's, so a commit
-      // asks for it again. Whatever the store holds under the key is the item's to delete.
-      await deps.db.run("DELETE FROM media_part WHERE media_id = ? AND n = ? AND claim = ?", [item.id, n, token]);
-      throw err;
-    }
-    const done = await deps.db.run(
-      `UPDATE media_part SET claim = NULL, stored_at = ?
-        WHERE media_id = ? AND n = ? AND claim = ? AND media_id IN (SELECT id FROM media WHERE id = ? AND workspace_id = ? AND state = 'uploading')`,
-      [deps.now(), item.id, n, token, item.id, auth.workspaceId],
-    );
-    if (done.changes === 1) return noContent();
-    // A later send of this part took the claim over (it marks the part stored itself; both
-    // were checked the same way, so either's bytes will do), or the item was deleted or
-    // swept meanwhile: then the object is nobody's, and this request removes it, since the
-    // delete may have run before the object was written.
-    const after = await loadItem(deps, auth, item.id);
-    if (after === null || after.state === "closing") {
-      await deps.drafts.delete([key]);
-      return noItem();
-    }
-    return noContent();
   });
 
   // Store the preview picture. 204 once it is stored.
@@ -456,57 +589,42 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
     const item = await loadItem(deps, auth, c.req.param("id"));
-    if (item === null || item.state === "closing") return noItem();
+    if (item === null) return noItem();
     if (item.state === "online") return alreadyOnline();
     const data = await readCapped(c.req.raw, PREVIEW_RULE.maxBytes);
     if (data === "too_large") return apiError(413, "too_large", `the preview is over ${PREVIEW_RULE.maxBytes} bytes`);
     const checked = checkImage(data, PREVIEW_RULE);
     if (!checked.ok) return apiError(400, "bad_image", `preview: ${checked.error}`);
     const type = checked.info.type;
+    const limit = await hitLimit(deps, LIMITS_MEDIA.preview, await workspaceKey(auth.workspaceId));
+    if (limit.over) return tooMany(LIMITS_MEDIA.preview, "sent previews", limit.retryAfterSeconds);
 
-    // Claim the preview, in one statement with the allowance: its size counts as used from
-    // here on, in place of the size of a preview it replaces. Parameters, in the order they
-    // stand in the text: type, size and token; the item; the size once more; the workspace
-    // id of USED_SQL; ALLOWANCE_OF_SQL's three.
-    const token = claimToken();
-    const claim = await deps.db.run(
-      `UPDATE media SET preview_type = ?, preview_bytes = ?, preview_claim = ?, preview_stored_at = NULL
-        WHERE id = ? AND workspace_id = ? AND state = 'uploading'
-          AND (SELECT r.allowance IS NULL OR r.used - coalesce(media.preview_bytes, 0) + ? <= r.allowance
-                 FROM (SELECT ${USED_SQL} AS used, ${ALLOWANCE_OF_SQL} AS allowance) r)`,
-      [type, data.byteLength, token, item.id, auth.workspaceId, data.byteLength, auth.workspaceId, ...allowanceParams(deps, auth.workspaceId)],
+    // The claim row is written in one statement with the allowance: its size counts as used
+    // from here on (src/usage.ts counts every preview claim), and it is let in when what is
+    // used, less the preview it would replace, plus its size is within the allowance.
+    // Parameters, in the order they stand in the text: the row's four values; the item and
+    // its conditions; the size once more; the workspace id of USED_SQL; ALLOWANCE_OF_SQL's three.
+    return storeClaim(
+      deps,
+      auth,
+      item,
+      { n: PREVIEW, ext: type, bytes: data.byteLength, data, contentType: PREVIEW_TYPE[type] },
+      (token, now) => ({
+        sql: `INSERT INTO media_object (media_id, n, claim, ext, bytes, claimed_at, current)
+              SELECT id, -1, ?, ?, ?, ?, 0 FROM media WHERE id = ? AND ${OPEN_ITEM}
+                AND (SELECT r.allowance IS NULL
+                            OR r.used - coalesce((SELECT o.bytes FROM media_object o WHERE o.media_id = media.id AND o.n = -1 AND o.current = 1), 0) + ? <= r.allowance
+                       FROM (SELECT ${USED_SQL} AS used, ${ALLOWANCE_OF_SQL} AS allowance) r)`,
+        params: [token, type, data.byteLength, now, item.id, auth.workspaceId, now - MEDIA_MAX_AGE_MS, data.byteLength, auth.workspaceId, ...allowanceParams(deps, auth.workspaceId)],
+      }),
+      async () => {
+        const now = await loadItem(deps, auth, item.id);
+        if (now === null) return noItem();
+        if (now.state === "online") return alreadyOnline();
+        const usage = await usageOf(deps, auth.workspaceId);
+        return storageFull(usage, Math.max(0, data.byteLength - (now.preview_bytes ?? 0)), "preview");
+      },
     );
-    if (claim.changes === 0) {
-      const now = await loadItem(deps, auth, item.id);
-      if (now === null || now.state === "closing") return noItem();
-      if (now.state === "online") return alreadyOnline();
-      const usage = await usageOf(deps, auth.workspaceId);
-      return storageFull(usage, Math.max(0, data.byteLength - (now.preview_bytes ?? 0)), "preview");
-    }
-    const key = previewKey(item.id, type);
-    try {
-      await deps.drafts.put(key, data, { contentType: PREVIEW_TYPE[type], cacheControl: NO_CACHE });
-    } catch (err) {
-      await deps.db.run("UPDATE media SET preview_type = NULL, preview_bytes = NULL, preview_claim = NULL WHERE id = ? AND workspace_id = ? AND preview_claim = ?", [
-        item.id, auth.workspaceId, token,
-      ]);
-      throw err;
-    }
-    const done = await deps.db.run("UPDATE media SET preview_claim = NULL, preview_stored_at = ? WHERE id = ? AND workspace_id = ? AND preview_claim = ? AND state = 'uploading'", [
-      deps.now(), item.id, auth.workspaceId, token,
-    ]);
-    if (done.changes === 0) {
-      const after = await loadItem(deps, auth, item.id);
-      if (after === null || after.state === "closing") {
-        await deps.drafts.delete([key]);
-        return noItem();
-      }
-      // A later send of the preview took the claim over and finishes it.
-      return noContent();
-    }
-    // A preview of the other type that this one replaces is removed, so an item holds one.
-    if (item.preview_type !== null && item.preview_type !== type) await deps.drafts.delete([previewKey(item.id, item.preview_type)]);
-    return noContent();
   });
 
   // Put the item online. 200 {id, link_id, kind, path, link}, the same again when repeated.
@@ -514,50 +632,52 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
     const item = await loadItem(deps, auth, c.req.param("id"));
-    if (item === null || item.state === "closing") return noItem();
+    if (item === null) return noItem();
     if (item.state === "online") return json(200, committedOut(deps, item));
     const incomplete = (detail: string) => apiError(409, "incomplete", detail);
-    const rows = await deps.db.all<{ n: number; bytes: number; stored_at: number | null }>(
-      "SELECT p.n, p.bytes, p.stored_at FROM media_part p JOIN media m ON m.id = p.media_id WHERE p.media_id = ? AND m.workspace_id = ?",
+    const rows = await deps.db.all<{ n: number; bytes: number }>(
+      "SELECT o.n, o.bytes FROM media_object o JOIN media m ON m.id = o.media_id WHERE o.media_id = ? AND m.workspace_id = ? AND o.current = 1 AND o.n >= 0",
       [item.id, auth.workspaceId],
     );
-    const stored = new Map(rows.filter((r) => r.stored_at !== null).map((r) => [r.n, r.bytes]));
+    const stored = new Map(rows.map((r) => [r.n, r.bytes]));
     for (let n = 0; n < item.parts; n++) if (!stored.has(n)) return incomplete(`part ${n} has not been sent, or is still being sent`);
     let sum = 0;
     for (let n = 0; n < item.parts; n++) sum += stored.get(n) ?? 0;
     if (sum !== item.bytes) return incomplete(`the parts add up to ${sum} bytes, not the ${item.bytes} declared`);
-    if (item.preview_claim !== null) return incomplete("the preview is still being sent; wait for it or send it again");
 
-    // Only while the item is uploading, every part is stored and none is claimed, the
-    // stored parts add up to the declared bytes, and no preview is being sent: checked
-    // again in the statement itself, so a send that started after the look above is
-    // either finished by then or makes this a no-op.
+    // Only while the item is uploading and within its age, every part has a current stored
+    // claim, and those add up to the declared bytes: checked again in the statement itself.
+    // A send still under way after this lands under its own key, finds the item online, and
+    // removes its own object: what the item serves stays as committed.
     const done = await deps.db.run(
       `UPDATE media SET state = 'online', online_at = ?
-        WHERE id = ? AND workspace_id = ? AND state = 'uploading' AND preview_claim IS NULL
-          AND (SELECT count(*) FROM media_part p WHERE p.media_id = media.id AND p.n < media.parts AND p.stored_at IS NOT NULL AND p.claim IS NULL) = media.parts
-          AND (SELECT coalesce(sum(p.bytes), 0) FROM media_part p WHERE p.media_id = media.id AND p.n < media.parts AND p.stored_at IS NOT NULL) = media.bytes`,
-      [deps.now(), item.id, auth.workspaceId],
+        WHERE id = ? AND ${OPEN_ITEM}
+          AND (SELECT count(*) FROM media_object o WHERE o.media_id = media.id AND o.current = 1 AND o.n BETWEEN 0 AND media.parts - 1) = media.parts
+          AND (SELECT coalesce(sum(o.bytes), 0) FROM media_object o WHERE o.media_id = media.id AND o.current = 1 AND o.n >= 0) = media.bytes`,
+      [deps.now(), item.id, auth.workspaceId, deps.now() - MEDIA_MAX_AGE_MS],
     );
     const now = await loadItem(deps, auth, item.id);
-    if (now === null || now.state === "closing") return noItem();
+    if (now === null) return noItem();
     if (now.state === "online") return json(200, committedOut(deps, now));
-    if (done.changes === 0) return incomplete("a part or the preview was being sent again while finishing; finish it once more");
+    if (done.changes === 0) return incomplete("a part was being sent again while finishing; finish it once more");
     return json(200, committedOut(deps, now));
   });
 
-  // Delete an item in any state. 204 once nothing of it is left; repeat on 500 cleanup_pending.
+  // Delete an item in any state. 204 once nothing of it is served; repeat on 500 cleanup_pending.
   app.delete("/api/v1/media/:id", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
     const id = c.req.param("id");
     if (!ITEM_ID.test(id)) return noItem();
-    const item = await deps.db.first<{ id: string; parts: number }>("SELECT id, parts FROM media WHERE id = ? AND workspace_id = ?", [id, auth.workspaceId]);
+    const item = await deps.db.first<{ id: string; state: string }>("SELECT id, state FROM media WHERE id = ? AND workspace_id = ?", [id, auth.workspaceId]);
     if (item === null) return noItem();
-    // Closing first: from here on the item counts for nothing and nothing can change it.
-    await deps.db.run("UPDATE media SET state = 'closing' WHERE id = ? AND workspace_id = ?", [item.id, auth.workspaceId]);
+    // Closing first: from here on nothing can change it, and no request finds it. Its bytes
+    // count until its row goes, which removeClosing does with its last object.
+    if (item.state !== "closing") await deps.db.run("UPDATE media SET state = 'closing' WHERE id = ? AND workspace_id = ?", [item.id, auth.workspaceId]);
     try {
-      await removeClosing(deps, auth.workspaceId, item);
+      // When a send still holds a young claim, the row stays (closing) until that send's own
+      // clean-up, a later delete or a sweep: the item is deleted for everyone already.
+      await removeClosing(deps, auth.workspaceId, item.id);
     } catch {
       console.error("delete: could not remove some files of a deleted item; the next delete call retries");
       return apiError(500, "cleanup_pending", "the item is deleted, but some of its files could not be removed yet; delete it again to retry");
@@ -574,9 +694,9 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     const cursorText = c.req.query("cursor");
     const cursor = cursorText === undefined || cursorText === "" ? null : decodeCursor(cursorText);
     if (cursor === null && cursorText !== undefined && cursorText !== "") return apiError(400, "bad_cursor", "the cursor is not one this list gave");
-    const after = cursor === null ? "" : " AND (created_at < ? OR (created_at = ? AND id < ?))";
+    const after = cursor === null ? "" : " AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))";
     const rows = await deps.db.all<ItemRow>(
-      `SELECT ${ITEM_COLUMNS} FROM media WHERE workspace_id = ? AND kind = ? AND state = 'online'${after} ORDER BY created_at DESC, id DESC LIMIT ?`,
+      `SELECT ${ITEM_COLUMNS} FROM media m WHERE m.workspace_id = ? AND m.kind = ? AND m.state = 'online'${after} ORDER BY m.created_at DESC, m.id DESC LIMIT ?`,
       [auth.workspaceId, kind, ...(cursor === null ? [] : [cursor.createdAt, cursor.createdAt, cursor.id]), LIST_PAGE + 1],
     );
     const page = rows.slice(0, LIST_PAGE);
@@ -585,12 +705,12 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     return json(200, { items: page.map((r) => itemOut(deps, r)), next });
   });
 
-  // One item, in any state but closing.
+  // One item, unless it is closing or was left unfinished past its age.
   app.get("/api/v1/media/:id", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
     const item = await loadItem(deps, auth, c.req.param("id"));
-    if (item === null || item.state === "closing") return noItem();
+    if (item === null) return noItem();
     return json(200, { ...itemOut(deps, item), state: item.state });
   });
 
@@ -599,9 +719,9 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
     const item = await loadItem(deps, auth, c.req.param("id"));
-    if (item === null || item.state === "closing") return noItem();
-    if (item.preview_type === null || item.preview_stored_at === null) return apiError(404, "not_found", "this item has no preview");
-    const file = await deps.drafts.get(previewKey(item.id, item.preview_type));
+    if (item === null) return noItem();
+    if (item.preview_type === null || item.preview_claim === null) return apiError(404, "not_found", "this item has no preview");
+    const file = await deps.drafts.get(objectKey(item.id, { n: PREVIEW, claim: item.preview_claim, ext: item.preview_type }));
     if (file === null) return apiError(404, "not_found", "this item has no preview");
     return new Response(file.body, { status: 200, headers: previewHeaders(item.preview_type, file.size) });
   });

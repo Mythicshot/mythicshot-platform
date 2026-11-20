@@ -220,7 +220,7 @@ function introduction(): string {
     `- One publish request copies up to ${COPY_BATCH} images; one delete request removes up to ${DELETE_FILES_PER_CALL} files.`,
     `- ${DEFAULT_MAX_OPEN_UPLOADS} open uploads per workspace, unless the server's settings give another number.`,
     `- An upload that is not finished is removed after ${hours} hours.`,
-    `- A shared image: ${n(DEFAULT_MEDIA_LIMITS.imageMaxBytes)} bytes and ${n(DEFAULT_MEDIA_LIMITS.imageMaxSide)} pixels on a side, PNG or JPEG. A shared clip: ${n(DEFAULT_MEDIA_LIMITS.clipMaxBytes)} bytes, GIF or MP4, at most ${n(CLIP_MAX_SIDE)} pixels on a side and ${CLIP_MAX_DURATION_MS / 60_000} minutes long. The server's settings can give other numbers for the image and clip sizes. Each is sent in parts of ${n(PART_BYTES)} bytes. An item's preview: ${n(PREVIEW_RULE.maxBytes)} bytes and ${n(PREVIEW_RULE.maxSide)} pixels on a side, PNG or JPEG. A workspace starts at most ${LIMITS_MEDIA.create.most} items an hour, and an item that is not finished is removed after ${MEDIA_MAX_AGE_MS / 3_600_000} hours.`,
+    `- A shared image: ${n(DEFAULT_MEDIA_LIMITS.imageMaxBytes)} bytes and ${n(DEFAULT_MEDIA_LIMITS.imageMaxSide)} pixels on a side, PNG or JPEG. A shared clip: ${n(DEFAULT_MEDIA_LIMITS.clipMaxBytes)} bytes, GIF or MP4, at most ${n(CLIP_MAX_SIDE)} pixels on a side and ${CLIP_MAX_DURATION_MS / 60_000} minutes long. The server's settings can give other numbers for the image and clip sizes. Each is sent in parts of ${n(PART_BYTES)} bytes. An item's preview: ${n(PREVIEW_RULE.maxBytes)} bytes and ${n(PREVIEW_RULE.maxSide)} pixels on a side, PNG or JPEG. A workspace starts at most ${LIMITS_MEDIA.create.most} items, sends at most ${n(LIMITS_MEDIA.part.most)} parts and ${LIMITS_MEDIA.preview.most} previews an hour, and an item that is not finished within ${MEDIA_MAX_AGE_MS / 3_600_000} hours is removed and can no longer be finished.`,
     "- A workspace may have a storage allowance, set by the server's settings or its admin. An upload or a shared item that would take the workspace over it is refused when it is started, with 413 `storage_full` and the numbers, before anything is stored. Nothing is ever deleted because of an allowance.",
     `- A publish that makes no progress for ${minutes} minutes counts as abandoned.`,
     "",
@@ -950,7 +950,7 @@ function paths(): OpenApiDoc["paths"] {
       delete: {
         tags: ["Items"],
         summary: "Delete a shared item",
-        description: "Removes an item, finished or not, with every part and its preview. Its bytes stop counting at once, and its public address stops working. When some files could not be removed yet, the answer is 500 cleanup_pending: send the same request again.",
+        description: "Removes an item, finished or not, with every part and its preview. Its public address stops working at once, and its bytes stop counting once its files are gone, which is in this request unless a part or preview is still being sent at that moment. When some files could not be removed yet, the answer is 500 cleanup_pending and the item still counts: send the same request again.",
         operationId: "deleteMedia",
         security: TOKEN,
         parameters: [mediaId],
@@ -978,6 +978,7 @@ function paths(): OpenApiDoc["paths"] {
           "404": noMedia(", or the item has no part of that number"),
           "409": refusal("The item is finished; its parts cannot change.", "already_online"),
           "413": refusal("The part is too long.", "too_large"),
+          "429": { description: `This workspace already sent ${LIMITS_MEDIA.part.most} parts in the last hour.`, headers: retryAfter, content: refusal("", "too_many_items").content },
         },
       },
     },
@@ -997,6 +998,7 @@ function paths(): OpenApiDoc["paths"] {
           "404": noMedia(""),
           "409": refusal("The item is finished; its preview cannot change.", "already_online"),
           "413": answer("too_large: the preview is too long. storage_full: it would take the workspace over its storage allowance; nothing was stored.", { oneOf: [refusalSchema("too_large"), ref("StorageFull")] }),
+          "429": { description: `This workspace already sent ${LIMITS_MEDIA.preview.most} previews in the last hour.`, headers: retryAfter, content: refusal("", "too_many_items").content },
         },
       },
       get: {

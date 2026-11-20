@@ -7,7 +7,9 @@ Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on
 - Shared items, through the API: a workspace can share a single image (PNG or JPEG, up to 10 MB) or a short clip (GIF or MP4, up to 50 MB). An item is sent in parts of 2,000,000 bytes, with an optional preview picture, and is online once it is finished. It stays until it is deleted.
 - The first part is checked against the declared type, and for a PNG, JPEG or GIF against the declared width and height, from the file's own bytes.
 - Items count against the workspace's storage allowance from the moment they are started, together with tours and uploads. One that does not fit is refused before anything is sent.
-- A workspace starts at most 60 items an hour, and an item that is not finished is removed after a day.
+- A workspace starts at most 60 items, sends at most 2,000 parts and 240 previews an hour. An item that is not finished within a day can no longer be finished and is removed.
+- Items are kept in the private store and are only ever served through the site. Once an item is online, nothing it serves can change. A deleted item counts toward the allowance until its files are really gone.
+- Upgrading: this version needs its database change (migration 0010) before it serves, because reading a workspace's storage use reads the new table. Both ways of installing do this already: the Node server applies new migrations when it starts, before it answers, and `npm run setup:cloudflare -- update` applies them before it deploys.
 
 ## 0.1.19 (2026-11-20)
 
