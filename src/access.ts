@@ -273,20 +273,23 @@ type State = {
   switch: { id: string; target: "public" | "private"; total: number; copied: number } | null;
   /** Retired `p/` pictures of the tour still in the public store. */
   stray: number;
+  /** Retired pictures of the tour, of either store, whose time to be deleted has come. */
+  due: number;
 };
 
 /** One call. Null for a tour that is not this workspace's. */
 async function readState(deps: Deps, auth: Auth, id: string): Promise<State | null> {
-  type Row = { id: string; access: Access; live: number; viewers: string; switch_id: string | null; target: "public" | "private" | null; total: number | null; copied: number; stray: number };
+  type Row = { id: string; access: Access; live: number; viewers: string; switch_id: string | null; target: "public" | "private" | null; total: number | null; copied: number; stray: number; due: number };
   const row = await deps.db.first<Row>(
     `SELECT t.id, t.access, s.tour_id IS NOT NULL AS live,
             (SELECT json_group_array(v.email) FROM tour_viewer v WHERE v.tour_id = t.id) AS viewers,
             w.switch_id, w.target, w.total,
             (SELECT count(*) FROM public_object o WHERE o.publish_id = w.switch_id AND o.tour_id = t.id AND o.state = 'pending' AND o.copied = 1) AS copied,
-            (SELECT count(*) FROM public_object o WHERE o.tour_id = t.id AND o.state = 'retired' AND substr(o.image_key, 1, 2) = 'p/') AS stray
+            (SELECT count(*) FROM public_object o WHERE o.tour_id = t.id AND o.state = 'retired' AND substr(o.image_key, 1, 2) = 'p/') AS stray,
+            (SELECT count(*) FROM public_object o WHERE o.tour_id = t.id AND o.state = 'retired' AND o.delete_after <= ?) AS due
        FROM tour t LEFT JOIN snapshot s ON s.tour_id = t.id LEFT JOIN access_switch w ON w.tour_id = t.id
       WHERE t.id = ? AND t.workspace_id = ?`,
-    [id, auth.workspaceId],
+    [deps.now(), id, auth.workspaceId],
   );
   if (row === null) return null;
   return {
@@ -296,6 +299,7 @@ async function readState(deps: Deps, auth: Auth, id: string): Promise<State | nu
     viewers: (JSON.parse(row.viewers) as string[]).sort(),
     switch: row.switch_id === null ? null : { id: row.switch_id, target: row.target ?? "private", total: row.total ?? 0, copied: row.copied },
     stray: row.stray,
+    due: row.due,
   };
 }
 
@@ -662,8 +666,9 @@ async function putAccess(r: Run, id: string, body: AccessBody): Promise<Response
       }
     }
     // A restricted tour keeps nothing in the public store: anything left there (a cancelled
-    // publish's pictures, a clean-up that was cut off) goes before the answer is 200.
-    if (isRestricted(body.access) && (cross || st.stray > 0) && !(await clearTour(r, id))) return progress(0, Math.max(1, st.stray));
+    // publish's pictures, a clean-up that was cut off) goes before the answer is 200, and so
+    // do the old pictures of a switch whose last answer was lost.
+    if (((isRestricted(body.access) && (cross || st.stray > 0)) || st.due > 0) && !(await clearTour(r, id))) return progress(0, Math.max(1, st.stray, st.due));
     return settingAnswer(d, body.access, list, null);
   }
   return busy();
