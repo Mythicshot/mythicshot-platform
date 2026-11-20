@@ -212,7 +212,7 @@ By default the platform serves one address and checks no host name: it answers t
 
 With two addresses the platform knows two host names and the role of each: the tours address, such as `tours.example.com`, where visitors open tours, and the app address, such as `app.example.com`. Two settings turn it on, `TOURS_HOST` and `APP_HOST`, each a host name without `https://` and without a path. Set both for two addresses, or neither for one.
 
-> [!warning] Never run on real hosting
+> [!warning] Not tried on real hosting
 > Nothing about two addresses has been run on real hosting yet: it is checked by this repository's tests only, so turn it on only after a backup and when the site may be down for a while.
 
 ### What answers where
@@ -241,9 +241,18 @@ Mythicshot keeps the tours address. The setup wizard is on the tours address onl
 
 The host name is taken from the address the request was sent to: the `Host` header on Node, the request's own address on Cloudflare. No `X-Forwarded-Host`, `Forwarded` or `X-Original-Host` header is read, and there is no setting to trust one, so whatever stands in front of the platform must pass the `Host` header on unchanged. On Node with two addresses, a request whose request line holds a full address instead of a path gets the empty `421` too.
 
+### An optional third address for images and clips
+
+Beside the two addresses an install can add a third, the img address, such as `img.example.com`, with one more setting, `IMG_HOST`. It is optional: without it, shared images and clips answer on the tours address, and everything else answers exactly as described above whether the img address is set or not. The img address exists only beside the other two, never on its own and never on one address.
+
+The img address answers shared images and clips and `/healthz` and nothing else: every other path there, the token API, the session, the sign-in pages and the dashboard included, answers `404` with `{"error":"not_found"}`, and nothing redirects to it or from it. No session cookie is taken or set there, and no token is taken there either. Asked on it, `/healthz` prints `{"ok":true,"address":"img"}`. This version has no image or clip route yet, so today the img address answers `/healthz` only.
+
+> [!warning] Not tried on real hosting
+> The third address has not been run on real hosting either: it is checked by this repository's tests only.
+
 ### A pair that cannot be used
 
-One setting without the other, a value that is not a plain host name, or the same name twice (also on two different ports) is never read as one address. On Node the app does not start: it prints one of the lines below and exits with code 1, before it opens the database. A Worker cannot refuse to start, so on Cloudflare every request, `/healthz` included, answers `500` with `{"error":"misconfigured"}`, and the line is in the Worker's log.
+One setting without the other, `IMG_HOST` without both of them, a value that is not a plain host name, or the same name twice (also on two different ports) is never read as one address. On Node the app does not start: it prints one of the lines below and exits with code 1, before it opens the database. A Worker cannot refuse to start, so on Cloudflare every request, `/healthz` included, answers `500` with `{"error":"misconfigured"}`, and the line is in the Worker's log.
 
 ```text
 TOURS_HOST is set but APP_HOST is not. Set both for two addresses, or neither for one.
@@ -251,6 +260,14 @@ APP_HOST is set but TOURS_HOST is not. Set both for two addresses, or neither fo
 TOURS_HOST is not a host name. Write it like tours.example.com, without https:// and without a path.
 APP_HOST is not a host name. Write it like app.example.com, without https:// and without a path.
 TOURS_HOST and APP_HOST name the same host. Two addresses need two different host names.
+```
+
+`IMG_HOST` gives the same kinds of line, such as these:
+
+```text
+IMG_HOST is set but TOURS_HOST and APP_HOST are not. IMG_HOST is an extra address beside those two: set them too, or leave IMG_HOST empty.
+IMG_HOST is not a host name. Write it like img.example.com, without https:// and without a path.
+TOURS_HOST and IMG_HOST name the same host. Two addresses need two different host names.
 ```
 
 > [!warning] A wrong name locks the site out
@@ -264,6 +281,8 @@ TOURS_HOST and APP_HOST name the same host. Two addresses need two different hos
 | Shared cPanel hosting | Two lines added to the settings file by hand, then `cpanel.sh` checks both addresses. See [A second address for the app](docs/hosting/cpanel.md#14-a-second-address-for-the-app) in that guide. |
 | Cloudflare | Not yet. The guided setup sets up one address and writes both settings empty; a second address there waits for a later version. See [Two addresses](docs/runbook-cloudflare.md#two-addresses) in the Cloudflare runbook. |
 | Node, started by hand | Set `TOURS_HOST` and `APP_HOST` in the environment the app starts with. |
+
+The optional third address is added the same way on each route, after the two work: on shared cPanel hosting one more subdomain and one more line, `IMG_HOST`, in the settings file (see [An optional third address for images and clips](docs/hosting/cpanel.md#an-optional-third-address-for-images-and-clips) in that guide); on Cloudflare, like the other two, not yet with the guided setup; on Docker not yet, because `install.sh` does not add a third name to Caddy (see [A third address for images and clips](docs/runbook-docker.md#a-third-address-for-images-and-clips)); started by hand, `IMG_HOST` in the same environment. To go back, remove the `IMG_HOST` line and restart: shared images and clips then answer on the tours address again.
 
 To go back to one address, remove both settings (on Docker, the `APP_DOMAIN` line) and restart the app; each of the three pages above gives the steps. The tours address is the same name before and after, so links to tours that are already out there keep working both ways.
 
@@ -498,6 +517,7 @@ Nothing in the code is tied to a hostname, account or bucket name.
 | `PUBLIC_IMAGE_BASE` | both | Empty (the default on both targets): the app serves published images itself on `/p/<name>`. Optionally, on Cloudflare, the address of the public bucket's own custom domain, such as `https://images.example.com`. |
 | `TOURS_HOST` | both | Optional, and only together with `APP_HOST`: the host name of the tours address, such as `tours.example.com`, without `https://` and without a path. Both empty or unset (the default) is one address, and no host name is checked. See [One address or two](#one-address-or-two). |
 | `APP_HOST` | both | Optional, and only together with `TOURS_HOST`: the host name of the app address, such as `app.example.com`, in the same form. It must be a different name than the tours address. |
+| `IMG_HOST` | both | Optional, and only beside both `TOURS_HOST` and `APP_HOST`: the host name of a third address for shared images and clips, such as `img.example.com`, in the same form and a name of its own. Unset or empty (the default): they answer on the tours address. It is not `PUBLIC_IMAGE_BASE`, which is about published tour pictures. See [An optional third address for images and clips](#an-optional-third-address-for-images-and-clips). |
 | `STORAGE_ALLOWANCE_BYTES` | both | Optional: the storage allowance of a workspace in bytes, digits only, such as `1073741824` for 1 GB. Unset or empty (the default): no limit. See [Storage allowance](#storage-allowance). Any other value stops the start on Node with one line, and on Cloudflare answers 500 `misconfigured` on every path until it is fixed. |
 | `SITE_HOST` | both | Optional, for a site on one address only: the host name sign-in links use, such as `tours.example.com`, without `https://` and without a path. Ignored when `APP_HOST` is set, since links then use the app address. It is used for links only, and no request is checked against it. A value that is not a host name never stops the site: it then has no address for links, and no sign-in mail is sent. |
 | `INVITE_CONTACT` | both | Optional: who to ask for an invite, an email address such as `hello@example.com` or an `https://` address, shown after "Mythicshot is invite-only for now." on the sign-in page; unset or anything else shows that sentence alone and never stops the site. On Cloudflare it is a var in the install's `wrangler.deploy.jsonc`, which `npm run setup:cloudflare -- update` keeps. See [Who to ask for an invite](#who-to-ask-for-an-invite). |

@@ -2,12 +2,29 @@
 // web framework. A host is only ever taken from configuration or from the address a
 // request was sent to, never from a request header such as X-Forwarded-Host.
 
-/** The roles an address can have. A further role is a new entry here and a `<ROLE>_HOST` setting. */
-export const HOST_ROLES = ["tours", "app"] as const;
+/**
+ * The roles an address can have. A further role is a new entry here and a `<ROLE>_HOST`
+ * setting; one an install may leave out is also listed in OPTIONAL_HOST_ROLES. `tours`
+ * holds what users publish, `app` the session and the dashboard, and `img` shared images
+ * and clips.
+ */
+export const HOST_ROLES = ["tours", "app", "img"] as const;
 export type HostRole = (typeof HOST_ROLES)[number];
 
-/** The configured address of every role, each as a normalised `name` or `name:port`. */
-export type Hosts = Readonly<Record<HostRole, string>>;
+/**
+ * The roles an install with addresses may leave unset. Each is only ever set beside
+ * every other role: without its own address, what it would serve answers on the tours
+ * address (mediaRole).
+ */
+export const OPTIONAL_HOST_ROLES = ["img"] as const satisfies readonly HostRole[];
+export type OptionalHostRole = (typeof OPTIONAL_HOST_ROLES)[number];
+export type RequiredHostRole = Exclude<HostRole, OptionalHostRole>;
+
+/**
+ * The configured address of every role, each as a normalised `name` or `name:port`. An
+ * optional role that is not set has no key at all.
+ */
+export type Hosts = Readonly<Record<RequiredHostRole, string> & Partial<Record<OptionalHostRole, string>>>;
 
 /** `hosts: null` is one-address mode: no host is configured and none is checked. */
 export type HostsResult = { ok: true; hosts: Hosts | null } | { ok: false; problem: string };
@@ -42,8 +59,15 @@ export function normaliseHost(raw: string): string | null {
 }
 
 /** The setting that holds a role's address, such as `TOURS_HOST`. */
-function settingOf(role: HostRole): string {
-  return `${role.toUpperCase()}_HOST`;
+export function settingOf(role: HostRole): `${Uppercase<HostRole>}_HOST` {
+  return `${role.toUpperCase() as Uppercase<HostRole>}_HOST`;
+}
+
+/** Every role's setting from an environment or a Worker's vars, keyed by role, each as found. */
+export function hostSettingsFrom<T>(env: Readonly<Partial<Record<string, T>>>): Partial<Record<HostRole, T>> {
+  const out: Partial<Record<HostRole, T>> = {};
+  for (const role of HOST_ROLES) out[role] = env[settingOf(role)];
+  return out;
 }
 
 /** A host without its port. */
@@ -51,11 +75,18 @@ function nameOf(host: string): string {
   return host.split(":")[0];
 }
 
+/** True for a role an install may leave unset. */
+function isOptional(role: HostRole): boolean {
+  return (OPTIONAL_HOST_ROLES as readonly HostRole[]).includes(role);
+}
+
 /**
  * The configured addresses from the raw settings. None set (unset, empty or only spaces)
- * is one-address mode. Otherwise every role needs a valid host name, and no two roles
- * may share a name: cookies are not separated by port, so two ports of one name are one
- * address. A problem is fixed text that names the settings and never repeats a value.
+ * is one-address mode. Otherwise every required role needs a valid host name, an
+ * optional role is either unset or a valid host name too, and no two roles may share a
+ * name: cookies are not separated by port, so two ports of one name are one address. An
+ * optional role set without the required ones is refused, never read as one-address
+ * mode. A problem is fixed text that names the settings and never repeats a value.
  */
 export function resolveHosts(raw: Partial<Record<HostRole, string | undefined>>): HostsResult {
   const values = HOST_ROLES.map((role) => {
@@ -64,15 +95,25 @@ export function resolveHosts(raw: Partial<Record<HostRole, string | undefined>>)
   });
   const set = values.filter((v) => v.value !== "");
   if (set.length === 0) return { ok: true, hosts: null };
-  const missing = values.find((v) => v.value === "");
+  const required = values.filter((v) => !isOptional(v.role));
+  const missing = required.find((v) => v.value === "");
   if (missing !== undefined) {
+    const setRequired = set.find((v) => !isOptional(v.role));
+    if (setRequired !== undefined) {
+      return {
+        ok: false,
+        problem: `${settingOf(setRequired.role)} is set but ${settingOf(missing.role)} is not. Set both for two addresses, or neither for one.`,
+      };
+    }
+    const extra = settingOf(set[0].role);
+    const needed = required.map((v) => settingOf(v.role)).join(" and ");
     return {
       ok: false,
-      problem: `${settingOf(set[0].role)} is set but ${settingOf(missing.role)} is not. Set both for two addresses, or neither for one.`,
+      problem: `${extra} is set but ${needed} are not. ${extra} is an extra address beside those two: set them too, or leave ${extra} empty.`,
     };
   }
-  const hosts = {} as Record<HostRole, string>;
-  for (const { role, value } of values) {
+  const hosts: Partial<Record<HostRole, string>> = {};
+  for (const { role, value } of set) {
     const host = normaliseHost(value);
     if (host === null) {
       return {
@@ -82,11 +123,11 @@ export function resolveHosts(raw: Partial<Record<HostRole, string | undefined>>)
     }
     hosts[role] = host;
   }
-  for (let i = 0; i < HOST_ROLES.length; i++) {
-    for (let j = i + 1; j < HOST_ROLES.length; j++) {
-      const a = HOST_ROLES[i];
-      const b = HOST_ROLES[j];
-      if (nameOf(hosts[a]) === nameOf(hosts[b])) {
+  for (let i = 0; i < set.length; i++) {
+    for (let j = i + 1; j < set.length; j++) {
+      const a = set[i].role;
+      const b = set[j].role;
+      if (nameOf(hosts[a]!) === nameOf(hosts[b]!)) {
         return {
           ok: false,
           problem: `${settingOf(a)} and ${settingOf(b)} name the same host. Two addresses need two different host names.`,
@@ -94,7 +135,7 @@ export function resolveHosts(raw: Partial<Record<HostRole, string | undefined>>)
       }
     }
   }
-  return { ok: true, hosts };
+  return { ok: true, hosts: hosts as Hosts };
 }
 
 /**
@@ -109,11 +150,24 @@ export function requestHost(req: Request): string | null {
   }
 }
 
-/** The role of a normalised host, or null when it is not one of the configured addresses. An exact match only. */
+/** The role of a normalised host, or null when it is not one of the configured addresses (an optional role that is not set never matches). An exact match only. */
 export function roleOf(hosts: Hosts, host: string | null): HostRole | null {
   if (host === null) return null;
   for (const role of HOST_ROLES) if (hosts[role] === host) return role;
   return null;
+}
+
+/**
+ * True when a request may be served on the address it was sent to, for something kept to
+ * `roles`: always in one-address mode (`hosts` null or absent), else only when the
+ * request's own address is the address of one of `roles`. An address no role names, and
+ * a role the list leaves out, is false, so a role added later is refused until it is
+ * listed. Never a header.
+ */
+export function onRole(hosts: Hosts | null | undefined, req: Request, roles: readonly HostRole[]): boolean {
+  if (hosts === null || hosts === undefined) return true;
+  const role = roleOf(hosts, requestHost(req));
+  return role !== null && roles.includes(role);
 }
 
 /** The origin of a configured host: `https://`, and `http://` only for localhost, `*.localhost` and 127.0.0.1. */
@@ -121,4 +175,28 @@ export function originOf(host: string): string {
   const name = nameOf(host);
   const local = name === "localhost" || name.endsWith(".localhost") || name === "127.0.0.1";
   return `${local ? "http" : "https"}://${host}`;
+}
+
+/**
+ * The role whose address serves shared media (images and clips): the img address when it
+ * is set, else the tours address.
+ */
+export function mediaRole(hosts: Hosts): "img" | "tours" {
+  return hosts.img !== undefined ? "img" : "tours";
+}
+
+/**
+ * The origin an item's public address starts with, without a trailing slash, from
+ * configuration only and never from a request, as sign-in links are (linkOrigin in
+ * src/mail.ts): the img address when it is set, else the tours address. In one-address
+ * mode (`hosts` null or absent) it is the origin of SITE_HOST when that is a host name,
+ * and otherwise the empty string: the caller then builds a relative link, as tour links
+ * are. On Node the request's host is the client's Host header, so reading it here could
+ * make the server put another site's name into a link.
+ */
+export function mediaOrigin(config: { hosts?: Hosts | null; siteHost?: string }): string {
+  const hosts = config.hosts ?? null;
+  if (hosts !== null) return originOf(hosts.img ?? hosts.tours);
+  const site = typeof config.siteHost === "string" ? normaliseHost(config.siteHost) : null;
+  return site === null ? "" : originOf(site);
 }

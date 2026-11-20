@@ -1,20 +1,38 @@
-// The host gate: in two-address mode, decides from the host a request was sent to and
-// the route it matched whether the route answers there. It runs before every route,
+// The host gate: with addresses configured, decides from the host a request was sent to
+// and the route it matched whether the route answers there. It runs before every route,
 // reads no body, no token and no header, and makes no database or storage call. In
 // one-address mode it does nothing.
 import type { Context, MiddlewareHandler } from "hono";
 import { matchedRoutes } from "hono/route";
-import { originOf, requestHost, roleOf, type HostRole } from "./hosts.ts";
+import { HOST_ROLES, mediaRole, originOf, requestHost, roleOf, type HostRole, type Hosts } from "./hosts.ts";
 import type { Config } from "./ports.ts";
 
 /**
- * Where a route answers in two-address mode. `any`: on every host, known or not. `both`:
- * on the tours and the app address. `tours`: on the tours address only, 404 on the app
- * address. `tours-redirect`: on the tours address, and the app address redirects there.
- * `app` and `app-redirect` are the same the other way round: on the app address only,
- * with 404 on the tours address, or a redirect from it.
+ * Where a route answers with addresses configured. `any`: on every host, known or not.
+ * `both`: on the tours and the app address. `tours`: on the tours address only, 404 on the
+ * app address. `tours-redirect`: on the tours address, and the app address redirects
+ * there. `app` and `app-redirect` are the same the other way round: on the app address
+ * only, with 404 on the tours address, or a redirect from it. `media`: shared images and
+ * clips, on the img address only when it is set, else on the tours address only (404
+ * everywhere else, and never a redirect). On the img address every rule but `any` and
+ * `media` is 404. In one-address mode every rule answers on the one address.
  */
-export type HostRule = "any" | "both" | "tours" | "tours-redirect" | "app" | "app-redirect";
+export type HostRule = "any" | "both" | "tours" | "tours-redirect" | "app" | "app-redirect" | "media";
+
+/**
+ * Where each rule answers, for the configured addresses: the roles whose address answers
+ * it, and the one role (if any) whose address redirects to the first of them. A role the
+ * list leaves out is 404, so a new role answers nothing it is not named for.
+ */
+const PLACES: Readonly<Record<HostRule, { on: (hosts: Hosts) => readonly HostRole[]; redirectFrom?: HostRole }>> = {
+  any: { on: () => HOST_ROLES },
+  both: { on: () => ["tours", "app"] },
+  tours: { on: () => ["tours"] },
+  "tours-redirect": { on: () => ["tours"], redirectFrom: "app" },
+  app: { on: () => ["app"] },
+  "app-redirect": { on: () => ["app"], redirectFrom: "tours" },
+  media: { on: (hosts) => [mediaRole(hosts)] },
+};
 
 /**
  * The rule of every route, keyed by "<METHOD> <route path>" exactly as in the app's
@@ -120,41 +138,43 @@ function notHere(): Response {
   return new Response('{"error":"not_found"}', { status: 404, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
-/** From the most open rule to the strictest. Rules that name different addresses are never compared: see ruleFor. */
-const STRICTNESS: readonly HostRule[] = ["any", "both", "tours-redirect", "app-redirect", "tours", "app"];
-
-/** The one address a rule keeps a route to, or null when it answers on both. */
-function sideOf(rule: HostRule): HostRole | null {
-  if (rule === "tours" || rule === "tours-redirect") return "tours";
-  if (rule === "app" || rule === "app-redirect") return "app";
-  return null;
-}
+/**
+ * From the most open rule to the strictest. Only the strictest of a request's rules may
+ * redirect: see the gate. `media` ranks strictest and never redirects, so a media route
+ * matched together with a redirect rule answers 404 on the address that rule would
+ * redirect from (without the img address, the app address) instead of redirecting.
+ */
+const STRICTNESS: readonly HostRule[] = ["any", "both", "tours-redirect", "app-redirect", "tours", "app", "media"];
 
 /**
  * The rule for this request: the strictest rule among every route it matched, the gate
- * itself left out. Hono may answer from any of them, so each one needs a rule: null when
- * no route matched, "none" when a matched route has no rule, and also when two matched
- * routes are kept to different addresses: no address may then answer for both, so the
- * request is closed on both. A route is keyed as
- * "<METHOD> <path>", one registered for every method as "ALL <path>"; a HEAD request is
- * matched as GET, so it gets GET's rule.
+ * itself left out, and the roles whose address may answer it, which are the roles every
+ * one of those rules answers on. Hono may answer from any of them, so each one needs a
+ * rule: null when no route matched, "none" when a matched route has no rule, and also when
+ * no address answers all of the matched routes' rules (two routes kept to different
+ * addresses): no address may then answer for all of them, so the request is closed on
+ * every address. A route is keyed as "<METHOD> <path>", one registered for every method as
+ * "ALL <path>"; a HEAD request is matched as GET, so it gets GET's rule.
  */
-function ruleFor(c: Context, gate: MiddlewareHandler, rules: Readonly<Record<string, HostRule>>): HostRule | "none" | null {
+function ruleFor(
+  c: Context,
+  gate: MiddlewareHandler,
+  rules: Readonly<Record<string, HostRule>>,
+  hosts: Hosts,
+): { rule: HostRule; on: readonly HostRole[] } | "none" | null {
   let strictest: HostRule | null = null;
-  let side: HostRole | null = null;
+  let on: readonly HostRole[] = HOST_ROLES;
   for (const route of matchedRoutes(c)) {
     if (route.handler === gate) continue;
     const key = `${route.method} ${route.path}`;
     if (!Object.hasOwn(rules, key)) return "none";
     const rule = rules[key];
-    const kept = sideOf(rule);
-    if (kept !== null) {
-      if (side !== null && side !== kept) return "none";
-      side = kept;
-    }
+    const here = PLACES[rule].on(hosts);
+    on = on.filter((role) => here.includes(role));
+    if (on.length === 0) return "none";
     if (strictest === null || STRICTNESS.indexOf(rule) > STRICTNESS.indexOf(strictest)) strictest = rule;
   }
-  return strictest;
+  return strictest === null ? null : { rule: strictest, on };
 }
 
 /**
@@ -166,25 +186,29 @@ export function hostGate(config: Config, rules: Readonly<Record<string, HostRule
     const hosts = config.hosts ?? null;
     if (hosts === null) return next();
 
-    const rule = ruleFor(c, gate, rules);
-    if (rule === "any") return next();
+    const found = ruleFor(c, gate, rules, hosts);
+    if (found !== null && found !== "none" && found.rule === "any") return next();
 
     const role = roleOf(hosts, requestHost(c.req.raw));
     if (role === null) return misdirected();
     // No route matched: the app's own 404.
-    if (rule === null) return next();
-    // A matched route nobody gave a rule: closed on both addresses.
-    if (rule === "none") return c.notFound();
-    // The address the rule keeps the route to; this request reached `role`.
-    const home = sideOf(rule);
-    if (home === null || home === role) return next();
-    if (rule === "tours-redirect" || rule === "app-redirect") {
+    if (found === null) return next();
+    // A matched route nobody gave a rule: closed on every address.
+    if (found === "none") return c.notFound();
+    // This request reached `role`: it answers when every matched rule allows that address.
+    if (found.on.includes(role)) return next();
+    // Else only the one address the strictest rule names may redirect, to the address that
+    // rule keeps the route to, and only when that address answers the request.
+    const place = PLACES[found.rule];
+    const home = place.on(hosts)[0];
+    const target = home === undefined ? undefined : hosts[home];
+    if (place.redirectFrom === role && target !== undefined && found.on.includes(home)) {
       // The path and query are the request's; the host comes only from configuration.
       const url = new URL(c.req.url);
       return new Response(null, {
         status: 308,
         headers: {
-          location: originOf(hosts[home]) + url.pathname + url.search,
+          location: originOf(target) + url.pathname + url.search,
           "cache-control": "no-store",
           "referrer-policy": "no-referrer",
           "x-content-type-options": "nosniff",

@@ -2,6 +2,12 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.19 (2026-11-20)
+
+- An optional third address for shared images and clips, set with `IMG_HOST` beside `TOURS_HOST` and `APP_HOST`. Without it they answer on the tours address, and sites with one or two addresses work as before.
+- The third address answers only images, clips and the health check, and never takes a sign-in or a token. No image or clip is shared yet: that comes in a later version.
+- The cPanel guide, the README and the Cloudflare runbook say how to add it; the Docker installer does not set it up yet.
+
 ## 0.1.18 (2026-11-19)
 
 - Guides for switching mail on, accounts and signing in, the dashboard, changing an email address, and what to do when mail does not arrive or someone is locked out.

@@ -1014,6 +1014,15 @@ The tours address is the same name before and after, so tour links that are alre
 
 **How to tell it worked:** `curl https://tours.example.com/healthz` prints `{"ok":true}` again, without an address, and `sudo bash install.sh status` shows no app address.
 
+### A third address for images and clips
+
+The platform can answer on an optional third name, such as `img.example.com`, for shared images and clips, set with `IMG_HOST` beside the two addresses; what it answers is in [An optional third address for images and clips](../README.md#an-optional-third-address-for-images-and-clips) in the README. It is optional: without it, images and clips answer on the tours address, which is what every step above sets up.
+
+On this route it is not available yet. `install.sh` has no setting for it: the Caddyfile it writes answers for `DOMAIN` and `APP_DOMAIN` only, the script does not check the third address, and an `install` run writes the Caddyfile again. The direct stack hands the app its whole `.env` and the tunnel stack passes `IMG_HOST` on, so the app would read such a line, but Caddy would not answer for the name.
+
+> [!WARNING]
+> Do not add an `IMG_HOST` line to `.env` on this route yet: the app then serves images and clips only on a name Caddy does not answer for.
+
 ### Two addresses on the other routes
 
 The server guides in [docs/hosting](hosting/README.md) install through this runbook, so this section holds for them as it is. The [Fly.io guide](hosting/fly.md) does not use `install.sh`, and its steps for two addresses wait for a later version. Shared cPanel hosting has its own steps, in [A second address for the app](hosting/cpanel.md#14-a-second-address-for-the-app), and so has Cloudflare, in [Two addresses](runbook-cloudflare.md#two-addresses) of that runbook.

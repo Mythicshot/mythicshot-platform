@@ -5,7 +5,7 @@
 import { canonicalAddress } from "../client.ts";
 import { parseEmail } from "../accounts.ts";
 import { misdirected } from "../host-gate.ts";
-import { normaliseHost, resolveHosts, type Hosts } from "../hosts.ts";
+import { hostSettingsFrom, normaliseHost, resolveHosts, type Hosts } from "../hosts.ts";
 import { linkOrigin, NO_MAIL, type Mailer } from "../mail.ts";
 import type { Config } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
@@ -21,15 +21,17 @@ import type { SmtpSettings } from "./smtp.ts";
 export const NODE_SETTINGS: readonly string[] = [
   "APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE",
   "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST",
-  "INVITE_CONTACT",
+  "INVITE_CONTACT", "IMG_HOST",
 ];
 
 /**
- * The app's configuration from the environment: PUBLIC_IMAGE_BASE, SETUP_CODE and the two
- * optional addresses, TOURS_HOST and APP_HOST. With neither address set, `hosts` is null
- * and the app serves one address as before. A pair that cannot be used (one without the
- * other, a value that is not a host name, the same name twice) throws an Error whose
- * message is the one fixed line to show; it names the settings and never repeats a value.
+ * The app's configuration from the environment: PUBLIC_IMAGE_BASE, SETUP_CODE and the
+ * optional addresses, TOURS_HOST and APP_HOST, and beside those two the optional third,
+ * IMG_HOST, for shared images and clips. With no address set, `hosts` is null and the app
+ * serves one address as before. Addresses that cannot be used (one of the pair without
+ * the other, IMG_HOST without the pair, a value that is not a host name, the same name
+ * twice) throw an Error whose message is the one fixed line to show; it names the
+ * settings and never repeats a value. Every `<ROLE>_HOST` of HOST_ROLES is read here.
  *
  * STORAGE_ALLOWANCE_BYTES is the site's default storage allowance per workspace. Unset or
  * empty, the config has no such key and nothing is limited, as before the setting
@@ -43,7 +45,9 @@ export const NODE_SETTINGS: readonly string[] = [
  * is switched on.
  */
 export function configFromEnv(env: NodeJS.ProcessEnv): Config {
-  const hosts = resolveHosts({ tours: env.TOURS_HOST, app: env.APP_HOST });
+  // The settings by name, so the list in NODE_SETTINGS is checked against them:
+  // env.TOURS_HOST, env.APP_HOST, env.IMG_HOST.
+  const hosts = resolveHosts(hostSettingsFrom<string>(env));
   if (!hosts.ok) throw new Error(hosts.problem);
   const allowance = allowanceFromSetting(env.STORAGE_ALLOWANCE_BYTES);
   if (!allowance.ok) throw new Error(allowance.problem);

@@ -20,6 +20,9 @@ const ONLY_APP = "APP_HOST is set but TOURS_HOST is not. Set both for two addres
 const BAD_TOURS = "TOURS_HOST is not a host name. Write it like tours.example.com, without https:// and without a path.";
 const BAD_APP = "APP_HOST is not a host name. Write it like app.example.com, without https:// and without a path.";
 const SAME = "TOURS_HOST and APP_HOST name the same host. Two addresses need two different host names.";
+const ONLY_IMG = "IMG_HOST is set but TOURS_HOST and APP_HOST are not. IMG_HOST is an extra address beside those two: set them too, or leave IMG_HOST empty.";
+const BAD_IMG = "IMG_HOST is not a host name. Write it like img.example.com, without https:// and without a path.";
+const SAME_IMG = "APP_HOST and IMG_HOST name the same host. Two addresses need two different host names.";
 
 /** Each bad pair with the one line it must give. */
 const BAD_PAIRS: [string, Record<string, string>, string][] = [
@@ -28,6 +31,9 @@ const BAD_PAIRS: [string, Record<string, string>, string][] = [
   ["a tours address that is not a host name", { TOURS_HOST: "https://tours.example.com", APP_HOST: "app.example.com" }, BAD_TOURS],
   ["an app address that is not a host name", { TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com/setup" }, BAD_APP],
   ["the same name twice", { TOURS_HOST: "tours.example.com:8443", APP_HOST: "Tours.Example.com." }, SAME],
+  ["the img address alone", { IMG_HOST: "img.example.com" }, ONLY_IMG],
+  ["an img address that is not a host name", { TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com", IMG_HOST: "img.example.com/i" }, BAD_IMG],
+  ["the img address naming the app address", { TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com", IMG_HOST: "App.Example.com" }, SAME_IMG],
 ];
 
 describe("configFromEnv", () => {
@@ -52,6 +58,17 @@ describe("configFromEnv", () => {
       hosts: { tours: "tours.example.com", app: "app.example.com" },
     });
     expect(configFromEnv({ TOURS_HOST: "tours.localhost:8787", APP_HOST: "app.localhost:8787" }).hosts).toEqual({ tours: "tours.localhost:8787", app: "app.localhost:8787" });
+  });
+
+  it("configFromEnv reads the optional IMG_HOST beside the other two", () => {
+    expect(configFromEnv({ TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com", IMG_HOST: " IMG.Example.com. " }).hosts).toEqual({
+      tours: "tours.example.com",
+      app: "app.example.com",
+      img: "img.example.com",
+    });
+    // Empty or only spaces is not set: two addresses, with no img key at all.
+    for (const img of ["", "   "]) expect(Object.keys(configFromEnv({ TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com", IMG_HOST: img }).hosts!)).toEqual(["tours", "app"]);
+    expect(configFromEnv({ IMG_HOST: "" }).hosts).toBeNull();
   });
 
   it("configFromEnv throws the exact line for each bad pair", () => {
@@ -533,7 +550,7 @@ describe("the settings reach the app on every install path", () => {
 
   it("the Node target reads the settings this test knows, so a new one cannot be forgotten here", () => {
     expect(settingsRead()).toEqual(
-      ["APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE", "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST", "INVITE_CONTACT"].sort(),
+      ["APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE", "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST", "INVITE_CONTACT", "IMG_HOST"].sort(),
     );
   });
 

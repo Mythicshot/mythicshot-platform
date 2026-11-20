@@ -1,7 +1,7 @@
 import { createApp } from "../app.ts";
 import { withBudget } from "../budget.ts";
 import { setClientAddress } from "../client.ts";
-import { HOST_ROLES, normaliseHost, resolveHosts, type Hosts, type HostsResult } from "../hosts.ts";
+import { HOST_ROLES, hostSettingsFrom, normaliseHost, resolveHosts, settingOf, type Hosts, type HostsResult } from "../hosts.ts";
 import { DEFER_FAILED, type Deps } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
 import { allowanceFromSetting } from "../usage.ts";
@@ -11,9 +11,10 @@ import { R2FileStore } from "./files.ts";
 /**
  * SETUP_CODE is a Worker secret, so `wrangler types` does not list it. Nor does it list
  * STORAGE_ALLOWANCE_BYTES, a var only an install that wants a limit adds to its own file,
- * or SITE_HOST, a var only a one-address install that wants sign-in links adds.
+ * or SITE_HOST, a var only a one-address install that wants sign-in links adds, or
+ * IMG_HOST, the optional third address an install with two addresses may add.
  */
-type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown };
+type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown; IMG_HOST?: unknown };
 
 /**
  * Who to ask for an invite, from the Worker's var INVITE_CONTACT, trimmed, or null when it
@@ -39,21 +40,22 @@ export function siteHostFromWorkerEnv(env: { SITE_HOST?: unknown }, hosts: Hosts
 }
 
 /**
- * The two addresses from the Worker's vars, TOURS_HOST and APP_HOST. Both empty or unset
- * is one-address mode; a pair that cannot be used gives its problem, a fixed line that
- * names the vars and never repeats a value. A var that is present but is not text (a JSON
- * var, or a binding given that name) is a value that cannot be used, never an unset one:
- * reading it as unset could quietly turn two addresses into one.
+ * The addresses from the Worker's vars: TOURS_HOST and APP_HOST, and beside them the
+ * optional IMG_HOST (every `<ROLE>_HOST` of HOST_ROLES). All empty or unset is one-address
+ * mode; addresses that cannot be used give their problem, a fixed line that names the vars
+ * and never repeats a value. A var that is present but is not text (a JSON var, or a
+ * binding given that name) is a value that cannot be used, never an unset one: reading it
+ * as unset could quietly turn two addresses into one.
  */
-export function hostsFromWorkerEnv(env: { TOURS_HOST?: unknown; APP_HOST?: unknown }): HostsResult {
-  const vars = { tours: env.TOURS_HOST, app: env.APP_HOST };
+export function hostsFromWorkerEnv(env: { TOURS_HOST?: unknown; APP_HOST?: unknown; IMG_HOST?: unknown }): HostsResult {
+  const vars = hostSettingsFrom<unknown>(env);
   for (const role of HOST_ROLES) {
     const value = vars[role];
     if (value !== undefined && typeof value !== "string") {
-      return { ok: false, problem: `${role.toUpperCase()}_HOST is not a host name. Write it like ${role}.example.com, without https:// and without a path.` };
+      return { ok: false, problem: `${settingOf(role)} is not a host name. Write it like ${role}.example.com, without https:// and without a path.` };
     }
   }
-  return resolveHosts(vars as { tours?: string; app?: string });
+  return resolveHosts(vars as Partial<Record<(typeof HOST_ROLES)[number], string>>);
 }
 
 /**
