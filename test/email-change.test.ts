@@ -149,7 +149,7 @@ describe("asking for an email change", () => {
         "",
         `${APP}/account/email#c=${code}`,
         "",
-        "It works once and for 15 minutes, in the browser where you are signed in. Until it is opened, nothing changes. If you did not ask for this, ignore this mail.",
+        "It works once and for 15 minutes, and you need to be signed in to Mythicshot when you open it. Until it is opened, nothing changes. If you did not ask for this, ignore this mail.",
         "",
       ].join("\n"),
     });
@@ -764,6 +764,9 @@ describe("the mail texts", () => {
     expect(() => emailChangeLink("http://app.example.com", "dpe_a")).toThrow("bad origin");
     expect(() => emailChangeLink("https://app.example.com", "dpe a")).toThrow("bad code");
     expect(emailChangeMail("x@example.com", "LINK", "Site\nBcc: y").subject).toBe("Confirm your new Mythicshot email address");
+    // Any signed-in browser of the account can open the link: the mail says so, with the site's own name.
+    expect(emailChangeMail("x@example.com", "LINK", "Harbor Tours").text.split("\n")[4]).toBe("It works once and for 15 minutes, and you need to be signed in to Harbor Tours when you open it. Until it is opened, nothing changes. If you did not ask for this, ignore this mail.");
+    expect(emailChangeMail("x@example.com", "LINK").text).not.toContain("in the browser where");
   });
 });
 
