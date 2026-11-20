@@ -14,12 +14,16 @@ import { sessionCookiePresent } from "../sessions.ts";
 import { DASH_JS } from "./script.ts";
 import { DASH_CSS } from "./style.ts";
 import { TOURS_HTML, TOURS_JS } from "./tours.ts";
+import { STORAGE_HTML, STORAGE_JS } from "./storage.ts";
 
 /** One dashboard page: where it is served, its document, and its own script. */
 export type DashPage = { path: string; html: string; script: { path: string; body: string } };
 
 /** The dashboard's pages. A later page adds its line here (see src/dash/shell.ts). */
-export const DASH_PAGES: readonly DashPage[] = [{ path: "/tours", html: TOURS_HTML, script: { path: "/dash/tours.js", body: TOURS_JS } }];
+export const DASH_PAGES: readonly DashPage[] = [
+  { path: "/tours", html: TOURS_HTML, script: { path: "/dash/tours.js", body: TOURS_JS } },
+  { path: "/storage", html: STORAGE_HTML, script: { path: "/dash/storage.js", body: STORAGE_JS } },
+];
 
 const HTML = "text/html; charset=utf-8";
 const CSS = "text/css; charset=utf-8";

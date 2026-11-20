@@ -82,6 +82,8 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /dash/tours.js": "app",
   "GET /dash/dash.css": "app",
   "GET /dash/dash.js": "app",
+  "GET /storage": "app",
+  "GET /dash/storage.js": "app",
 
   // Tour pages, their pictures and the player's files.
   "GET /p/:name": "tours-redirect",

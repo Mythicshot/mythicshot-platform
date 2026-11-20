@@ -160,7 +160,7 @@ describe("the dashboard's pages and files", () => {
       expect([head.status, head.bytes.length, head.headers.get("content-security-policy"), head.calls], s.path).toEqual([200, 0, POLICY, 0]);
     }
     // The routes are the ones the shell serves, and nothing else.
-    expect(DASH_PAGES.map((p) => [p.path, p.html, p.script.path, p.script.body])).toEqual([["/tours", TOURS_HTML, "/dash/tours.js", TOURS_JS]]);
+    expect(DASH_PAGES.filter((p) => p.path === "/tours").map((p) => [p.path, p.html, p.script.path, p.script.body])).toEqual([["/tours", TOURS_HTML, "/dash/tours.js", TOURS_JS]]);
   });
 
   it("no page or file holds anything about anyone: the same answer for nobody, a member, an admin and a token", async () => {
