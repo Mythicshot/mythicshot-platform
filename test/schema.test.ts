@@ -12,6 +12,8 @@ const TABLES = [
   "chapter",
   "deleted_object",
   "email_change",
+  "media",
+  "media_part",
   "membership",
   "public_object",
   "publish_job",
@@ -706,5 +708,98 @@ describe("schema", () => {
     for (const id of ["", "emc_1", "EMC_" + "0".repeat(24), "emc-" + "0".repeat(24), "emc_" + "0".repeat(23) + "g", "e_" + "0".repeat(24), "emcxx_" + "0".repeat(24), SECRET]) await rejection(row({ id }));
     await rejection(deps.db.run("INSERT INTO email_change (id, user_id, new_email, code_hash, created_at) VALUES (? || char(0) || 'x', ?, 'a@example.com', ?, 1)", ["emc_" + "0".repeat(24), user, HASH_B]));
     expect(await count(deps, "email_change")).toBe(0);
+  });
+  // Shared items (migration 0010).
+
+  it("an item and its parts are strict, cascade nothing, and take only the shapes the routes write", async () => {
+    const { deps } = await makeDeps();
+    const { workspaceId } = await seedWorkspace(deps, "A");
+    for (const name of ["media", "media_part"]) {
+      const t = (await appTables(deps)).find((x) => x.name === name);
+      expect(t?.sql, name).toMatch(/\)\s*STRICT$/);
+      expect(t?.sql, name).not.toMatch(/cascade|set null|set default/i);
+    }
+    const indexes = await deps.db.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'media' AND sql IS NOT NULL ORDER BY name");
+    expect(indexes.map((i) => i.name)).toEqual(["media_list", "media_state"]);
+    let n = 0;
+    type Cols = Partial<Record<"id" | "ws" | "link" | "kind" | "type" | "bytes" | "parts" | "width" | "height" | "duration" | "title" | "state" | "ptype" | "pbytes" | "pclaim" | "pstored", string | number | null>>;
+    const item = (c: Cols = {}, titleSql = "?") => {
+      n += 1;
+      const v = { id: "med_" + n.toString(16).padStart(24, "0"), ws: workspaceId, link: "a".repeat(19) + "abcdefghijklmnopqrstuvwxyz234567"[n % 32], kind: "image", type: "image/png", bytes: 10, parts: 1, width: 1, height: 1, duration: null, title: null, state: "uploading", ptype: null, pbytes: null, pclaim: null, pstored: null, ...c };
+      return deps.db.run(
+        `INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, duration_ms, title, state, preview_type, preview_bytes, preview_claim, preview_stored_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${titleSql}, ?, ?, ?, ?, ?, 1)`,
+        [v.id, v.ws, v.link, v.kind, v.type, v.bytes, v.parts, v.width, v.height, v.duration, v.title, v.state, v.ptype, v.pbytes, v.pclaim, v.pstored],
+      );
+    };
+    const reset = () => deps.db.run("DELETE FROM media");
+    const good: Cols[] = [
+      {},
+      { kind: "image", type: "image/jpeg" },
+      { kind: "clip", type: "image/gif", duration: 1 },
+      { kind: "clip", type: "video/mp4", duration: 600000, parts: 27 },
+      { title: "x".repeat(120) },
+      { title: "é".repeat(120) },
+      { state: "online" },
+      { state: "closing" },
+      { ptype: "png", pbytes: 100000, pclaim: "0".repeat(24) },
+      { ptype: "jpg", pbytes: 1, pstored: 5 },
+    ];
+    for (const c of good) {
+      await item(c);
+      await reset();
+    }
+    const bad: Cols[] = [
+      { id: "med_1" },
+      { id: "MED_" + "0".repeat(24) },
+      { id: "up_" + "0".repeat(25) },
+      { id: "med_" + "0".repeat(23) + "g" },
+      { ws: "ws_nobody" },
+      { link: "a".repeat(19) },
+      { link: "a".repeat(21) },
+      { link: "A".repeat(20) },
+      { link: "a".repeat(19) + "1" },
+      { link: "a".repeat(19) + "8" },
+      { kind: "video" },
+      { type: "image/gif" },
+      { type: "image/svg+xml" },
+      { kind: "clip", type: "image/png", duration: 1 },
+      { kind: "clip", type: "video/mp4" },
+      { kind: "clip", type: "video/mp4", duration: 0 },
+      { duration: 5 },
+      { bytes: 0 },
+      { parts: 0 },
+      { parts: 1000 },
+      { width: 0 },
+      { height: -1 },
+      { title: "" },
+      { title: "x".repeat(481) },
+      { state: "deleted" },
+      { ptype: "gif", pbytes: 1 },
+      { ptype: "png" },
+      { pbytes: 10 },
+      { ptype: "png", pbytes: 100001 },
+      { ptype: "png", pbytes: 1, pclaim: "0".repeat(23) },
+      { ptype: "png", pbytes: 1, pclaim: "G".repeat(24) },
+      { pstored: 5 },
+    ];
+    for (const c of bad) expect(await item(c).then(() => "stored", () => "refused"), JSON.stringify(c)).toBe("refused");
+    await rejection(item({}, "'a' || char(0) || 'b'"));
+    await rejection(deps.db.run("INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, state, created_at) VALUES (? || char(0) || 'x', ?, ?, 'image', 'image/png', 1, 1, 1, 1, 'uploading', 1)", ["med_" + "0".repeat(24), workspaceId, "b".repeat(20)]));
+    expect(await count(deps, "media")).toBe(0);
+
+    // A link id is unique; a part needs its item, has one row per number, and is claimed or stored, never both or neither.
+    await item({ id: "med_" + "1".repeat(24), link: "c".repeat(20) });
+    expect(isUniqueViolation(await rejection(item({ link: "c".repeat(20) })))).toBe(true);
+    const part = (cols: { media?: string; n?: number; bytes?: number; claim?: string | null; stored?: number | null }) =>
+      deps.db.run("INSERT INTO media_part (media_id, n, bytes, claim, stored_at) VALUES (?, ?, ?, ?, ?)", [cols.media ?? "med_" + "1".repeat(24), cols.n ?? 0, cols.bytes ?? 1, cols.claim === undefined ? null : cols.claim, cols.stored === undefined ? 1 : cols.stored]);
+    await part({ n: 0, bytes: 2_000_000 });
+    await part({ n: 998, claim: "a".repeat(24), stored: null });
+    expect(isUniqueViolation(await rejection(part({ n: 0 })))).toBe(true);
+    for (const c of [{ media: "med_" + "2".repeat(24) }, { n: -1 }, { n: 999 }, { n: 1, bytes: 0 }, { n: 1, bytes: 2_000_001 }, { n: 1, claim: null, stored: null }, { n: 1, claim: "a".repeat(24), stored: 1 }, { n: 1, claim: "a".repeat(25), stored: null }]) {
+      await rejection(part(c));
+    }
+    expect(await count(deps, "media_part")).toBe(2);
+    // An item with parts cannot be deleted out from under them.
+    await rejection(deps.db.run("DELETE FROM media WHERE id = ?", ["med_" + "1".repeat(24)]));
   });
 });

@@ -38,7 +38,7 @@ CREATE TABLE media (
   parts INTEGER NOT NULL CHECK (parts BETWEEN 1 AND 999),
   width INTEGER NOT NULL CHECK (width > 0),
   height INTEGER NOT NULL CHECK (height > 0),
-  duration_ms INTEGER CHECK ((kind = 'clip' AND duration_ms > 0) OR (kind = 'image' AND duration_ms IS NULL)),
+  duration_ms INTEGER CHECK ((kind = 'clip' AND duration_ms IS NOT NULL AND duration_ms > 0) OR (kind = 'image' AND duration_ms IS NULL)),
   title TEXT CHECK (title IS NULL OR (length(CAST(title AS BLOB)) BETWEEN 1 AND 480 AND instr(CAST(title AS BLOB), X'00') = 0)),
   state TEXT NOT NULL CHECK (state IN ('uploading', 'online', 'closing')),
   preview_type TEXT CHECK (preview_type IS NULL OR preview_type IN ('png', 'jpg')),
