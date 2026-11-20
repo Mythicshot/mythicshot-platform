@@ -612,6 +612,8 @@ describe("the tables against the route table", () => {
     for (const [key, entry] of Object.entries(LISTS)) expect(entry.holds.length, `${key} must say what it holds`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(CREATES)) expect(entry.makes.length, `${key} must say what it makes`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(SELF)) expect((entry.ends ?? entry.changes ?? "").length, `${key} must say what it ends or changes`).toBeGreaterThan(10);
+    for (const [key, entry] of Object.entries(CONNECT)) expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
+    for (const [key, entry] of Object.entries(INVITE)) expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(ADMIN)) {
       expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
       // Only an answer with no body has no field.

@@ -447,6 +447,8 @@ export const OWNED: Readonly<Record<string, string>> = {
 export const SHARED: Readonly<Record<string, string>> = {
   rate_counter: "counters for the whole site's sign-in requests; a key is a hash and names no workspace",
   connect_key: "the install's one key for the short codes' HMAC, made by the migration; no workspace has a part in it",
+  // An invite names no workspace today. Should invites ever gain a workspace column (inviting
+  // someone into an existing workspace), this entry must move to OWNED with that column.
   invite: "the site's invites, which the admin alone lists and changes: an address and the digest of a code, until accepting one makes a new workspace for it",
 };
 
