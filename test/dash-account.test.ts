@@ -70,7 +70,7 @@ async function signedIn(deps: Parameters<typeof seedAccount>[0], opts: { admin?:
 
 // ---- The wording ----
 
-const SHELL = ["Mythicshot", "Images", "GIFs", "Tours", "Storage", "Account", "Admin", "This page needs JavaScript."];
+const SHELL = ["Mythicshot", "Images", "GIFs", "Tours", "Storage", "Connections", "Account", "Admin", "This page needs JavaScript."];
 
 /** Not in the mockups: the line under the address when the site cannot send mail, the server's own sentence (review follow-up L6). */
 const MAIL_OFF_LINE = "This site cannot send mail, so an email address cannot be changed here.";

@@ -58,6 +58,7 @@ const ADMIN_WORDING = [
   "GIFs",
   "Tours",
   "Storage",
+  "Connections",
   "Account",
   "Admin",
   "This page needs JavaScript.",

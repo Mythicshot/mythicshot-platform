@@ -84,6 +84,8 @@ export const UNDOCUMENTED_ROUTES: Readonly<Record<string, string>> = {
   "GET /dash/gifs.js": "the GIFs page's own script",
   "GET /storage": "the dashboard's Storage page, for people in a browser; it calls the usage and tour requests described here",
   "GET /dash/storage.js": "the Storage page's own script",
+  "GET /connections": "the dashboard's Connections page, for people in a browser; it calls the connect and token requests described here",
+  "GET /dash/connections.js": "the Connections page's own script",
   "GET /admin": "the dashboard's Admin page, for the site's admin in a browser; it calls the admin requests described here",
   "GET /dash/admin.js": "the Admin page's own script",
   "GET /dash/account.js": "the Account page's own script",

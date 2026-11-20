@@ -71,7 +71,7 @@ async function signedIn(deps: Parameters<typeof seedAccount>[0], opts: { admin?:
 
 const BRAND = "Mythicshot";
 const NOSCRIPT = "This page needs JavaScript.";
-const TABS = ["Images", "GIFs", "Tours", "Storage", "Account", "Admin"];
+const TABS = ["Images", "GIFs", "Tours", "Storage", "Connections", "Account", "Admin"];
 
 /** Every text of the Tours page's body, in order, hidden parts included. Nothing else may be in it. */
 const TOURS_WORDING = [
@@ -308,7 +308,7 @@ describe("the dashboard's pages and files", () => {
     expect(SCRIPTS.length).toBe(DASH_PAGES.length + 1);
   });
 
-  it("the bar holds the brand, the six tabs in order, and a place for the username", () => {
+  it("the bar holds the brand, the seven tabs in order, and a place for the username", () => {
     const doc = new FakeDocument(TOURS_HTML);
     const nav = doc.body.all().find((e) => e.tagName === "nav")!;
     const links = nav.all().filter((e) => e.tagName === "a");
@@ -317,6 +317,7 @@ describe("the dashboard's pages and files", () => {
       ["GIFs", "/gifs", null, false],
       ["Tours", "/tours", "page", false],
       ["Storage", "/storage", null, false],
+      ["Connections", "/connections", null, false],
       ["Account", "/account", null, false],
       ["Admin", "/admin", null, true],
     ]);

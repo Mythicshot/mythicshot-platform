@@ -2,7 +2,7 @@
 // (the brand, the tabs and the username) and the page's own body. The shared stylesheet
 // and script are src/dash/style.ts and src/dash/script.ts; src/dash/routes.ts serves them.
 //
-// How a page joins the dashboard (Images, GIFs, Tours, Storage, Account and Admin are built this way):
+// How a page joins the dashboard (Images, GIFs, Tours, Storage, Connections, Account and Admin are built this way):
 //
 // 1. Its body and its script live in a module of its own under src/dash/, as the Tours
 //    page does in src/dash/tours.ts: the body as an HTML string (fixed text only, no data),
@@ -19,8 +19,9 @@
 //    session says admin, the workspace's name, whether the account has a username, its email
 //    address, this session's id, and whether the site can change the address (email_change).
 //    Inside it, Dash.api(method, path, body) sends every request (the session cookie, and
-//    the X-Csrf-Token header on every change), Dash.formatBytes and Dash.dateOf write sizes
-//    and dates as every page does, Dash.failure(res) is the approved sentence for a failed
+//    the X-Csrf-Token header on every change; its answer carries the retry-after header as
+//    retryAfter), Dash.formatBytes and Dash.dateOf write sizes and dates as every page does
+//    (Dash.dateOf(ms, true) always with the year), Dash.failure(res) is the approved sentence for a failed
 //    request, and Dash.question({...}) is the one way to ask a question in the page (see
 //    its comment in src/dash/script.ts). Data reaches the page only through textContent and
 //    safe attributes.
@@ -31,7 +32,7 @@
 //    (test/hosts.test.ts), in OPEN (test/isolation.test.ts) and in UNDOCUMENTED_ROUTES
 //    (src/docs/openapi.ts), and its words are pinned in a test as test/dash.test.ts does.
 //
-// The tabs are fixed here, in this order: Images, GIFs, Tours, Storage, Account, Admin.
+// The tabs are fixed here, in this order: Images, GIFs, Tours, Storage, Connections, Account, Admin.
 // Where a person lands (after signing in, and on GET /) is still Tours. The Admin tab is in every page,
 // hidden; only the shared script shows it, and only when the session says the person is
 // an admin. Nothing about anyone is in the document: the username, too, is filled in by
@@ -44,6 +45,7 @@ export const DASH_TABS = [
   { key: "gifs", label: "GIFs", href: "/gifs" },
   { key: "tours", label: "Tours", href: "/tours" },
   { key: "storage", label: "Storage", href: "/storage" },
+  { key: "connections", label: "Connections", href: "/connections" },
   { key: "account", label: "Account", href: "/account" },
   { key: "admin", label: "Admin", href: "/admin" },
 ] as const;

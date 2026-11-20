@@ -64,6 +64,7 @@ const STORAGE_WORDING = [
   "GIFs",
   "Tours",
   "Storage",
+  "Connections",
   "Account",
   "Admin",
   "This page needs JavaScript.",
@@ -241,7 +242,7 @@ describe("the Storage page", () => {
     const navEnd = STORAGE_HTML.indexOf("</nav>");
     expect(navEnd).toBeGreaterThanOrEqual(0);
     for (const path of ["/images", "/gifs"]) for (const text of [STORAGE_HTML.slice(navEnd), STORAGE_JS]) expect(text, path).not.toContain(path);
-    expect(doc.body.all().filter((e) => e.tagName === "a").map((a) => a.getAttribute("href"))).toEqual(["/images", "/gifs", "/tours", "/storage", "/account", "/admin"]);
+    expect(doc.body.all().filter((e) => e.tagName === "a").map((a) => a.getAttribute("href"))).toEqual(["/images", "/gifs", "/tours", "/storage", "/connections", "/account", "/admin"]);
     for (const api of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "createContextualFragment", "DOMParser", "srcdoc", "confirm(", "alert(", "prompt("]) expect(STORAGE_JS, api).not.toContain(api);
   });
 
