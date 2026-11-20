@@ -3,6 +3,7 @@
 //
 // `requireAuth` is the only way a route learns its caller. It takes one credential, a
 // token or a session cookie, and resolves it to exactly one workspace.
+import { onRole, type HostRole } from "./hosts.ts";
 import { json } from "./http.ts";
 import type { Deps } from "./ports.ts";
 import { csrfFor, readSessionCookie, resolveSession, sameOriginChange, sessionCookiePresent, sessionHost } from "./sessions.ts";
@@ -13,6 +14,13 @@ import { csrfFor, readSessionCookie, resolveSession, sameOriginChange, sessionCo
  * its account, and whether that account is a site admin.
  */
 export type Auth = { workspaceId: string; tokenId: string; session?: { id: string; userId: string; admin: boolean } };
+
+/**
+ * The roles whose address takes any credential, a token or a session: the tours and the
+ * app address (a session only the app address: SESSION_ROLES). The img address serves
+ * shared media to anyone and takes none, nor does a role added later until it is listed.
+ */
+export const CREDENTIAL_ROLES: readonly HostRole[] = ["tours", "app"];
 
 /** The header a page sends the anti-forgery value in. */
 const CSRF_HEADER = "x-csrf-token";
@@ -105,6 +113,9 @@ function notFound(): Response {
  * the only way a route learns its caller.
  *
  * In this order:
+ * 0. With addresses configured, a request sent to an address outside CREDENTIAL_ROLES
+ *    (the img address) is the one 401 before anything else is read. The host gate keeps
+ *    every credential route off that address already; this holds without it.
  * 1. With `only: "token"` no cookie is looked at: the Authorization header is judged
  *    alone, exactly as in the version before sessions, and without one the answer is the
  *    401. The setup wizard's own page asks this way, and a cookie left in the browser
@@ -115,7 +126,7 @@ function notFound(): Response {
  *    and, unless `touch` is false, records when the token was last used. A token is
  *    refused when it is malformed, unknown or revoked, and when an account of its
  *    workspace is disabled. `only: "session"` refuses every token, with no lookup.
- * 4. With a session cookie: in two-address mode it counts only on the app address. For
+ * 4. With a session cookie: with addresses configured it counts only on the app address. For
  *    any method but GET and HEAD the request must come from a page of this host
  *    (`sameOriginChange`, else 403 `bad_origin`) and carry the session's anti-forgery
  *    value in X-Csrf-Token (else 403 `bad_csrf`); both are decided from the request
@@ -144,6 +155,7 @@ export async function requireAuth(
 
 /** `requireAuth` without the admin rule: the caller, or the refusal a route that is no admin route answers. */
 async function callerOf(req: Request, deps: Deps, opts: { touch?: boolean; only?: "token" | "session" }): Promise<Auth | Response> {
+  if (!onRole(deps.config.hosts, req, CREDENTIAL_ROLES)) return unauthorized();
   const header = req.headers.get("authorization");
   // Before any cookie is read: a token-only route has no session to mix a token with.
   if (opts.only === "token") return tokenAuth(header ?? "", deps, opts.touch !== false);

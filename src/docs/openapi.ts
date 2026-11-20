@@ -509,7 +509,7 @@ function schemas(): Record<string, Schema> {
     ),
     Health: object(
       ["ok"],
-      { ok: { type: "boolean", const: true }, address: { type: "string", enum: ["tours", "app"], description: "Only on a server with two addresses, when asked on one of them: which of the two this request reached." } },
+      { ok: { type: "boolean", const: true }, address: { type: "string", enum: ["tours", "app", "img"], description: "Only on a server with two addresses (or three, with the optional img address), when asked on one of them: which one this request reached." } },
     ),
     UploadTarget: {
       description: "Where the upload goes.",

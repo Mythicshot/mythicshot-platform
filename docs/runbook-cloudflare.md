@@ -177,7 +177,9 @@ A Worker cannot refuse to start, which is why a pair that cannot be used closes 
 > [!WARNING]
 > Setting the two vars by hand can take the whole site down at the next deploy: a pair that cannot be used answers 500 everywhere, and a pair that can be used refuses the `workers.dev` address and every name that is not one of the two.
 
-To go back to one address, set both vars to an empty string in `wrangler.deploy.jsonc`, as in the block above, and deploy with the update command. With both empty the command writes them empty again, and the Worker answers on every address as before.
+A third var, `IMG_HOST`, is optional: the host name of an address for shared images and clips, such as `img.example.com`, only beside both of the other two, as in [An optional third address for images and clips](../README.md#an-optional-third-address-for-images-and-clips) in the README. Without it, images and clips answer on the tours address. It is not in `wrangler.jsonc` and not the same as `PUBLIC_IMAGE_BASE` below. Like the other two it waits for a later version of the guided command, which attaches no third domain; the command keeps a value set by hand, and on its own or naming the same host as another var it answers `500` everywhere, as in the table above.
+
+To go back to one address, set both vars to an empty string in `wrangler.deploy.jsonc`, as in the block above, remove an `IMG_HOST` var if there is one, and deploy with the update command. With both empty the command writes them empty again, and the Worker answers on every address as before.
 
 ```sh
 npm run setup:cloudflare -- update

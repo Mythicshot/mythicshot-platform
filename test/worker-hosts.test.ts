@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Hosts, HostsResult } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
 
-type HostVars = { TOURS_HOST?: unknown; APP_HOST?: unknown };
+type HostVars = { TOURS_HOST?: unknown; APP_HOST?: unknown; IMG_HOST?: unknown };
 type Entry = {
   hostsFromWorkerEnv(env: HostVars): HostsResult;
   depsFromEnv(env: Record<string, unknown>, hosts: Hosts | null, storageAllowanceBytes?: number | null): Deps;
@@ -25,6 +25,9 @@ const ONLY_APP = "APP_HOST is set but TOURS_HOST is not. Set both for two addres
 const BAD_TOURS = "TOURS_HOST is not a host name. Write it like tours.example.com, without https:// and without a path.";
 const BAD_APP = "APP_HOST is not a host name. Write it like app.example.com, without https:// and without a path.";
 const SAME = "TOURS_HOST and APP_HOST name the same host. Two addresses need two different host names.";
+const ONLY_IMG = "IMG_HOST is set but TOURS_HOST and APP_HOST are not. IMG_HOST is an extra address beside those two: set them too, or leave IMG_HOST empty.";
+const BAD_IMG = "IMG_HOST is not a host name. Write it like img.example.com, without https:// and without a path.";
+const SAME_IMG = "TOURS_HOST and IMG_HOST name the same host. Two addresses need two different host names.";
 
 /** Each bad pair with its problem; `secret` is a made-up part of a value that must never be logged. */
 const BAD_PAIRS: [string, HostVars, string][] = [
@@ -33,6 +36,9 @@ const BAD_PAIRS: [string, HostVars, string][] = [
   ["a tours address that is not a host name", { TOURS_HOST: "https://made-up-tours.example.com", APP_HOST: "app.example.com" }, BAD_TOURS],
   ["an app address that is not a host name", { TOURS_HOST: "tours.example.com", APP_HOST: "made-up-app.example.com/setup" }, BAD_APP],
   ["the same name twice", { TOURS_HOST: "made-up.example.com:8443", APP_HOST: "Made-Up.Example.com." }, SAME],
+  ["the img address alone", { TOURS_HOST: "", APP_HOST: "", IMG_HOST: "made-up-img.example.com" }, ONLY_IMG],
+  ["an img address that is not a host name", { TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com", IMG_HOST: "https://made-up-img.example.com" }, BAD_IMG],
+  ["the img address naming the tours address", { TOURS_HOST: "made-up.example.com", APP_HOST: "app.example.com", IMG_HOST: "made-up.example.com" }, SAME_IMG],
 ];
 
 /** Stand-ins for the bindings: any use of one fails the request, so a test that passes used none. */
@@ -64,6 +70,15 @@ describe("hostsFromWorkerEnv", () => {
     expect(entry.hostsFromWorkerEnv({ TOURS_HOST: " Tours.Example.com. ", APP_HOST: "app.example.com:443" })).toEqual({ ok: true, hosts: { tours: "tours.example.com", app: "app.example.com" } });
   });
 
+  it("the optional IMG_HOST var gives the img address beside the other two", () => {
+    expect(entry.hostsFromWorkerEnv({ TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com", IMG_HOST: " IMG.Example.com. " })).toEqual({
+      ok: true,
+      hosts: { tours: "tours.example.com", app: "app.example.com", img: "img.example.com" },
+    });
+    expect(entry.hostsFromWorkerEnv({ TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com", IMG_HOST: "" })).toEqual({ ok: true, hosts: { tours: "tours.example.com", app: "app.example.com" } });
+    expect(entry.hostsFromWorkerEnv({ TOURS_HOST: "", APP_HOST: "", IMG_HOST: "" })).toEqual({ ok: true, hosts: null });
+  });
+
   it("each bad pair gives its problem", () => {
     for (const [label, env, problem] of BAD_PAIRS) expect(entry.hostsFromWorkerEnv(env), label).toEqual({ ok: false, problem });
   });
@@ -76,6 +91,8 @@ const NOT_TEXT: [string, HostVars, string][] = [
   ["null for the tours address, the app address unset", { TOURS_HOST: null }, BAD_TOURS],
   ["false for the app address, the tours address empty", { TOURS_HOST: "", APP_HOST: false }, BAD_APP],
   ["a list for both", { TOURS_HOST: ["made-up-tours.example.com"], APP_HOST: ["made-up-app.example.com"] }, BAD_TOURS],
+  ["a number for the img address", { TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com", IMG_HOST: 7 }, BAD_IMG],
+  ["null for the img address, the other two unset", { IMG_HOST: null }, BAD_IMG],
 ];
 
 describe("a var that is present but not text", () => {

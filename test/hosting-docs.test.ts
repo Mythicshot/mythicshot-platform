@@ -479,7 +479,7 @@ describe("the shared cPanel hosting guide", () => {
 
   it("links no external page, so none that was not opened, and names no provider", () => {
     expect([...guide.matchAll(/\]\(([a-z]+:[^)\s]+)\)/g)]).toEqual([]);
-    expect(guide).not.toMatch(/https?:\/\/(?!(?:tours|app)\.example\.com\b)/);
+    expect(guide).not.toMatch(/https?:\/\/(?!(?:tours|app|img)\.example\.com\b)/);
     for (const p of SERVER_GUIDES) {
       const provider = hosting[p].match(/^# Host on (?:an? )?(\S+)/)?.[1] ?? "";
       expect(provider.length, p).toBeGreaterThan(2);
@@ -734,6 +734,22 @@ describe("the shared cPanel hosting guide", () => {
     );
     expect(runbook).toMatch(/^### If the setup did not finish$/m);
     expect(runbook).toContain("the steps in [If the token was lost before anyone saved it](#if-the-token-was-lost-before-anyone-saved-it) clear that half-finished setup");
+  });
+
+  it("the optional third address is a part of the second address's section, optional, marked Unconfirmed, and checked in a browser", () => {
+    const part = second();
+    const from = part.indexOf("### An optional third address for images and clips");
+    expect(from).toBeGreaterThan(part.indexOf("**The way back.**"));
+    const third = part.slice(from);
+    expect(third).toContain("This is optional: without it, images and clips answer on the tours address, and nothing else changes.");
+    expect(third).toMatch(/^1\. Create the subdomain `img\.example\.com` and attach it to the same Node\.js app[^\n]*\*\*Unconfirmed\*\*[^\n]*has not been tried on real hosting\.$/m);
+    expect(third).toContain("```text\nIMG_HOST=img.example.com\n```");
+    expect(third).toContain('`https://img.example.com/healthz` shows `{"ok":true,"address":"img"}`');
+    expect(third).toContain("`cpanel.sh` does not check the third address: open it in a browser.");
+    expect(third).toContain("**The way back.** Remove the `IMG_HOST` line from the settings file and restart.");
+    // The script really does not know it, and the closing list says it was not run on real hosting.
+    expect(cpanelSh).not.toContain("IMG_HOST");
+    expect(guide.slice(guide.indexOf("**Tested only on a development computer,**"))).toContain("The optional third address of [step 14](#an-optional-third-address-for-images-and-clips): only the platform's own tests have run it");
   });
 
   it("the second address is set up in the order that keeps the platform reachable, and attaching it stays marked Unconfirmed", () => {

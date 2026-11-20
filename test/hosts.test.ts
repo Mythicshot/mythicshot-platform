@@ -1,20 +1,23 @@
 // Which address answers what: one row per route in the route table, sent to the app in
 // one-address mode and, in two-address mode, to the tours address, the app address and
-// a host the install does not serve.
+// a host the install does not serve; and with the optional img address set, to it too.
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
 import { DASH_LINK_PAGES, DASH_PAGES } from "../src/dash/routes.ts";
 import { HOST_RULES, hostGate, type HostRule } from "../src/host-gate.ts";
-import type { Hosts } from "../src/hosts.ts";
+import { HOST_ROLES, type HostRole, type Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
+import { SESSION_COOKIE } from "../src/sessions.ts";
 import { VERSION } from "../src/version.ts";
 import { count, fixtures, send, uploadTour, type Call, type Json } from "./bundle.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
+const THREE: Hosts = { ...HOSTS, img: "img.example.com" };
 const TOURS = "https://tours.example.com";
 const APP = "https://app.example.com";
+const IMG = "https://img.example.com";
 const UNKNOWN = "https://evil.example.net";
 const OTHER = "https://other.example.net"; // any host, for one-address mode
 const CODE = "correct-horse-battery-staple";
@@ -31,24 +34,29 @@ type Row = {
   path: string;
   /** A JSON body; the request then also carries its own address as Origin, as the wizard's page does. */
   body?: unknown;
-  /** The expected status: one-address mode on any host, the tours address, the app address, an unknown host. */
+  /**
+   * The expected status: one-address mode on any host, the tours address, the app address,
+   * an unknown host, and the img address (set beside the other two, which answer the same
+   * with it as without it).
+   */
   one: number;
   tours: number;
   app: number;
   unknown: number;
+  img: number;
 };
 
-const api = (method: string, path: string): Row => ({ method, path, one: 401, tours: 401, app: 401, unknown: 421 });
-const wizard = (method: string, path: string, status: number, body?: unknown): Row => ({ method, path, body, one: status, tours: status, app: 404, unknown: 421 });
-const session = (method: string, path: string, status: number, body?: unknown): Row => ({ method, path, body, one: status, tours: 404, app: status, unknown: 421 });
+const api = (method: string, path: string): Row => ({ method, path, one: 401, tours: 401, app: 401, unknown: 421, img: 404 });
+const wizard = (method: string, path: string, status: number, body?: unknown): Row => ({ method, path, body, one: status, tours: status, app: 404, unknown: 421, img: 404 });
+const session = (method: string, path: string, status: number, body?: unknown): Row => ({ method, path, body, one: status, tours: 404, app: status, unknown: 421, img: 404 });
 /** A sign-in page or one of its files: static, on the app address only (on any host in one-address mode). */
-const page = (path: string): Row => ({ method: "GET", path, one: 200, tours: 404, app: 200, unknown: 421 });
+const page = (path: string): Row => ({ method: "GET", path, one: 200, tours: 404, app: 200, unknown: 421, img: 404 });
 /** An admin route: the one 404 to anyone but an admin's session, and on the app address only. */
-const admin = (method: string, path: string, body?: unknown): Row => ({ method, path, body, one: 404, tours: 404, app: 404, unknown: 421 });
+const admin = (method: string, path: string, body?: unknown): Row => ({ method, path, body, one: 404, tours: 404, app: 404, unknown: 421, img: 404 });
 
 /** Keyed like HOST_RULES: "<METHOD> <route path>" exactly as in the route table. */
 const ROWS: Record<string, Row> = {
-  "GET /healthz": { method: "GET", path: "/healthz", one: 200, tours: 200, app: 200, unknown: 200 },
+  "GET /healthz": { method: "GET", path: "/healthz", one: 200, tours: 200, app: 200, unknown: 200, img: 200 },
   "GET /setup": wizard("GET", "/setup", 200),
   "GET /setup/setup.css": wizard("GET", "/setup/setup.css", 200),
   "GET /setup/setup.js": wizard("GET", "/setup/setup.js", 200),
@@ -103,7 +111,7 @@ const ROWS: Record<string, Row> = {
   "GET /signin/signin.js": page("/signin/signin.js"),
   // The dashboard: on the app address only. GET / sends a browser on (to /signin, as no
   // cookie is sent here); the tours address sends it on to the app address first.
-  "GET /": { method: "GET", path: "/", one: 302, tours: 308, app: 302, unknown: 421 },
+  "GET /": { method: "GET", path: "/", one: 302, tours: 308, app: 302, unknown: 421, img: 404 },
   "GET /tours": page("/tours"),
   "GET /dash/tours.js": page("/dash/tours.js"),
   "GET /dash/dash.css": page("/dash/dash.css"),
@@ -115,16 +123,16 @@ const ROWS: Record<string, Row> = {
   "GET /dash/account.js": page("/dash/account.js"),
   "GET /account/email": page("/account/email"),
   "GET /dash/account-email.js": page("/dash/account-email.js"),
-  "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421 },
-  "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { method: "GET", path: "/player.js", one: 200, tours: 200, app: 404, unknown: 421 },
-  "GET /t/:slug": { method: "GET", path: "/t/no-such-tour", one: 404, tours: 404, app: 308, unknown: 421 },
+  "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421, img: 404 },
+  "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { method: "GET", path: "/player.js", one: 200, tours: 200, app: 404, unknown: 421, img: 404 },
+  "GET /t/:slug": { method: "GET", path: "/t/no-such-tour", one: 404, tours: 404, app: 308, unknown: 421, img: 404 },
   // The documentation page lives on the app address: the tours address sends the page on and has none of its files.
-  "GET /docs": { method: "GET", path: "/docs", one: 200, tours: 308, app: 200, unknown: 421 },
-  "GET /docs/:file{(?:viewer|docs)\\.[0-9a-f]{16}\\.(?:js|css)}": { method: "GET", path: "/docs/viewer.0123456789abcdef.js", one: 200, tours: 404, app: 200, unknown: 421 },
-  "GET /docs/licences.txt": { method: "GET", path: "/docs/licences.txt", one: 200, tours: 404, app: 200, unknown: 421 },
+  "GET /docs": { method: "GET", path: "/docs", one: 200, tours: 308, app: 200, unknown: 421, img: 404 },
+  "GET /docs/:file{(?:viewer|docs)\\.[0-9a-f]{16}\\.(?:js|css)}": { method: "GET", path: "/docs/viewer.0123456789abcdef.js", one: 200, tours: 404, app: 200, unknown: 421, img: 404 },
+  "GET /docs/licences.txt": { method: "GET", path: "/docs/licences.txt", one: 200, tours: 404, app: 200, unknown: 421, img: 404 },
   // The description is public text beside the API, on both addresses.
-  "GET /api/v1/openapi.json": { method: "GET", path: "/api/v1/openapi.json", one: 200, tours: 200, app: 200, unknown: 421 },
-  "GET /api/v1/openapi.yaml": { method: "GET", path: "/api/v1/openapi.yaml", one: 200, tours: 200, app: 200, unknown: 421 },
+  "GET /api/v1/openapi.json": { method: "GET", path: "/api/v1/openapi.json", one: 200, tours: 200, app: 200, unknown: 421, img: 404 },
+  "GET /api/v1/openapi.yaml": { method: "GET", path: "/api/v1/openapi.yaml", one: 200, tours: 200, app: 200, unknown: 421, img: 404 },
 };
 
 const KEYS = Object.keys(ROWS);
@@ -159,12 +167,14 @@ async function column(deps: Deps, origin: string): Promise<Record<string, Call>>
 }
 
 const statuses = (answers: Record<string, Call>) => Object.fromEntries(KEYS.map((k) => [k, answers[k].status]));
-const expected = (col: "one" | "tours" | "app" | "unknown") => Object.fromEntries(KEYS.map((k) => [k, ROWS[k][col]]));
+const expected = (col: "one" | "tours" | "app" | "unknown" | "img") => Object.fromEntries(KEYS.map((k) => [k, ROWS[k][col]]));
 
 /** An install with a setup code and nothing claimed, in one-address mode. */
 const oneAddress = (config?: Parameters<typeof makeDeps>[0]) => makeDeps({ setupCode: CODE, ...config });
 /** The same in two-address mode. */
 const twoAddress = (config?: Parameters<typeof makeDeps>[0]) => makeDeps({ setupCode: CODE, hosts: HOSTS, ...config });
+/** The same with the img address set too. */
+const threeAddress = (config?: Parameters<typeof makeDeps>[0]) => makeDeps({ setupCode: CODE, hosts: THREE, ...config });
 
 function expectMisdirected(r: Call, what: string): void {
   expect(r.status, what).toBe(421);
@@ -256,6 +266,9 @@ describe("the host-routing matrix", () => {
     // 15, and the eight routes of shared items.
     expect(API_KEYS.length).toBe(23);
     expect(WIZARD_KEYS.length).toBe(5);
+    // No route of the shipped app is a media route yet, so the img address has health alone.
+    expect(Object.values(HOST_RULES).filter((r) => r === "media")).toEqual([]);
+    for (const key of KEYS) expect(ROWS[key].img, key).toBe(key === "GET /healthz" ? 200 : 404);
   });
 
   it("one-address mode answers every route on any host as before", async () => {
@@ -377,14 +390,60 @@ describe("the host-routing matrix", () => {
     }
   });
 
+  it("with the img address set, the tours and app addresses answer every route exactly as with two addresses", async () => {
+    const two = await twoAddress();
+    const three = await threeAddress();
+    for (const [origin, col] of [[TOURS, "tours"], [APP, "app"]] as const) {
+      const before = await column(two.deps, origin);
+      const after = await column(three.deps, origin);
+      expect(statuses(after), origin).toEqual(expected(col));
+      for (const key of KEYS) {
+        const what = `${origin} ${key}`;
+        expect(after[key].status, what).toBe(before[key].status);
+        expect(after[key].text, what).toBe(before[key].text);
+        expect(after[key].headers.get("location"), what).toBe(before[key].headers.get("location"));
+        expect(after[key].headers.get("content-type"), what).toBe(before[key].headers.get("content-type"));
+        expect(after[key].calls, what).toBe(before[key].calls);
+      }
+    }
+    // An unknown host is as unknown as with two addresses.
+    expect(statuses(await column(three.deps, UNKNOWN))).toEqual(expected("unknown"));
+  });
+
+  it("the img address answers health and nothing else, and costs no database or storage call for the rest", async () => {
+    const { deps, calls } = await threeAddress();
+    const before = calls();
+    const answers = await column(deps, IMG);
+    expect(statuses(answers)).toEqual(expected("img"));
+    for (const key of KEYS) {
+      if (key === "GET /healthz") continue;
+      expectNotHere(answers[key], key);
+      expect(answers[key].headers.get("location"), key).toBeNull();
+    }
+    expect(answers["GET /healthz"].text).toBe('{"ok":true,"address":"img"}');
+    expect(answers["GET /healthz"].headers.get("content-type")).toBe("application/json");
+    expect(calls() - before).toBe(1);
+    // Its name matches in capitals, with a trailing dot and with a default port; another port is unknown.
+    for (const origin of ["https://IMG.Example.com", "https://img.example.com.", "http://img.example.com:80"]) {
+      expect((await send(deps, "GET", "/healthz", { origin })).text, origin).toBe('{"ok":true,"address":"img"}');
+    }
+    expectMisdirected(await sendRow(deps, ROWS["GET /t/:slug"], "https://img.example.com:8443"), "another port");
+    // Without the img address set, its name is a host this install does not serve.
+    const two = await twoAddress();
+    expectMisdirected(await sendRow(two.deps, ROWS["GET /t/:slug"], IMG), "img address not set");
+    expect((await send(two.deps, "GET", "/healthz", { origin: IMG })).text).toBe('{"ok":true}');
+  });
+
   it("no answer on any host sets a cookie or a cross-origin header", async () => {
     const one = await oneAddress();
     const two = await twoAddress();
+    const three = await threeAddress();
     const all: [string, Record<string, Call>][] = [
       ["one address", await column(one.deps, OTHER)],
       ["tours", await column(two.deps, TOURS)],
       ["app", await column(two.deps, APP)],
       ["unknown", await column(two.deps, UNKNOWN)],
+      ["img", await column(three.deps, IMG)],
     ];
     let seen = 0;
     for (const [name, answers] of all) {
@@ -396,7 +455,7 @@ describe("the host-routing matrix", () => {
         seen++;
       }
     }
-    expect(seen).toBe(4 * KEYS.length);
+    expect(seen).toBe(5 * KEYS.length);
   });
 });
 
@@ -621,6 +680,42 @@ describe("two addresses", () => {
   });
 });
 
+describe("three addresses", () => {
+  it("a real token gets nothing on the img address and works on the other two as before", async () => {
+    const { deps } = await threeAddress({ retiredGraceMs: 0 });
+    const a = await seedWorkspace(deps, "Acme");
+    await uploadTour(deps, a.token, fixtures.v2 as Json);
+    for (const origin of [TOURS, APP]) expect((await send(deps, "GET", "/api/v1/tours", { token: a.token, origin })).status, origin).toBe(200);
+    for (const path of ["/api/v1/tours", "/api/v1/me", "/api/v1/usage", "/api/v1/setup/connected"]) expectNotHere(await send(deps, "GET", path, { token: a.token, origin: IMG }), path);
+    expectNotHere(await send(deps, "POST", "/api/v1/uploads", { token: a.token, origin: IMG, body: "{}", headers: { "content-type": "application/json" } }), "upload");
+  });
+
+  it("a session cookie gets nothing on the img address and none is set there", async () => {
+    const { deps } = await threeAddress();
+    const cookie = `${SESSION_COOKIE}=dps_${"0".repeat(64)}`;
+    for (const [method, path] of [["GET", "/api/v1/session"], ["POST", "/api/v1/signout"], ["GET", "/tours"], ["GET", "/"], ["POST", "/api/v1/signin/complete"]]) {
+      const r = await send(deps, method, path, { origin: IMG, headers: { cookie, origin: IMG } });
+      expectNotHere(r, `${method} ${path}`);
+      expect(r.headers.getSetCookie(), `${method} ${path}`).toEqual([]);
+    }
+  });
+
+  it("the redirects still name the tours and app addresses, never the img address", async () => {
+    const { deps } = await threeAddress();
+    expectRedirect(await send(deps, "GET", "/t/abc?x=1", { origin: APP }), "https://tours.example.com/t/abc?x=1");
+    expectRedirect(await send(deps, "GET", "/docs", { origin: TOURS }), "https://app.example.com/docs");
+    expectRedirect(await send(deps, "GET", "/", { origin: TOURS }), "https://app.example.com/");
+  });
+
+  it("me still lists the tours and app addresses", async () => {
+    const { deps } = await threeAddress();
+    const a = await seedWorkspace(deps, "Acme");
+    expect((await send(deps, "GET", "/api/v1/me", { token: a.token, origin: APP })).text).toBe(
+      `{"workspace":"Acme","version":"${VERSION}","addresses":{"tours":"tours.example.com","app":"app.example.com"}}`,
+    );
+  });
+});
+
 describe("the rule lookup", () => {
   const config = { publicImageBase: "", setupCode: null, hosts: HOSTS };
   type Route = [method: "get" | "all", path: string, name: string];
@@ -669,7 +764,7 @@ describe("the rule lookup", () => {
         if (want.app === 404) expect(onApp.text, what).toBe(NOT_FOUND);
         if (want.app === 308) expect(onApp.location, what).toBe("https://tours.example.com/setup?x=1");
         // A request only the wide route matches keeps the wide route's own rule.
-        const alone = { any: 200, both: 200, tours: 404, "tours-redirect": 308, app: 200, "app-redirect": 200 }[wideRule];
+        const alone = { any: 200, both: 200, tours: 404, "tours-redirect": 308, app: 200, "app-redirect": 200, media: 404 }[wideRule];
         expect((await ask(app, APP, "/other")).status, what).toBe(alone);
       }
     }
@@ -697,7 +792,7 @@ describe("the rule lookup", () => {
         if (want.tours === 404) expect(onTours.text, what).toBe(NOT_FOUND);
         if (want.tours === 308) expect(onTours.location, what).toBe("https://app.example.com/setup?x=1");
         // A request only the wide route matches keeps the wide route's own rule.
-        const alone = { any: 200, both: 200, app: 404, "app-redirect": 308, tours: 200, "tours-redirect": 200 }[wideRule];
+        const alone = { any: 200, both: 200, app: 404, "app-redirect": 308, tours: 200, "tours-redirect": 200, media: 200 }[wideRule];
         expect((await ask(app, TOURS, "/other")).status, what).toBe(alone);
       }
     }
@@ -706,7 +801,7 @@ describe("the rule lookup", () => {
   it("two matched routes whose rules name different addresses are closed on both", async () => {
     const tours: HostRule[] = ["tours", "tours-redirect"];
     const apps: HostRule[] = ["app", "app-redirect"];
-    const aloneOnTours: Record<HostRule, number> = { any: 200, both: 200, tours: 200, "tours-redirect": 200, app: 404, "app-redirect": 308 };
+    const aloneOnTours: Record<HostRule, number> = { any: 200, both: 200, tours: 200, "tours-redirect": 200, app: 404, "app-redirect": 308, media: 200 };
     for (const [name, routes] of orders) {
       for (const a of tours) {
         for (const b of apps) {
@@ -775,5 +870,77 @@ describe("the rule lookup", () => {
     expect((await ask(app, UNKNOWN, "/setup")).text).toBe("narrow");
     expect((await ask(app, UNKNOWN, "/other")).text).toBe("wide");
     expect((await ask(app, UNKNOWN, "/secret", "POST")).text).toBe("secret");
+  });
+
+  /** Where a route under one rule answers, by address, for the hosts given (an address not set is left out). */
+  async function placesOf(rule: HostRule, hosts: Hosts): Promise<Record<string, number | string>> {
+    const app = tiny([["get", "/r", "r"]], { "GET /r": rule }, hosts);
+    const origins: Record<HostRole | "unknown", string> = { tours: TOURS, app: APP, img: IMG, unknown: UNKNOWN };
+    const out: Record<string, number | string> = {};
+    for (const role of [...HOST_ROLES, "unknown"] as const) {
+      if (role !== "unknown" && hosts[role] === undefined) continue;
+      const r = await ask(app, origins[role], "/r?x=1");
+      out[role] = r.status === 308 ? `308 ${r.location}` : r.status;
+      if (r.status === 200) expect(r.text).toBe("r");
+      if (r.status === 404) expect(r.text).toBe(NOT_FOUND);
+    }
+    return out;
+  }
+
+  it("a media route answers on the img address alone when it is set, else on the tours address alone, else on the only address", async () => {
+    expect(await placesOf("media", THREE)).toEqual({ tours: 404, app: 404, img: 200, unknown: 421 });
+    expect(await placesOf("media", HOSTS)).toEqual({ tours: 200, app: 404, unknown: 421 });
+    const one = tiny([["get", "/r", "r"]], { "GET /r": "media" }, null);
+    for (const origin of [TOURS, APP, IMG, UNKNOWN]) expect((await ask(one, origin, "/r")).text, origin).toBe("r");
+    // HEAD follows GET.
+    const app = tiny([["get", "/r", "r"]], { "GET /r": "media" }, THREE);
+    expect((await ask(app, IMG, "/r", "HEAD")).status).toBe(200);
+    expect((await ask(app, TOURS, "/r", "HEAD")).status).toBe(404);
+  });
+
+  it("with the img address set, every other rule answers on the tours and app addresses as with two, and 404 on the img address", async () => {
+    const others: HostRule[] = ["both", "tours", "tours-redirect", "app", "app-redirect"];
+    for (const rule of others) {
+      const two = await placesOf(rule, HOSTS);
+      expect(await placesOf(rule, THREE), rule).toEqual({ ...two, img: 404 });
+    }
+    // Health and its like: on every host, the img address too.
+    expect(await placesOf("any", THREE)).toEqual({ tours: 200, app: 200, img: 200, unknown: 200 });
+    // The redirect rules never redirect from the img address, nor to it.
+    expect(await placesOf("tours-redirect", THREE)).toEqual({ tours: 200, app: "308 https://tours.example.com/r?x=1", img: 404, unknown: 421 });
+    expect(await placesOf("app-redirect", THREE)).toEqual({ tours: "308 https://app.example.com/r?x=1", app: 200, img: 404, unknown: 421 });
+  });
+
+  it("a media route matched together with another route answers only where both may, else nowhere", async () => {
+    const cases: [HostRule, Hosts, Record<string, number>][] = [
+      ["any", THREE, { tours: 404, app: 404, img: 200, unknown: 421 }],
+      ["media", THREE, { tours: 404, app: 404, img: 200, unknown: 421 }],
+      ["both", THREE, { tours: 404, app: 404, img: 404, unknown: 421 }],
+      ["tours", THREE, { tours: 404, app: 404, img: 404, unknown: 421 }],
+      ["tours-redirect", THREE, { tours: 404, app: 404, img: 404, unknown: 421 }],
+      ["app", THREE, { tours: 404, app: 404, img: 404, unknown: 421 }],
+      ["app-redirect", THREE, { tours: 404, app: 404, img: 404, unknown: 421 }],
+      // Without the img address a media route lives on the tours address, so it agrees with the tours rules.
+      ["any", HOSTS, { tours: 200, app: 404, unknown: 421 }],
+      ["both", HOSTS, { tours: 200, app: 404, unknown: 421 }],
+      ["tours", HOSTS, { tours: 200, app: 404, unknown: 421 }],
+      ["tours-redirect", HOSTS, { tours: 200, app: 404, unknown: 421 }],
+      ["app", HOSTS, { tours: 404, app: 404, unknown: 421 }],
+      ["app-redirect", HOSTS, { tours: 404, app: 404, unknown: 421 }],
+    ];
+    const origins: Record<string, string> = { tours: TOURS, app: APP, img: IMG, unknown: UNKNOWN };
+    for (const [name, routes] of orders) {
+      for (const [other, hosts, want] of cases) {
+        for (const rules of [{ "GET /setup": "media", "GET /:page": other }, { "GET /setup": other, "GET /:page": "media" }] as Record<string, HostRule>[]) {
+          const app = tiny(routes, rules, hosts);
+          const what = `${name}: ${JSON.stringify(rules)} ${hosts.img === undefined ? "two" : "three"}`;
+          for (const [where, status] of Object.entries(want)) {
+            const r = await ask(app, origins[where], "/setup");
+            expect(r.status, `${what} ${where}`).toBe(status);
+            expect(r.location, `${what} ${where}`).toBeNull();
+          }
+        }
+      }
+    }
   });
 });

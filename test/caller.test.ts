@@ -266,6 +266,26 @@ describe("the caller", () => {
     expect((await send(deps, "GET", "/api/v1/me", { origin: TOURS, token: a.token })).status).toBe(200);
   });
 
+  it("with the img address set, neither a session nor a token is accepted there, and the other two are as before", async () => {
+    const IMG = "https://img.example.com";
+    const { deps, calls, a } = await site({ hosts: { tours: "tours.example.com", app: "app.example.com", img: "img.example.com" } });
+    const s = await signIn(deps, a.userId);
+    expect(await requireAuth(request({ origin: APP, cookie: s.cookie }), deps)).toMatchObject({ workspaceId: a.workspaceId });
+    expect(await requireAuth(request(change(s)), deps)).toMatchObject({ workspaceId: a.workspaceId });
+    for (const origin of [TOURS, APP]) expect(await requireAuth(request({ origin, authorization: `Bearer ${a.token}` }), deps), origin).toMatchObject({ workspaceId: a.workspaceId });
+    expect(await refusal(await requireAuth(request({ origin: TOURS, cookie: s.cookie }), deps))).toEqual(is401);
+
+    // The gate already answers 404 there; the caller refuses on its own too, before any lookup.
+    const before = calls();
+    expect(await refusal(await requireAuth(request({ origin: IMG, cookie: s.cookie }), deps))).toEqual(is401);
+    expect(await refusal(await requireAuth(request(change(s, "POST", IMG)), deps))).toEqual(is401);
+    expect(await refusal(await requireAuth(request({ origin: IMG, authorization: `Bearer ${a.token}` }), deps))).toEqual(is401);
+    expect(await refusal(await requireAuth(request({ origin: IMG, authorization: `Bearer ${a.token}` }), deps, { only: "token" }))).toEqual(is401);
+    expect(await refusal(await requireAuth(request({ origin: IMG, cookie: s.cookie }), deps, { admin: true }))).toEqual(is404);
+    expect(await resolveSession(request({ origin: IMG, cookie: s.cookie }), deps)).toBeNull();
+    expect(calls()).toBe(before);
+  });
+
   it("with one address a session is accepted on it", async () => {
     const { deps, a } = await site();
     const s = await signIn(deps, a.userId);
