@@ -2,6 +2,18 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.27 (2026-11-20)
+
+- Dashboard, Connections page: a new tab between Storage and Account lists the computers where Mythicshot can publish to the workspace, each with "Signed in from Mythicshot" or "From setup", the day it was connected and the day it was last used ("Today", a date, or "Never"), and "Rename" and "Disconnect". Both ask first, and the list is read again however they end, so it always shows what is true.
+- The "Connect Mythicshot" card takes the code Mythicshot shows, in any case, with or without the dash. A code that cannot be one is refused in the page without a request. Continue names the computer and when it asked, and "Connect" or "Not me" settles that same code; closing the question leaves the request alone. After too many codes that did not work, Continue rests for the minutes the server gives. The code is only ever sent in a request body, never in an address, and is not stored.
+- After "Connect" the list is read again a few times over about half a minute, until the new computer shows up once Mythicshot has collected its token.
+- The question warns in one more line when the request may have come from a different network than the page's (the server also says so when either network is not known).
+- When no answer comes back to "Connect" or "Not me", the page looks the code up once: if the request is no longer open the question closes with a note (after "Connect": the computer shows in the list if it was connected, and the list is watched; after "Not me": the code no longer works, and nothing is watched); if it is still open the question stays with the failure, so a second press never meets "does not work" by surprise.
+- One question at a time: while a code is being looked up, the rows' "Rename" and "Disconnect" rest, and a lookup's answer never opens its question over another. A held Enter's repeats never press "Continue", "Connect" or "Not me".
+- The name in the "Disconnect" question's title is kept apart from the quote marks around it, so right-to-left letters cannot reorder them.
+- API description: the routes that take a session alone list the 403 answers `bad_origin` and `bad_csrf` that a change made with a session can get.
+- The dashboard's shared script hands a page the answer's retry-after header, and writes a date with the year on request.
+
 ## 0.1.26 (2026-11-20)
 
 - Connecting Mythicshot with a pair of codes, through the API. `POST /api/v1/connect/start`, sent with no credential, answers a long secret device code, a short code such as `ABCD-EFGH` and the dashboard's Connections page, `/connections` (on the address from the settings, never from the request). A signed-in person looks the short code up (`POST /api/v1/connect/lookup`, which shows the device's name, when it asked, and `same_network`: whether the person is on the network the app asked from) and confirms it (`POST /api/v1/connect/confirm`) or refuses it (`POST /api/v1/connect/refuse`). Mythicshot asks `POST /api/v1/connect/token` with the device code every 5 seconds and, once confirmed, receives a token for that person's workspace, once, with the confirming account's username (never its email address) so the app can show who connected it. The codes live 10 minutes and are never put in an address: every request takes them in its JSON body, and the lookup, like confirm and refuse, needs the session's anti-forgery header, so no other site can spend a person's wrong tries. The Connections page itself comes in a later version.

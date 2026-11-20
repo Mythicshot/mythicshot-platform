@@ -1043,6 +1043,39 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
   });
 });
 
+describe("the two 403s of a change made with a session, on each route that takes a session alone", () => {
+  it("bad_origin from another origin, bad_csrf without the anti-forgery header", async () => {
+    const { deps } = await makeDeps();
+    const api = client(deps);
+    const account = await seedAccount(deps, { admin: true });
+    const made = await redeemSignInCode(deps, await createSignInCode(deps, account.userId), null, null);
+    if (made === null) throw new Error("the sign-in was refused");
+    const cookie = `${SESSION_COOKIE}=${made.secret}`;
+    const csrf = await csrfFor(made.secret);
+    const APP = "https://app.example.com";
+    const TOKEN = "tok_" + "0".repeat(24);
+    const routes: [string, string, unknown][] = [
+      ["DELETE", "/api/v1/sessions/ses_" + "0".repeat(24), undefined],
+      ["POST", "/api/v1/signout", undefined],
+      ["POST", "/api/v1/signout/everywhere", undefined],
+      ["POST", "/api/v1/account/email", { email: "new@example.com" }],
+      ["POST", "/api/v1/account/email/confirm", { code: "dpe_" + "0".repeat(40) }],
+      ["POST", "/api/v1/connect/lookup", { user_code: "ABCD-EFGH" }],
+      ["POST", "/api/v1/connect/confirm", { user_code: "ABCD-EFGH" }],
+      ["POST", "/api/v1/connect/refuse", { user_code: "ABCD-EFGH" }],
+      ["PATCH", `/api/v1/tokens/${TOKEN}`, { name: "Laptop" }],
+      ["DELETE", `/api/v1/tokens/${TOKEN}`, undefined],
+    ];
+    for (const [method, path, body] of routes) {
+      const withBody = body === undefined ? {} : { body: JSON.stringify(body) };
+      const forged = await api.call(method, path, { origin: APP, ...withBody, headers: { cookie, "content-type": JSON_TYPE, origin: "https://evil.example.net", "x-csrf-token": csrf } });
+      expect([forged.status, forged.json?.error], `${method} ${path}`).toEqual([403, "bad_origin"]);
+      const bare = await api.call(method, path, { origin: APP, ...withBody, headers: { cookie, "content-type": JSON_TYPE, origin: APP } });
+      expect([bare.status, bare.json?.error], `${method} ${path}`).toEqual([403, "bad_csrf"]);
+    }
+  });
+});
+
 describe("the description is checked in full", () => {
   /** Every schema the description holds, with where it is. References are not followed: their targets are in the list themselves. */
   function allSchemas(): { at: string; schema: Json; answer: boolean }[] {
@@ -1228,6 +1261,11 @@ describe("the error codes in the code", () => {
     expect(storage.map((m) => `${m[1]} ${m[2]}`)).toEqual(["413 storage_full"]);
     expect([...source("usage.ts").matchAll(/\berror: "/g)]).toHaveLength(1);
     inCode.add("413 storage_full");
+    // The caller guard's two 403s for a change made with a session (src/auth.ts, below) are
+    // listed on each route that takes a session alone and changes something.
+    const guard403 = [...source("auth.ts").matchAll(/\bjson\(403, \{ error: "([a-z_]+)"/g)].map((m) => `403 ${m[1]}`);
+    expect(guard403).toEqual(["403 bad_origin", "403 bad_csrf"]);
+    for (const answer of guard403) inCode.add(answer);
 
     const described = new Set<string>();
     for (const op of OPS) {
@@ -1244,8 +1282,30 @@ describe("the error codes in the code", () => {
     expect(described.has("413 storage_full")).toBe(true);
     expect([...described].sort(), "a status and code only one side has; the code wins: correct src/docs/openapi.ts").toEqual([...inCode].sort());
 
+    // Every route that takes a session alone and changes something lists both 403s, but the
+    // admin's, which answer every refusal with the one 404.
+    const sessionChanges = OPS.filter((o) => o.method !== "GET" && JSON.stringify(o.op.security) === JSON.stringify([{ session: [] }]) && !o.path.startsWith("/api/v1/admin/"));
+    expect(sessionChanges.map((o) => o.key).sort()).toEqual(
+      [
+        "DELETE /api/v1/sessions/{id}",
+        "POST /api/v1/signout",
+        "POST /api/v1/signout/everywhere",
+        "POST /api/v1/account/email",
+        "POST /api/v1/account/email/confirm",
+        "POST /api/v1/connect/lookup",
+        "POST /api/v1/connect/confirm",
+        "POST /api/v1/connect/refuse",
+        "PATCH /api/v1/tokens/{id}",
+        "DELETE /api/v1/tokens/{id}",
+      ].sort(),
+    );
+    for (const o of sessionChanges) {
+      const schema = deref(DOC, (responseOf(o, "403").content as Record<string, Json>)["application/json"].schema) as Json;
+      expect(schema.properties.error.enum, o.key).toEqual(expect.arrayContaining(["bad_origin", "bad_csrf"]));
+    }
+
     // The refusals of the caller guard, which any route that takes a session can answer: in
-    // the introduction's list of answers any request can get, not repeated on each request.
+    // the introduction's list of answers any request can get; the two 403s also on each route above.
     const guard = [...source("auth.ts").matchAll(/\bjson\((\d{3}), \{ error: "([a-z_]+)"/g)].map((m) => `${m[1]} ${m[2]}`);
     expect(guard).toEqual(["400 mixed_credentials", "404 not_found", "403 bad_origin", "403 bad_csrf"]);
     for (const answer of guard) {

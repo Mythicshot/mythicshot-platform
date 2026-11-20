@@ -41,7 +41,7 @@ const JS = "text/javascript; charset=utf-8";
 
 // ---- The wording ----
 
-const SHELL = ["Mythicshot", "Images", "GIFs", "Tours", "Storage", "Account", "Admin", "This page needs JavaScript."];
+const SHELL = ["Mythicshot", "Images", "GIFs", "Tours", "Storage", "Connections", "Account", "Admin", "This page needs JavaScript."];
 /** Proposed beside the mockups (not in them): the delete question's sentence, and the two empty states. */
 const QUESTION = "Its link stops working for everyone and it is removed. This cannot be undone. The copy on your computer is not touched.";
 const NOT_RELOADED = "The change was made, but the list could not be loaded again. Reload the page to see it.";

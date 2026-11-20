@@ -258,4 +258,33 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
 .lone h1 { font-size: 1.15rem; margin: 0 0 8px; }
 .lone .sub { margin: 0 0 8px; }
 .two a.btn { display: inline-flex; align-items: center; justify-content: center; }
+
+/* The Connections page. */
+.connections { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+.connections th { text-align: left; font-size: 0.76rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 0 10px 8px 0; white-space: nowrap; }
+.connections td { padding: 11px 10px 11px 0; border-top: 1px solid var(--line); vertical-align: middle; }
+.connections td.when { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.connections .t { font-weight: 600; }
+.connections .d { color: var(--muted); font-size: 0.85rem; }
+.name { unicode-bidi: isolate; overflow-wrap: anywhere; }
+.note { margin: 0 0 14px; padding: 10px 12px; border-radius: 10px; background: var(--ok-bg); color: var(--ok-text); font-size: 0.9rem; }
+.note.plain { background: var(--tag-bg); color: var(--text); }
+.connect-text { margin: 0 0 10px; }
+.inline { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.inline .field { flex: 1 1 180px; width: auto; min-width: 0; }
+.code-field { font: 600 1.1rem/1.2 ui-monospace, Consolas, monospace; letter-spacing: 0.1em; }
+.connect-message { margin: 8px 0 0; }
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 16px; margin: 10px 0 0; font-size: 0.93rem; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; min-width: 0; }
+#confirm-box, #rename-box, #disconnect-box { max-height: 100%; overflow-y: auto; }
+@media (max-width: 720px) {
+  .connections, .connections tbody, .connections tr, .connections td { display: block; }
+  .connections thead, .connections td.when { display: none; }
+  .connections tr { padding: 12px 0; border-top: 1px solid var(--line); }
+  .connections tr:first-child { border-top: 0; padding-top: 0; }
+  .connections tr:last-child { padding-bottom: 0; }
+  .connections td { padding: 0; border-top: 0; }
+  .connections td.acts-cell { margin-top: 8px; }
+}
 `;

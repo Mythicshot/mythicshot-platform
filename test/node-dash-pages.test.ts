@@ -295,6 +295,23 @@ describe("the shared script", () => {
     const dateOf = vm.runInContext("Dash.dateOf", ctx) as (ms: unknown) => string;
     for (const ms of [day(2026, 11, 19), day(2026, 1, 1), day(2025, 12, 31)]) expect(dateOf(ms)).toBe(shown(ms));
     expect(dateOf("x")).toBe("");
+    // With the year asked for, always with the year, this year's dates too (the Connections page).
+    const withYear = dateOf as (ms: unknown, withYear?: unknown) => string;
+    for (const ms of [day(2026, 11, 19), day(2025, 12, 31)]) {
+      const d = new Date(ms);
+      expect(withYear(ms, true)).toBe(`${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`);
+      expect(withYear(ms, "yes")).toBe(shown(ms));
+    }
+    expect(withYear("x", true)).toBe("");
+  });
+
+  it("Dash.api hands the page the answer's retry-after header as sent, or null", async () => {
+    const answers = [new Response('{"error":"rate_limited"}', { status: 429, headers: { "retry-after": "540" } }), new Response("{}", { status: 200 })];
+    const ctx = vm.createContext({ document: {}, location: {}, fetch: () => Promise.resolve(answers.shift()) });
+    vm.runInContext(DASH_JS, ctx);
+    const api = vm.runInContext("Dash.api", ctx) as (method: string, path: string) => Promise<unknown>;
+    expect(JSON.parse(JSON.stringify(await api("GET", "/api/v1/connect/requests/ABCDEFGH")))).toEqual({ status: 429, data: { error: "rate_limited" }, retryAfter: "540" });
+    expect(JSON.parse(JSON.stringify(await api("GET", "/api/v1/tokens")))).toEqual({ status: 200, data: {}, retryAfter: null });
   });
 });
 

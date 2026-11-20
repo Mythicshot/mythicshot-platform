@@ -144,6 +144,8 @@ const ROWS: Record<string, Row> = {
   "GET /dash/gifs.js": page("/dash/gifs.js"),
   "GET /storage": page("/storage"),
   "GET /dash/storage.js": page("/dash/storage.js"),
+  "GET /connections": page("/connections"),
+  "GET /dash/connections.js": page("/dash/connections.js"),
   "GET /admin": page("/admin"),
   "GET /dash/admin.js": page("/dash/admin.js"),
   "GET /dash/account.js": page("/dash/account.js"),
@@ -184,7 +186,7 @@ const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 /** The sign-in pages and their stylesheet and script, and the dashboard's account pages (/account, /account/email). */
 const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account)(?:\/|$)/.test(k));
 /** The dashboard's other pages and every file under /dash/ (src/dash/). */
-const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:images|gifs|tours|storage|admin|dash\/[a-z][a-z-]*\.(?:js|css))$/.test(k));
+const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:images|gifs|tours|storage|connections|admin|dash\/[a-z][a-z-]*\.(?:js|css))$/.test(k));
 const ROOT_KEY = "GET /";
 const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
 const DOCS_PAGE_KEY = "GET /docs";
@@ -298,7 +300,7 @@ describe("the host-routing matrix", () => {
     for (const key of DASH_KEYS) expect(HOST_RULES[key], key).toBe("app");
     expect(HOST_RULES[ROOT_KEY]).toBe("app-redirect");
     expect(PAGE_KEYS.length).toBe(6);
-    expect(DASH_KEYS.length).toBe(14);
+    expect(DASH_KEYS.length).toBe(16);
     // Every dashboard page and its script is in one of the two lists, and nothing is in both.
     for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES]) for (const key of [`GET ${p.path}`, `GET ${p.script.path}`]) expect([PAGE_KEYS.includes(key), DASH_KEYS.includes(key)].filter(Boolean), key).toEqual([true]);
     for (const key of ["GET /dash/dash.css", "GET /dash/dash.js"]) expect(DASH_KEYS, key).toContain(key);
