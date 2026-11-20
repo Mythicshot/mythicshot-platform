@@ -2,6 +2,15 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.34 (2026-11-20)
+
+- The page an invite's link opens, `/invite`, on the app address. It takes the code from the part of the address after `#` and removes it from the address bar before it does anything else, then looks the invite up (`POST /api/v1/invite/check`, the code in the body) and asks "Choose your username", saying "You were invited as <address>." with the address in bold, so a person who was forwarded someone else's invite notices. Opening the link makes nothing: the account is made only when the person presses "Create my account" (or Enter in the field), with one request however often it is pressed, and the browser then lands on the Connections page, signed in.
+- The username is checked in the page by the site's rule, in small letters only: a capital, an underscore or markup is refused without a request ("Use 3 to 30 lowercase letters, digits and hyphens, starting with a letter."), and shown as typed. A name that is taken or that the site holds back says so under the field, and the invite keeps working.
+- One page, "This invite no longer works", for every invite that cannot be used: no code or a malformed one in the address (nothing is asked), and an invite that is unknown, used, cancelled, replaced or expired, or whose address has an account by now. A browser that is signed in already gets "You are already signed in", with a way to the dashboard and nothing that acts on that account. Too many tries say how many minutes to wait; when the site cannot be reached, "Try again" asks again with the code the page still holds, so the mail is not needed again.
+- The code is never put in an address, a store, a log or the page: it is only sent in the two requests' bodies. The page holds no data and makes no database call, and is served with the sign-in pages' headers and stylesheet.
+- Connections page: a new account is welcomed above the heading, "Welcome, <username>. Your workspace is ready. Connect Mythicshot on your computer to start sharing: …", when it has no computer connected and nothing in its workspace yet (read from the usage the page asks for). It goes away once a computer is connected.
+- The dashboard's browser check has a part for accepting an invite in two browsers, with the forwarded-link check and a used link.
+
 ## 0.1.32 (2026-11-20)
 
 - Invites, through the API. The site's admin invites an address with `POST /api/v1/admin/invites` (`{"email": …}`), lists the invites that are open or ran out with `GET /api/v1/admin/invites`, sends one again with a new link with `POST /api/v1/admin/invites/<id>/resend`, and cancels one with `DELETE /api/v1/admin/invites/<id>`. Only an admin's session reaches them; anyone else, any token included, gets the one 404 every admin route answers. The Admin page's invite box and the page the link opens come in a later version.
