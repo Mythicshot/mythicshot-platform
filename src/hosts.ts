@@ -150,6 +150,19 @@ export function roleOf(hosts: Hosts, host: string | null): HostRole | null {
   return null;
 }
 
+/**
+ * True when a request may be served on the address it was sent to, for something kept to
+ * `roles`: always in one-address mode (`hosts` null or absent), else only when the
+ * request's own address is the address of one of `roles`. An address no role names, and
+ * a role the list leaves out, is false, so a role added later is refused until it is
+ * listed. Never a header.
+ */
+export function onRole(hosts: Hosts | null | undefined, req: Request, roles: readonly HostRole[]): boolean {
+  if (hosts === null || hosts === undefined) return true;
+  const role = roleOf(hosts, requestHost(req));
+  return role !== null && roles.includes(role);
+}
+
 /** The origin of a configured host: `https://`, and `http://` only for localhost, `*.localhost` and 127.0.0.1. */
 export function originOf(host: string): string {
   const name = nameOf(host);

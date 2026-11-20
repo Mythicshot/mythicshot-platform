@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HOST_ROLES, mediaOrigin, mediaRole, normaliseHost, OPTIONAL_HOST_ROLES, originOf, requestHost, resolveHosts, roleOf, type Hosts } from "../src/hosts.ts";
+import { HOST_ROLES, mediaOrigin, mediaRole, normaliseHost, onRole, OPTIONAL_HOST_ROLES, originOf, requestHost, resolveHosts, roleOf, type Hosts } from "../src/hosts.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
 const THREE: Hosts = { ...HOSTS, img: "img.example.com" };
@@ -200,6 +200,17 @@ describe("host names", () => {
     expect(roleOf(THREE, "app.example.com")).toBe("app");
     expect(roleOf(HOSTS, "img.example.com")).toBeNull();
     expect(roleOf(THREE, "img.example.com:8443")).toBeNull();
+  });
+
+  it("onRole holds only on an address of the roles listed, and always with one address", () => {
+    const at = (origin: string) => new Request(origin + "/x", { headers: { "x-forwarded-host": "app.example.com" } });
+    expect(onRole(THREE, at("https://app.example.com"), ["app"])).toBe(true);
+    expect(onRole(THREE, at("https://tours.example.com"), ["app"])).toBe(false);
+    expect(onRole(THREE, at("https://img.example.com"), ["tours", "app"])).toBe(false);
+    expect(onRole(THREE, at("https://img.example.com"), ["img"])).toBe(true);
+    expect(onRole(THREE, at("https://evil.example.net"), ["tours", "app", "img"])).toBe(false);
+    expect(onRole(THREE, at("https://app.example.com"), [])).toBe(false);
+    for (const hosts of [null, undefined]) expect(onRole(hosts, at("https://evil.example.net"), [])).toBe(true);
   });
 
   it("mediaRole is the img address when it is set, else the tours address", () => {

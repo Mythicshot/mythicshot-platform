@@ -15,7 +15,7 @@
 import { workspaceOf } from "./accounts.ts";
 import { auditStatement } from "./audit.ts";
 import { newId } from "./auth.ts";
-import { requestHost, roleOf } from "./hosts.ts";
+import { onRole, type HostRole } from "./hosts.ts";
 import { isNotNullViolation, type Deps, type Stmt } from "./ports.ts";
 
 /** The cookie's name. The `__Host-` prefix makes browsers refuse it unless it is Secure, has the path / and no Domain: it belongs to one host and no other host can set it. */
@@ -114,14 +114,19 @@ export function readSessionCookie(req: Request): string | null {
 }
 
 /**
+ * The roles whose address takes a session cookie: the app address alone. The tours
+ * address holds what users publish and the img address shared media, so neither does,
+ * and nor does a role added later until it is listed here.
+ */
+export const SESSION_ROLES: readonly HostRole[] = ["app"];
+
+/**
  * True when a session may be used on the address this request was sent to: always in
- * one-address mode, and only on the app address in two-address mode. The address is the
- * request's own, never a header.
+ * one-address mode, and with addresses configured only on an address of SESSION_ROLES.
+ * The address is the request's own, never a header.
  */
 export function sessionHost(req: Request, deps: Deps): boolean {
-  const hosts = deps.config.hosts ?? null;
-  if (hosts === null) return true;
-  return roleOf(hosts, requestHost(req)) === "app";
+  return onRole(deps.config.hosts, req, SESSION_ROLES);
 }
 
 /**
