@@ -806,9 +806,13 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     // The site's cap of invites.
     await deps.db.batch(Array.from({ length: 100 }, (_, i) => ({ sql: "INSERT INTO invite (id, email, code_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)", params: [`inv_${String(i).padStart(24, "a")}`, `cap${i}@example.com`, String(i).padStart(64, "c"), Date.now(), Date.now() + 86_400_000] })));
     refused(await send1("over@example.com"), 409, "too_many_invites");
+    // Resending one that ran out would open it again: refused at the cap too.
+    await deps.db.run("UPDATE invite SET created_at = 1, expires_at = 2 WHERE id = ?", [id]);
+    refused(await api.call("POST", `/api/v1/admin/invites/${id}/resend`, { headers }), 409, "too_many_invites");
+    await deps.db.run("UPDATE invite SET created_at = ?, expires_at = ? WHERE id = ?", [Date.now(), Date.now() + 86_400_000, id]);
     await deps.db.run("DELETE FROM invite WHERE email LIKE 'cap%'");
-    // The admin's hourly number: 10 sends were counted so far, the refused ones too.
-    for (let i = 0; i < 10; i++) expect((await send1(`n${i}@example.com`)).status).toBe(201);
+    // The admin's hourly number: 11 sends were counted so far, the refused ones too.
+    for (let i = 0; i < 9; i++) expect((await send1(`n${i}@example.com`)).status).toBe(201);
     refused(await send1("one-too-many@example.com"), 429, "rate_limited");
     refused(await api.call("POST", `/api/v1/admin/invites/${id}/resend`, { headers }), 429, "rate_limited");
 

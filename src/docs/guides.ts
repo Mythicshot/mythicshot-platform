@@ -190,7 +190,7 @@ export const CODE_MEANINGS: Readonly<Record<string, string>> = {
   rate_limited: "Too many sign-in requests from this network, too many email-change requests for an account or an address, too many requests to connect the app from this network (or too many of them waiting), too many wrong short codes from an account or a network, too many invites from an admin or invite mails from the site, or too many invite look-ups and accepts from this network. The retry-after header says how long to wait.",
   credentials_not_allowed: "The app's requests while it connects take no token and no session cookie, and looking up or accepting an invite takes no token; send none.",
   has_account: "The address already has an account: it cannot be invited, or the invite can no longer make one. Sign in instead.",
-  too_many_invites: "The site holds as many invites as it may; cancel one that is no longer needed.",
+  too_many_invites: "The site holds as many open invites as it may; cancel one that is no longer needed.",
   mail_failed: "The invite is stored, but its mail could not be sent; resend it.",
   invite_invalid: "The invite cannot be used: unknown, already used, cancelled, replaced by a newer one, or expired.",
   signed_in: "The browser is signed in to an account; sign out before accepting an invite.",

@@ -253,7 +253,7 @@ function introduction(): string {
     `- An upload that is not finished is removed after ${hours} hours.`,
     `- A shared image: ${n(DEFAULT_MEDIA_LIMITS.imageMaxBytes)} bytes and ${n(DEFAULT_MEDIA_LIMITS.imageMaxSide)} pixels on a side, PNG or JPEG. A shared clip: ${n(DEFAULT_MEDIA_LIMITS.clipMaxBytes)} bytes, GIF or MP4, at most ${n(CLIP_MAX_SIDE)} pixels on a side and ${CLIP_MAX_DURATION_MS / 60_000} minutes long. These numbers are fixed in this version: no setting changes them. Each is sent in parts of ${n(PART_BYTES)} bytes. An item's preview: ${n(PREVIEW_RULE.maxBytes)} bytes and ${n(PREVIEW_RULE.maxSide)} pixels on a side, PNG or JPEG. A workspace starts at most ${LIMITS_MEDIA.create.most} items, sends at most ${n(LIMITS_MEDIA.part.most)} parts and ${LIMITS_MEDIA.preview.most} previews an hour, and an item that is not finished within ${MEDIA_MAX_AGE_MS / 3_600_000} hours is removed and can no longer be finished.`,
     `- Connecting the app: a network asks for at most ${LIMITS_CONNECT.startNetwork.most} pairs of codes in ${LIMITS_CONNECT.startNetwork.windowMs / 60_000} minutes and ${LIMITS_CONNECT.startNetworkDay.most} in a day, and has at most ${OPEN_PER_NETWORK} waiting at once; it asks for tokens at most ${LIMITS_CONNECT.pollNetwork.most} times in ${LIMITS_CONNECT.pollNetwork.windowMs / 60_000} minutes. An account may type ${LIMITS_CONNECT.wrongAccount.most} short codes that name no waiting request in ${LIMITS_CONNECT.wrongAccount.windowMs / 60_000} minutes, and a network ${LIMITS_CONNECT.wrongNetwork.most}; a right code is not counted.`,
-    `- Invites: an admin sends at most ${LIMITS_INVITE.sendAdmin.most} an hour, resends included; the site sends at most ${LIMITS_INVITE.mailSite.most} invite mails an hour and holds at most ${MAX_INVITES} invites, open or expired. A network looks up and accepts invites at most ${LIMITS_INVITE.codeNetwork.most} times in ${LIMITS_INVITE.codeNetwork.windowMs / 60_000} minutes.`,
+    `- Invites: an admin sends at most ${LIMITS_INVITE.sendAdmin.most} an hour, resends included; the site sends at most ${LIMITS_INVITE.mailSite.most} invite mails an hour and holds at most ${MAX_INVITES} open invites; invites that ran out do not count. A network looks up and accepts invites at most ${LIMITS_INVITE.codeNetwork.most} times in ${LIMITS_INVITE.codeNetwork.windowMs / 60_000} minutes.`,
     "- A workspace may have a storage allowance, set by the server's settings or its admin. An upload or a shared item that would take the workspace over it is refused when it is started, with 413 `storage_full` and the numbers, before anything is stored. Nothing is ever deleted because of an allowance.",
     `- A publish that makes no progress for ${minutes} minutes counts as abandoned.`,
     "",
@@ -487,7 +487,7 @@ function schemas(): Record<string, Schema> {
       "One invite that is open or ran out. An accepted or cancelled invite is gone.",
     ),
     InviteList: object(["invites"], {
-      invites: { type: "array", maxItems: MAX_INVITES, description: `The site's invites, newest first: every one, since there are at most ${MAX_INVITES}.`, items: ref("Invite") },
+      invites: { type: "array", maxItems: MAX_INVITES, description: `The site's invites, newest first, at most ${MAX_INVITES}: every open one, then as many that ran out as fit.`, items: ref("Invite") },
     }),
     EmailChangeRequest: input(["email"], { email: text(254, "The new address, which the link is mailed to. Spaces around it are dropped and capitals do not count.", 3) }),
     EmailChangeConfirm: input(["code"], { code: { type: "string", pattern: "^dpe_[0-9a-f]{40}$", description: "The code of the link mailed to the new address, the part after #c= in its address." } }),
@@ -1516,7 +1516,7 @@ function paths(): OpenApiDoc["paths"] {
       post: {
         tags: ["Admin"],
         summary: "Invite an address",
-        description: `For the site's admin: mails the address a link that lets its owner make an account, once and for ${INVITE_MS / 86_400_000} days, and answers the invite. An address that already has an invite gets a new link in that same invite, and the older link stops working at once. The mail is sent before the answer: when it could not be handed over the invite stays and the answer is mail_failed, and resending it tries again. Nothing is counted or stored on a site that cannot send mail. An admin sends at most ${LIMITS_INVITE.sendAdmin.most} invites an hour, resends included, and the site sends at most ${LIMITS_INVITE.mailSite.most} invite mails an hour and holds at most ${MAX_INVITES} invites. Every refusal of the caller is the one 404. ${NOT_FROM_THE_PAGE}`,
+        description: `For the site's admin: mails the address a link that lets its owner make an account, once and for ${INVITE_MS / 86_400_000} days, and answers the invite. An address that already has an invite gets a new link in that same invite, and the older link stops working at once. The mail is sent before the answer: when it could not be handed over the invite stays and the answer is mail_failed, and resending it tries again. Nothing is counted or stored on a site that cannot send mail. An admin sends at most ${LIMITS_INVITE.sendAdmin.most} invites an hour, resends included, and the site sends at most ${LIMITS_INVITE.mailSite.most} invite mails an hour and holds at most ${MAX_INVITES} open invites (invites that ran out do not count). Every refusal of the caller is the one 404. ${NOT_FROM_THE_PAGE}`,
         operationId: "adminInvite",
         security: SESSION,
         requestBody: { required: true, content: json(ref("InviteSend")) },
@@ -1524,7 +1524,7 @@ function paths(): OpenApiDoc["paths"] {
           "201": answer("The invite; its mail is on its way.", ref("Invite")),
           "400": answer("bad_request: the body is not a JSON object holding email and nothing else. bad_email, with no detail: email is not an email address.", someDetail("bad_request", "bad_email")),
           "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
-          "409": refusal(`mail_off: the site cannot send mail. has_account: the address already has an account. too_many_invites: the site holds ${MAX_INVITES} invites already; cancel one. Nothing was stored.`, "mail_off", "has_account", "too_many_invites"),
+          "409": refusal(`mail_off: the site cannot send mail. has_account: the address already has an account. too_many_invites: the site holds ${MAX_INVITES} open invites already; cancel one. Nothing was stored.`, "mail_off", "has_account", "too_many_invites"),
           "429": { description: "The admin sent its invites for this hour, or the site its invite mails. Nothing was stored.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
           "502": refusal("The invite is stored, but its mail could not be handed over. Resend it to try again.", "mail_failed"),
         },
@@ -1532,7 +1532,7 @@ function paths(): OpenApiDoc["paths"] {
       get: {
         tags: ["Admin"],
         summary: "List the invites",
-        description: `For the site's admin: every invite that is open or ran out, newest first. An accepted or cancelled invite is gone, and one that ran out is removed ${INVITE_KEPT_MS / 86_400_000} days later. It works whether or not the site can send mail. Every refusal is the one 404. ${NOT_FROM_THE_PAGE}`,
+        description: `For the site's admin: the invites that are open or ran out, newest first, at most ${MAX_INVITES}: every open one, then as many that ran out as fit. An accepted or cancelled invite is gone, and one that ran out is removed ${INVITE_KEPT_MS / 86_400_000} days later. It works whether or not the site can send mail. Every refusal is the one 404. ${NOT_FROM_THE_PAGE}`,
         operationId: "adminListInvites",
         security: SESSION,
         responses: { "200": answer("The invites.", ref("InviteList")), "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")) },
@@ -1549,7 +1549,7 @@ function paths(): OpenApiDoc["paths"] {
         responses: {
           "200": answer("The refreshed invite; its mail is on its way.", ref("Invite")),
           "404": answer("No such invite, or anything other than the site's admin, signed in on this address, with a correct request. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
-          "409": refusal("mail_off: the site cannot send mail. has_account: the address has an account by now; cancel the invite. Nothing changed.", "mail_off", "has_account"),
+          "409": refusal(`mail_off: the site cannot send mail. has_account: the address has an account by now; cancel the invite. too_many_invites: the invite ran out, and the site holds ${MAX_INVITES} open invites already. Nothing changed.`, "mail_off", "has_account", "too_many_invites"),
           "429": { description: "The admin sent its invites for this hour, or the site its invite mails. Nothing changed.", headers: retryAfter, content: json(refusalSchema("rate_limited")) },
           "502": refusal("The invite has its new link, but the mail could not be handed over. Resend it to try again.", "mail_failed"),
         },

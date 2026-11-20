@@ -18,7 +18,11 @@
 // and "resend", give that one row a new code, so the older link stops working at once.
 // Cancelling removes the row, and so does accepting. A row whose time ran out stays listed
 // ("expired") until it is cancelled or replaced, and is swept INVITE_KEPT_MS after it ran out,
-// a few at a time, by the admin's own list and sends. At most MAX_INVITES rows exist.
+// a few at a time, by the admin's own list and sends. At most MAX_INVITES invites are open
+// (unexpired) at once; rows that ran out do not count, so they never block a send while they
+// wait for the sweep. The list stays bounded at MAX_INVITES rows, newest first: an invite's
+// end is always 7 days after its start, so every open invite is newer than every expired one
+// and all open invites are always on it.
 //
 // Sending needs mail: on a site that cannot mail a link (no mailer, or no address for links)
 // it is refused with `mail_off` before anything is counted or stored. The mail is sent
@@ -67,7 +71,7 @@ import { parseUsername } from "./usernames.ts";
 export const INVITE_MS = 7 * 86_400_000;
 /** How long a row whose time ran out stays, listed as expired, before a sweep removes it. */
 export const INVITE_KEPT_MS = 30 * 86_400_000;
-/** The most invites the site holds at once, open or expired; the admin's list shows them all. */
+/** The most open (unexpired) invites the site holds at once; also the most rows the admin's list shows, open ones first. */
 export const MAX_INVITES = 100;
 /** The most rows one sweep removes. */
 export const INVITE_SWEEP_PAGE = 50;
@@ -85,7 +89,7 @@ const MAX_ADMIN_BODY_BYTES = 1024;
 export const INVITE_SAYS = {
   mailOff: "This site cannot send mail, so nobody can be invited here.",
   hasAccount: "That address already has an account.",
-  tooMany: `There are ${MAX_INVITES} invites already. Cancel one that is no longer needed, then try again.`,
+  tooMany: `There are ${MAX_INVITES} open invites already. Cancel one that is no longer needed, then try again.`,
   rateLimited: "Too many invites. Wait a while and try again.",
   mailFailed: "The invite is saved, but its mail could not be sent. Resend it to try again.",
   invalid: "This invite no longer works. Ask the person who invited you to send it again.",
@@ -227,16 +231,18 @@ export function inviteRoutes(app: Hono, deps: Deps): void {
 
     let capCounted = false;
     for (let attempt = 1; ; attempt++) {
-      const site = await deps.db.first<{ account: string | null; invite: string | null; n: number; me: string | null }>(
+      const site = await deps.db.first<{ account: string | null; invite: string | null; still_open: number | null; n: number; me: string | null }>(
         `SELECT (SELECT id FROM user WHERE email = ?) AS account,
                 (SELECT id FROM invite WHERE email = ?) AS invite,
-                (SELECT count(*) FROM invite) AS n,
+                (SELECT expires_at > ? FROM invite WHERE email = ?) AS still_open,
+                (SELECT count(*) FROM invite WHERE expires_at > ?) AS n,
                 (SELECT username FROM user WHERE id = ?) AS me`,
-        [email, email, adminId],
+        [email, email, deps.now(), email, deps.now(), adminId],
       );
       if (site === null) throw new Error("invites: the site could not be read");
       if (site.account !== null) return apiError(409, "has_account", INVITE_SAYS.hasAccount);
-      if (site.invite === null && site.n >= MAX_INVITES) return apiError(409, "too_many_invites", INVITE_SAYS.tooMany);
+      // A send that would add an open invite (a new one, or one that ran out made new) must fit.
+      if (site.still_open !== 1 && site.n >= MAX_INVITES) return apiError(409, "too_many_invites", INVITE_SAYS.tooMany);
       if (!capCounted) {
         // The site's invite mail cap counts only a mail that is about to be sent.
         const cap = await hitLimit(deps, LIMITS_INVITE.mailSite, SITE_KEY);
@@ -252,16 +258,17 @@ export function inviteRoutes(app: Hono, deps: Deps): void {
       try {
         await deps.db.batch([
           {
-            // Replaces the address's invite only while it is still the one just read, and adds
-            // one only while the address has none and the site is under its cap. Anything else
+            // Replaces the address's invite only while it is still the one just read (and, when
+            // it ran out, only while the site is under its cap of open invites), and adds one
+            // only while the address has none and the site is under that cap. Anything else
             // changes no row, and the audit row after it then undoes the batch.
             sql: `INSERT INTO invite (id, email, code_hash, invited_by, created_at, expires_at)
                   SELECT ?, ?, ?, ?, ?, ?
-                   WHERE EXISTS (SELECT 1 FROM invite WHERE email = ? AND id = ?)
-                      OR (NOT EXISTS (SELECT 1 FROM invite WHERE email = ?) AND (SELECT count(*) FROM invite) < ?)
+                   WHERE EXISTS (SELECT 1 FROM invite WHERE email = ? AND id = ? AND (expires_at > ? OR (SELECT count(*) FROM invite WHERE expires_at > ?) < ?))
+                      OR (NOT EXISTS (SELECT 1 FROM invite WHERE email = ?) AND (SELECT count(*) FROM invite WHERE expires_at > ?) < ?)
                   ON CONFLICT (email) DO UPDATE SET code_hash = excluded.code_hash, invited_by = excluded.invited_by, created_at = excluded.created_at, expires_at = excluded.expires_at
                    WHERE invite.id = excluded.id`,
-            params: [id, email, hash, adminId, now, expiresAt, email, id, email, MAX_INVITES],
+            params: [id, email, hash, adminId, now, expiresAt, email, id, now, now, MAX_INVITES, email, now, MAX_INVITES],
           },
           auditStatement(deps, { event: "invite_sent", userId: adminId, workspaceId: auth.workspaceId, subject: id, detail: { replaced: site.invite === null ? 0 : 1 } }, { onlyAfterOneChange: true }),
         ]);
@@ -276,8 +283,9 @@ export function inviteRoutes(app: Hono, deps: Deps): void {
   });
 
   /**
-   * The site's invites that are open or ran out, newest first: every one, since there are at
-   * most MAX_INVITES. Accepted and cancelled invites are gone. Sweeps first. It needs no mail.
+   * The site's invites that are open or ran out, newest first, at most MAX_INVITES: every open
+   * one (there are at most that many, and each is newer than any that ran out), then as many
+   * that ran out as fit. Accepted and cancelled invites are gone. Sweeps first. It needs no mail.
    */
   app.get("/api/v1/admin/invites", async (c) => {
     const auth = await requireAuth(c.req.raw, deps, { admin: true });
@@ -308,12 +316,16 @@ export function inviteRoutes(app: Hono, deps: Deps): void {
 
     const sends = await hitLimit(deps, LIMITS_INVITE.sendAdmin, await accountKey(adminId));
     if (sends.over) return tooMany(sends.retryAfterSeconds, INVITE_SAYS.rateLimited);
-    const found = await deps.db.first<{ email: string; account: string | null; me: string | null }>(
-      "SELECT i.email, (SELECT u.id FROM user u WHERE u.email = i.email) AS account, (SELECT username FROM user WHERE id = ?) AS me FROM invite i WHERE i.id = ?",
-      [adminId, id],
+    const found = await deps.db.first<{ email: string; account: string | null; me: string | null; still_open: number; n: number }>(
+      `SELECT i.email, (SELECT u.id FROM user u WHERE u.email = i.email) AS account, (SELECT username FROM user WHERE id = ?) AS me,
+              i.expires_at > ? AS still_open, (SELECT count(*) FROM invite WHERE expires_at > ?) AS n
+         FROM invite i WHERE i.id = ?`,
+      [adminId, deps.now(), deps.now(), id],
     );
     if (found === null) return notFound();
     if (found.account !== null) return apiError(409, "has_account", INVITE_SAYS.hasAccount);
+    // Resending one that ran out opens it again, so it must fit under the cap of open invites.
+    if (found.still_open !== 1 && found.n >= MAX_INVITES) return apiError(409, "too_many_invites", INVITE_SAYS.tooMany);
     const cap = await hitLimit(deps, LIMITS_INVITE.mailSite, SITE_KEY);
     if (cap.over) return tooMany(cap.retryAfterSeconds, INVITE_SAYS.rateLimited);
 
@@ -323,14 +335,18 @@ export function inviteRoutes(app: Hono, deps: Deps): void {
     const expiresAt = now + INVITE_MS;
     try {
       await deps.db.batch([
-        { sql: "UPDATE invite SET code_hash = ?, invited_by = ?, created_at = ?, expires_at = ? WHERE id = ?", params: [hash, adminId, now, expiresAt, id] },
-        // Unless that changed the one row (it was cancelled or accepted since the read), this
-        // fails and the whole batch is undone.
+        {
+          sql: "UPDATE invite SET code_hash = ?, invited_by = ?, created_at = ?, expires_at = ? WHERE id = ? AND (expires_at > ? OR (SELECT count(*) FROM invite WHERE expires_at > ?) < ?)",
+          params: [hash, adminId, now, expiresAt, id, now, now, MAX_INVITES],
+        },
+        // Unless that changed the one row (it was cancelled or accepted since the read, or the
+        // cap filled up meanwhile), this fails and the whole batch is undone.
         auditStatement(deps, { event: "invite_resent", userId: adminId, workspaceId: auth.workspaceId, subject: id }, { onlyAfterOneChange: true }),
       ]);
     } catch (err) {
       if (!isNotNullViolation(err)) throw err;
-      return notFound();
+      const still = await deps.db.first("SELECT 1 AS x FROM invite WHERE id = ?", [id]);
+      return still === null ? notFound() : apiError(409, "too_many_invites", INVITE_SAYS.tooMany);
     }
     return mailInvite(deps, found.email, found.me, code, entryOf({ id, email: found.email, created_at: now, expires_at: expiresAt }, now), 200);
   });

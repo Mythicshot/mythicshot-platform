@@ -330,6 +330,48 @@ describe("sending an invite", () => {
     expect(LIMITS_INVITE.mailSite.bucket).not.toBe("mail_site");
   });
 
+  it("only open invites count toward the 100: rows that ran out never block a send, and the list stays at 100 with every open one", async () => {
+    const { deps, mail, adminSession } = await site();
+    const row = (i: number, created: number) => ({
+      sql: "INSERT INTO invite (id, email, code_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, NULL, ?, ?)",
+      params: [`inv_${String(i).padStart(24, "0")}`, `n${i}@example.com`, i.toString(16).padStart(64, "0"), created, created + INVITE_MS],
+    });
+    // 100 that ran out a day ago, still waiting for the sweep, and 99 open ones.
+    await deps.db.batch(Array.from({ length: MAX_INVITES }, (_, i) => row(i, NOW - INVITE_MS - DAY - i)));
+    await deps.db.batch(Array.from({ length: MAX_INVITES - 1 }, (_, i) => row(1000 + i, NOW - 1000 + i)));
+    expect((await invite(deps, adminSession, MARA)).status).toBe(201);
+    const over = await invite(deps, adminSession, "one-more@example.com");
+    expect([over.status, over.json.error]).toEqual([409, "too_many_invites"]);
+    expect(mail.sent).toHaveLength(1);
+    // Replacing an open invite adds no open one, so it goes through at the cap; replacing one
+    // that ran out would open it again, so it is refused like a new one.
+    expect((await invite(deps, adminSession, "n1001@example.com")).status).toBe(201);
+    const reopen = await invite(deps, adminSession, "n5@example.com");
+    expect([reopen.status, reopen.json.error]).toEqual([409, "too_many_invites"]);
+    expect(mail.sent).toHaveLength(2);
+    const resendExpired = await resend(deps, adminSession, `inv_${String(5).padStart(24, "0")}`);
+    expect([resendExpired.status, resendExpired.json.error]).toEqual([409, "too_many_invites"]);
+    expect((await resend(deps, adminSession, `inv_${String(1001).padStart(24, "0")}`)).status).toBe(200);
+    // Once one open invite ends, there is room again.
+    expect((await cancel(deps, adminSession, `inv_${String(1000).padStart(24, "0")}`)).status).toBe(204);
+    expect((await invite(deps, adminSession, "one-more@example.com")).status).toBe(201);
+    // The list holds 100 rows, every open one first.
+    const listed = (await list(deps, adminSession)).json.invites as { state: string; created_at: number }[];
+    expect(listed).toHaveLength(MAX_INVITES);
+    const open = await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM invite WHERE expires_at > ?", [NOW]);
+    expect(listed.filter((i) => i.state === "open")).toHaveLength(open!.n);
+    expect(open!.n).toBe(MAX_INVITES);
+    // No open one comes after one that ran out.
+    const firstExpired = listed.findIndex((i) => i.state === "expired");
+    if (firstExpired >= 0) expect(listed.slice(firstExpired).every((i) => i.state === "expired")).toBe(true);
+    // One fewer open invite, and the newest that ran out shows up at the end of the list.
+    expect((await cancel(deps, adminSession, `inv_${String(1001).padStart(24, "0")}`)).status).toBe(204);
+    const after = (await list(deps, adminSession)).json.invites as { state: string; email: string }[];
+    expect(after).toHaveLength(MAX_INVITES);
+    expect(after.at(-1)).toMatchObject({ state: "expired", email: "n0@example.com" });
+    expect(listed.map((i) => i.created_at)).toEqual([...listed.map((i) => i.created_at)].sort((x, y) => y - x));
+  });
+
   it("the site holds at most 100 invites; replacing one of them still works", async () => {
     const { deps, mail, adminSession } = await site();
     const stmts = Array.from({ length: MAX_INVITES }, (_, i) => ({
