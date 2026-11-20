@@ -22,10 +22,13 @@
 // - A tour is deleted as the Tours page deletes it: DELETE /api/v1/tours/:id again while it
 //   answers 202. It is done when the tour is gone: 200, 404 (already gone), or 500
 //   cleanup_pending (gone, with files left for later requests to remove).
-// - An image or a GIF: DELETE /api/v1/media/:id, sent again (at most ITEM_ROUNDS times in
-//   all) while it answers 500 cleanup_pending, as the API asks. It is done on 204, 404
-//   (already gone), or a last cleanup_pending: the item is closing by then, so it counts for
-//   nothing and is no longer listed, and the workspace's sweep removes what is left.
+// - An image or a GIF: DELETE /api/v1/media/:id, sent again after a pause (PAUSES_MS, at
+//   most ITEM_ROUNDS times in all) while it answers 500 cleanup_pending, as the API asks and
+//   as the Images and GIFs pages do. It is done on 204, 404 (already gone), or a last
+//   cleanup_pending: the item is closing by then, so it is no longer listed (it counts in the
+//   usage until its files are gone), and a later request or the sweep removes what is left.
+//   When no answer came, the largest list read again decides: the item is gone when it is no
+//   longer listed although it would still fit in the list; otherwise it is a failure.
 // After any outcome the page reads the usage and the largest list again; when that fails
 // after a delete that worked, the page says the change was made and asks for a reload.
 // Message lines are hidden while they have nothing to say.
@@ -109,6 +112,10 @@ export const STORAGE_JS = `(function () {
   var MAX_ROUNDS = 1000;
   // An item's delete is sent at most this many times while its files are not all removed yet.
   var ITEM_ROUNDS = 3;
+  // The pauses before the second and the third send, so a moment's fault in the store does not use them all at once.
+  var PAUSES_MS = [400, 1200];
+  // How many entries the largest list holds at most (LARGEST_TOURS in src/usage.ts).
+  var LARGEST = 10;
   var TOUR_ID = /^tour_[0-9a-f]{24}$/;
   var ITEM_ID = /^med_[0-9a-f]{24}$/;
   // What each kind of entry is called on the page, and asked about.
@@ -128,6 +135,8 @@ export const STORAGE_JS = `(function () {
   var working = false;
   // Each listed entry's Delete button, by id, to give the focus back after the question.
   var deleteOf = {};
+  // The entries the list shows now.
+  var listed = [];
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -244,6 +253,7 @@ export const STORAGE_JS = `(function () {
     $("room-uploads").textContent = Dash.formatBytes(u.counted.uploads_in_progress);
 
     var list = entries.filter(entryOk);
+    listed = list;
     var max = 0;
     list.forEach(function (e) { if (e.bytes > max) max = e.bytes; });
     deleteOf = {};
@@ -303,16 +313,31 @@ export const STORAGE_JS = `(function () {
     return next();
   }
 
-  // Sends an item's delete again while its files are not all removed yet, at most ITEM_ROUNDS times; the last answer.
+  function pause(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
+  // Sends an item's delete, again after a pause while its files are not all removed yet, at most ITEM_ROUNDS times; the last answer.
   function runItem(id) {
     var rounds = 0;
     function next() {
       rounds++;
       return Dash.api("DELETE", "/api/v1/media/" + encodeURIComponent(id)).then(function (res) {
-        return leftovers(res) && rounds < ITEM_ROUNDS ? next() : res;
+        return leftovers(res) && rounds < ITEM_ROUNDS ? pause(PAUSES_MS[rounds - 1]).then(next) : res;
       });
     }
     return next();
+  }
+
+  // After a delete whose answer was lost, whether the list read again shows the item gone: it
+  // is not listed although it would still fit (the list is not full, or holds a smaller entry).
+  function goneFromList(e) {
+    var smaller = false;
+    for (var i = 0; i < listed.length; i++) {
+      if (listed[i].id === e.id) return false;
+      if (listed[i].bytes < e.bytes) smaller = true;
+    }
+    return listed.length < LARGEST || smaller;
   }
 
   function leftovers(res) {
@@ -320,7 +345,7 @@ export const STORAGE_JS = `(function () {
   }
 
   // Whether the entry is gone (null: no answer came). One whose leftover files could not all
-  // be removed yet is gone too: it counts for nothing, and later requests finish the cleaning.
+  // be removed yet is gone too: it is no longer listed, and later requests finish the cleaning.
   function done(e, res) {
     if (res === null) return false;
     if (leftovers(res) || res.status === 404) return true;
@@ -354,6 +379,11 @@ export const STORAGE_JS = `(function () {
           working = false;
           question.busy(false, "delete-go");
           rowsDisabled(false);
+          // No answer came for an image or a GIF: the list read again decides.
+          if (res === null && e.kind !== "tour" && r === true && goneFromList(e)) {
+            ok = true;
+            question.close(false);
+          }
           if (ok) {
             sayIn($("storage-message"), r === true ? "" : TEXT.notReloaded);
             $("h-page").focus();

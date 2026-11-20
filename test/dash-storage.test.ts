@@ -274,8 +274,12 @@ describe("the Storage page", () => {
     expect(requests.sort()).toEqual(['DELETE "/api/v1/media/"', 'DELETE "/api/v1/tours/"', 'GET "/api/v1/usage"', 'GET "/api/v1/usage/largest"']);
     expect(STORAGE_JS).toContain('Dash.api("DELETE", "/api/v1/tours/" + encodeURIComponent(id))');
     expect(STORAGE_JS).toContain('Dash.api("DELETE", "/api/v1/media/" + encodeURIComponent(id))');
-    const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "setTimeout(", "document.referrer", "navigator"];
+    const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer", "navigator"];
     for (const api of forbidden) expect(STORAGE_JS, api).not.toContain(api);
+    // One timer only: the pause before an image's or a GIF's delete is sent again, as on the Images and GIFs pages.
+    expect(STORAGE_JS.match(/setTimeout\(/g)).toHaveLength(1);
+    expect(STORAGE_JS).toContain("return new Promise(function (resolve) { setTimeout(resolve, ms); });");
+    expect(STORAGE_JS).toContain("var PAUSES_MS = [400, 1200];");
     // A lost session goes to /signin through the shared script.
     expect(STORAGE_JS).toContain("Dash.signedOut()");
   });

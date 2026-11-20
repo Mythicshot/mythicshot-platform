@@ -50,6 +50,10 @@ type Tab = {
   /** A key pressed with the focus nowhere in particular: on the page's body. */
   pressOnPage: (key: string, shiftKey?: boolean) => boolean;
   violations: string[];
+  /** The delay of every timer the page set, in order. */
+  delays: number[];
+  /** Runs the timers set so far, as if their time had passed. */
+  tick: () => void;
 };
 
 const open: Tab[] = [];
@@ -83,8 +87,16 @@ function openStorage(respond: Responder): Tab {
     pending.push(p.catch(() => {}));
     return p;
   };
-  const context: Record<string, unknown> = { document: doc, location, fetch };
-  for (const name of ["localStorage", "sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "window", "self", "top", "parent", "opener", "open", "postMessage", "setInterval", "setTimeout", "console", "alert", "confirm", "prompt", "history", "navigator"]) {
+  // Timers run only when the test says their time has passed.
+  const timers: (() => void)[] = [];
+  const delays: number[] = [];
+  const setTimeout = (fn: () => void, ms?: number) => {
+    timers.push(fn);
+    delays.push(Number(ms));
+    return timers.length;
+  };
+  const context: Record<string, unknown> = { document: doc, location, fetch, setTimeout };
+  for (const name of ["localStorage", "sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "window", "self", "top", "parent", "opener", "open", "postMessage", "setInterval", "console", "alert", "confirm", "prompt", "history", "navigator"]) {
     Object.defineProperty(context, name, {
       get() {
         violations.push(name);
@@ -113,6 +125,10 @@ function openStorage(respond: Responder): Tab {
     },
     pressOnPage: (key, shiftKey = false) => doc.body.dispatch("keydown", { key, shiftKey }).defaultPrevented,
     violations,
+    delays,
+    tick: () => {
+      for (const fn of timers.splice(0)) fn();
+    },
   };
   open.push(tab);
   return tab;
@@ -659,12 +675,12 @@ describe("deleting an image or a GIF from the Storage page", () => {
     expect(tab.$("storage-message").hidden).toBe(true);
   });
 
-  it("files left to remove (500 cleanup_pending): the delete is sent again, and counts as done when they stay", async () => {
-    const pending = { status: 500, json: { error: "cleanup_pending", detail: "the item is deleted, but some of its files could not be removed yet; delete it again to retry" } };
-    for (const [answer, sent] of [
-      [[pending, { status: 204 }], 2],
-      [[pending, pending, { status: 404, json: { error: "not_found" } }], 3],
-      [[pending], 3],
+  it("files left to remove (500 cleanup_pending): the delete is sent again after 400 ms, then 1200 ms, and counts as done when they stay", async () => {
+    const pending = { status: 500, json: { error: "cleanup_pending", detail: "the item is deleted, but some of its files could not be removed yet; send the same request again later" } };
+    for (const [answer, sent, delays] of [
+      [[pending, { status: 204 }], 2, [400]],
+      [[pending, pending, { status: 404, json: { error: "not_found" } }], 3, [400, 1200]],
+      [[pending], 3, [400, 1200]],
     ] as const) {
       const tab = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: [...answer] as Answer[], "GET /api/v1/usage": [usage(M5), afterGif], "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
       await tab.settle();
@@ -672,12 +688,75 @@ describe("deleting an image or a GIF from the Storage page", () => {
       tab.$("delete-go").click();
       await tab.settle();
       const what = JSON.stringify(answer);
+      // Nothing is sent again before the pause has passed; the question stays busy meanwhile.
+      expect(deletes(tab), what).toHaveLength(1);
+      expect([tab.delays, tab.$("delete-go").textContent, tab.$("delete-dialog").shown], what).toEqual([[400], "Deleting…", true]);
+      for (let i = 0; i < 3; i++) {
+        tab.tick();
+        await tab.settle();
+      }
+      expect(tab.delays, what).toEqual(delays);
       expect(deletes(tab), what).toEqual(Array.from({ length: sent }, () => [`/api/v1/media/${G1}`, CSRF, undefined]));
       expect(tab.$("delete-dialog").shown, what).toBe(false);
       expect(rows(tab).map(titleOf), what).toEqual(["Full onboarding, long cut", "Timeline rehearsal walkthrough"]);
       expect([tab.$("storage-message").hidden, tab.$("delete-message").hidden], what).toEqual([true, true]);
       expect(tab.doc.activeElement, what).toBe(tab.$("h-page"));
     }
+  });
+
+  it("a delete whose answer is lost looks at the list read again: gone means done, still listed means it failed", async () => {
+    // Gone from a list that has room for it: deleted, and the question closes as for a delete that answered.
+    const gone = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", "GET /api/v1/usage": [usage(M5), afterGif], "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
+    await gone.settle();
+    deleteOf(rows(gone)[GIF_ROW]).click();
+    gone.$("delete-go").click();
+    await gone.settle();
+    expect(gone.$("delete-dialog").shown).toBe(false);
+    expect([gone.$("storage-message").hidden, gone.$("delete-message").hidden]).toEqual([true, true]);
+    expect(rows(gone).map(titleOf)).toEqual(["Full onboarding, long cut", "Timeline rehearsal walkthrough"]);
+    expect(gone.doc.activeElement).toBe(gone.$("h-page"));
+
+    // Lost on the second send, after a first cleanup_pending: the list decides the same way.
+    const second = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: [{ status: 500, json: { error: "cleanup_pending" } }, "network"], "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
+    await second.settle();
+    deleteOf(rows(second)[GIF_ROW]).click();
+    second.$("delete-go").click();
+    await second.settle();
+    second.tick();
+    await second.settle();
+    expect(deletes(second)).toHaveLength(2);
+    expect(second.$("delete-dialog").shown).toBe(false);
+
+    // Still listed: it failed, and the question says so with its buttons back.
+    const kept = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network" }));
+    await kept.settle();
+    deleteOf(rows(kept)[GIF_ROW]).click();
+    kept.$("delete-go").click();
+    await kept.settle();
+    expect(kept.$("delete-dialog").shown).toBe(true);
+    expect([kept.$("delete-message").textContent, kept.$("delete-go").disabled, kept.$("delete-go").textContent]).toEqual([FAILED, false, "Delete GIF"]);
+    expect(kept.$("storage-message").hidden).toBe(true);
+
+    // Not listed, but the list is full of larger things, so it cannot tell: a failure, never a claim that it was deleted.
+    const big = (i: number): Entry => ({ kind: "tour", id: "tour_" + String(i).padStart(24, "0"), title: `Big ${i}`, bytes: GB + i });
+    const full = Array.from({ length: 10 }, (_, i) => big(i));
+    const unsure = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", "GET /api/v1/usage/largest": [largest(M5_TOURS), largest(full)] }));
+    await unsure.settle();
+    deleteOf(rows(unsure)[GIF_ROW]).click();
+    unsure.$("delete-go").click();
+    await unsure.settle();
+    expect(unsure.$("delete-dialog").shown).toBe(true);
+    expect(unsure.$("delete-message").textContent).toBe(FAILED);
+    expect(rows(unsure)).toHaveLength(10);
+
+    // The list cannot be read again either: a failure, and the page keeps what it showed.
+    const blind = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: "network", "GET /api/v1/usage/largest": [largest(M5_TOURS), { status: 500, json: { error: "internal" } }] }));
+    await blind.settle();
+    deleteOf(rows(blind)[GIF_ROW]).click();
+    blind.$("delete-go").click();
+    await blind.settle();
+    expect([blind.$("delete-dialog").shown, blind.$("delete-message").textContent]).toEqual([true, FAILED]);
+    expect(rows(blind).map(titleOf)).toEqual(M5_TOURS.map((t) => t.title));
   });
 
   it("an item already gone (404) counts as deleted", async () => {
@@ -727,6 +806,10 @@ describe("deleting an image or a GIF from the Storage page", () => {
       await tab.settle();
       deleteOf(rows(tab)[GIF_ROW]).click();
       tab.$("delete-go").click();
+      for (let i = 0; i < 3; i++) {
+        await tab.settle();
+        tab.tick();
+      }
       await tab.settle();
       const what = JSON.stringify(answer);
       expect(tab.$("delete-dialog").shown, what).toBe(false);
