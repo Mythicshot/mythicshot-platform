@@ -153,18 +153,18 @@ describe("the codes", () => {
 });
 
 describe("starting a request", () => {
-  it("answers both codes, the connect page from the settings, 600 seconds and 5; only digests of the codes are stored", async () => {
+  it("answers both codes, the Connections page from the settings, 600 seconds and 5; only digests of the codes are stored", async () => {
     const { deps } = await site(TWO);
     const r = await start(deps, "  Work laptop ", { origin: TOURS });
     expect(r.status, r.text).toBe(201);
     expect(Object.keys(r.json)).toEqual(["device_code", "user_code", "verify_url", "expires_in", "interval"]);
     expect(r.json.device_code).toMatch(DEVICE_CODE);
     expect(r.json.user_code).toMatch(USER_CODE);
-    expect(r.json).toMatchObject({ verify_url: `${APP}/connect`, expires_in: 600, interval: 5 });
+    expect(r.json).toMatchObject({ verify_url: `${APP}/connections`, expires_in: 600, interval: 5 });
     expect([...r.headers.entries()].sort()).toEqual(API_HEADERS);
     // The app address too answers it, with the same page.
     const onApp = await start(deps, "Other", { origin: APP });
-    expect([onApp.status, onApp.json.verify_url]).toEqual([201, `${APP}/connect`]);
+    expect([onApp.status, onApp.json.verify_url]).toEqual([201, `${APP}/connections`]);
 
     const rows = await deps.db.all<Record<string, unknown>>("SELECT * FROM connect_request ORDER BY created_at, device_name DESC");
     expect(rows[0]).toEqual({
@@ -193,14 +193,14 @@ describe("starting a request", () => {
     expect(await deps.db.first("SELECT key FROM connect_key")).toEqual({ key: expect.stringMatching(/^[0-9a-f]{64}$/) });
   });
 
-  it("the connect page comes from the settings, never from the request, and is a bare path without them", async () => {
+  it("the Connections page comes from the settings, never from the request, and is a bare path without them", async () => {
     const one = await site({ siteHost: "demo.example.com" });
     for (const origin of [ORIGIN, "https://evil.example.net", "http://localhost:8787"]) {
       const r = await start(one.deps, "x", { origin, headers: { host: "evil.example.net", "x-forwarded-host": "evil.example.net" } });
-      expect(r.json.verify_url, origin).toBe("https://demo.example.com/connect");
+      expect(r.json.verify_url, origin).toBe("https://demo.example.com/connections");
     }
     const bare = await site();
-    expect((await start(bare.deps, "x", { origin: "https://evil.example.net" })).json.verify_url).toBe("/connect");
+    expect((await start(bare.deps, "x", { origin: "https://evil.example.net" })).json.verify_url).toBe("/connections");
     // Never a code in it.
     const r = await start(bare.deps, "x");
     expect(r.json.verify_url).not.toContain(r.json.user_code);

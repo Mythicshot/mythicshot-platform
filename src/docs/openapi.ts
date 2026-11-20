@@ -206,7 +206,7 @@ function introduction(): string {
     "",
     "## Connecting the app",
     "",
-    `The desktop app gets its token with a pair of codes, so nobody has to copy one. It asks POST /api/v1/connect/start, with no credential, for a long secret device code and a short user code such as ABCD-EFGH, shows the short one and opens verify_url, the dashboard's connect page. A signed-in person types the short code there; the page shows the device's name (GET /api/v1/connect/requests/{code}) and the person confirms it (POST /api/v1/connect/confirm) or refuses it (POST /api/v1/connect/refuse). Meanwhile the app asks POST /api/v1/connect/token with the device code every ${POLL_INTERVAL_S} seconds: pending, until it is answered connected with a token for that person's workspace, once. The codes live ${CONNECT_MS / 60_000} minutes. Neither is ever put in an address.`,
+    `The desktop app gets its token with a pair of codes, so nobody has to copy one. It asks POST /api/v1/connect/start, with no credential, for a long secret device code and a short user code such as ABCD-EFGH, shows the short one and opens verify_url, the dashboard's Connections page. A signed-in person types the short code there; the page shows the device's name (GET /api/v1/connect/requests/{code}) and the person confirms it (POST /api/v1/connect/confirm) or refuses it (POST /api/v1/connect/refuse). Meanwhile the app asks POST /api/v1/connect/token with the device code every ${POLL_INTERVAL_S} seconds: pending, until it is answered connected with a token for that person's workspace, once. The codes live ${CONNECT_MS / 60_000} minutes. Neither is ever put in an address.`,
     "",
     "The workspace's tokens are listed, renamed and revoked with GET /api/v1/tokens, PATCH /api/v1/tokens/{id} and DELETE /api/v1/tokens/{id}. Like the requests that take a short code, they need the session: a token cannot list, rename or revoke tokens, its own included. A revoked token is refused from the next request on.",
     "",
@@ -464,8 +464,8 @@ function schemas(): Record<string, Schema> {
       ["device_code", "user_code", "verify_url", "expires_in", "interval"],
       {
         device_code: { type: "string", pattern: "^dpd_[0-9a-f]{40}$", description: "The secret the app asks for its token with. Keep it to the app: never show it or put it in an address." },
-        user_code: { type: "string", pattern: `^[${USER_CODE_ALPHABET}]{4}-[${USER_CODE_ALPHABET}]{4}$`, description: "The short code to show, for the person to type on the connect page. Its characters leave out the ones that look alike (0 and O, 1, I and L, and U)." },
-        verify_url: { type: "string", description: `The dashboard's connect page, ${VERIFY_PATH} on the address from the server's settings (the app address, or the one address), never from the request. When the server has no address in its settings it is the bare path: join it to the address the app is set up with. It holds neither code.` },
+        user_code: { type: "string", pattern: `^[${USER_CODE_ALPHABET}]{4}-[${USER_CODE_ALPHABET}]{4}$`, description: "The short code to show, for the person to type on the Connections page. Its characters leave out the ones that look alike (0 and O, 1, I and L, and U)." },
+        verify_url: { type: "string", description: `The dashboard's Connections page, ${VERIFY_PATH}, where the short code is typed, on the address from the server's settings (the app address, or the one address), never from the request. When the server has no address in its settings it is the bare path: join it to the address the app is set up with. It holds neither code.` },
         expires_in: { type: "integer", const: CONNECT_MS / 1000, description: "Seconds the codes live." },
         interval: { type: "integer", const: POLL_INTERVAL_S, description: "Seconds to wait between two asks for the token." },
       },
@@ -1271,7 +1271,7 @@ function paths(): OpenApiDoc["paths"] {
       post: {
         tags: ["Connections"],
         summary: "Ask to connect the app",
-        description: `For the desktop app, which has no credential yet: starts a request and answers its two codes and the connect page to open. Send it with no token and no session cookie. The codes live ${CONNECT_MS / 60_000} minutes. A network may ask ${LIMITS_CONNECT.startNetwork.most} times in ${LIMITS_CONNECT.startNetwork.windowMs / 60_000} minutes and ${LIMITS_CONNECT.startNetworkDay.most} times in a day, and have ${OPEN_PER_NETWORK} requests waiting at once.`,
+        description: `For the desktop app, which has no credential yet: starts a request and answers its two codes and the Connections page to open. Send it with no token and no session cookie. The codes live ${CONNECT_MS / 60_000} minutes. A network may ask ${LIMITS_CONNECT.startNetwork.most} times in ${LIMITS_CONNECT.startNetwork.windowMs / 60_000} minutes and ${LIMITS_CONNECT.startNetworkDay.most} times in a day, and have ${OPEN_PER_NETWORK} requests waiting at once.`,
         operationId: "startConnection",
         security: [],
         requestBody: { required: true, content: json(ref("ConnectStart")) },
@@ -1302,7 +1302,7 @@ function paths(): OpenApiDoc["paths"] {
       get: {
         tags: ["Connections"],
         summary: "Look up a request by its short code",
-        description: `What the connect page shows before the person confirms: the device's name and when it asked. Only a request that is waiting (neither confirmed nor refused, and not expired) is found; every other code is the one 404. A code that finds nothing counts as a wrong try: ${LIMITS_CONNECT.wrongAccount.most} for an account in ${LIMITS_CONNECT.wrongAccount.windowMs / 60_000} minutes, ${LIMITS_CONNECT.wrongNetwork.most} for a network, counted together with confirm and refuse; past that every try answers 429 until the time is up. A right code is not counted. ${NOT_FROM_THE_PAGE}`,
+        description: `What the Connections page shows before the person confirms: the device's name and when it asked. Only a request that is waiting (neither confirmed nor refused, and not expired) is found; every other code is the one 404. A code that finds nothing counts as a wrong try: ${LIMITS_CONNECT.wrongAccount.most} for an account in ${LIMITS_CONNECT.wrongAccount.windowMs / 60_000} minutes, ${LIMITS_CONNECT.wrongNetwork.most} for a network, counted together with confirm and refuse; past that every try answers 429 until the time is up. A right code is not counted. ${NOT_FROM_THE_PAGE}`,
         operationId: "getConnectionRequest",
         security: SESSION,
         parameters: [userCodeParam],

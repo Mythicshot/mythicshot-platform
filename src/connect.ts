@@ -61,8 +61,8 @@ export const OPEN_UNKNOWN_NETWORK = 100;
 export const CONNECT_SWEEP_PAGE = 50;
 /** The longest device name, in characters. */
 export const DEVICE_NAME_MAX = 60;
-/** The dashboard's connect page, where a person types the short code. */
-export const VERIFY_PATH = "/connect";
+/** The dashboard's Connections page, whose connect box is where a person types the short code. */
+export const VERIFY_PATH = "/connections";
 
 /**
  * The user code's characters: the capital letters and digits without the ones that look
@@ -249,7 +249,7 @@ const OPEN_BY_CODE = "FROM connect_request WHERE user_code_hash = ? AND confirme
 export function connectRoutes(app: Hono, deps: Deps): void {
   /**
    * Starts a request: the device code, the user code and where to type it. verify_url is the
-   * dashboard's connect page on the address from the settings (the app address, else
+   * dashboard's Connections page on the address from the settings (the app address, else
    * SITE_HOST), never one taken from the request; with neither it is the bare path, which
    * the app joins to the address it is set up with. Neither code is put in it.
    *
