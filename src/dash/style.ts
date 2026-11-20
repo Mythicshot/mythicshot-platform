@@ -79,8 +79,7 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 18px; margin: 0 0 14px; min-width: 0; }
 .load { margin: 0; color: var(--error); font-size: 0.9rem; }
 .load:empty { display: none; }
-.message { min-height: 1.5em; margin: 0 0 8px; color: var(--error); font-size: 0.9rem; line-height: 1.45; }
-noscript .message { min-height: 0; }
+.message { margin: 0 0 8px; color: var(--error); font-size: 0.9rem; line-height: 1.45; }
 .hint { margin: 6px 0 0; color: var(--muted); font-size: 0.86rem; }
 .tag { display: inline-block; border-radius: 6px; font-size: 0.76rem; padding: 2px 7px; background: var(--tag-bg); color: var(--tag-text); white-space: nowrap; }
 .tag.ok { background: var(--ok-bg); color: var(--ok-text); }
@@ -145,6 +144,7 @@ noscript .message { min-height: 0; }
 .tours .status .tag + .tag { margin-left: 4px; }
 .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; }
 .narrow-only { display: none; }
+.vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .more { position: relative; display: inline-block; }
 .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 10; min-width: 180px; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
 .menu button { display: block; width: 100%; min-height: 40px; padding: 8px 12px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font: inherit; font-size: 0.9rem; text-align: left; white-space: nowrap; cursor: pointer; }

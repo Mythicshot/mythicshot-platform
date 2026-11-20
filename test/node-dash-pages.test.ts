@@ -34,6 +34,10 @@ const shown = (ms: number) => {
 
 const FAILED = "Something went wrong. Try again in a moment.";
 const TOO_MANY = "Too many requests. Wait a few minutes and try again.";
+// Proposed for the owner's approval (review follow-ups L4 and M1).
+const EMPTY_TOUR = "This tour has no steps, so it cannot be published.";
+const PUBLISH_BUSY = "This tour is being published. Try again when that is done.";
+const NOT_RELOADED = "The change was made, but the list could not be loaded again. Reload the page to see it.";
 
 type Answer = { status: number; json?: unknown } | "network";
 type Fetched = { method: string; path: string; headers: Record<string, string>; body: string | undefined; init: Record<string, unknown> };
@@ -207,6 +211,19 @@ const byText = (row: FakeElement, text: string) => {
 const menuOf = (row: FakeElement) => row.all().find((e) => e.getAttribute("role") === "menu")!;
 const menuItems = (row: FakeElement) => menuOf(row).all().filter((e) => e.getAttribute("role") === "menuitem");
 const key = (el: FakeElement, k: string, shiftKey = false) => el.dispatch("keydown", { key: k, shiftKey });
+/** Every button of every row, menus included. */
+const rowButtons = (tab: Tab) => rows(tab).flatMap((row) => row.all().filter((e) => e.tagName === "button"));
+
+/** A responder whose answers to requests matching `held` wait until the test hands them over; the rest go to `rest`. */
+function holding(held: (req: Fetched) => boolean, rest: Responder): { respond: Responder; answer: (a: Answer) => void } {
+  const waiting: ((a: Answer) => void)[] = [];
+  return {
+    respond: (req) => (held(req) ? new Promise<Answer>((r) => waiting.push(r)) : rest(req)),
+    answer: (a) => {
+      for (const r of waiting.splice(0)) r(a);
+    },
+  };
+}
 
 describe("the shared script", () => {
   it("sends a visitor who is not signed in to /signin and asks nothing else", async () => {
@@ -246,10 +263,27 @@ describe("the shared script", () => {
     const truthy = openTours(standard({ "GET /api/v1/session": session({ admin: "yes" }) }));
     await truthy.settle();
     expect(truthy.$("tab-admin").hidden).toBe(true);
-    // An account without a username shows its email address.
-    const noName = openTours(standard({ "GET /api/v1/session": session({ username: null }) }));
-    await noName.settle();
-    expect(noName.$("dash-user").textContent).toBe("solex@example.com");
+    // An account without a username shows the word Account, never its email address: people record their screens.
+    for (const username of [null, "", 7]) {
+      const noName = openTours(standard({ "GET /api/v1/session": session({ username }) }));
+      await noName.settle();
+      expect(noName.$("dash-user").textContent, String(username)).toBe("Account");
+      expect(noName.doc.root.textContent, String(username)).not.toContain("solex@example.com");
+    }
+  });
+
+  it("Dash.api refuses any path that is not one absolute path of this site, before any request", async () => {
+    const fetched: string[] = [];
+    const ctx = vm.createContext({ document: {}, location: {}, fetch: (p: string) => (fetched.push(p), Promise.resolve(new Response("{}"))) });
+    vm.runInContext(DASH_JS, ctx);
+    const api = vm.runInContext("Dash.api", ctx) as (method: string, path: unknown, body?: unknown) => Promise<unknown>;
+    for (const path of ["//evil.example.net/x", "/\\evil.example.net/x", "https://evil.example.net/", "api/v1/tours", "", " /api/v1/tours", "javascript:alert(1)", null, 7]) {
+      expect(() => api("GET", path), String(path)).toThrow();
+      expect(() => api("POST", path, {}), String(path)).toThrow();
+    }
+    expect(fetched).toEqual([]);
+    await api("GET", "/api/v1/tours");
+    expect(fetched).toEqual(["/api/v1/tours"]);
   });
 
   it("writes sizes as the server and the account page do", async () => {
@@ -289,9 +323,9 @@ describe("the Tours page", () => {
       };
     };
     expect(r.map(summary)).toEqual([
-      { wide: "14 steps · app.example.com/t/k3f9abcdef", narrow: `14 steps · 6.1 MB · ${shown(day(2026, 11, 19))}`, tags: [["tag ok", "Published"]], size: "6.1 MB", when: shown(day(2026, 11, 19)), controls: ["Copy link", "Open", "More"] },
+      { wide: "14 steps · app.example.com/t/k3f9…", narrow: `14 steps · 6.1 MB · ${shown(day(2026, 11, 19))}`, tags: [["tag ok", "Published"]], size: "6.1 MB", when: shown(day(2026, 11, 19)), controls: ["Copy link", "Open", "More"] },
       {
-        wide: "9 steps · app.example.com/t/p71cabcdef",
+        wide: "9 steps · app.example.com/t/p71c…",
         narrow: `9 steps · 2.6 MB · ${shown(day(2026, 11, 18))}`,
         tags: [["tag ok", "Published"], ["tag warn", "Changes waiting"]],
         size: "2.6 MB",
@@ -301,6 +335,14 @@ describe("the Tours page", () => {
       { wide: "6 steps · no public link", narrow: `6 steps · 1.9 MB · ${shown(day(2026, 11, 17))}`, tags: [["tag", "Not published"]], size: "1.9 MB", when: shown(day(2026, 11, 17)), controls: ["Publish", "More"] },
     ]);
     expect(shown(day(2026, 11, 19))).toBe("19 Nov");
+    // The full link is in the shortened text's title; a tour without a link has none.
+    expect(r.map((row) => row.all().find((e) => e.className === "wide-only")!.getAttribute("title"))).toEqual([`${APP}/t/k3f9abcdef`, `${APP}/t/p71cabcdef`, null]);
+    // The last column's header has a name for a screen reader, hidden from sight.
+    const lastHeader = tab.doc.root.all().filter((e) => e.tagName === "th").at(-1)!;
+    expect([lastHeader.textContent, lastHeader.all()[0]?.className]).toEqual(["Actions", "vh"]);
+    // Message lines take no room until there is a message.
+    expect(tab.$("tours-message").hidden).toBe(true);
+    expect(tab.$("delete-message").hidden).toBe(true);
     // The hint under the table, and no empty state.
     expect(tab.$("tours-hint").shown).toBe(true);
     expect(tab.$("tours-empty").shown).toBe(false);
@@ -353,18 +395,27 @@ describe("the Tours page", () => {
       await tab.settle();
       const row = rows(tab)[0];
       const link = row.all().find((e) => e.tagName === "a");
-      return { href: link?.getAttribute("href") ?? null, controls: controlsOf(row).map((c) => c.textContent), text: row.all().find((e) => e.className === "wide-only")!.textContent };
+      const wide = row.all().find((e) => e.className === "wide-only")!;
+      return { href: link?.getAttribute("href") ?? null, controls: controlsOf(row).map((c) => c.textContent), text: wide.textContent, title: wide.getAttribute("title") };
     };
-    expect(await linkFor(meTwo("tours.example.com"))).toEqual({ href: "https://tours.example.com/t/k3f9abcdef", controls: ["Copy link", "Open", "More"], text: " · tours.example.com/t/k3f9abcdef" });
+    expect(await linkFor(meTwo("tours.example.com"))).toEqual({ href: "https://tours.example.com/t/k3f9abcdef", controls: ["Copy link", "Open", "More"], text: " · tours.example.com/t/k3f9…", title: "https://tours.example.com/t/k3f9abcdef" });
+    // A slug of four characters or fewer is shown whole.
+    expect((await linkFor(ME_ONE, "/t/k3f9")).text).toBe(" · app.example.com/t/k3f9");
     expect((await linkFor(meTwo("TOURS.example.com:8443"))).href).toBe("https://tours.example.com:8443/t/k3f9abcdef");
     expect((await linkFor(meTwo("tours.localhost:8787"), undefined, "http://app.localhost:8787")).href).toBe("http://tours.localhost:8787/t/k3f9abcdef");
     expect((await linkFor(meTwo("127.0.0.1:3001"), undefined, "http://localhost:3000")).href).toBe("http://127.0.0.1:3001/t/k3f9abcdef");
     // One-address mode: this page's own origin, http on a local machine too.
     expect((await linkFor(ME_ONE, undefined, "http://localhost:3000")).href).toBe("http://localhost:3000/t/k3f9abcdef");
     // Nothing that is not a plain path of a tour, and no address that is not a host name, makes a link.
-    const none = { href: null, controls: ["More"], text: " · no public link" };
-    for (const url of ["//evil.example.net/t/x", "javascript:alert(1)", "https://evil.example.net/t/x", "/t/../account", "/t/x?y", "/t/X", null, 7]) expect(await linkFor(ME_ONE, url), String(url)).toEqual(none);
-    for (const host of ["evil.example.net/x", "user@evil.example.net", "evil.example.net\\x", "", "javascript:alert(1)"]) expect(await linkFor(meTwo(host)), host).toEqual(none);
+    const none = { href: null, controls: ["More"], text: " · no public link", title: null };
+    const hostileUrls = [
+      "//evil.example.net/t/x", "javascript:alert(1)", "https://evil.example.net/t/x", "/t/../account", "/t/x?y", "/t/X", "/t/k3f9abcdef#x", "/t/k3f9abcdef/",
+      '/t/k3f9"><b>x', "/t/a b", "/t/%2F%2Fevil", "/t/" + "a".repeat(65), "/t/", "/t\\evil", " /t/k3f9abcdef", null, 7, { toString: () => "/t/k3f9abcdef" },
+    ];
+    for (const url of hostileUrls) expect(await linkFor(ME_ONE, url), String(url)).toEqual(none);
+    for (const url of hostileUrls) expect(await linkFor(meTwo("tours.example.com"), url), String(url)).toEqual(none);
+    const hostileHosts = ["evil.example.net/x", "user@evil.example.net", "evil.example.net\\x", "", "javascript:alert(1)", " tours.example.com", "tours.example.com\n", "tours.example.com#", "tours.example.com?x", "tours.example.com/", "tours.example.com:", "tours.example.com:123456", '"><b>x'];
+    for (const host of hostileHosts) expect(await linkFor(meTwo(host)), host).toEqual(none);
     expect(await linkFor({ status: 200, json: { addresses: null } })).toEqual(none);
   });
 
@@ -478,6 +529,7 @@ describe("the Tours page", () => {
     expect(controlsOf(row).map((c) => c.textContent)).toEqual(["Publish", "More"]);
     expect(tab.doc.activeElement).toBe(byText(row, "Publish"));
     expect(tab.$("tours-message").textContent).toBe("");
+    expect(tab.$("tours-message").hidden).toBe(true);
   });
 
   it("Publish and Publish changes drive the publish until it is live", async () => {
@@ -510,17 +562,34 @@ describe("the Tours page", () => {
     expect(tab.fetched.filter((f) => f.method === "POST").at(-1)!.path).toBe(`/api/v1/tours/${T2}/publish`);
   });
 
-  it("a change that fails says so with the approved sentences and gives the buttons back; a lost session goes to /signin", async () => {
-    for (const [answer, text] of [[{ status: 429, json: { error: "rate_limited" } }, TOO_MANY], [{ status: 409, json: { error: "publish_cancelled" } }, FAILED], [{ status: 500, json: { error: "internal" } }, FAILED], ["network", FAILED]] as const) {
-      const tab = openTours(standard({ ["POST /api/v1/tours/" + T3 + "/publish"]: answer as Answer }));
+  it("a change that fails says why, reads the list again so it shows what is true, and gives every button back", async () => {
+    const cases: [Answer, string][] = [
+      [{ status: 429, json: { error: "rate_limited" } }, TOO_MANY],
+      [{ status: 409, json: { error: "publish_cancelled" } }, FAILED],
+      [{ status: 500, json: { error: "internal" } }, FAILED],
+      [{ status: 400, json: { error: "empty_tour", detail: "a tour with no steps cannot be published" } }, EMPTY_TOUR],
+      [{ status: 400, json: { error: "bad_request" } }, FAILED],
+      [{ status: 413, json: { error: "too_large", detail: "a tour of more than 300 steps cannot be published" } }, "A tour of more than 300 steps cannot be published."],
+      [{ status: 413, json: { error: "too_large", detail: "<b>the tour is too large to publish.</b>" } }, "<b>the tour is too large to publish.</b>"],
+      [{ status: 413, json: { error: "too_large" } }, FAILED],
+      [{ status: 413, json: { error: "too_large", detail: "" } }, FAILED],
+      ["network", FAILED],
+    ];
+    for (const [answer, text] of cases) {
+      const what = JSON.stringify(answer);
+      const tab = openTours(standard({ [`POST /api/v1/tours/${T3}/publish`]: answer }));
       await tab.settle();
+      byText(rows(tab)[2], "Publish").click();
+      await tab.settle();
+      expect(tab.$("tours-message").textContent, what).toBe(text);
+      expect(tab.$("tours-message").hidden, what).toBe(false);
+      expect(tab.$("tours-message").children.every((c) => !(c instanceof FakeElement)), what).toBe(true);
+      // The list was read again after the failure.
+      expect(tab.fetched.filter((f) => f.path === "/api/v1/tours"), what).toHaveLength(2);
       const publish = byText(rows(tab)[2], "Publish");
-      publish.click();
-      await tab.settle();
-      expect(tab.$("tours-message").textContent, JSON.stringify(answer)).toBe(text);
-      expect([publish.textContent, publish.disabled, publish.getAttribute("aria-busy")]).toEqual(["Publish", false, null]);
-      expect(byText(rows(tab)[2], "More").disabled).toBe(false);
-      expect(tab.doc.activeElement).toBe(publish);
+      expect([publish.textContent, publish.disabled, publish.getAttribute("aria-busy")], what).toEqual(["Publish", false, null]);
+      for (const b of rowButtons(tab)) expect(b.disabled, `${what} ${b.textContent}`).toBe(false);
+      expect(tab.doc.activeElement, what).toBe(publish);
     }
     const out = openTours(standard({ ["POST /api/v1/tours/" + T1 + "/unpublish"]: SIGNED_OUT }));
     await out.settle();
@@ -528,6 +597,106 @@ describe("the Tours page", () => {
     menuItems(rows(out)[0])[0].click();
     await out.settle();
     expect(out.left()).toBe("/signin");
+  });
+
+  it("an unpublish that stops part way or loses the network says so, and the list shows the tour as it now is", async () => {
+    const after = MOCKUP_TOURS.map((t) => (t.id === T1 ? { ...t, status: "draft", url: null, published_at: null } : t));
+    const cases: [Answer[], string][] = [
+      [[{ status: 202, json: { status: "in_progress" } }, { status: 500, json: { error: "internal" } }], FAILED],
+      [["network"], FAILED],
+      // The tour is unpublished; only some of its public images wait to be removed, which later requests finish.
+      [[{ status: 202, json: { status: "in_progress" } }, { status: 500, json: { error: "cleanup_pending" } }], ""],
+    ];
+    for (const [answer, text] of cases) {
+      const what = JSON.stringify(answer);
+      const tab = openTours(standard({ [`POST /api/v1/tours/${T1}/unpublish`]: answer, "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), toursAnswer(after)] }));
+      await tab.settle();
+      byText(rows(tab)[0], "More").click();
+      menuItems(rows(tab)[0])[0].click();
+      await tab.settle();
+      expect(tab.$("tours-message").textContent, what).toBe(text);
+      expect(tab.$("tours-message").hidden, what).toBe(text === "");
+      const row = rows(tab)[0];
+      expect(controlsOf(row).map((c) => c.textContent), what).toEqual(["Publish", "More"]);
+      for (const b of rowButtons(tab)) expect(b.disabled, `${what} ${b.textContent}`).toBe(false);
+      expect(tab.doc.activeElement, what).toBe(byText(row, "Publish"));
+    }
+  });
+
+  it("a change that worked but whose list cannot be read again keeps the list as last known and says so, without claiming the change failed", async () => {
+    for (const reload of [{ status: 500, json: { error: "internal" } }, "network"] as Answer[]) {
+      const what = JSON.stringify(reload);
+      const tab = openTours(standard({ [`POST /api/v1/tours/${T1}/unpublish`]: { status: 204 }, "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), reload] }));
+      await tab.settle();
+      const more = byText(rows(tab)[0], "More");
+      more.click();
+      menuItems(rows(tab)[0])[0].click();
+      await tab.settle();
+      expect(tab.$("tours-message").textContent, what).toBe(NOT_RELOADED);
+      expect(tab.$("tours-message").hidden, what).toBe(false);
+      expect(rows(tab), what).toHaveLength(3);
+      expect([more.textContent, more.disabled, more.getAttribute("aria-busy")], what).toEqual(["More", false, null]);
+      for (const b of rowButtons(tab)) expect(b.disabled, `${what} ${b.textContent}`).toBe(false);
+      expect(tab.$("dash-load").textContent, what).toBe("");
+    }
+    // The same after a delete: the question closes, the list stays as it was, with the same sentence.
+    const del = openTours(standard({ [`DELETE /api/v1/tours/${T2}`]: { status: 200, json: { deleted: true } }, "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), { status: 500, json: { error: "internal" } }] }));
+    await del.settle();
+    byText(rows(del)[1], "More").click();
+    menuItems(rows(del)[1])[2].click();
+    del.$("delete-go").click();
+    await del.settle();
+    expect(del.$("delete-dialog").hidden).toBe(true);
+    expect(del.$("tours-message").textContent).toBe(NOT_RELOADED);
+    expect(rows(del)).toHaveLength(3);
+    for (const b of rowButtons(del)) expect(b.disabled, b.textContent).toBe(false);
+  });
+
+  it("while a change runs every row's buttons are disabled, so no other click can start anything", async () => {
+    const after = MOCKUP_TOURS.map((t) => (t.id === T1 ? { ...t, status: "draft", url: null, published_at: null } : t));
+    const held = holding((req) => req.method === "POST", standard({ "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), toursAnswer(after)] }));
+    const tab = openTours(held.respond);
+    await tab.settle();
+    byText(rows(tab)[0], "More").click();
+    menuItems(rows(tab)[0])[0].click();
+    await tab.settle();
+    const buttons = rowButtons(tab).filter((b) => b.getAttribute("role") !== "menuitem");
+    expect(buttons.map((b) => [b.textContent, b.disabled])).toEqual([
+      ["Copy link", true],
+      ["Unpublishing…", true],
+      ["Copy link", true],
+      ["More", true],
+      ["Publish", true],
+      ["More", true],
+    ]);
+    // A click on another row's button does nothing.
+    expect(byText(rows(tab)[2], "Publish").click()).toBeNull();
+    expect(byText(rows(tab)[1], "More").click()).toBeNull();
+    expect(menuOf(rows(tab)[1]).hidden).toBe(true);
+    expect(tab.fetched.filter((f) => f.method === "POST")).toHaveLength(1);
+    held.answer({ status: 204 });
+    await tab.settle();
+    for (const b of rowButtons(tab)) expect(b.disabled, b.textContent).toBe(false);
+    expect(tab.fetched.filter((f) => f.method === "POST")).toHaveLength(1);
+  });
+
+  it("Delete tour pressed twice sends one delete, and the rows cannot be used while it runs", async () => {
+    const held = holding((req) => req.method === "DELETE", standard({ "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), toursAnswer(MOCKUP_TOURS.slice(1))] }));
+    const tab = openTours(held.respond);
+    await tab.settle();
+    byText(rows(tab)[0], "More").click();
+    menuItems(rows(tab)[0])[1].click();
+    tab.$("delete-go").click();
+    tab.$("delete-go").click();
+    tab.$("delete-go").dispatch("click");
+    await tab.settle();
+    expect(tab.fetched.filter((f) => f.method === "DELETE")).toHaveLength(1);
+    for (const b of rowButtons(tab)) expect(b.disabled, b.textContent).toBe(true);
+    held.answer({ status: 200, json: { deleted: true } });
+    await tab.settle();
+    expect(tab.fetched.filter((f) => f.method === "DELETE")).toHaveLength(1);
+    expect(rows(tab)).toHaveLength(2);
+    for (const b of rowButtons(tab)) expect(b.disabled, b.textContent).toBe(false);
   });
 
   it("Delete asks first with mockup 2's question; Keep it and Escape close it, the focus stays inside and comes back to More", async () => {
@@ -552,7 +721,8 @@ describe("the Tours page", () => {
     expect(tab.doc.activeElement).toBe(tab.$("delete-go"));
     expect(key(tab.$("delete-go"), "Tab").defaultPrevented).toBe(true);
     expect(tab.doc.activeElement).toBe(tab.$("delete-keep"));
-    expect(key(tab.$("delete-keep"), "Tab").defaultPrevented).toBe(false);
+    expect(key(tab.$("delete-keep"), "Tab").defaultPrevented).toBe(true);
+    expect(tab.doc.activeElement).toBe(tab.$("delete-go"));
     // Keep it closes it and gives the focus back to More.
     tab.$("delete-keep").click();
     expect(dialog.hidden).toBe(true);
@@ -597,23 +767,101 @@ describe("the Tours page", () => {
     expect(tab.doc.activeElement).toBe(tab.$("h-page"));
   });
 
-  it("a delete that fails keeps the question open with the approved sentence; a tour already gone counts as deleted", async () => {
-    const tab = openTours(standard({ ["DELETE /api/v1/tours/" + T1]: [{ status: 500, json: { error: "cleanup_pending" } }, { status: 404, json: { error: "not_found" } }], "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), toursAnswer(MOCKUP_TOURS.slice(1))] }));
+  it("a delete that could not yet remove every file counts as done: the tour is gone", async () => {
+    const tab = openTours(standard({ [`DELETE /api/v1/tours/${T1}`]: { status: 500, json: { error: "cleanup_pending" } }, "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), toursAnswer(MOCKUP_TOURS.slice(1))] }));
     await tab.settle();
     byText(rows(tab)[0], "More").click();
     menuItems(rows(tab)[0])[1].click();
     tab.$("delete-go").click();
     await tab.settle();
-    expect(tab.$("delete-dialog").hidden).toBe(false);
-    expect(tab.$("delete-message").textContent).toBe(FAILED);
-    expect([tab.$("delete-go").textContent, tab.$("delete-go").disabled]).toEqual(["Delete tour", false]);
-    expect(tab.doc.activeElement).toBe(tab.$("delete-go"));
-    // Pressed again: the tour is gone now, which is what was asked.
-    tab.$("delete-go").click();
-    await tab.settle();
     expect(tab.$("delete-dialog").hidden).toBe(true);
+    expect(tab.$("tours-message").hidden).toBe(true);
     expect(rows(tab)).toHaveLength(2);
-    expect(tab.$("delete-message").textContent).toBe("");
+    expect(tab.doc.activeElement).toBe(tab.$("h-page"));
+  });
+
+  it("a delete that fails keeps the question open with the reason and reads the list again; a tour already gone counts as deleted", async () => {
+    const cases: [Answer, string][] = [
+      [{ status: 500, json: { error: "internal" } }, FAILED],
+      [{ status: 409, json: { error: "publish_busy" } }, PUBLISH_BUSY],
+      [{ status: 429, json: { error: "rate_limited" } }, TOO_MANY],
+      ["network", FAILED],
+    ];
+    for (const [answer, text] of cases) {
+      const what = JSON.stringify(answer);
+      const tab = openTours(standard({ [`DELETE /api/v1/tours/${T1}`]: [answer, { status: 404, json: { error: "not_found" } }], "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), toursAnswer(MOCKUP_TOURS), toursAnswer(MOCKUP_TOURS.slice(1))] }));
+      await tab.settle();
+      byText(rows(tab)[0], "More").click();
+      menuItems(rows(tab)[0])[1].click();
+      tab.$("delete-go").click();
+      await tab.settle();
+      expect(tab.$("delete-dialog").hidden, what).toBe(false);
+      expect(tab.$("delete-message").textContent, what).toBe(text);
+      expect(tab.$("delete-message").hidden, what).toBe(false);
+      expect(tab.fetched.filter((f) => f.path === "/api/v1/tours"), what).toHaveLength(2);
+      expect([tab.$("delete-go").textContent, tab.$("delete-go").disabled, tab.$("delete-keep").disabled], what).toEqual(["Delete tour", false, false]);
+      expect(tab.doc.activeElement, what).toBe(tab.$("delete-go"));
+      // Pressed again: the tour is gone now, which is what was asked.
+      tab.$("delete-go").click();
+      await tab.settle();
+      expect(tab.$("delete-dialog").hidden, what).toBe(true);
+      expect(rows(tab), what).toHaveLength(2);
+      expect(tab.$("delete-message").hidden, what).toBe(true);
+    }
+    // Keep it after a failed delete gives the focus to the row's More as the list now shows it.
+    const kept = openTours(standard({ [`DELETE /api/v1/tours/${T1}`]: { status: 500, json: { error: "internal" } } }));
+    await kept.settle();
+    byText(rows(kept)[0], "More").click();
+    menuItems(rows(kept)[0])[1].click();
+    kept.$("delete-go").click();
+    await kept.settle();
+    kept.$("delete-keep").click();
+    expect(kept.$("delete-dialog").hidden).toBe(true);
+    expect(kept.doc.activeElement).toBe(byText(rows(kept)[0], "More"));
+  });
+
+  it("while the question is open the page behind is inert, the backdrop closes it, and Escape and Tab are handled for the whole document", async () => {
+    const tab = openTours(standard());
+    await tab.settle();
+    const behind = ["dash-top", "tours-page"];
+    for (const id of behind) expect([tab.$(id).hasAttribute("inert"), tab.$(id).hasAttribute("aria-hidden")], id).toEqual([false, false]);
+    const openIt = () => {
+      byText(rows(tab)[1], "More").click();
+      menuItems(rows(tab)[1])[2].click();
+      expect(tab.$("delete-dialog").hidden).toBe(false);
+    };
+    openIt();
+    for (const id of behind) expect([tab.$(id).getAttribute("inert"), tab.$(id).getAttribute("aria-hidden")], id).toEqual(["", "true"]);
+    // A click inside the question does not close it; a click on the backdrop does, like Keep it.
+    tab.$("delete-text").click();
+    expect(tab.$("delete-dialog").hidden).toBe(false);
+    tab.$("delete-dialog").click();
+    expect(tab.$("delete-dialog").hidden).toBe(true);
+    expect(tab.doc.activeElement).toBe(byText(rows(tab)[1], "More"));
+    for (const id of behind) expect([tab.$(id).hasAttribute("inert"), tab.$(id).hasAttribute("aria-hidden")], id).toEqual([false, false]);
+    // Escape pressed anywhere in the document closes it.
+    openIt();
+    key(tab.doc.body, "Escape");
+    expect(tab.$("delete-dialog").hidden).toBe(true);
+    expect(tab.doc.activeElement).toBe(byText(rows(tab)[1], "More"));
+    // Tab from outside the question brings the focus into it, and wraps inside it both ways.
+    openIt();
+    tab.$("h-page").focus();
+    expect(key(tab.doc.body, "Tab").defaultPrevented).toBe(true);
+    expect(tab.doc.activeElement).toBe(tab.$("delete-keep"));
+    key(tab.doc.body, "Tab");
+    expect(tab.doc.activeElement).toBe(tab.$("delete-go"));
+    key(tab.doc.body, "Tab");
+    expect(tab.doc.activeElement).toBe(tab.$("delete-keep"));
+    key(tab.doc.body, "Tab", true);
+    expect(tab.doc.activeElement).toBe(tab.$("delete-go"));
+    tab.$("h-page").focus();
+    key(tab.doc.body, "Tab", true);
+    expect(tab.doc.activeElement).toBe(tab.$("delete-go"));
+    // Once it is closed, Tab and Escape are the page's own again.
+    tab.$("delete-keep").click();
+    expect(key(tab.doc.body, "Tab").defaultPrevented).toBe(false);
+    expect(tab.fetched.filter((f) => f.method !== "GET")).toEqual([]);
   });
 
   it("says when the list cannot be read, with the approved sentences", async () => {

@@ -9,21 +9,27 @@
 // the tours address in two-address mode (and nothing in one-address mode, where it is this
 // page's own address). The link is that address's origin, written as the server writes it
 // (https, or http for localhost and 127.0.0.1, as originOf in src/hosts.ts), and the path.
-// It goes into an href only when it is https, of this page's own origin, or http on a
-// local name; otherwise the tour shows no link and no Copy link or Open.
+// It is made only from a path of exactly that shape and a tours address that is a plain
+// host name with an optional port; anything else gives the tour no link, no Copy link and
+// no Open. The row shows the link without its scheme and with the slug cut after four
+// characters, as the mockup does; the whole link is in the text's title and is what Copy
+// link copies.
 //
 // Every change goes through the existing routes: publish (driven until it is live),
 // unpublish and delete (each called again while it answers 202), with the session cookie
 // and the anti-forgery header Dash.api adds. Unpublish asks nothing; delete asks first.
+// While a change runs every row's buttons are disabled. However a change ends, the list
+// is read again, so the page shows what is true.
 import { dashHtml } from "./shell.ts";
 
-const TOURS_MAIN = `  <h1 id="h-page" tabindex="-1">Tours</h1>
+const TOURS_MAIN = `  <div id="tours-page">
+  <h1 id="h-page" tabindex="-1">Tours</h1>
   <section id="tours" aria-labelledby="h-page" hidden>
     <p class="sub"><span id="tours-count"></span><span class="wide-only" id="tours-in"></span><span id="tours-used"></span></p>
-    <p class="message" id="tours-message" role="status" aria-live="polite"></p>
+    <p class="message" id="tours-message" role="status" aria-live="polite" hidden></p>
     <div class="card" id="tours-list" hidden>
       <table class="tours">
-        <thead><tr><th scope="col">Tour</th><th scope="col">Status</th><th scope="col" class="n">Size</th><th scope="col" class="n">Changed</th><th scope="col"></th></tr></thead>
+        <thead><tr><th scope="col">Tour</th><th scope="col">Status</th><th scope="col" class="n">Size</th><th scope="col" class="n">Changed</th><th scope="col"><span class="vh">Actions</span></th></tr></thead>
         <tbody id="tours-rows"></tbody>
       </table>
     </div>
@@ -35,11 +41,12 @@ const TOURS_MAIN = `  <h1 id="h-page" tabindex="-1">Tours</h1>
     </div>
     <p class="hint" id="tours-hint" hidden>"Changes waiting" means Mythicshot uploaded a newer version that visitors do not see yet. "More" holds: Publish changes, Unpublish, Delete.</p>
   </section>
+  </div>
   <div class="backdrop" id="delete-dialog" hidden>
     <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-text">
       <h2 id="delete-title" tabindex="-1"></h2>
       <p class="sub" id="delete-text">Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.</p>
-      <p class="message" id="delete-message" role="status" aria-live="polite"></p>
+      <p class="message" id="delete-message" role="status" aria-live="polite" hidden></p>
       <div class="two">
         <button type="button" class="btn quiet" id="delete-keep">Keep it</button>
         <button type="button" class="btn danger" id="delete-go">Delete tour</button>
@@ -77,13 +84,21 @@ export const TOURS_JS = `(function () {
     publishing: "Publishing…",
     unpublishing: "Unpublishing…",
     deleting: "Deleting…",
+    cut: "…",
+    emptyTour: "This tour has no steps, so it cannot be published.",
+    publishBusy: "This tour is being published. Try again when that is done.",
+    notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
   };
   // A publish, unpublish or delete is driven by at most this many requests.
   var MAX_ROUNDS = 1000;
   // How long Copy link reads Copied.
   var COPIED_MS = 2000;
+  // How many characters of the slug the row shows.
+  var SLUG_SHOWN = 4;
   var TOUR_ID = /^tour_[0-9a-f]{24}$/;
   var TOUR_PATH = /^\\/t\\/[a-z0-9]{1,64}$/;
+  // What the page behind the question is, made inert while it is open.
+  var BEHIND = ["dash-top", "tours-page"];
 
   var $ = function (id) { return document.getElementById(id); };
   var workspace = "";
@@ -93,8 +108,11 @@ export const TOURS_JS = `(function () {
   var openMenu = null;
   var asking = null;
   var working = false;
-  // Each row's first control, by tour id, to give focus back after the list is rebuilt.
+  // Each row's first control and its More, by tour id, to give focus back after the list is rebuilt.
   var firstOf = {};
+  var moreOf = {};
+  // Every button of every row, menus included, to disable while a change runs.
+  var rowButtons = [];
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -103,8 +121,14 @@ export const TOURS_JS = `(function () {
     return e;
   }
 
+  // A message line is hidden while it has nothing to say.
+  function sayIn(line, text) {
+    line.textContent = text;
+    line.hidden = text === "";
+  }
+
   function say(text) {
-    $("tours-message").textContent = text;
+    sayIn($("tours-message"), text);
   }
 
   function busy(btn, on, label) {
@@ -118,13 +142,18 @@ export const TOURS_JS = `(function () {
     }
   }
 
+  function rowsDisabled(on) {
+    rowButtons.forEach(function (b) { b.disabled = on; });
+  }
+
   // A name the server writes with http (src/hosts.ts, originOf): this computer's own.
   function localName(host) {
     var name = host.replace(/:[0-9]+$/, "");
     return name === "localhost" || /\\.localhost$/.test(name) || name === "127.0.0.1";
   }
 
-  // The origin public links start with: this page's own in one-address mode, else the tours address's.
+  // The origin public links start with: this page's own in one-address mode, else the
+  // tours address's, which must be a plain host name or address with an optional port.
   function baseOf(me) {
     if (me === null || typeof me !== "object") return null;
     var a = me.addresses;
@@ -135,18 +164,32 @@ export const TOURS_JS = `(function () {
     return (localName(host) ? "http:" : "https:") + "//" + host;
   }
 
-  // Only an https link, one of this page's own origin, or http on a local name goes into an href.
-  function safe(link) {
-    if (/^https:\\/\\/[^/?#@\\\\]+\\//.test(link)) return true;
-    if (link.indexOf(location.origin + "/") === 0) return true;
-    var m = /^http:\\/\\/([^/?#@\\\\]+)\\//.exec(link);
-    return m !== null && localName(m[1]);
-  }
-
   function linkOf(t) {
     if (base === null || t.status !== "published" || typeof t.url !== "string" || !TOUR_PATH.test(t.url)) return null;
-    var link = base + t.url;
-    return safe(link) ? link : null;
+    return base + t.url;
+  }
+
+  // The link as the row shows it: no scheme, and the slug cut after a few characters.
+  function shortOf(link) {
+    var text = link.replace(/^https?:\\/\\//, "");
+    var at = text.lastIndexOf("/t/") + 3;
+    return text.length - at > SLUG_SHOWN ? text.slice(0, at + SLUG_SHOWN) + TEXT.cut : text;
+  }
+
+  // The sentence for a change that did not happen: a reason retrying cannot fix when there is one.
+  function problem(kind, res) {
+    var code = Dash.errorOf(res);
+    var status = res !== null && typeof res === "object" ? res.status : 0;
+    if (kind === "publish" && status === 400 && code === "empty_tour") return TEXT.emptyTour;
+    if (kind === "publish" && status === 413) {
+      var detail = res.data !== null && typeof res.data === "object" && typeof res.data.detail === "string" ? res.data.detail.trim() : "";
+      if (detail !== "") {
+        detail = detail.charAt(0).toUpperCase() + detail.slice(1);
+        return /[a-z0-9]$/i.test(detail) ? detail + "." : detail;
+      }
+    }
+    if (kind === "delete" && status === 409 && code === "publish_busy") return TEXT.publishBusy;
+    return Dash.failure(res);
   }
 
   // ---- The More menu ----
@@ -168,7 +211,7 @@ export const TOURS_JS = `(function () {
     if (refocus) m.button.focus();
   }
 
-  function moreMenu(t, i, items, titleId, controls) {
+  function moreMenu(t, i, items, titleId) {
     var wrap = el("div", "more");
     var btn = el("button", "btn sm quiet", TEXT.more);
     btn.type = "button";
@@ -176,7 +219,8 @@ export const TOURS_JS = `(function () {
     btn.setAttribute("aria-expanded", "false");
     btn.setAttribute("aria-controls", "menu-" + i);
     btn.setAttribute("aria-describedby", titleId);
-    controls.push(btn);
+    rowButtons.push(btn);
+    moreOf[t.id] = btn;
     var menu = el("div", "menu");
     menu.setAttribute("id", "menu-" + i);
     menu.setAttribute("role", "menu");
@@ -190,11 +234,12 @@ export const TOURS_JS = `(function () {
       entry.setAttribute("tabindex", "-1");
       entry.addEventListener("click", function () {
         closeMenu(true);
-        if (item.kind === "delete") ask(t, btn);
-        else change(t, item.kind, btn, controls);
+        if (item.kind === "delete") ask(t);
+        else change(t, item.kind, btn);
       });
       menu.appendChild(entry);
       m.entries.push(entry);
+      rowButtons.push(entry);
     });
     btn.addEventListener("click", function () {
       if (openMenu === m) closeMenu(true);
@@ -252,7 +297,9 @@ export const TOURS_JS = `(function () {
     what.appendChild(name);
     var d = el("div", "d");
     d.appendChild(el("span", "", steps));
-    d.appendChild(el("span", "wide-only", TEXT.dot + (link !== null ? link.replace(/^https?:\\/\\//, "") : TEXT.noLink)));
+    var shown = el("span", "wide-only", TEXT.dot + (link !== null ? shortOf(link) : TEXT.noLink));
+    if (link !== null) shown.setAttribute("title", link);
+    d.appendChild(shown);
     d.appendChild(el("span", "narrow-only", TEXT.dot + size + TEXT.dot + when));
     what.appendChild(d);
     tr.appendChild(what);
@@ -266,7 +313,7 @@ export const TOURS_JS = `(function () {
 
     var cell = el("td", "acts-cell");
     var acts = el("div", "acts");
-    var controls = [];
+    var first = null;
     if (link !== null) {
       var copy = el("button", "btn sm", TEXT.copy);
       copy.type = "button";
@@ -287,7 +334,8 @@ export const TOURS_JS = `(function () {
         });
       });
       acts.appendChild(copy);
-      controls.push(copy);
+      rowButtons.push(copy);
+      first = copy;
       var open = el("a", "btn sm quiet", TEXT.open);
       open.setAttribute("href", link);
       open.setAttribute("target", "_blank");
@@ -299,24 +347,27 @@ export const TOURS_JS = `(function () {
       var pub = el("button", "btn sm quiet", TEXT.publish);
       pub.type = "button";
       pub.setAttribute("aria-describedby", titleId);
-      pub.addEventListener("click", function () { change(t, "publish", pub, controls); });
+      pub.addEventListener("click", function () { change(t, "publish", pub); });
       acts.appendChild(pub);
-      controls.push(pub);
+      rowButtons.push(pub);
+      if (first === null) first = pub;
     }
     var items = [];
     if (waiting) items.push({ text: TEXT.publishChanges, kind: "publish" });
     if (published) items.push({ text: TEXT.unpublish, kind: "unpublish" });
     items.push({ text: TEXT.remove, kind: "delete", danger: true });
-    acts.appendChild(moreMenu(t, i, items, titleId, controls));
+    acts.appendChild(moreMenu(t, i, items, titleId));
     cell.appendChild(acts);
     tr.appendChild(cell);
-    firstOf[t.id] = controls[0];
+    firstOf[t.id] = first !== null ? first : moreOf[t.id];
     return tr;
   }
 
   function show(tours, used) {
     closeMenu(false);
     firstOf = {};
+    moreOf = {};
+    rowButtons = [];
     var list = tours.filter(function (t) { return t !== null && typeof t === "object" && typeof t.id === "string" && TOUR_ID.test(t.id); });
     var n = list.length;
     $("tours-count").textContent = n === 1 ? TEXT.oneTour : n + TEXT.tours;
@@ -377,103 +428,145 @@ export const TOURS_JS = `(function () {
     return next(undefined);
   }
 
-  // Whether the change is done: published, unpublished, or deleted (or already gone).
+  // Whether the change is done: published, unpublished, or deleted (or already gone). An
+  // unpublish or delete whose leftover files could not all be removed yet is done too: the
+  // tour is unpublished or gone, and later requests finish the cleaning.
   function done(kind, res) {
+    if (res === null) return false;
+    var leftovers = res.status === 500 && Dash.errorOf(res) === "cleanup_pending";
     if (kind === "publish") return res.status === 200;
-    if (kind === "unpublish") return res.status === 204;
-    return res.status === 200 || res.status === 404;
+    if (kind === "unpublish") return res.status === 204 || leftovers;
+    return res.status === 200 || res.status === 404 || leftovers;
   }
 
-  function change(t, kind, btn, controls) {
+  // Runs a change, then reads the list again however it ended (null: no answer came).
+  // steps.before(ok) runs before the list is read; steps.after(ok, res, shown) after it,
+  // with shown false when the list could not be read and stays as last known.
+  function changeThen(id, kind, steps) {
+    function settle(res) {
+      if (res !== null && res.status === 401) { Dash.signedOut(); return; }
+      var ok = done(kind, res);
+      if (steps.before) steps.before(ok);
+      return reload().then(function (r) {
+        if (r !== false) steps.after(ok, res, r === true);
+      });
+    }
+    return run(id, kind).then(settle, function () { return settle(null); });
+  }
+
+  function change(t, kind, btn) {
     if (working || btn.disabled) return;
     working = true;
     say("");
-    controls.forEach(function (c) { c.disabled = true; });
+    rowsDisabled(true);
     busy(btn, true, kind === "publish" ? TEXT.publishing : TEXT.unpublishing);
-    function back(text) {
-      working = false;
-      busy(btn, false);
-      controls.forEach(function (c) { c.disabled = false; });
-      say(text);
-      btn.focus();
-    }
-    run(t.id, kind).then(function (res) {
-      if (res.status === 401) { Dash.signedOut(); return; }
-      if (!done(kind, res)) { back(Dash.failure(res)); return; }
-      return reload().then(function (r) {
-        if (r === false) return;
-        if (r !== true) { back(Dash.failure(r)); return; }
+    changeThen(t.id, kind, {
+      after: function (ok, res, shown) {
         working = false;
-        // The focus goes to the tour's row as it is now.
+        if (!shown) {
+          // The list is as last known: its buttons come back, and the page says what happened.
+          busy(btn, false);
+          rowsDisabled(false);
+          say(ok ? TEXT.notReloaded : problem(kind, res));
+          btn.focus();
+          return;
+        }
+        say(ok ? "" : problem(kind, res));
         var first = firstOf[t.id];
         if (first !== undefined) first.focus();
         else $("h-page").focus();
-      });
-    }).then(null, function () { back(Dash.TEXT.failed); });
+      },
+    });
   }
 
   // ---- The question before a delete ----
 
-  function ask(t, opener) {
+  function behind(inert) {
+    BEHIND.forEach(function (id) {
+      var e = $(id);
+      if (inert) {
+        e.setAttribute("inert", "");
+        e.setAttribute("aria-hidden", "true");
+      } else {
+        e.removeAttribute("inert");
+        e.removeAttribute("aria-hidden");
+      }
+    });
+  }
+
+  function ask(t) {
     if (working) return;
-    asking = { t: t, opener: opener };
+    asking = { t: t };
     $("delete-title").textContent = TEXT.askBefore + String(t.title) + TEXT.askAfter;
-    $("delete-message").textContent = "";
+    sayIn($("delete-message"), "");
     $("delete-dialog").hidden = false;
+    behind(true);
     $("delete-keep").focus();
   }
 
-  function closeAsk() {
-    if (asking === null || working) return;
-    var opener = asking.opener;
+  // Closes the question; the focus goes to the More it came from, as the list now shows it.
+  function closeAsk(refocus) {
+    if (asking === null) return;
+    var id = asking.t.id;
     asking = null;
     $("delete-dialog").hidden = true;
-    opener.focus();
+    behind(false);
+    if (!refocus) return;
+    var more = moreOf[id];
+    if (more !== undefined) more.focus();
+    else $("h-page").focus();
   }
 
   function startPage() {
     var keep = $("delete-keep");
     var go = $("delete-go");
-    keep.addEventListener("click", closeAsk);
+    var dialog = $("delete-dialog");
+    keep.addEventListener("click", function () { if (!working) closeAsk(true); });
+    // A click on the backdrop, outside the question itself, is Keep it.
+    dialog.addEventListener("click", function (ev) { if (ev.target === dialog && !working) closeAsk(true); });
     go.addEventListener("click", function () {
       if (asking === null || working) return;
       var t = asking.t;
       working = true;
-      $("delete-message").textContent = "";
+      sayIn($("delete-message"), "");
       keep.disabled = true;
-      busy(go, true, TEXT.deleting);
       go.disabled = true;
-      function back(text) {
-        working = false;
-        keep.disabled = false;
-        go.disabled = false;
-        busy(go, false);
-        $("delete-message").textContent = text;
-        go.focus();
-      }
-      run(t.id, "delete").then(function (res) {
-        if (res.status === 401) { Dash.signedOut(); return; }
-        if (!done("delete", res)) { back(Dash.failure(res)); return; }
-        keep.disabled = false;
-        go.disabled = false;
-        busy(go, false);
-        asking = null;
-        $("delete-dialog").hidden = true;
-        return reload().then(function (r) {
+      busy(go, true, TEXT.deleting);
+      rowsDisabled(true);
+      changeThen(t.id, "delete", {
+        before: function (ok) {
+          if (ok) closeAsk(false);
+        },
+        after: function (ok, res, shown) {
           working = false;
-          if (r === false) return;
-          // The tour is gone; when the list cannot be read again, the page says so.
-          if (r !== true) say(Dash.failure(r));
-          $("h-page").focus();
-        });
-      }).then(null, function () { back(Dash.TEXT.failed); });
+          keep.disabled = false;
+          go.disabled = false;
+          busy(go, false);
+          if (!shown) rowsDisabled(false);
+          if (ok) {
+            say(shown ? "" : TEXT.notReloaded);
+            $("h-page").focus();
+            return;
+          }
+          sayIn($("delete-message"), problem("delete", res));
+          go.focus();
+        },
+      });
     });
-    // Escape closes the question; Tab and Shift+Tab stay on its two buttons.
-    $("delete-dialog").addEventListener("keydown", function (ev) {
-      if (ev.key === "Escape") { ev.preventDefault(); closeAsk(); return; }
+    // While the question is open, Escape closes it and Tab keeps the focus on its two
+    // buttons, wherever the focus was: the page behind is inert.
+    document.addEventListener("keydown", function (ev) {
+      if (asking === null) return;
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        if (!working) closeAsk(true);
+        return;
+      }
       if (ev.key !== "Tab") return;
-      if (ev.shiftKey && document.activeElement === keep) { ev.preventDefault(); go.focus(); }
-      else if (!ev.shiftKey && document.activeElement === go) { ev.preventDefault(); keep.focus(); }
+      ev.preventDefault();
+      var at = document.activeElement;
+      if (ev.shiftKey) (at === keep ? go : at === go ? keep : go).focus();
+      else (at === keep ? go : keep).focus();
     });
     // A click outside the open menu closes it.
     document.body.addEventListener("click", function (ev) {

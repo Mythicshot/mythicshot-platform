@@ -72,7 +72,7 @@ export function dashHtml(opts: { title: string; active: DashTab; main: string; s
 <script src="${opts.script}" defer></script>
 </head>
 <body data-page="${opts.active}">
-<header class="top">
+<header class="top" id="dash-top">
   <p class="brand">Mythicshot</p>
   <nav class="nav">${tabs}</nav>
   <p class="who" id="dash-user"></p>
