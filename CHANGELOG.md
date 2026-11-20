@@ -2,6 +2,14 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.31 (2026-11-20)
+
+- A mail when a new computer is connected: once Mythicshot has collected its token, the account that confirmed the request gets one plain-text mail at its address as it is then, "A computer was connected to your Mythicshot account", naming the computer in quotes and the day and time in UTC, saying that it can publish, change and delete everything in the workspace, and linking to the dashboard's Connections page to disconnect it. Without an address for links the last line says, in words, to open the Connections page of the dashboard and disconnect it there.
+- The computer's name stays on its one line in the mail whatever it holds: a character that could end or hide a line becomes U+FFFD, so it can add no header or line, even though the API already refuses such names. It is also made inert in the mail, so it can neither pass for the site's own words nor become a link: every quotation mark becomes an apostrophe, `://` becomes `:/ /`, `www.` becomes `www .` and an at sign becomes ` at `. Then the name is cut at 60 characters. The dashboard still shows names as they are.
+- Only the collection that made the token sends it, after the database has kept the token: a collection that fails, or the second of two at once, sends nothing, so there is one mail per token. It goes after the answer, and the answer is the same whether mail is off, the mail server refuses, the mail waits or a limit is reached. A site without mail, as every Cloudflare install in this version, makes no call for it.
+- Limits of its own, apart from sign-in's and email change's: 5 such mails a day per account, and 30 an hour for the site. A mail that is not sent (over a limit, an address that cannot be used, a mail server that refuses) is never tried again and is one new audit event, `connection_mail_not_sent`, with the request and a word for why, never the address.
+- The README, the API description and the Docker runbook's audit table say so.
+
 ## 0.1.28 (2026-11-20)
 
 - Upgrade rehearsal: the check of two new builds started at the same moment no longer fails on every update to 0.1.26 or later. Every build now runs with `CLIENT_ADDRESS_HEADER=X-Forwarded-For`, and every request the rehearsal sends carries that header with a documentation address, as behind a site's proxy, so a build no longer writes its line asking for the setting. Builds before the setting (0.1.7, 0.1.8) read neither, so nothing changes for them.

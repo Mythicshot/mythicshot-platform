@@ -127,6 +127,21 @@ export const LIMITS_CONNECT = {
   wrongNetwork: { bucket: "connect_wrong_network", windowMs: 600_000, most: 20 },
 } as const satisfies Record<string, Limit>;
 
+/**
+ * The caps on the mail an account gets once Mythicshot on a computer has collected its token
+ * (src/connect-mail.ts), in buckets of their own, apart from sign-in's (LIMITS_SIGNIN.mailSite)
+ * and email change's, so these notices can neither use up the mail sign-in needs nor be held
+ * back by it. Only a notice about to be sent is counted: first per account, keyed by
+ * `accountKey`, and only when the account is not over, for the site under SITE_KEY. Over
+ * either: nothing is sent and one audit row says so; the collection is never affected.
+ */
+export const LIMITS_CONNECT_MAIL = {
+  /** Notices to one account in a day: more computers than one person connects, few enough that a flood stops soon. */
+  mailAccountDay: { bucket: "connect_mail_account_day", windowMs: 86_400_000, most: 5 },
+  /** Notices from the whole site in an hour, as many as email change's links, well below sign-in's. */
+  mailSite: { bucket: "connect_mail_site", windowMs: 3_600_000, most: 30 },
+} as const satisfies Record<string, Limit>;
+
 /** The key of a counter that counts for the whole site. */
 export const SITE_KEY = "site";
 
