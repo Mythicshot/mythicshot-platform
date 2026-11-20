@@ -2,7 +2,7 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
-## 0.1.29 (2026-11-20)
+## 0.1.32 (2026-11-20)
 
 - Invites, through the API. The site's admin invites an address with `POST /api/v1/admin/invites` (`{"email": …}`), lists the invites that are open or ran out with `GET /api/v1/admin/invites`, sends one again with a new link with `POST /api/v1/admin/invites/<id>/resend`, and cancels one with `DELETE /api/v1/admin/invites/<id>`. Only an admin's session reaches them; anyone else, any token included, gets the one 404 every admin route answers. The Admin page's invite box and the page the link opens come in a later version.
 - The invite mail, "You are invited to Mythicshot", names the admin who sent it by username (or says "You are invited" without a name), and holds a link to `/invite` with a single-use code after the `#`, so it reaches no server log. The link works once and for 7 days, and the mail gives the last day in UTC. The code is stored only as a digest and is only ever sent in a request body.
@@ -13,6 +13,14 @@ Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on
 - The audit record has four new events: an invite sent, resent, cancelled and accepted. None holds a code or an address.
 - The API description describes the six requests, and its guide to error codes names the new codes.
 - Upgrading: this version needs its database change (migration 0012: the invite table). The Node server applies it when it starts, before it answers, and `npm run setup:cloudflare -- update` applies it before it deploys.
+
+## 0.1.31 (2026-11-20)
+
+- A mail when a new computer is connected: once Mythicshot has collected its token, the account that confirmed the request gets one plain-text mail at its address as it is then, "A computer was connected to your Mythicshot account", naming the computer in quotes and the day and time in UTC, saying that it can publish, change and delete everything in the workspace, and linking to the dashboard's Connections page to disconnect it. Without an address for links the last line says, in words, to open the Connections page of the dashboard and disconnect it there.
+- The computer's name stays on its one line in the mail whatever it holds: a character that could end or hide a line becomes U+FFFD, so it can add no header or line, even though the API already refuses such names. It is also made inert in the mail, so it can neither pass for the site's own words nor become a link: every quotation mark becomes an apostrophe, `://` becomes `:/ /`, `www.` becomes `www .` and an at sign becomes ` at `. Then the name is cut at 60 characters. The dashboard still shows names as they are.
+- Only the collection that made the token sends it, after the database has kept the token: a collection that fails, or the second of two at once, sends nothing, so there is one mail per token. It goes after the answer, and the answer is the same whether mail is off, the mail server refuses, the mail waits or a limit is reached. A site without mail, as every Cloudflare install in this version, makes no call for it.
+- Limits of its own, apart from sign-in's and email change's: 5 such mails a day per account, and 30 an hour for the site. A mail that is not sent (over a limit, an address that cannot be used, a mail server that refuses) is never tried again and is one new audit event, `connection_mail_not_sent`, with the request and a word for why, never the address.
+- The README, the API description and the Docker runbook's audit table say so.
 
 ## 0.1.28 (2026-11-20)
 

@@ -25,6 +25,7 @@ export const AUDIT_EVENTS = [
   "connection_confirmed",
   "connection_refused",
   "connection_collected",
+  "connection_mail_not_sent",
   "token_renamed",
   "token_revoked",
   "invite_sent",

@@ -65,7 +65,7 @@ It is built to run on Cloudflare's Free plan, which allows 50 subrequests and 10
 
 The setup wizard's last step shows the server address. In Mythicshot, open Settings › Output › Tour publishing, paste the server address and the API token from the wizard, and press Test connection. The token is shown once, by the wizard; keep it in a password manager.
 
-The server can also give Mythicshot a token of its own without copying one, with a pair of codes. Mythicshot asks the server for them (`POST /api/v1/connect/start`, with no credential), shows a short code such as `ABCD-EFGH` and opens the dashboard's Connections page (`/connections`); a person signed in to the site types the short code there, sees the device's name and whether they are on the network Mythicshot asked from, and confirms it, and Mythicshot, which keeps asking with its long secret code, then receives a token for that person's workspace, once, with the username of whoever confirmed. Signing out before Mythicshot collects the token cancels it. The codes live 10 minutes, are never put in an address, and are stored only as digests. Signed-in people list, rename and revoke their workspace's tokens with `GET /api/v1/tokens`, `PATCH /api/v1/tokens/<id>` and `DELETE /api/v1/tokens/<id>`; a token cannot do any of that, and a revoked token is refused from its next request on. The dashboard pages for this come in a later version; the requests are described at `/docs`.
+The server can also give Mythicshot a token of its own without copying one, with a pair of codes. Mythicshot asks the server for them (`POST /api/v1/connect/start`, with no credential), shows a short code such as `ABCD-EFGH` and opens the dashboard's Connections page (`/connections`); a person signed in to the site types the short code there, sees the device's name and whether they are on the network Mythicshot asked from, and confirms it, and Mythicshot, which keeps asking with its long secret code, then receives a token for that person's workspace, once, with the username of whoever confirmed. Once it has, the account that confirmed gets one mail at its address naming the computer and the time and linking to the Connections page, so a connection nobody meant to make is noticed; the token's answer is the same whether or not that mail goes. Signing out before Mythicshot collects the token cancels it. The codes live 10 minutes, are never put in an address, and are stored only as digests. Signed-in people list, rename and revoke their workspace's tokens with `GET /api/v1/tokens`, `PATCH /api/v1/tokens/<id>` and `DELETE /api/v1/tokens/<id>`; a token cannot do any of that, and a revoked token is refused from its next request on. The dashboard pages for this come in a later version; the requests are described at `/docs`.
 
 ## API documentation
 
@@ -401,7 +401,7 @@ A site whose mail is off cannot mail the link, so the Account page shows no "Cha
 
 ## Mail
 
-The Node target sends two kinds of mail: sign-in links, and the link and notice of an email change. Mail is off until it is switched on. A Cloudflare install sends no mail in this version.
+The Node target sends three kinds of mail: sign-in links, the link and notice of an email change, and a notice to the account that confirmed a new connection of Mythicshot once Mythicshot has collected its token (at most 5 a day per account and 30 an hour for the site, apart from sign-in's limit). Mail is off until it is switched on. A Cloudflare install sends no mail in this version.
 
 ### Switch mail on
 

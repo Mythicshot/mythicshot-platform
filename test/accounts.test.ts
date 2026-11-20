@@ -233,7 +233,7 @@ describe("accounts", () => {
     const { deps } = await makeDeps();
     deps.now = () => NOW;
     const a = await seedAccount(deps);
-    expect(AUDIT_EVENTS).toEqual(["first_admin", "signin_link_sent", "signin_link_printed", "signin", "signout", "signout_everywhere", "session_revoked", "allowance_set", "email_change_requested", "email_changed", "email_changed_on_server", "connection_confirmed", "connection_refused", "connection_collected", "token_renamed", "token_revoked", "invite_sent", "invite_resent", "invite_cancelled", "invite_accepted"]);
+    expect(AUDIT_EVENTS).toEqual(["first_admin", "signin_link_sent", "signin_link_printed", "signin", "signout", "signout_everywhere", "session_revoked", "allowance_set", "email_change_requested", "email_changed", "email_changed_on_server", "connection_confirmed", "connection_refused", "connection_collected", "connection_mail_not_sent", "token_renamed", "token_revoked", "invite_sent", "invite_resent", "invite_cancelled", "invite_accepted"]);
     const first = auditStatement(deps, { event: "allowance_set", userId: a.userId, workspaceId: a.workspaceId, subject: a.workspaceId, detail: { old: 1_073_741_824, new: 0 } });
     // A statement for the caller's batch: nothing is written by making it.
     expect(await count(deps, "audit")).toBe(0);
