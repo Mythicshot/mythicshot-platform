@@ -2,6 +2,18 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.30 (2026-11-20)
+
+- Admin API: disabling, enabling and deleting an account. `POST /api/v1/admin/accounts/<id>/disable` ends every session of the account at once, spends its unused sign-in links and its open email change, and refuses every token of its workspace while it is disabled (the tokens are kept, and work again once it is enabled); a request to connect Mythicshot that it confirmed can no longer be collected. `POST /api/v1/admin/accounts/<id>/enable` changes the status back and nothing else; the person signs in again. Both answer 204, also for an account already in that state. The Admin page's buttons come in a later version.
+- A disabled account's tour pages, published pictures (also those a re-publish replaced, during their grace) and shared images and clips answer exactly as ones that never existed, byte for byte. The tour page and the picture route check this inside the one database lookup they already made, so neither makes a call more. A copy a browser or a cache already holds is not taken back (a page for up to a minute, a picture for up to a year), and with `PUBLIC_IMAGE_BASE` set to a public bucket's own domain the app cannot stop published pictures at all; the README and the API description say so.
+- `GET /api/v1/admin/accounts/<id>/removal` answers what a delete would remove: the username and email address, the tours, the shared images and clips, the connected computers and the bytes used.
+- `DELETE /api/v1/admin/accounts/<id>` with `{"username": ...}` (an account without one is confirmed with its email address) deletes a disabled account and everything of its workspace in bounded steps, each request within the call budget: `202` with the files removed out of how many, then `200`. Files go before the rows that name them, and the account, its membership and its workspace go last, in one batch, so a delete stopped anywhere leaves a disabled, listed account that is finished by asking again; meanwhile it cannot be enabled. Afterwards its address and username are free again.
+- Refusals with their own codes: `own_account`, `last_admin`, `not_disabled`, `deleting` (enabling an account whose delete has started), `username_mismatch`, and `site_owner` for the account whose workspace the site was set up with, which cannot be deleted.
+- The admin's list of accounts adds `deleting`: true while a delete of the account has started and not finished.
+- The audit record has three new events: `account_disabled`, `account_enabled` and `account_deleted`, each with ids alone.
+- Setting a workspace's allowance no longer records a change when the workspace was deleted at that moment.
+- Upgrading: this version needs its database change (migration 0013: a table for a delete in progress) before it serves, because the list of accounts reads it. The Node server applies it when it starts, before it answers, and `npm run setup:cloudflare -- update` applies it before it deploys.
+
 ## 0.1.28 (2026-11-20)
 
 - Upgrade rehearsal: the check of two new builds started at the same moment no longer fails on every update to 0.1.26 or later. Every build now runs with `CLIENT_ADDRESS_HEADER=X-Forwarded-For`, and every request the rehearsal sends carries that header with a documentation address, as behind a site's proxy, so a build no longer writes its line asking for the setting. Builds before the setting (0.1.7, 0.1.8) read neither, so nothing changes for them.
