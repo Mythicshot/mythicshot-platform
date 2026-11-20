@@ -109,7 +109,7 @@ function expectFileHeaders(r: Call, type: string): void {
 }
 
 describe("the page of an image", () => {
-  it("shows the image, its title and details, the two buttons and the footer, in the mockup's words, with the page headers", async () => {
+  it("shows the image, its title and details, the two buttons and the footer, in the mockup's words, with the page headers", SLOW, async () => {
     const { deps, a } = await world();
     const item = await seedItem(deps, a.workspaceId, IMAGE());
     const r = await get(deps, `/i/${item.link}`);
@@ -137,7 +137,7 @@ describe("the page of an image", () => {
     expect([again.status, again.bytes.length, again.headers.get("etag")]).toEqual([304, 0, etag]);
   });
 
-  it("an image without a title is an untitled image", async () => {
+  it("an image without a title is an untitled image", SLOW, async () => {
     const { deps, a } = await world();
     const item = await seedItem(deps, a.workspaceId, { ...IMAGE(null), width: 842, height: 311, content_type: "image/jpeg", file: jpeg(842, 311, 90_112) });
     const r = await get(deps, `/i/${item.link}`);
@@ -147,7 +147,7 @@ describe("the page of an image", () => {
     expect(r.text).toContain(`src="/i/${item.link}.jpg"`);
   });
 
-  it("every value from the database reaches the page escaped: a title of markup, quotes and </title>", async () => {
+  it("every value from the database reaches the page escaped: a title of markup, quotes and </title>", SLOW, async () => {
     const { deps, a } = await world({ hosts: THREE });
     const evil = `</title><script>alert("x")</script><img src=x onerror='alert(1)'> & "quoted" 'single'`;
     const item = await seedItem(deps, a.workspaceId, IMAGE(evil));
@@ -243,7 +243,7 @@ describe("link preview tags", () => {
     expect(b.text).toContain(`<meta name="twitter:card" content="summary">`);
   });
 
-  it("with one address and no SITE_HOST: no absolute address at all, whatever host the request names; with SITE_HOST, that origin", async () => {
+  it("with one address and no SITE_HOST: no absolute address at all, whatever host the request names; with SITE_HOST, that origin", SLOW, async () => {
     const { deps, a } = await world();
     const image = await seedItem(deps, a.workspaceId, IMAGE());
     const r = await send(deps, "GET", `/i/${image.link}`, { origin: "https://evil.example.net", headers: { "x-forwarded-host": "evil.example.net" } });
@@ -261,7 +261,7 @@ describe("link preview tags", () => {
 });
 
 describe("the file", () => {
-  it("is answered whole with its stored type, a strong ETag, ranges accepted, and a 304 that reads no part", async () => {
+  it("is answered whole with its stored type, a strong ETag, ranges accepted, and a 304 that reads no part", SLOW, async () => {
     const { deps, a } = await world();
     const item = await seedItem(deps, a.workspaceId, IMAGE());
     const r = await get(deps, `/i/${item.link}.png`);
@@ -289,7 +289,7 @@ describe("the file", () => {
     expect(r.bytes).toEqual(item.file);
   });
 
-  it("stored bytes that look like HTML or SVG are still answered only as the stored type, sandboxed and not sniffed", async () => {
+  it("stored bytes that look like HTML or SVG are still answered only as the stored type, sandboxed and not sniffed", SLOW, async () => {
     const { deps, a } = await world();
     const html = new TextEncoder().encode(`<!doctype html><html><body><script>alert(document.cookie)</script></body></html>`);
     const svg = new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script></svg>`);
@@ -405,7 +405,7 @@ describe("Range", () => {
     expect([tail.status, tail.calls, tail.bytes.every((b) => b === 27)]).toEqual([206, 2, true]);
   });
 
-  it("an online item whose part has gone from the store is the 404 page, not a short file", async () => {
+  it("an online item whose part has gone from the store is the 404 page, not a short file", SLOW, async () => {
     const { deps, a } = await world();
     const item = await seedItem(deps, a.workspaceId, IMAGE());
     await deps.drafts.delete([`m/${item.id}/part-000`]);
@@ -472,7 +472,7 @@ describe("a link that does not work", () => {
 });
 
 describe("the pages' files and the addresses", () => {
-  it("the stylesheet and the script are fixed text, an hour in a cache, with an ETag", async () => {
+  it("the stylesheet and the script are fixed text, an hour in a cache, with an ETag", SLOW, async () => {
     const { deps } = await makeDeps();
     for (const [path, body, type] of [["/s/share.css", SHARE_CSS, "text/css; charset=utf-8"], ["/s/share.js", SHARE_JS, "text/javascript; charset=utf-8"]] as const) {
       const r = await get(deps, path);
@@ -502,7 +502,7 @@ describe("the pages' files and the addresses", () => {
     expect((await get(two.deps, `/r/${other.link}`, {}, IMG)).status).toBe(421);
   });
 
-  it("no token and no cookie is read: a request carrying them gets the same answer and nothing records a use", async () => {
+  it("no token and no cookie is read: a request carrying them gets the same answer and nothing records a use", SLOW, async () => {
     const { deps, a } = await world();
     const item = await seedItem(deps, a.workspaceId, IMAGE());
     const plain = await get(deps, `/i/${item.link}`);
