@@ -432,6 +432,15 @@ describe("the Admin page and its script", () => {
     for (const api of forbidden) expect(ADMIN_JS, api).not.toContain(api);
     // The two timers: the pause between a delete's calls, and the end of the rest after a 429.
     expect(ADMIN_JS.match(/setTimeout\(/g)).toHaveLength(2);
+    // A delete's loop is bounded twice over: misses in a row, and calls in all (a count too
+    // large to run in a test, so pinned by its text; the misses are run in test/node-dash-admin-actions.test.ts).
+    for (const line of [
+      "var MAX_MISSES = 3;",
+      "var MAX_ROUNDS = 5000;",
+      "return rounds < MAX_ROUNDS ? pause(PAUSE_MS).then(send) : finish(null, false);",
+      "if (again && rounds < MAX_ROUNDS) {",
+      "if (misses < MAX_MISSES) return pause(MISS_PAUSES_MS[misses - 1]).then(send);",
+    ]) expect(ADMIN_JS, line).toContain(line);
     // No other page serves, loads or names the Admin page's script.
     for (const p of DASH_PAGES.filter((x) => x.path !== "/admin")) {
       expect(p.html, p.path).not.toContain("/dash/admin.js");

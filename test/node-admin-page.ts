@@ -1,4 +1,5 @@
-// Test only: the harness that runs the Admin page's scripts under Node, shared by
+// Test only, Node only (left out of the Workers typecheck in tsconfig.cloudflare.json, as
+// test/harness.node.ts is): the harness that runs the Admin page's scripts under Node, shared by
 // test/node-dash-admin.test.ts (the list and the allowance) and
 // test/node-dash-admin-actions.test.ts (invites, disabling, enabling and deleting). The page's
 // document, the shared /dash/dash.js and the page's /dash/admin.js are run in one fresh Node

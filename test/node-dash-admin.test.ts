@@ -1,7 +1,7 @@
 // What the Admin page's script does when it runs, for the list of accounts and for setting an
 // allowance: the page's document, the shared /dash/dash.js and the page's /dash/admin.js are
 // run in one fresh Node `vm` context against a stand-in document built from the page's own
-// HTML (test/pages-dom.ts), with a stand-in address and fetch (test/admin-page.ts). The fetch
+// HTML (test/pages-dom.ts), with a stand-in address and fetch (test/node-admin-page.ts). The fetch
 // either answers from the test or is handed to the real app, as a browser on the app address
 // would send it. Node only: the Workers runtime runs no code from a string. The size parser
 // (SIZE_JS) is also run on its own, on its table of inputs. Invites, disabling, enabling and
@@ -56,7 +56,7 @@ import {
   type Answer,
   type Responder,
   type Tab,
-} from "./admin-page.ts";
+} from "./node-admin-page.ts";
 
 afterEach(checkTabs);
 
