@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { DASH_LINK_PAGES, DASH_PAGES } from "../src/dash/routes.ts";
+import { HOST_RULES } from "../src/host-gate.ts";
 import { RESERVED, USERNAME_MAX, USERNAME_MIN, parseUsername } from "../src/usernames.ts";
 
 const SHAPE = { ok: false, problem: "shape" };
@@ -7,7 +9,7 @@ const taken = (username: string) => ({ ok: true, username });
 
 /** The names the plan lists, in the plan's order (`me` is in it and is two characters), then the ones added at review. */
 const PLAN_LIST =
-  "admin administrator root system support help security abuse postmaster hostmaster webmaster noreply no-reply mail email info contact hello api app www web tours tour img media static assets cdn docs blog status billing account accounts settings signin sign-in signout sign-out login logout signup sign-up register invite invites setup dashboard workspace workspaces team teams user users me you null undefined none anonymous everyone owner official staff mod moderator mythicshot mythic mythiclab mythic-lab demo test example deleted unknown guest nobody removed sysadmin superuser admins moderators mods helpdesk service bot notifications legal privacy terms dmca copyright trust safety sales press pricing feedback report cpanel webmail ftp autodiscover autoconfig smtp imap localhost dev staging beta healthz player auth oauth session sessions upload uploads embed share public home new search true false nan ember".split(
+  "admin administrator root system support help security abuse postmaster hostmaster webmaster noreply no-reply mail email info contact hello api app www web tours tour img media static assets cdn docs blog status billing account accounts settings signin sign-in signout sign-out login logout signup sign-up register invite invites setup dashboard workspace workspaces team teams user users me you null undefined none anonymous everyone owner official staff mod moderator mythicshot mythic mythiclab mythic-lab demo test example deleted unknown guest nobody removed sysadmin superuser admins moderators mods helpdesk service bot notifications legal privacy terms dmca copyright trust safety sales press pricing feedback report cpanel webmail ftp autodiscover autoconfig smtp imap localhost dev staging beta healthz player auth oauth session sessions upload uploads embed share public home new search true false nan ember connect connections dash gifs images openapi storage tokens usage".split(
     " ",
   );
 
@@ -350,6 +352,33 @@ describe("usernames", () => {
     // The only listed name left out is too short to be chosen at all.
     expect(PLAN_LIST.filter((name) => !RESERVED.has(name))).toEqual(["me"]);
     expect(parseUsername("me")).toEqual(SHAPE);
+  });
+
+  it("every top-level path of the app, and every first part of an API path, is reserved", () => {
+    // The first part of each route's path, as a word: `/connections` is connections,
+    // `/:file{player(...)...}` is player, `/api/v1/openapi.json` is openapi. Parameters are skipped.
+    const words = new Set<string>();
+    const wordOf = (part: string | undefined): string | null => {
+      if (part === undefined || part === "") return null;
+      if (part.startsWith(":")) return /\{([a-z][a-z0-9-]*)/.exec(part)?.[1] ?? null;
+      return /^([a-z][a-z0-9-]*)/.exec(part)?.[1] ?? null;
+    };
+    const paths = [...Object.keys(HOST_RULES).map((key) => key.slice(key.indexOf(" ") + 1)), ...[...DASH_PAGES, ...DASH_LINK_PAGES].flatMap((p) => [p.path, p.script.path])];
+    for (const path of paths) {
+      const parts = path.split("/");
+      const top = wordOf(parts[1]);
+      if (top !== null) words.add(top);
+      if (parts[1] === "api" && parts[2] === "v1") {
+        const second = wordOf(parts[3]);
+        if (second !== null) words.add(second);
+      }
+    }
+    // The routes are really read: a few that must be among them.
+    for (const w of ["connections", "dash", "images", "gifs", "storage", "signin", "invite", "tokens", "connect", "usage", "player", "openapi"]) expect(words, w).toContain(w);
+    const free = [...words].filter((w) => w.length >= USERNAME_MIN && parseUsername(w).ok);
+    expect(free, "add these to RESERVED_NAMES in src/usernames.ts (and to PLAN_LIST here): a name cannot be taken back once registered").toEqual([]);
+    // The one-letter paths (i, r, s, p, t) and me are shorter than any username.
+    for (const w of [...words].filter((x) => x.length < USERNAME_MIN)) expect(parseUsername(w), w).toEqual(SHAPE);
   });
 
   it("the reserved list is lowercase, sorted and passes the shape rule itself", () => {
