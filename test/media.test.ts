@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
 import { SUBREQUEST_BUDGET } from "../src/budget.ts";
-import { CLIP_MAX_DURATION_MS, DEFAULT_MEDIA_LIMITS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, mediaLimits, mediaLimitsProblem, mediaLink, onlineItemFiles } from "../src/media.ts";
+import { CLIP_MAX_DURATION_MS, DEFAULT_MEDIA_LIMITS, MAX_LOOSE_CLAIMS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, mediaLimits, mediaLimitsProblem, mediaLink, onlineItemFiles } from "../src/media.ts";
 import type { Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
 import { LIMITS_MEDIA, workspaceKey } from "../src/rate.ts";
@@ -599,7 +599,7 @@ describe("delete and sweep", () => {
       drafts: {
         ...deps.drafts,
         put: async (key, body, meta) => {
-          expect((await remove(deps, token, id)).status).toBe(204);
+          expect((await remove(deps, token, id)).status).toBe(500);
           return deps.drafts.put(key, body, meta);
         },
       },
@@ -676,7 +676,7 @@ describe("the three invariants", () => {
     // The delete runs while the part is being written, and the request then dies: its
     // object is in the store, and neither its "done" statement nor its own clean-up runs.
     const dying: Deps = interrupt(deps, async () => {
-      expect((await remove(deps, token, id)).status).toBe(204);
+      expect((await remove(deps, token, id)).status).toBe(500);
     }, { before: true });
     const dead: Deps = { ...dying, db: { ...dying.db, batch: () => Promise.reject(new Error("cut off")) }, drafts: { ...dying.drafts, delete: () => Promise.reject(new Error("cut off")) } };
     expect((await quiet(() => putPart(dead, token, id, 0, fileOf(IMAGE)))).status).toBe(500);
@@ -684,9 +684,9 @@ describe("the three invariants", () => {
     expect(await orphans(deps, draftKeys)).toEqual([]);
     // Deleted for everyone, and still counted: its object is there.
     expect((await get(deps, token, id)).json).toEqual(NO_ITEM);
-    expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(IMAGE.bytes);
+    expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(2 * IMAGE.bytes); // the item, and the object of the send that died
     // A delete while the claim is young removes the object but keeps the row, which could still see one written.
-    expect((await remove(deps, token, id)).status).toBe(204);
+    refused(await remove(deps, token, id), 500, "cleanup_pending");
     expect(await objectsOf(draftKeys, id)).toEqual([]);
     expect(await count(deps, "media_object")).toBe(1);
     // Past the claim's lifetime the next sweep finishes it, and the room is free.
@@ -704,7 +704,7 @@ describe("the three invariants", () => {
     deps.now = () => now;
     const { id } = await sendItem(deps, token, IMAGE);
     const dying = interrupt(deps, async () => {
-      expect((await remove(deps, token, id)).status).toBe(204);
+      expect((await remove(deps, token, id)).status).toBe(500);
     }, { before: true });
     const dead: Deps = { ...dying, db: { ...dying.db, batch: () => Promise.reject(new Error("cut off")) }, drafts: { ...dying.drafts, delete: () => Promise.reject(new Error("cut off")) } };
     expect((await quiet(() => putPreview(dead, token, id, png(10, 10, 300)))).status).toBe(500);
@@ -787,6 +787,139 @@ describe("the three invariants", () => {
     expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`]);
     expect(await count(deps, "media_object")).toBe(1);
     expect((await commit(deps, token, id)).status).toBe(200);
+  });
+
+  it("(b) when the read after the stored batch fails, the stored object survives and is served", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedAccount(deps);
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    const file = fileOf(IMAGE, 5);
+    // The batch that marks the claim stored commits; the next read fails once.
+    let armed = false;
+    const flaky: Deps = {
+      ...deps,
+      db: {
+        ...deps.db,
+        batch: async (stmts) => {
+          await deps.db.batch(stmts);
+          if (stmts.some((st) => st.sql.includes("SET stored_at"))) armed = true;
+        },
+        all: async (sql, params) => {
+          if (armed) {
+            armed = false;
+            throw new Error("the read failed");
+          }
+          return deps.db.all(sql, params);
+        },
+      },
+    };
+    expect((await quiet(() => putPart(flaky, token, id, 0, file))).status).toBe(500);
+    expect(await served(deps, id, 0)).toEqual(file);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+    expect((await commit(deps, token, id)).status).toBe(200);
+    const files = await onlineItemFiles(deps, (await get(deps, token, id)).json.link_id);
+    expect(await readAll(deps, files!.parts[0])).toEqual(file);
+  });
+
+  it("(b) a send whose claim was taken away while the item is still uploading answers 409 superseded, not 404", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    // Its claim row goes while it writes (as a claim older than its lifetime is removed).
+    const slow = interrupt(deps, async () => {
+      await deps.db.run("DELETE FROM media_object WHERE media_id = ?", [id]);
+    }, { before: true });
+    const r = await putPart(slow, token, id, 0, fileOf(IMAGE));
+    expect([r.status, r.json?.error]).toEqual([409, "superseded"]);
+    expect((await get(deps, token, id)).json.state).toBe("uploading");
+    expect(await objectsOf(draftKeys, id)).toEqual([]);
+    expect((await putPart(deps, token, id, 0, fileOf(IMAGE))).status).toBe(204);
+  });
+
+  it("(c) sends that die after their object landed count, are bounded per item, and are removed after their lifetime by a later touch", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await create(deps, token, CLIP)).json.id as string;
+    const file = fileOf(CLIP);
+    const usage = async () => (await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes as number;
+    // A send dies after its object landed: no "done", no clean-up.
+    const dying: Deps = { ...deps, db: { ...deps.db, batch: () => Promise.reject(new Error("cut off")) }, drafts: { ...deps.drafts, delete: () => Promise.reject(new Error("cut off")) } };
+    for (let i = 0; i < MAX_LOOSE_CLAIMS; i++) {
+      expect((await quiet(() => putPart(dying, token, id, 0, partOf(file, 0)))).status, `dying send ${i + 1}`).toBe(500);
+      now += 1000;
+    }
+    // Their objects are there, named by rows, and counted beside the item's own bytes.
+    expect((await draftKeys()).filter((k) => k.startsWith(`m/${id}/`))).toHaveLength(MAX_LOOSE_CLAIMS);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+    expect(await usage()).toBe(CLIP.bytes + MAX_LOOSE_CLAIMS * PART_BYTES);
+    // One more send is refused while they are young: 429, and when to come back.
+    const refusedSend = await putPart(deps, token, id, 1, partOf(file, 1));
+    refused(refusedSend, 429, "too_many_items");
+    const wait = Number(refusedSend.headers.get("retry-after"));
+    expect(wait).toBeGreaterThan(0);
+    expect(wait).toBeLessThanOrEqual(300);
+    expect(await count(deps, "media_object")).toBe(MAX_LOOSE_CLAIMS);
+    // Past their lifetime the next send removes them (objects, then rows) and goes through.
+    now += 5 * 60 * 1000;
+    for (let n = 0; n < 3; n++) expect((await putPart(deps, token, id, n, partOf(file, n))).status, `part ${n}`).toBe(204);
+    expect(await count(deps, "media_object")).toBe(3);
+    expect(await usage()).toBe(CLIP.bytes);
+    expect(await objectsOf(draftKeys, id)).toEqual([0, 1, 2].map((n) => `m/${id}/part-00${n}`));
+    // A send that dies after the item was finished leaves a claim on an online item: counted
+    // until the sweep of a later create meets it past its lifetime.
+    const dyingLate = interrupt(dying, async () => {
+      expect((await commit(deps, token, id)).status).toBe(200);
+    }, { before: true });
+    expect((await quiet(() => putPart(dyingLate, token, id, 2, partOf(file, 2)))).status).toBe(500);
+    expect(await usage()).toBe(CLIP.bytes + 500_000);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+    now += 5 * 60 * 1000 + 1;
+    expect((await create(deps, token, IMAGE)).status).toBe(201);
+    expect(await usage()).toBe(CLIP.bytes + IMAGE.bytes);
+    expect(await objectsOf(draftKeys, id)).toEqual([0, 1, 2].map((n) => `m/${id}/part-00${n}`));
+    expect(await count(deps, "media_object")).toBe(3);
+  });
+
+  it("(c) a commit leaves no replaced or expired claim behind", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const id = (await create(deps, token, IMAGE)).json.id as string;
+    expect((await putPart(deps, token, id, 0, fileOf(IMAGE))).status).toBe(204);
+    // A claim of a send that died long ago, written directly with its object.
+    const claim = "c".repeat(24);
+    await deps.db.run("INSERT INTO media_object (media_id, claim, n, bytes, claimed_at) VALUES (?, ?, 0, ?, ?)", [id, claim, IMAGE.bytes, now - 10 * 60 * 1000]);
+    await deps.drafts.put(`m/${id}/part-000.${claim}`, fileOf(IMAGE), { contentType: "image/png" });
+    expect((await commit(deps, token, id)).status).toBe(200);
+    expect(await count(deps, "media_object")).toBe(1);
+    expect(await objectsOf(draftKeys, id)).toEqual([`m/${id}/part-000`]);
+    expect(await orphans(deps, draftKeys)).toEqual([]);
+  });
+
+  it("(c) a delete with a send still under way says cleanup_pending and counts until it is finished; an item at its row bound deletes within the budget", async () => {
+    const { deps, draftKeys } = await makeDeps();
+    const { token } = await seedWorkspace(deps, "Acme");
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    const { id } = await sendItem(deps, token, { ...CLIP, bytes: DEFAULT_MEDIA_LIMITS.clipMaxBytes });
+    // The most claim rows an item can hold: every part, a preview, and the loose ones.
+    expect((await putPreview(deps, token, id, png(10, 10, 100))).status).toBe(204);
+    for (let i = 0; i < MAX_LOOSE_CLAIMS; i++) {
+      await deps.db.run("INSERT INTO media_object (media_id, claim, n, bytes, claimed_at) VALUES (?, ?, 1, 2000000, ?)", [id, String(i).repeat(24), now]);
+    }
+    expect(await count(deps, "media_object")).toBe(27 + 1 + MAX_LOOSE_CLAIMS);
+    const held = await remove(deps, token, id);
+    refused(held, 500, "cleanup_pending");
+    expect(held.calls).toBeLessThanOrEqual(8);
+    expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(DEFAULT_MEDIA_LIMITS.clipMaxBytes + MAX_LOOSE_CLAIMS * PART_BYTES);
+    expect(await objectsOf(draftKeys, id)).toEqual([]);
+    now += 5 * 60 * 1000 + 1;
+    const done = await remove(deps, token, id);
+    expect([done.status, done.calls <= 8]).toEqual([204, true]);
+    expect((await send(deps, "GET", "/api/v1/usage", { token })).json.used_bytes).toBe(0);
   });
 
   it("(c) a delete that cannot finish keeps counting the item until it does", async () => {
@@ -982,6 +1115,6 @@ describe("the call budget", () => {
     for (const c of [...calls, done.calls, listed.calls, gone.calls]) expect(c).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
     // The delete is a handful of calls whatever the number of parts: one store delete takes them all.
     expect(gone.calls).toBeLessThanOrEqual(8);
-    expect({ create: calls[0], parts: Math.max(...calls.slice(1)), commit: done.calls, list: listed.calls, remove: gone.calls }).toEqual({ create: 6, parts: 8, commit: 6, list: 3, remove: 7 });
+    expect({ create: calls[0], parts: Math.max(...calls.slice(1)), commit: done.calls, list: listed.calls, remove: gone.calls }).toEqual({ create: 7, parts: 8, commit: 7, list: 3, remove: 7 });
   });
 });

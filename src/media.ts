@@ -41,8 +41,14 @@
 //     while an item is online, and a claim that was current once never becomes current again.
 // (c) An item's bytes count toward the allowance until its row is removed, which happens
 //     only with its last object: the usage counts every item row, closing ones too, and
-//     every preview claim row (src/usage.ts). A delete that finishes in its own request
-//     frees the room at once; one answered cleanup_pending counts until it is retried.
+//     every claim row but the current part claims, which the item's bytes already hold
+//     (src/usage.ts). A delete frees the room when it answers 204; one answered
+//     cleanup_pending (a store that failed, or a send still under way) counts until it is
+//     finished by a later delete, the sweep, or that send's own clean-up.
+// A send that dies after its object landed leaves a claim that is not current: it counts,
+// an item may hold at most MAX_LOOSE_CLAIMS of them before a further send is refused with
+// 429, and every later send, commit and sweep that meets one older than CLAIM_LIFETIME_MS
+// removes it, object first.
 //
 // Where the objects live: the private store (`deps.drafts`), never the public one. The
 // public store can be a bucket with a public domain of its own (PUBLIC_IMAGE_BASE), where
@@ -88,6 +94,14 @@ export const CLAIM_LIFETIME_MS = 5 * 60 * 1000;
 export const LIST_PAGE = 50;
 /** Items one create removes at most while sweeping, to bound its work: three calls each. */
 const SWEEP_LIMIT = 5;
+/** Online items whose loose claims one create removes at most while sweeping: three calls each. */
+const PRUNE_LIMIT = 2;
+/**
+ * The most claims of an item that are not current (sends under way, or left by a send that
+ * died) a new send may find: one more is refused with 429 until they finish or expire. So an
+ * item holds at most parts + 1 + MAX_LOOSE_CLAIMS claim rows, and a delete stays bounded.
+ */
+export const MAX_LOOSE_CLAIMS = 4;
 /** The create's JSON body: a few short fields and a title. */
 const CREATE_BODY_BYTES = 4096;
 /** Attempts at a fresh link id when one collides with an existing item's. */
@@ -193,6 +207,8 @@ async function loadItem(deps: Deps, auth: Auth, id: string): Promise<ItemRow | n
 
 /** The condition, over an item row `media` in scope, that it is uploading and not past its age. Two parameters: the workspace id, the age floor. */
 const OPEN_ITEM = "media.workspace_id = ? AND media.state = 'uploading' AND media.created_at >= ?";
+/** The condition, over an item row `media` in scope, that it holds fewer than MAX_LOOSE_CLAIMS claims that are not current. No parameter. */
+const FEW_LOOSE = `(SELECT count(*) FROM media_object l WHERE l.media_id = media.id AND l.current = 0) < ${MAX_LOOSE_CLAIMS}`;
 
 const noItem = () => apiError(404, "not_found", "no such item");
 const alreadyOnline = () => apiError(409, "already_online", "the item is online and cannot change any more; delete it and start again to change it");
@@ -231,18 +247,21 @@ type ClaimRow = { n: number; claim: string; ext: ImageType | null; stored_at: nu
 /**
  * Removes what it can of an item of this workspace that is already closing: deletes the
  * object of every claim row, then removes the claim rows whose object cannot appear any
- * more (stored, or older than CLAIM_LIFETIME_MS), and the item row once none is left.
- * Three calls, whatever the number of parts: one store delete takes up to 1,000 keys
- * (src/budget.ts counts it as one call, R2 deletes them in one operation, and the Node
- * store deletes them one by one within that call). True when the item is gone.
+ * more (stored, or older than CLAIM_LIFETIME_MS when this call began: the one time taken
+ * before the read decides, so a claim that was young when its key was deleted keeps its
+ * row), and the item row once none is left. Three calls, whatever the number of parts:
+ * one store delete takes up to 1,000 keys (src/budget.ts counts it as one call, R2
+ * deletes them in one operation, and the Node store deletes them one by one within that
+ * call), and an item holds at most parts + 1 + MAX_LOOSE_CLAIMS rows. True when the item
+ * is gone.
  */
 async function removeClosing(deps: Deps, workspaceId: string, id: string): Promise<boolean> {
+  const floor = deps.now() - CLAIM_LIFETIME_MS;
   const rows = await deps.db.all<ClaimRow>(
     "SELECT o.n, o.claim, o.ext, o.stored_at, o.claimed_at FROM media_object o JOIN media m ON m.id = o.media_id WHERE o.media_id = ? AND m.workspace_id = ? AND m.state = 'closing'",
     [id, workspaceId],
   );
   if (rows.length > 0) await deps.drafts.delete(rows.map((o) => objectKey(id, o)));
-  const floor = deps.now() - CLAIM_LIFETIME_MS;
   const done = rows.filter((o) => o.stored_at !== null || o.claimed_at < floor).map((o) => o.claim);
   await deps.db.batch([
     {
@@ -255,20 +274,54 @@ async function removeClosing(deps: Deps, workspaceId: string, id: string): Promi
 }
 
 /**
+ * The claims of an item that are not current and can no longer become so or see their
+ * object written: stored (a newer claim took their place), or older than the floor (their
+ * request is gone). Of `rows`, the claim rows of one item.
+ */
+function looseClaims<T extends ClaimRow & { current: number }>(rows: T[], floor: number): T[] {
+  return rows.filter((r) => r.current === 0 && (r.stored_at !== null || r.claimed_at < floor));
+}
+
+/**
+ * Removes the loose claims of an item of this workspace (see looseClaims), in any state but
+ * closing (removeClosing takes those): their objects first, then their rows, each row only
+ * while it is still loose. Three calls at most. The number removed.
+ */
+async function pruneClaims(deps: Deps, workspaceId: string, id: string): Promise<number> {
+  const floor = deps.now() - CLAIM_LIFETIME_MS;
+  const rows = await deps.db.all<ClaimRow & { current: number }>(
+    `SELECT o.n, o.claim, o.ext, o.stored_at, o.claimed_at, o.current FROM media_object o JOIN media m ON m.id = o.media_id
+      WHERE o.media_id = ? AND m.workspace_id = ? AND m.state <> 'closing' AND o.current = 0`,
+    [id, workspaceId],
+  );
+  const loose = looseClaims(rows, floor);
+  if (loose.length === 0) return 0;
+  await deps.drafts.delete(loose.map((o) => objectKey(id, o)));
+  await deps.db.run(
+    "DELETE FROM media_object WHERE media_id = ? AND current = 0 AND (stored_at IS NOT NULL OR claimed_at < ?) AND claim IN (SELECT value FROM json_each(?))",
+    [id, floor, JSON.stringify(loose.map((o) => o.claim))],
+  );
+  return loose.length;
+}
+
+/**
  * Closes every item of the workspace still unfinished after MEDIA_MAX_AGE_MS, in one
  * statement, then removes up to SWEEP_LIMIT of its closing items, the oldest first: those
  * just closed, and any whose delete was cut off. An item that still holds a claim younger
  * than CLAIM_LIFETIME_MS is skipped by the LIMIT, so it cannot keep the others waiting.
- * What could not be removed now is tried again by a later sweep.
+ * Then it removes the loose claims of up to PRUNE_LIMIT online items (a send that died
+ * after the item was finished leaves one). What could not be removed now is tried again
+ * by a later sweep. At most 2 + 3 × SWEEP_LIMIT + 1 + 3 × PRUNE_LIMIT calls.
  */
 async function sweep(deps: Deps, workspaceId: string): Promise<void> {
   const now = deps.now();
+  const floor = now - CLAIM_LIFETIME_MS;
   await deps.db.run("UPDATE media SET state = 'closing' WHERE workspace_id = ? AND state = 'uploading' AND created_at < ?", [workspaceId, now - MEDIA_MAX_AGE_MS]);
   const closing = await deps.db.all<{ id: string }>(
     `SELECT m.id FROM media m WHERE m.workspace_id = ? AND m.state = 'closing'
         AND NOT EXISTS (SELECT 1 FROM media_object o WHERE o.media_id = m.id AND o.stored_at IS NULL AND o.claimed_at >= ?)
       ORDER BY m.created_at, m.id LIMIT ?`,
-    [workspaceId, now - CLAIM_LIFETIME_MS, SWEEP_LIMIT],
+    [workspaceId, floor, SWEEP_LIMIT],
   );
   for (const item of closing) {
     try {
@@ -278,15 +331,32 @@ async function sweep(deps: Deps, workspaceId: string): Promise<void> {
       console.error(`sweep: could not remove a closing item ${item.id}; will retry later`);
     }
   }
+  const online = await deps.db.all<{ id: string }>(
+    `SELECT m.id FROM media m WHERE m.workspace_id = ? AND m.state = 'online'
+        AND EXISTS (SELECT 1 FROM media_object o WHERE o.media_id = m.id AND o.current = 0 AND (o.stored_at IS NOT NULL OR o.claimed_at < ?))
+      ORDER BY m.created_at, m.id LIMIT ?`,
+    [workspaceId, floor, PRUNE_LIMIT],
+  );
+  for (const item of online) {
+    try {
+      await pruneClaims(deps, workspaceId, item.id);
+    } catch {
+      console.error(`sweep: could not remove the loose files of an item ${item.id}; will retry later`);
+    }
+  }
 }
 
 /**
- * Stores one object for an item under a new claim of its own: the claim row (by `claim`,
- * one statement that holds the item's conditions), the object, then one batch that marks
+ * Stores one object for an item under a new claim of its own: the claim row (one statement
+ * that holds the item's conditions and refuses a claim while the item already holds
+ * MAX_LOOSE_CLAIMS claims that are not current), the object, then one batch that marks
  * the claim stored and current in place of the claim that was, only while the item is
- * uploading. Then the claims of that part (or preview) that were current before and are
- * not any more are deleted, objects first. Seven calls at most. Answers 204, or what the
- * item has become meanwhile.
+ * uploading. Then the item's loose claims (the one this replaced, and any of a request
+ * that is gone) are removed, objects first. At most fifteen calls: seven on the way, and
+ * five more when the claim is first refused for loose claims (a look, their removal, a
+ * second try and a second look), or four more when the object is not stored (a look at
+ * the claim row, its removal, and a look at the item). Answers 204, or what the item has
+ * become meanwhile.
  */
 async function storeClaim(
   deps: Deps,
@@ -298,16 +368,41 @@ async function storeClaim(
 ): Promise<Response> {
   const token = claimToken();
   const key = objectKey(item.id, { n: o.n, claim: token, ext: o.ext });
-  const stmt = claim(token, deps.now());
-  const made = await deps.db.run(stmt.sql, stmt.params);
-  if (made.changes === 0) return refused();
+  const insert = async () => {
+    const stmt = claim(token, deps.now());
+    return (await deps.db.run(stmt.sql, stmt.params)).changes === 1;
+  };
+  const loose = () =>
+    deps.db.first<{ held: number; oldest: number | null }>(
+      "SELECT count(*) AS held, min(CASE WHEN stored_at IS NULL THEN claimed_at END) AS oldest FROM media_object WHERE media_id = ? AND current = 0",
+      [item.id],
+    );
+  if (!(await insert())) {
+    // Refused: the item changed, the allowance is full (a preview), or too many sends of it
+    // have not finished. Loose claims are removed and the claim is tried once more.
+    let held = await loose();
+    if ((held?.held ?? 0) < MAX_LOOSE_CLAIMS) return refused();
+    if ((await pruneClaims(deps, auth.workspaceId, item.id)) > 0 && (await insert())) {
+      held = null;
+    } else {
+      held = await loose();
+      if ((held?.held ?? 0) < MAX_LOOSE_CLAIMS) return refused();
+      const wait = held?.oldest === null || held?.oldest === undefined ? CLAIM_LIFETIME_MS : held.oldest + CLAIM_LIFETIME_MS - deps.now();
+      const res = apiError(429, "too_many_items", `${MAX_LOOSE_CLAIMS} sends of this item have not finished; wait for them, or try again later`);
+      res.headers.set("retry-after", String(Math.min(CLAIM_LIFETIME_MS / 1000, Math.max(1, Math.ceil(wait / 1000)))));
+      return res;
+    }
+  }
   // The object goes under this claim's own key: nothing it writes can replace what another
   // claim stored, whatever the order of the two.
-  let marked = false;
+  // "claimed": the batch was not sent, so the claim is certainly not stored. "sent": it was
+  // sent, and whether it took effect is known only from a successful read of the claim row.
+  let phase: "claimed" | "sent" | "stored" = "claimed";
   try {
     await deps.drafts.put(key, o.data, { contentType: o.contentType, cacheControl: NO_CACHE });
     const open = `EXISTS (SELECT 1 FROM media WHERE media.id = ? AND ${OPEN_ITEM})`;
     const floor = deps.now() - MEDIA_MAX_AGE_MS;
+    phase = "sent";
     await deps.db.batch([
       {
         sql: `UPDATE media_object SET current = 0 WHERE media_id = ? AND n = ? AND current = 1 AND ${open}
@@ -316,35 +411,56 @@ async function storeClaim(
       },
       { sql: `UPDATE media_object SET stored_at = ?, current = 1 WHERE media_id = ? AND claim = ? AND stored_at IS NULL AND ${open}`, params: [deps.now(), item.id, token, item.id, auth.workspaceId, floor] },
     ]);
-    const rows = await deps.db.all<ClaimRow & { current: number }>("SELECT n, claim, ext, stored_at, claimed_at, current FROM media_object WHERE media_id = ? AND n = ?", [item.id, o.n]);
-    marked = rows.some((r) => r.claim === token && r.current === 1);
-    if (marked) {
-      // What this claim replaced is served no more and can never be served again: it goes.
-      const old = rows.filter((r) => r.claim !== token && r.current === 0 && r.stored_at !== null);
-      if (old.length > 0) {
-        await deps.drafts.delete(old.map((r) => objectKey(item.id, r)));
-        await deps.db.run("DELETE FROM media_object WHERE media_id = ? AND current = 0 AND stored_at IS NOT NULL AND claim IN (SELECT value FROM json_each(?))", [item.id, JSON.stringify(old.map((r) => r.claim))]);
+    const rows = await deps.db.all<ClaimRow & { current: number }>("SELECT n, claim, ext, stored_at, claimed_at, current FROM media_object WHERE media_id = ? AND (n = ? OR current = 0)", [item.id, o.n]);
+    if (rows.some((r) => r.claim === token && r.current === 1)) {
+      phase = "stored";
+      // What this claim replaced is served no more and can never be served again, and a
+      // claim older than its lifetime has no request left: both go. Housekeeping: a failure
+      // leaves them to the next touch, and this answer stands.
+      try {
+        const gone = looseClaims(rows.filter((r) => r.claim !== token), deps.now() - CLAIM_LIFETIME_MS);
+        if (gone.length > 0) {
+          await deps.drafts.delete(gone.map((r) => objectKey(item.id, r)));
+          await deps.db.run("DELETE FROM media_object WHERE media_id = ? AND current = 0 AND claim IN (SELECT value FROM json_each(?))", [item.id, JSON.stringify(gone.map((r) => r.claim))]);
+        }
+      } catch {
+        console.error("media: could not remove replaced files; a later send, commit or sweep removes them");
       }
       return noContent();
     }
   } finally {
-    if (!marked) {
-      // Not stored (the store failed, or the item was finished, deleted or swept meanwhile):
-      // this claim's object is nobody's, and this request removes it, then its row. If the
-      // request ends before that, the row still names the object for the delete or sweep.
-      try {
-        await deps.drafts.delete([key]);
-        await deps.db.batch([
-          { sql: "DELETE FROM media_object WHERE media_id = ? AND claim = ? AND stored_at IS NULL", params: [item.id, token] },
-          { sql: "DELETE FROM media WHERE id = ? AND workspace_id = ? AND state = 'closing' AND NOT EXISTS (SELECT 1 FROM media_object WHERE media_id = ?)", params: [item.id, auth.workspaceId, item.id] },
-        ]);
-      } catch {
-        console.error("media: could not remove an object that was not stored; the item's delete or sweep removes it");
-      }
-    }
+    if (phase !== "stored") await dropClaim(deps, auth, item.id, token, key, phase === "sent");
   }
+  // Not stored: the item was finished, deleted or swept meanwhile, or this claim's row was
+  // removed as too old. A live item is answered as such, so the client does not give it up.
   const after = await loadItem(deps, auth, item.id);
-  return after?.state === "online" ? alreadyOnline() : noItem();
+  if (after === null) return noItem();
+  if (after.state === "online") return alreadyOnline();
+  return apiError(409, "superseded", "this send did not take its place (it took too long, or a newer send replaced it); check the item and send again what is missing");
+}
+
+/**
+ * Removes the object and row of a claim this request made and did not see stored. When the
+ * batch that stores it was sent, the claim row is read first, and the object is deleted
+ * only when that read succeeds and shows the row gone or not stored: a batch that took
+ * effect although its answer was lost leaves a stored claim, which may be current and
+ * served, and is left alone; a read that fails deletes nothing, and the row still names
+ * the object for the delete or the sweep. Nothing is thrown from here.
+ */
+async function dropClaim(deps: Deps, auth: Auth, itemId: string, token: string, key: string, sent: boolean): Promise<void> {
+  try {
+    if (sent) {
+      const row = await deps.db.first<{ stored_at: number | null }>("SELECT stored_at FROM media_object WHERE media_id = ? AND claim = ?", [itemId, token]);
+      if (row !== null && row.stored_at !== null) return;
+    }
+    await deps.drafts.delete([key]);
+    await deps.db.batch([
+      { sql: "DELETE FROM media_object WHERE media_id = ? AND claim = ? AND stored_at IS NULL", params: [itemId, token] },
+      { sql: "DELETE FROM media WHERE id = ? AND workspace_id = ? AND state = 'closing' AND NOT EXISTS (SELECT 1 FROM media_object WHERE media_id = ?)", params: [itemId, auth.workspaceId, itemId] },
+    ]);
+  } catch {
+    console.error("media: could not remove an object that was not stored; the item's delete or sweep removes it");
+  }
 }
 
 type Declared = { kind: MediaKind; contentType: string; bytes: number; width: number; height: number; durationMs: number | null; title: string | null };
@@ -574,7 +690,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
       item,
       { n, ext: null, bytes: data.byteLength, data, contentType: item.content_type },
       (token, now) => ({
-        sql: `INSERT INTO media_object (media_id, n, claim, ext, bytes, claimed_at, current) SELECT id, ?, ?, NULL, ?, ?, 0 FROM media WHERE id = ? AND ${OPEN_ITEM}`,
+        sql: `INSERT INTO media_object (media_id, n, claim, ext, bytes, claimed_at, current) SELECT id, ?, ?, NULL, ?, ?, 0 FROM media WHERE id = ? AND ${OPEN_ITEM} AND ${FEW_LOOSE}`,
         params: [n, token, data.byteLength, now, item.id, auth.workspaceId, now - MEDIA_MAX_AGE_MS],
       }),
       async () => {
@@ -611,7 +727,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
       { n: PREVIEW, ext: type, bytes: data.byteLength, data, contentType: PREVIEW_TYPE[type] },
       (token, now) => ({
         sql: `INSERT INTO media_object (media_id, n, claim, ext, bytes, claimed_at, current)
-              SELECT id, -1, ?, ?, ?, ?, 0 FROM media WHERE id = ? AND ${OPEN_ITEM}
+              SELECT id, -1, ?, ?, ?, ?, 0 FROM media WHERE id = ? AND ${OPEN_ITEM} AND ${FEW_LOOSE}
                 AND (SELECT r.allowance IS NULL
                             OR r.used - coalesce((SELECT o.bytes FROM media_object o WHERE o.media_id = media.id AND o.n = -1 AND o.current = 1), 0) + ? <= r.allowance
                        FROM (SELECT ${USED_SQL} AS used, ${ALLOWANCE_OF_SQL} AS allowance) r)`,
@@ -658,12 +774,24 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     );
     const now = await loadItem(deps, auth, item.id);
     if (now === null) return noItem();
-    if (now.state === "online") return json(200, committedOut(deps, now));
+    if (now.state === "online") {
+      // An online item keeps no claim that is not current and older than its lifetime, nor
+      // one that was replaced: they go now (housekeeping; a failure leaves them to the
+      // sweep). A send still under way removes its own when it finds the item online.
+      try {
+        await pruneClaims(deps, auth.workspaceId, item.id);
+      } catch {
+        console.error("media: could not remove replaced files of a finished item; the sweep removes them");
+      }
+      return json(200, committedOut(deps, now));
+    }
     if (done.changes === 0) return incomplete("a part was being sent again while finishing; finish it once more");
     return json(200, committedOut(deps, now));
   });
 
-  // Delete an item in any state. 204 once nothing of it is served; repeat on 500 cleanup_pending.
+  // Delete an item in any state. 204 once nothing of it is left; 500 cleanup_pending when it
+  // is deleted but some of its files are still to go (a store that failed, or a send still
+  // under way that may yet write one): send it again.
   app.delete("/api/v1/media/:id", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
@@ -674,15 +802,17 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     // Closing first: from here on nothing can change it, and no request finds it. Its bytes
     // count until its row goes, which removeClosing does with its last object.
     if (item.state !== "closing") await deps.db.run("UPDATE media SET state = 'closing' WHERE id = ? AND workspace_id = ?", [item.id, auth.workspaceId]);
+    const pending = () => apiError(500, "cleanup_pending", "the item is deleted, but some of its files could not be removed yet; delete it again to retry");
+    let gone: boolean;
     try {
-      // When a send still holds a young claim, the row stays (closing) until that send's own
-      // clean-up, a later delete or a sweep: the item is deleted for everyone already.
-      await removeClosing(deps, auth.workspaceId, item.id);
+      // When a send still holds a young claim, the row stays (closing, and counted) until
+      // that send's own clean-up, a later delete or a sweep: the item is deleted for everyone already.
+      gone = await removeClosing(deps, auth.workspaceId, item.id);
     } catch {
       console.error("delete: could not remove some files of a deleted item; the next delete call retries");
-      return apiError(500, "cleanup_pending", "the item is deleted, but some of its files could not be removed yet; delete it again to retry");
+      return pending();
     }
-    return noContent();
+    return gone ? noContent() : pending();
   });
 
   // The workspace's online items of one kind, newest first, a page at a time.

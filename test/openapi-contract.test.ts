@@ -845,6 +845,27 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     expect((await api.call("DELETE", `/api/v1/media/${clipId}`, { token: a.token })).status).toBe(204);
     expect((await api.call("DELETE", `/api/v1/media/${id}`, { token: a.token })).status).toBe(204);
 
+    // A send whose claim is removed while it writes (as one older than its lifetime is), on an item still open.
+    const open = (await create(a.token, { ...image, title: "Still open" })).json.id as string;
+    let cut = false;
+    const losing: Deps = {
+      ...deps,
+      drafts: {
+        ...deps.drafts,
+        put: async (key, body, meta) => {
+          if (!cut && key.startsWith(`m/${open}/`)) {
+            cut = true;
+            await deps.db.run("DELETE FROM media_object WHERE media_id = ? AND claim = ?", [open, key.split(".")[1]]);
+          }
+          return deps.drafts.put(key, body, meta);
+        },
+      },
+    };
+    refused(await client(losing).call("PUT", `/api/v1/media/${open}/parts/0`, bytesOf(a.token, png(64, 48, 3000))), 409, "superseded");
+    cut = false;
+    refused(await client(losing).call("PUT", `/api/v1/media/${open}/preview`, bytesOf(a.token, png(32, 24, 500))), 409, "superseded");
+    expect((await api.call("DELETE", `/api/v1/media/${open}`, { token: a.token })).status).toBe(204);
+
     // At most so many parts and previews an hour: the counts so far are written directly, one short of each limit.
     const sendsOf = (await create(a.token, image)).json.id as string;
     const key = await workspaceKey(a.workspaceId);

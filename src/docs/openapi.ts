@@ -11,7 +11,7 @@
 // it fetched the description from. The one example carries a placeholder address.
 import { ADMIN_PAGE, MAX_ALLOWANCE_BYTES } from "../admin-api.ts";
 import { LIMITS } from "../manifest.ts";
-import { CLIP_MAX_DURATION_MS, CLIP_MAX_SIDE, DEFAULT_MEDIA_LIMITS, LIST_PAGE, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, TITLE_MAX } from "../media.ts";
+import { CLIP_MAX_DURATION_MS, CLIP_MAX_SIDE, DEFAULT_MEDIA_LIMITS, LIST_PAGE, MAX_LOOSE_CLAIMS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, TITLE_MAX } from "../media.ts";
 import { LIMITS_MEDIA } from "../rate.ts";
 import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../publish.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
@@ -950,7 +950,7 @@ function paths(): OpenApiDoc["paths"] {
       delete: {
         tags: ["Items"],
         summary: "Delete a shared item",
-        description: "Removes an item, finished or not, with every part and its preview. Its public address stops working at once, and its bytes stop counting once its files are gone, which is in this request unless a part or preview is still being sent at that moment. When some files could not be removed yet, the answer is 500 cleanup_pending and the item still counts: send the same request again.",
+        description: "Removes an item, finished or not, with every part and its preview. Its public address stops working at once. 204 means nothing of it is left and its bytes no longer count. 500 cleanup_pending means it is deleted all the same, but some of its files are still to go (the store failed, or a part or preview was being sent at that moment), and it counts until they are: send the same request again.",
         operationId: "deleteMedia",
         security: TOKEN,
         parameters: [mediaId],
@@ -958,7 +958,7 @@ function paths(): OpenApiDoc["paths"] {
           "204": empty("Nothing of the item is left."),
           "401": UNAUTHORIZED,
           "404": noMedia(", or already deleted"),
-          "500": refusal("The item is deleted, but some of its files could not be removed yet. Send the same request again.", "cleanup_pending"),
+          "500": refusal("The item is deleted, but some of its files are still to be removed, and until they are its bytes count. Send the same request again.", "cleanup_pending"),
         },
       },
     },
@@ -976,9 +976,9 @@ function paths(): OpenApiDoc["paths"] {
           "400": refusal("bad_part: the part's length is not the one it must have. bad_media: part 0 is not a file of the declared type, or its width and height differ from the declared ones.", "bad_part", "bad_media"),
           "401": UNAUTHORIZED,
           "404": noMedia(", or the item has no part of that number"),
-          "409": refusal("The item is finished; its parts cannot change.", "already_online"),
+          "409": refusal("already_online: the item is finished; its parts cannot change. superseded: this send did not take its place (it took too long, or its claim was removed); the item is still open: check it and send again what is missing.", "already_online", "superseded"),
           "413": refusal("The part is too long.", "too_large"),
-          "429": { description: `This workspace already sent ${LIMITS_MEDIA.part.most} parts in the last hour.`, headers: retryAfter, content: refusal("", "too_many_items").content },
+          "429": { description: `This workspace already sent ${LIMITS_MEDIA.part.most} parts in the last hour, or ${MAX_LOOSE_CLAIMS} sends of this item have not finished yet.`, headers: retryAfter, content: refusal("", "too_many_items").content },
         },
       },
     },
@@ -996,9 +996,9 @@ function paths(): OpenApiDoc["paths"] {
           "400": refusal("The body is not a PNG or JPEG within the preview's size.", "bad_image"),
           "401": UNAUTHORIZED,
           "404": noMedia(""),
-          "409": refusal("The item is finished; its preview cannot change.", "already_online"),
+          "409": refusal("already_online: the item is finished; its preview cannot change. superseded: this send did not take its place (it took too long, or its claim was removed); the item is still open: send it again.", "already_online", "superseded"),
           "413": answer("too_large: the preview is too long. storage_full: it would take the workspace over its storage allowance; nothing was stored.", { oneOf: [refusalSchema("too_large"), ref("StorageFull")] }),
-          "429": { description: `This workspace already sent ${LIMITS_MEDIA.preview.most} previews in the last hour.`, headers: retryAfter, content: refusal("", "too_many_items").content },
+          "429": { description: `This workspace already sent ${LIMITS_MEDIA.preview.most} previews in the last hour, or ${MAX_LOOSE_CLAIMS} sends of this item have not finished yet.`, headers: retryAfter, content: refusal("", "too_many_items").content },
         },
       },
       get: {

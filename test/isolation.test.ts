@@ -807,7 +807,7 @@ describe("one workspace against another", () => {
       const pictures = sum(s.rows.step, "bytes");
       const logos = sum(s.rows.tour, "logo_bytes");
       const uploads = sum(s.rows.upload.filter((u) => u.closing_at === null), "reserved_bytes");
-      const media = sum(s.rows.media, "bytes") + sum(s.rows.media_object.filter((o) => o.n === -1), "bytes");
+      const media = sum(s.rows.media, "bytes") + sum(s.rows.media_object.filter((o) => o.current === 0 || o.n === -1), "bytes");
       expect(media).toBeGreaterThan(0);
       return { used_bytes: pictures + logos + uploads + media, allowance_bytes: null, over: false, tours: s.rows.tour.length, counted: { pictures, logos, uploads_in_progress: uploads } };
     };
