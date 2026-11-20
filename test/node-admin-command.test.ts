@@ -758,4 +758,69 @@ describe("the server command", () => {
     // Everything went through the one output: no line to the console, where a log would catch it.
     for (const spy of [log, error, warn, stdout, stderr]) expect(spy).not.toHaveBeenCalled();
   });
+  it("change-email changes an account's address at once, behind RECOVERY_LINKS=on, and says so in one sentence", async () => {
+    const s = await site();
+    expect((await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"])).code).toBe(0);
+    const db = connect(s.dir);
+    const written = async () => [await db.all("SELECT id, email FROM user ORDER BY id"), await db.all("SELECT * FROM audit ORDER BY id")];
+    const before = await written();
+    const CHANGE_OFF = "Changing an email address here is off. To do it, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.";
+    for (const value of [undefined, "", "off", "yes", "o n"]) {
+      const r = await run({ ...s.env, RECOVERY_LINKS: value }, ["change-email", "--username", "alex", "--email", "new@example.com"]);
+      expect(r.lines, String(value)).toEqual([CHANGE_OFF]);
+      expect(r.code).toBe(1);
+    }
+    expect(await written()).toEqual(before);
+
+    const done = await run({ ...s.env, ...ON }, ["change-email", "--username", "Alex", "--email", "New@Example.com"]);
+    expect(done.lines).toEqual(['The account "alex" now signs in with new@example.com.', REMIND]);
+    expect(done.code).toBe(0);
+    expect(await db.first("SELECT email FROM user WHERE id = ?", [s.userId])).toEqual({ email: "new@example.com" });
+    expect(await db.all("SELECT event, user_id, subject, detail FROM audit WHERE event = 'email_changed_on_server'")).toEqual([{ event: "email_changed_on_server", user_id: s.userId, subject: s.userId, detail: null }]);
+    // The new address signs in from now on; the old one does not.
+    expect((await run({ ...s.env, ...ON }, ["signin-link", "--email", "new@example.com"])).code).toBe(0);
+    expect((await run({ ...s.env, ...ON }, ["signin-link", "--email", "you@example.com"])).lines).toEqual([NO_LINK]);
+
+    // Each refusal: its sentence, exit 1, and nothing written.
+    const other = await workspaceStatements(depsOn(db), "Other", "taken@example.com");
+    await db.batch(other.stmts);
+    const after = await written();
+    const refusals: [string[], string][] = [
+      [["--username", "alex", "--email", "taken@example.com"], "That email address belongs to another account. Nothing was changed."],
+      [["--username", "alex", "--email", "new@example.com"], "That is already the account's email address. Nothing was changed."],
+      [["--username", "nobody", "--email", "free@example.com"], "No account has that username. Nothing was changed."],
+      [["--username", "a", "--email", "free@example.com"], "No account has that username. Nothing was changed."],
+      [["--username", "alex", "--email", "not an address"], "That is not an email address. Nothing was changed."],
+      [["--username", "alex", "--email", "x@example.com\r\nBcc: y@example.com"], "That is not an email address. Nothing was changed."],
+    ];
+    for (const [args, line] of refusals) {
+      const r = await run({ ...s.env, ...ON }, ["change-email", ...args]);
+      expect(r.lines, args.join(" ")).toEqual([line]);
+      expect(r.code).toBe(1);
+    }
+    expect(await written()).toEqual(after);
+
+    // Arguments it does not take: the usage, which names it, and exit 2.
+    for (const argv of [["change-email"], ["change-email", "--username", "alex"], ["change-email", "--email", "x@example.com"], ["change-email", "--username", "alex", "--email", "x@example.com", "--send-to", "y@example.com"]]) {
+      const r = await run({ ...s.env, ...ON }, argv);
+      expect(r.code, argv.join(" ")).toBe(2);
+      expect(r.lines.join(" ")).toContain("change-email --username <name> --email <address>");
+    }
+  });
+
+  it("change-email stops on a database without the email-change migration", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "dp-admin-cmd-"));
+    made.push(dir);
+    const migrations = join(dir, "migrations-before-email-change");
+    cpSync(MIGRATIONS_DIR, migrations, { recursive: true, filter: (from) => !from.endsWith("0009_email_change.sql") });
+    const db = new NodeDb(join(dir, "db.sqlite"));
+    await migrate(db, migrations);
+    const w = await workspaceStatements(depsOn(db), "Acme", "you@example.com");
+    await db.batch([...w.stmts, { sql: "UPDATE user SET username = 'alex' WHERE id = ?", params: [w.userId] }]);
+    db.close();
+    const r = await run({ DATA_DIR: dir, ...TWO, ...ON }, ["change-email", "--username", "alex", "--email", "new@example.com"]);
+    expect(r.lines).toEqual(["The database is from an older version. Update the site first."]);
+    expect(r.code).toBe(1);
+    expect(await connect(dir).first("SELECT email FROM user WHERE id = ?", [w.userId])).toEqual({ email: "you@example.com" });
+  });
 });

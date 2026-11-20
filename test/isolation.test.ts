@@ -239,10 +239,15 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[] }> 
  * Routes with no id that change only the caller's own session or account: what they end.
  * Each is sent by one workspace with its session; nothing of the other may change.
  */
-const SELF: Record<string, { path: string; ends: string }> = {
+const SELF: Record<string, { path: string; ends?: string; changes?: string }> = {
   "POST /api/v1/signout": { path: "/api/v1/signout", ends: "the session the request is sent with" },
   "POST /api/v1/signout/everywhere": { path: "/api/v1/signout/everywhere", ends: "every session of the caller's own account" },
+  "POST /api/v1/account/email": { path: "/api/v1/account/email", changes: "asks for a change of the caller's own email address; another account's address answers the same and changes nothing" },
+  "POST /api/v1/account/email/confirm": { path: "/api/v1/account/email/confirm", changes: "confirms a change of the caller's own email address; another account's code is refused like one that never existed" },
 };
+/** The SELF routes that end sessions, and those that change the caller's email address. */
+const SELF_ENDS = Object.entries(SELF).filter(([, entry]) => entry.ends !== undefined);
+const SELF_CHANGES = Object.keys(SELF).filter((key) => SELF[key].changes !== undefined);
 
 /** The fields of one account in the admin's list: who it is, its counts and its allowance. */
 const ACCOUNT_FIELDS = ["id", "username", "email", "status", "admin", "created_at", "workspace_id", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "counted.pictures", "counted.logos", "counted.uploads_in_progress"];
@@ -430,7 +435,7 @@ describe("the tables against the route table", () => {
     expect(routes()).toContain("DELETE /api/v1/tours/:id");
     for (const [key, entry] of Object.entries(OPEN)) expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(LISTS)) expect(entry.holds.length, `${key} must say what it holds`).toBeGreaterThan(10);
-    for (const [key, entry] of Object.entries(SELF)) expect(entry.ends.length, `${key} must say what it ends`).toBeGreaterThan(10);
+    for (const [key, entry] of Object.entries(SELF)) expect((entry.ends ?? entry.changes ?? "").length, `${key} must say what it ends or changes`).toBeGreaterThan(10);
     for (const [key, entry] of Object.entries(ADMIN)) {
       expect(entry.reason.length, `${key} needs a reason`).toBeGreaterThan(10);
       expect(entry.fields.length, `${key} must list the fields it may answer`).toBeGreaterThan(0);
@@ -537,7 +542,7 @@ describe("one workspace against another", () => {
     for (const n of invented) expect(names).not.toContain(n);
     for (const side of [w.a, w.b]) {
       const s = await snapshotOf(w.deps, side, w.keys);
-      for (const table of ["workspace", "user", "membership", "signin_method", "signin_code", "session", "audit", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object"]) {
+      for (const table of ["workspace", "user", "membership", "signin_method", "signin_code", "session", "email_change", "audit", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object"]) {
         expect(s.rows[table].length, `${side.name} has no row in ${table}`).toBeGreaterThan(0);
       }
       // Every file a row names is there, but the one picture the publish in progress has not copied yet.
@@ -764,7 +769,7 @@ describe("one workspace against another", () => {
     };
     const alive = async (credential: Credential) => (await fire(deps, { method: "GET", path: "/api/v1/session" }, credential)).status;
     for (const [mine, theirs] of directions(w)) {
-      for (const [key, self] of Object.entries(SELF)) {
+      for (const [key, self] of SELF_ENDS) {
         const caller = await fresh(mine);
         const theirsLive = await fresh(theirs);
         // Asked once, so that asking again below writes nothing.
@@ -785,6 +790,51 @@ describe("one workspace against another", () => {
     // Everywhere did end the caller's own sessions: the ones the world made, too.
     expect(await alive(BY_SESSION.of(a))).toBe(401);
     expect(await alive(BY_SESSION.of(b))).toBe(401);
+  });
+
+  it("changing an email address reaches nothing of the other workspace: its address answers as a free one, its code as one that never existed", SLOW, async () => {
+    // A site that can mail links: two addresses, the fake mailer.
+    const ctx = await makeDeps({ hosts: HOSTS });
+    const w = await world(ctx.deps, { draftKeys: ctx.draftKeys, publicKeys: ctx.publicKeys });
+    const { deps } = w;
+    const exercised = new Set<string>();
+    const request = async (key: string, side: Side, json: unknown, credential: Credential = BY_SESSION.of(side)) => {
+      exercised.add(key);
+      return fire(deps, { method: "POST", path: SELF[key].path, json }, credential, APP);
+    };
+    const free = { status: 200, body: '{"ok":true}' };
+    for (const [mine, theirs] of directions(w)) {
+      const before = await snapshotOf(deps, theirs, w.keys);
+      ctx.mail.sent.length = 0;
+      w.tick();
+      // Their address answers what a free address answers, and nothing is stored or sent.
+      const asked = await request("POST /api/v1/account/email", mine, { email: theirs.email });
+      const nobodys = await request("POST /api/v1/account/email", mine, { email: `nobody-${mine.name.toLowerCase()}@example.com` });
+      expect({ status: asked.status, body: asked.text }).toEqual(free);
+      expect(seen(asked)).toEqual(seen(nobodys));
+      expect(ctx.mail.sent.map((m) => m.to)).toEqual([`nobody-${mine.name.toLowerCase()}@example.com`]);
+      // Their open change's code: the refusal of a code that never existed, byte for byte.
+      const theirCode = await request("POST /api/v1/account/email/confirm", mine, { code: theirs.emailCode });
+      const neverCode = await request("POST /api/v1/account/email/confirm", mine, { code: "dpe_" + "0".repeat(40) });
+      expect(theirCode.status).toBe(400);
+      expect(seen(theirCode)).toEqual(seen(neverCode));
+      // By token: nobody, for both.
+      for (const key of SELF_CHANGES) expect((await request(key, mine, { email: theirs.email, code: theirs.emailCode }, BY_TOKEN.of(mine))).status, key).toBe(401);
+      expect(await snapshotOf(deps, theirs, w.keys), `${mine.name} changed something of ${theirs.name}`).toEqual(before);
+    }
+    // The routes are not refused for everyone. Each side's request for a free address above
+    // replaced its open change, so its old code no longer works; the code mailed for the new
+    // one works for it, and changes nothing of the other side.
+    const before = await snapshotOf(deps, w.b, w.keys);
+    const replaced = await request("POST /api/v1/account/email/confirm", w.a, { code: w.a.emailCode });
+    expect(replaced.status, replaced.text).toBe(400);
+    const code = (ctx.mail.sent.at(-1)?.text.match(/dpe_[0-9a-f]{40}/) ?? [""])[0];
+    const own = await request("POST /api/v1/account/email/confirm", w.a, { code });
+    expect(own.status, own.text).toBe(200);
+    expect(own.json).toEqual({ email: "nobody-alpha@example.com", previous_email: w.a.email });
+    expect(await snapshotOf(deps, w.b, w.keys)).toEqual(before);
+    expect([...exercised].sort()).toEqual([...SELF_CHANGES].sort());
+    expect(w.writes()).toEqual([]);
   });
 
   it("an upload cannot target another workspace's tour or chapter", SLOW, async () => {

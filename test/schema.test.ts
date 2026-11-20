@@ -11,6 +11,7 @@ const TABLES = [
   "audit",
   "chapter",
   "deleted_object",
+  "email_change",
   "membership",
   "public_object",
   "publish_job",
@@ -653,5 +654,57 @@ describe("schema", () => {
     await rejection(code("? || char(0) || ?", ["ses_" + HEX, SECRET]));
     await rejection(code("? || char(0) || ?", ["ses_" + HEX.slice(2), "x"]));
     expect(await count(deps, "signin_code")).toBe(5);
+  });
+  // Changing an email address (migration 0009).
+
+  it("an email change is strict, one per account, and its code is found by its digest alone", async () => {
+    const { deps } = await makeDeps();
+    const a = await ownerOf(deps, (await seedWorkspace(deps, "A")).workspaceId);
+    const b = await ownerOf(deps, (await seedWorkspace(deps, "B")).workspaceId);
+    const t = (await appTables(deps)).find((x) => x.name === "email_change");
+    expect(t?.sql).toMatch(/\)\s*STRICT$/);
+    expect(t?.sql).not.toMatch(/cascade|set null|set default/i);
+    const indexes = await deps.db.all<{ name: string; sql: string }>("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'email_change' AND sql IS NOT NULL ORDER BY name");
+    expect(indexes.map((i) => i.name)).toEqual(["email_change_code", "email_change_user"]);
+    for (const i of indexes) expect(i.sql).toMatch(/^CREATE UNIQUE INDEX/);
+    const change = (id: string, user: string, hash: string, email = "new@example.com") =>
+      deps.db.run("INSERT INTO email_change (id, user_id, new_email, code_hash, created_at) VALUES (?, ?, ?, ?, ?)", [id, user, email, hash, NOW]);
+    await change("emc_" + "0".repeat(24), a, HASH_A);
+    // A second row for the same account, or the same digest for another, is refused.
+    expect(isUniqueViolation(await rejection(change("emc_" + "1".repeat(24), a, HASH_B)))).toBe(true);
+    expect(isUniqueViolation(await rejection(change("emc_" + "1".repeat(24), b, HASH_A)))).toBe(true);
+    // An account that does not exist cannot have one.
+    await rejection(change("emc_" + "2".repeat(24), "usr_nobody", HASH_B));
+    await change("emc_" + "1".repeat(24), b, HASH_B);
+    // Rows cannot be deleted out from under: the account stays while its change does.
+    await rejection(deps.db.run("DELETE FROM user WHERE id = ?", [a]));
+    expect(await count(deps, "email_change")).toBe(2);
+  });
+
+  it("an email change holds an address of the stored form, a digest and an id, and nothing can hide behind a NUL", async () => {
+    const { deps } = await makeDeps();
+    const user = await ownerOf(deps, (await seedWorkspace(deps, "A")).workspaceId);
+    let n = 0;
+    const row = (cols: { id?: string; email?: string; hash?: string }, emailSql = "?") => {
+      n += 1;
+      const id = cols.id ?? "emc_" + n.toString(16).padStart(24, "0");
+      const hash = cols.hash ?? n.toString(16).padStart(64, "0");
+      return deps.db.run(`INSERT INTO email_change (id, user_id, new_email, code_hash, created_at) VALUES (?, ?, ${emailSql}, ?, 1)`, [id, user, cols.email ?? "a@example.com", hash]);
+    };
+    const reset = () => deps.db.run("DELETE FROM email_change");
+    for (const email of ["a@example.com", "first.last+tag@sub.example.co.uk", "x@" + "y".repeat(249) + ".zz"]) {
+      await row({ email });
+      await reset();
+    }
+    for (const email of ["", "ab", "A@example.com", "a@Example.com", "@example.com", "noatsign", "a@b@example.com", "a b@example.com", "a@example.com\n", "\u00e4@example.com", "a@ex\u00e4mple.com", "x@" + "y".repeat(250) + ".zz", "a\t@example.com"]) {
+      await rejection(row({ email }));
+    }
+    await rejection(row({}, "'a@example.com' || char(0) || 'x'"));
+    await rejection(row({}, "'a' || char(0) || '@example.com'"));
+    for (const hash of ["", HASH_A.slice(1), HASH_A + "a", HASH_A.toUpperCase(), "g".repeat(64), SECRET]) await rejection(row({ hash }));
+    await rejection(deps.db.run("INSERT INTO email_change (id, user_id, new_email, code_hash, created_at) VALUES ('emc_' || ?, ?, 'a@example.com', ? || char(0) || 'x', 1)", ["9".repeat(24), user, HASH_A.slice(2)]));
+    for (const id of ["", "emc_1", "EMC_" + "0".repeat(24), "emc-" + "0".repeat(24), "emc_" + "0".repeat(23) + "g", "e_" + "0".repeat(24), "emcxx_" + "0".repeat(24), SECRET]) await rejection(row({ id }));
+    await rejection(deps.db.run("INSERT INTO email_change (id, user_id, new_email, code_hash, created_at) VALUES (? || char(0) || 'x', ?, 'a@example.com', ?, 1)", ["emc_" + "0".repeat(24), user, HASH_B]));
+    expect(await count(deps, "email_change")).toBe(0);
   });
 });

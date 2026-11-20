@@ -765,8 +765,9 @@ describe("the session", () => {
       workspace: { id: a.workspaceId, name: "Account" },
       session: { id: s.sessionId, created_at: NOW, expires_at: NOW + 2_592_000_000 },
       csrf: s.csrf,
+      email_change: true,
     });
-    expect(Object.keys(r.json)).toEqual(["account", "workspace", "session", "csrf"]);
+    expect(Object.keys(r.json)).toEqual(["account", "workspace", "session", "csrf", "email_change"]);
     expect(Object.keys(r.json.account)).toEqual(["id", "username", "email", "admin"]);
     expect(r.json.csrf).toMatch(/^[0-9a-f]{64}$/);
     expect(r.text).not.toMatch(SECRET);

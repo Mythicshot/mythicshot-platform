@@ -233,7 +233,7 @@ describe("accounts", () => {
     const { deps } = await makeDeps();
     deps.now = () => NOW;
     const a = await seedAccount(deps);
-    expect(AUDIT_EVENTS).toEqual(["first_admin", "signin_link_sent", "signin_link_printed", "signin", "signout", "signout_everywhere", "session_revoked", "allowance_set"]);
+    expect(AUDIT_EVENTS).toEqual(["first_admin", "signin_link_sent", "signin_link_printed", "signin", "signout", "signout_everywhere", "session_revoked", "allowance_set", "email_change_requested", "email_changed", "email_changed_on_server"]);
     const first = auditStatement(deps, { event: "allowance_set", userId: a.userId, workspaceId: a.workspaceId, subject: a.workspaceId, detail: { old: 1_073_741_824, new: 0 } });
     // A statement for the caller's batch: nothing is written by making it.
     expect(await count(deps, "audit")).toBe(0);
@@ -269,11 +269,12 @@ describe("accounts", () => {
     const a = await seedAccount(deps);
     const token = a.token;
     const code = "dpl_" + "0123456789".repeat(4);
+    const emailCode = "dpe_" + "9876543210".repeat(4);
     const secret = "dps_" + "0123456789abcdef".repeat(4);
     const cookie = "__Host-dp_session=" + secret;
     const hash = await hashToken(token);
     const secrets: (string | number)[] = [
-      token, code, secret, cookie, hash, a.email,
+      token, code, emailCode, emailCode.slice(0, 30), secret, cookie, hash, a.email,
       // Inside other text, in capitals, and cut short enough to still be most of the secret.
       `token ${token} was used`, token.toUpperCase(), token.slice(0, 30), code.slice(0, 30), secret.slice(4), "Bearer " + token, hash.toUpperCase(), hash.slice(0, 40), "Sam <sam@example.com>", "sam@localhost", "@",
       // A network address is not recorded either.
@@ -310,7 +311,7 @@ describe("accounts", () => {
       // A word: a lowercase letter, then at most 39 lowercase letters, digits and underscores.
       { a: "" }, { a: "Bytes" }, { a: "two words" }, { a: "a.b" }, { a: "a-b" }, { a: "9lives" }, { a: "_x" }, { a: "x".repeat(41) }, { a: "caf\u00e9" },
       // A word that is most of a secret is still one.
-      { a: "dp_" + "ab".repeat(10) }, { a: "dpl_" + "0".repeat(12) }, { a: "x" + "ab".repeat(16) },
+      { a: "dp_" + "ab".repeat(10) }, { a: "dpl_" + "0".repeat(12) }, { a: "dpe_" + "0".repeat(12) }, { a: "x" + "ab".repeat(16) },
       // Keys follow the same rule, and a key that names a part of every object is refused, not dropped.
       { "": 1 }, { Old: 1 }, { "a b": 1 }, { ["x".repeat(41)]: 1 }, proto, { constructor: 1 }, { prototype: 1 }, { ["__proto__"]: 1 }, many,
     ]) {

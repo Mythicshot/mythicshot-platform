@@ -49,6 +49,30 @@ export const LIMITS_SIGNIN = {
   codeNetwork: { bucket: "code_network", windowMs: 900_000, most: 20 },
 } as const satisfies Record<string, Limit>;
 
+/**
+ * The limits on changing an account's email address. Every request is from a signed-in
+ * account, so it is counted per account and per address asked for, not per network. Each
+ * limit has a bucket of its own, as in LIMITS_SIGNIN. Over any of them: 429. The mail a
+ * request sends is also counted against the site's cap, LIMITS_SIGNIN.mailSite, which every
+ * mail the site sends shares.
+ */
+export const LIMITS_EMAIL_CHANGE = {
+  /** Change requests of one account, keyed by `accountKey`. */
+  requestAccount: { bucket: "email_account", windowMs: 900_000, most: 3 },
+  /** The same key, over a day. */
+  requestAccountDay: { bucket: "email_account_day", windowMs: 86_400_000, most: 10 },
+  /**
+   * Change requests for one new address, from any account, keyed by `recipientKey`. Counted
+   * for every request, whether or not the address is free, so the count says nothing about
+   * who has an account; it keeps a mailbox from being sent link after link.
+   */
+  requestRecipient: { bucket: "email_recipient", windowMs: 900_000, most: 3 },
+  /** The same key, over a day. */
+  requestRecipientDay: { bucket: "email_recipient_day", windowMs: 86_400_000, most: 10 },
+  /** Code tries of one account, keyed by `accountKey`. A code is 160 random bits; this only stops a page that loops. */
+  confirmAccount: { bucket: "email_confirm_account", windowMs: 900_000, most: 20 },
+} as const satisfies Record<string, Limit>;
+
 /** The key of a counter that counts for the whole site. */
 export const SITE_KEY = "site";
 
@@ -92,6 +116,16 @@ async function sha256Hex(text: string): Promise<string> {
 export async function recipientKey(email: string): Promise<string> {
   if (typeof email !== "string") throw new Error("bad email");
   return sha256Hex("rate recipient\n" + email.trim().toLowerCase());
+}
+
+/**
+ * The key an account is counted under: 64 hex characters, the digest of a fixed prefix and
+ * the account's id, so a counter row names no account by its id either. Rejects with "bad
+ * account" for anything that is not text.
+ */
+export async function accountKey(userId: string): Promise<string> {
+  if (typeof userId !== "string" || userId === "") throw new Error("bad account");
+  return sha256Hex("rate account\n" + userId);
 }
 
 const IPV4 = /^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$/;

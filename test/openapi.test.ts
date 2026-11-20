@@ -34,7 +34,7 @@ const METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "tr
 /** The operations anyone may call, with no credential at all. */
 const PUBLIC = ["GET /healthz", "POST /api/v1/signin/request", "POST /api/v1/signin/complete"];
 /** The operations that take a session and no token. */
-const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere"];
+const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm"];
 /** The site admin's operations: an admin's session alone, and a 404 (never a 401) to everyone else. */
 const ADMIN_ONLY = ["GET /api/v1/admin/summary", "GET /api/v1/admin/accounts", "PATCH /api/v1/admin/workspaces/:id"];
 
@@ -248,6 +248,8 @@ describe("the API description", () => {
       "End one of the account's sessions",
       "Sign out",
       "Sign out everywhere",
+      "Ask to change the email address",
+      "Finish changing the email address",
       "Every account's storage use in all",
       "List every account's storage use",
       "Set a workspace's storage allowance",

@@ -1,6 +1,7 @@
-// The first admin, and a sign-in link made for a person to open rather than mailed. No
-// platform API and no web framework: the server command in src/node/admin.ts is the one
-// caller, and no route reaches this file.
+// The first admin, a sign-in link made for a person to open rather than mailed, and an
+// email address changed on the server for a site whose mail is off. No platform API and
+// no web framework: the server command in src/node/admin.ts is the one caller, and no
+// route reaches this file.
 //
 // A site has no admin until somebody with access to the server says who it is. Until
 // then no sign-in link is sent or accepted, so a site that was updated behaves as it did
@@ -145,4 +146,52 @@ export async function signInLinkFor(deps: Deps, emailInput: string): Promise<Pri
   const origin = linkOrigin(deps.config);
   if (origin === null) return { ok: true, link: signInLink(PATH_ONLY, code).slice(PATH_ONLY.length), whole: false, userId: account.id };
   return { ok: true, link: signInLink(origin, code), whole: true, userId: account.id };
+}
+
+export type EmailSetProblem = "bad_email" | "no_account" | "email_taken" | "same_email";
+export type EmailSetResult = { ok: true; userId: string; email: string } | { ok: false; problem: EmailSetProblem };
+
+/** The shape of a username (src/usernames.ts), for looking one up: a name of any other shape is nobody's. */
+const USERNAME_SHAPE = /^[a-z][a-z0-9-]{2,29}$/;
+
+/**
+ * Changes the email address of the account with this username, at once and without a
+ * mailed link: the recovery tool of the server command, for a site whose mail is off. The
+ * address goes through `parseEmail`; the username is matched as typed, after outer blanks
+ * are dropped and letters lowercased. `no_account` for a username nobody has (or one of no
+ * username's shape), `email_taken` for an address another account has, `same_email` for the
+ * account's own.
+ *
+ * One read, then one batch: the address, the account's open email change and open sign-in
+ * codes spent (they would go to the old address), and the audit row
+ * `email_changed_on_server`, which holds ids only. The unique index decides an address
+ * taken between the read and the batch: nothing of the batch is then kept. A refusal
+ * writes nothing.
+ */
+export async function setEmailOnServer(deps: Deps, input: { username: string; email: string }): Promise<EmailSetResult> {
+  const email = parseEmail(input?.email);
+  if (email === null) return { ok: false, problem: "bad_email" };
+  const username = typeof input.username === "string" ? input.username.trim().toLowerCase() : "";
+  if (!USERNAME_SHAPE.test(username)) return { ok: false, problem: "no_account" };
+  const found = await deps.db.first<{ id: string; workspace_id: string | null; holder: string | null }>(
+    `SELECT u.id, (SELECT m.workspace_id FROM membership m WHERE m.user_id = u.id) AS workspace_id, (SELECT h.id FROM user h WHERE h.email = ?) AS holder
+       FROM user u WHERE u.username = ?`,
+    [email, username],
+  );
+  if (found === null) return { ok: false, problem: "no_account" };
+  if (found.holder === found.id) return { ok: false, problem: "same_email" };
+  if (found.holder !== null) return { ok: false, problem: "email_taken" };
+  const now = deps.now();
+  try {
+    await deps.db.batch([
+      { sql: "UPDATE user SET email = ? WHERE id = ?", params: [email, found.id] },
+      { sql: "UPDATE email_change SET used_at = ? WHERE user_id = ? AND used_at IS NULL", params: [now, found.id] },
+      { sql: "UPDATE signin_code SET used_at = ? WHERE user_id = ? AND used_at IS NULL", params: [now, found.id] },
+      auditStatement(deps, { event: "email_changed_on_server", userId: found.id, workspaceId: found.workspace_id, subject: found.id }),
+    ]);
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    return { ok: false, problem: "email_taken" };
+  }
+  return { ok: true, userId: found.id, email };
 }
