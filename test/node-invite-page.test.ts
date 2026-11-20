@@ -32,8 +32,8 @@ const BRAND = "Mythicshot";
 const CHOOSE_LEAD = (email: string) => `You were invited as ${email}. Your username is how you appear here, and it cannot be changed later.`;
 const HINT = "3 to 30 characters: lowercase letters, digits and hyphens.";
 const FOOT = "You sign in with a link sent to your email address. There is no password.";
-const DEAD = ["Mythicshot", "This invite no longer works", "An invite works once and for 7 days, and a newer invite replaces an older one. Ask the person who invited you to send it again.", "Already have an account? Sign in"];
-const HERE = ["Mythicshot", "You are already signed in", "This invite is for a new account. Sign out first if you want to use it, then open the link from your mail again.", "Go to the dashboard"];
+const DEAD = ["Mythicshot", "This invite no longer works", "An invite works once and for 7 days, and a newer invite replaces an older one. Ask the person who invited you to send it again.", "If you reloaded this page, open the link in your mail again.", "Already have an account? Sign in"];
+const HERE = ["Mythicshot", "You are already signed in", "This invite is for a new account. If you have just used it, you are all set. Otherwise sign out first, then open the link from your mail again.", "Go to the dashboard"];
 const BAD = "Use 3 to 30 lowercase letters, digits and hyphens, starting with a letter.";
 const RESERVED = "That username cannot be chosen. Try another.";
 const TAKEN = "That username is taken. Try another.";
@@ -420,9 +420,10 @@ describe("the invite page: choosing the username", () => {
         [CHECK]: FOUND(),
         [ACCEPT]: [
           { status: 409, json: { error: "username_taken", detail: TAKEN } },
-          { status: 400, json: { error: "bad_username", detail: RESERVED } },
+          { status: 400, json: { error: "reserved_username", detail: RESERVED } },
           { status: 400, json: { error: "bad_username", detail: BAD } },
-          { status: 400, json: { error: "bad_username", detail: "<b>anything else</b>" } },
+          // The words the server sends are never what the page goes by: the code is.
+          { status: 400, json: { error: "bad_username", detail: RESERVED } },
           OK,
         ],
       }),
@@ -592,7 +593,7 @@ describe("the invite page against the real app", () => {
     first.$("choose-button").click();
     await first.settle();
     expect(first.$("choose-message").textContent).toBe(TAKEN);
-    // A reserved name: the server's detail.
+    // A reserved name: the server's own code.
     type(first, "admin");
     first.$("choose-button").click();
     await first.settle();

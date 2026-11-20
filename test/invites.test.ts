@@ -29,7 +29,7 @@ const HAS_ACCOUNT = '{"error":"has_account","detail":"That address already has a
 const ACCEPT_HAS_ACCOUNT = '{"error":"has_account","detail":"This address already has an account. Sign in instead."}';
 const TAKEN = '{"error":"username_taken","detail":"That username is taken. Try another."}';
 const BAD_USERNAME = '{"error":"bad_username","detail":"Use 3 to 30 lowercase letters, digits and hyphens, starting with a letter."}';
-const RESERVED = '{"error":"bad_username","detail":"That username cannot be chosen. Try another."}';
+const RESERVED = '{"error":"reserved_username","detail":"That username cannot be chosen. Try another."}';
 const SIGNED_IN = '{"error":"signed_in","detail":"You are signed in. Sign out first, then open the invite link again."}';
 const CREDENTIALS = '{"error":"credentials_not_allowed","detail":"send no token with this request"}';
 const MAIL_FAILED = '{"error":"mail_failed","detail":"The invite is saved, but its mail could not be sent. Resend it to try again."}';
@@ -649,9 +649,23 @@ describe("accepting an invite", () => {
     for (const name of ["Mara_K", "ab", "a".repeat(31), "-mara", "mara-", "ma--ra", "9mara", "", null, 5, "mära"]) {
       expect(seen(await accept(deps, code, name)), String(name)).toEqual({ status: 400, headers: API_HEADERS, body: BAD_USERNAME });
     }
-    for (const name of ["admin", "ad-min", "invite", "my-mythicshot"]) expect(seen(await accept(deps, code, name)).body, name).toBe(RESERVED);
+    for (const name of ["admin", "ad-min", "invite", "my-mythicshot"]) expect(seen(await accept(deps, code, name)), name).toEqual({ status: 400, headers: API_HEADERS, body: RESERVED });
     expect(await countOf(deps, "invite")).toBe(1);
     expect((await accept(deps, code, "mara")).status).toBe(200);
+  });
+
+  it("a dead code is the one invite_invalid whatever the username: malformed, reserved, taken or fine", async () => {
+    const { deps, mail, adminSession } = await site();
+    const { code } = await invited(deps, mail, adminSession, MARA);
+    const madeUp = "dpi_" + "0".repeat(40);
+    // 25 requests in all: under the network's 30 in 15 minutes.
+    const names: unknown[] = ["Mara_K", "", null, 5, "admin", "my-mythicshot", "tess", "fresh"];
+    for (const name of names) {
+      for (const dead of [madeUp, "dpi_short"]) expect(seen(await accept(deps, dead, name)), `${String(dead)} ${String(name)}`).toEqual({ status: 404, headers: API_HEADERS, body: INVALID });
+    }
+    // Used: the same answer for every name.
+    expect((await accept(deps, code, "mara")).status).toBe(200);
+    for (const name of names) expect(seen(await accept(deps, code, name)), String(name)).toEqual({ status: 404, headers: API_HEADERS, body: INVALID });
   });
 
   it("refuses a username that is taken, and the invite stays usable", async () => {

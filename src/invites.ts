@@ -43,7 +43,10 @@
 //   (LIMITS_INVITE).
 // - answer one fixed 404 `invite_invalid` for every code that cannot be used: unknown,
 //   malformed, used, cancelled, replaced or expired, after the same database calls (one
-//   read that finds nothing), so codes cannot be told apart.
+//   read that finds nothing), so codes cannot be told apart. The accept decides this before
+//   it looks at the username, so a dead code with any username, a malformed or a reserved one
+//   included, gets that one answer too; then the address that has an account by now; only
+//   then the username (`bad_username`, `reserved_username`, `username_taken`).
 //
 // Accepting is one batch that cannot half-apply, decided by the database's own rules: the
 // invite row is removed only while it is still there under this code and unexpired, and the
@@ -398,21 +401,23 @@ export function inviteRoutes(app: Hono, deps: Deps): void {
     const req = c.req.raw;
     const body = await personRequest(req, deps, NEEDS_ACCEPT);
     if (body instanceof Response) return body;
-    const name = parseUsername(body.username);
-    if (!name.ok) return apiError(400, "bad_username", name.problem === "reserved" ? INVITE_SAYS.reservedUsername : INVITE_SAYS.badUsername);
-    const username = name.username;
+    // A dead code first, whatever the username: the one invite_invalid.
     const code = body.code;
     if (typeof code !== "string" || !INVITE_CODE_PATTERN.test(code)) return invalid();
+    const name = parseUsername(body.username);
 
     const hash = await hashToken(code);
     const now = deps.now();
+    // The same one read for any username; a name that cannot be stored is looked up as null, which no account has.
     const found = await deps.db.first<{ id: string; email: string; account: number | null; taken: number | null }>(
       `SELECT i.id, i.email, (SELECT 1 FROM user u WHERE u.email = i.email) AS account, (SELECT 1 FROM user t WHERE t.username = ?) AS taken
          FROM invite i WHERE i.code_hash = ? AND i.expires_at > ?`,
-      [username, hash, now],
+      [name.ok ? name.username : null, hash, now],
     );
     if (found === null) return invalid();
     if (found.account !== null) return apiError(409, "has_account", INVITE_SAYS.acceptHasAccount);
+    if (!name.ok) return name.problem === "reserved" ? apiError(400, "reserved_username", INVITE_SAYS.reservedUsername) : apiError(400, "bad_username", INVITE_SAYS.badUsername);
+    const username = name.username;
     if (found.taken !== null) return apiError(409, "username_taken", INVITE_SAYS.usernameTaken);
 
     const workspaceId = newId("ws");

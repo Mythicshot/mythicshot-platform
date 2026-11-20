@@ -55,11 +55,14 @@ const WORDING = [
   // Mockup 6.
   "This invite no longer works",
   "An invite works once and for 7 days, and a newer invite replaces an older one. Ask the person who invited you to send it again.",
+  // Asked in review: a reload lands here too, as the code left the address when the page first opened.
+  "If you reloaded this page, open the link in your mail again.",
   "Already have an account?",
   "Sign in",
   // Proposed: a browser that is signed in already.
   "You are already signed in",
-  "This invite is for a new account. Sign out first if you want to use it, then open the link from your mail again.",
+  // Asked in review: also a second tab right after the invite was used in the first.
+  "This invite is for a new account. If you have just used it, you are all set. Otherwise sign out first, then open the link from your mail again.",
   "Go to the dashboard",
 ];
 
@@ -164,6 +167,9 @@ describe("the invite page", () => {
     // The sentences the server also says are the server's own, and the dead page's days are the invite's.
     expect([TEXT.badUsername, TEXT.reserved, TEXT.taken]).toEqual([INVITE_SAYS.badUsername, INVITE_SAYS.reservedUsername, INVITE_SAYS.usernameTaken]);
     expect(INVITE_HTML).toContain(`An invite works once and for ${INVITE_MS / 86_400_000} days`);
+    // The page tells a reserved name by the server's error code, never by comparing its words.
+    expect(INVITE_JS).toContain('if (res.status === 400 && error === "reserved_username") { refuse(TEXT.reserved); return; }');
+    expect(INVITE_JS).not.toContain("detail");
     // The failure sentence is the sign-in pages' own.
     expect(SIGNIN_JS).toContain(`failed: ${JSON.stringify(TEXT.failed)},`);
     // The wait, put together.

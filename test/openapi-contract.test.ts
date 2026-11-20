@@ -919,6 +919,8 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     refused(await accept("[]"), 400, "bad_request");
     refused(await accept({ code, username: "x" }, { token: admin.token }), 400, "credentials_not_allowed");
     refused(await accept({ code, username: "Bad_Name" }), 400, "bad_username");
+    refused(await accept({ code, username: "admin" }), 400, "reserved_username");
+    refused(await accept({ code: "dpi_" + "0".repeat(40), username: "Bad_Name" }), 404, "invite_invalid");
     refused(await accept({ code, username: "fresh" }, { headers: { origin: "https://evil.example.net" } }), 403, "bad_origin");
     refused(await accept({ code: "dpi_" + "0".repeat(40), username: "fresh" }), 404, "invite_invalid");
     refused(await accept({ code, username: "fresh" }, { headers: { cookie: headers.cookie } }), 409, "signed_in");
@@ -1444,7 +1446,7 @@ describe("the error codes in the code", () => {
     const invitesPlain = [...invites.matchAll(/\bjson\((\d{3}), \{ error: "([a-z_]+)"/g)];
     expect(invitesPlain.length, "invites.ts: an error answer not built in place").toBe([...invites.matchAll(/\berror: "/g)].length);
     for (const m of invitesPlain) inCode.add(`${m[1]} ${m[2]}`);
-    expect([...inCode]).toEqual(expect.arrayContaining(["404 invite_invalid", "409 signed_in", "409 has_account", "409 too_many_invites", "502 mail_failed", "400 bad_username", "409 username_taken"]));
+    expect([...inCode]).toEqual(expect.arrayContaining(["404 invite_invalid", "409 signed_in", "409 has_account", "409 too_many_invites", "502 mail_failed", "400 bad_username", "400 reserved_username", "409 username_taken"]));
     // Shared items answer with apiError, and with plain JSON for the one refusal that carries the limits.
     const media = source("media.ts");
     const mediaLiteral = [...media.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];

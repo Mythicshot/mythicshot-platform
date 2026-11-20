@@ -1273,7 +1273,7 @@ function paths(): OpenApiDoc["paths"] {
         requestBody: { required: true, content: json(ref("InviteAccept")) },
         responses: {
           "200": { ...answer("The account is made, and this browser is signed in to it.", ref("Ok")), headers: setCookie("The session cookie: host-only, Secure, HttpOnly and SameSite=Lax.") },
-          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token. bad_username: the username breaks the rule, or is one the site holds back.", "bad_request", "credentials_not_allowed", "bad_username"),
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token. bad_username: the username breaks the rule. reserved_username: the username is one the site holds back. An invite that cannot be used answers 404 whatever the username.", "bad_request", "credentials_not_allowed", "bad_username", "reserved_username"),
           "403": refusal("The request did not come from a page of this address.", "bad_origin"),
           "404": refusal("The invite cannot be used: unknown, already used, cancelled, replaced by a newer invite, or expired. They cannot be told apart.", "invite_invalid"),
           "409": refusal("signed_in: the browser is signed in; sign out first. has_account: the address has an account by now; sign in instead. username_taken: another account has the username; choose another. Nothing was made.", "signed_in", "has_account", "username_taken"),

@@ -23,12 +23,15 @@
 // - choose: mockup 5. The invited address in bold, so a person who was forwarded someone
 //   else's invite notices. The username is checked in the page by the server's shape rule
 //   (lower case only: a capital is refused, never silently lowered); a reserved or taken name
-//   is the server's answer. Accepted: the browser is signed in, and the page goes to the
+//   is the server's answer, by its error code. Accepted: the browser is signed in, and the page goes to the
 //   Connections page, which decides by itself whether to welcome the person.
 // - dead: mockup 6, one page for every invite that cannot be used: no code or a malformed one
 //   in the address (nothing is asked), invite_invalid from either request, and has_account.
-// - here: the browser is signed in already (409 signed_in). Proposed wording. It offers the
-//   dashboard and nothing that would act on the account that is signed in.
+//   A reload also lands here, as the code left the address when the page first opened, so a
+//   line says to open the link from the mail again rather than ask for a new invite.
+// - here: the browser is signed in already (409 signed_in), also in a second tab right after
+//   the invite was used in the first. Proposed wording. It offers the dashboard and nothing
+//   that would act on the account that is signed in.
 
 export const INVITE_HTML = `<!doctype html>
 <html lang="en">
@@ -68,12 +71,13 @@ export const INVITE_HTML = `<!doctype html>
   <section id="dead" aria-labelledby="h-dead" hidden>
     <h1 id="h-dead" tabindex="-1">This invite no longer works</h1>
     <p class="lead">An invite works once and for 7 days, and a newer invite replaces an older one. Ask the person who invited you to send it again.</p>
+    <p class="small">If you reloaded this page, open the link in your mail again.</p>
     <p class="small">Already have an account? <a href="/signin">Sign in</a></p>
   </section>
 
   <section id="here" aria-labelledby="h-here" hidden>
     <h1 id="h-here" tabindex="-1">You are already signed in</h1>
-    <p class="lead">This invite is for a new account. Sign out first if you want to use it, then open the link from your mail again.</p>
+    <p class="lead">This invite is for a new account. If you have just used it, you are all set. Otherwise sign out first, then open the link from your mail again.</p>
     <button type="button" class="primary wide" id="here-button">Go to the dashboard</button>
   </section>
 </main>
@@ -134,10 +138,6 @@ export const INVITE_JS = String.raw`(function () {
 
   function errorOf(res) {
     return res.data !== null && typeof res.data === "object" && typeof res.data.error === "string" ? res.data.error : "";
-  }
-
-  function detailOf(res) {
-    return res.data !== null && typeof res.data === "object" && typeof res.data.detail === "string" ? res.data.detail : "";
   }
 
   function say(el, text) {
@@ -296,7 +296,8 @@ export const INVITE_JS = String.raw`(function () {
       var error = errorOf(res);
       if ((res.status === 404 && error === "invite_invalid") || (res.status === 409 && error === "has_account")) { dead(); return; }
       if (res.status === 409 && error === "signed_in") { here(); return; }
-      if (res.status === 400 && error === "bad_username") { refuse(detailOf(res) === TEXT.reserved ? TEXT.reserved : TEXT.badUsername); return; }
+      if (res.status === 400 && error === "reserved_username") { refuse(TEXT.reserved); return; }
+      if (res.status === 400 && error === "bad_username") { refuse(TEXT.badUsername); return; }
       if (res.status === 409 && error === "username_taken") { refuse(TEXT.taken); return; }
       if (res.status === 429) block(res.retryAfter);
       say(message, res.status === 429 ? waitText() : TEXT.failed);
