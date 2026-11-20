@@ -39,9 +39,11 @@ INSERT INTO connect_key (id, key) VALUES (1, lower(hex(randomblob(32))));
 -- under (null when the network is not known); it caps the open requests of one network.
 --
 -- A request is settled once: confirmed (by an account, for that account's one workspace,
--- with the id the token will have) or refused. A confirmed request is collected once, which
--- is when its token is made, with that id; token_id names no row until then, and none at all
--- for a request nobody collected, so it has no foreign key. last_poll_at is when the app
+-- from one of its sessions, with the id the token will have) or refused. A confirmed request
+-- is collected once, which is when its token is made, with that id, and only while the
+-- confirming session is still live. token_id names no row until then, and none at all for a
+-- request nobody collected; confirmed_session names a session that a sweep may remove once it
+-- has ended. Neither has a foreign key, which would keep a session row from being removed. last_poll_at is when the app
 -- last asked; asking again sooner than the interval is refused.
 --
 -- A user code is unique among the rows: a new request whose code is taken gets another. Rows
@@ -57,12 +59,13 @@ CREATE TABLE connect_request (
   last_poll_at INTEGER,
   confirmed_at INTEGER,
   confirmed_by TEXT REFERENCES user (id),
+  confirmed_session TEXT CHECK (confirmed_session IS NULL OR (length(confirmed_session) = 28 AND length(CAST(confirmed_session AS BLOB)) = 28 AND substr(confirmed_session, 1, 4) = 'ses_' AND substr(confirmed_session, 5) NOT GLOB '*[^0-9a-f]*')),
   workspace_id TEXT REFERENCES workspace (id),
   token_id TEXT CHECK (token_id IS NULL OR (length(token_id) = 28 AND length(CAST(token_id AS BLOB)) = 28 AND substr(token_id, 1, 4) = 'tok_' AND substr(token_id, 5) NOT GLOB '*[^0-9a-f]*')),
   refused_at INTEGER,
   collected_at INTEGER,
-  -- Confirmed: all four set together, or none.
-  CHECK ((confirmed_at IS NULL) = (confirmed_by IS NULL) AND (confirmed_at IS NULL) = (workspace_id IS NULL) AND (confirmed_at IS NULL) = (token_id IS NULL)),
+  -- Confirmed: all five set together, or none.
+  CHECK ((confirmed_at IS NULL) = (confirmed_by IS NULL) AND (confirmed_at IS NULL) = (confirmed_session IS NULL) AND (confirmed_at IS NULL) = (workspace_id IS NULL) AND (confirmed_at IS NULL) = (token_id IS NULL)),
   -- Settled once: never both confirmed and refused.
   CHECK (confirmed_at IS NULL OR refused_at IS NULL),
   -- Collected only once confirmed.

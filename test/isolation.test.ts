@@ -196,9 +196,6 @@ const CASES: Record<string, Entry> = {
   ],
   "PATCH /api/v1/tokens/:id": (t) => theirTokens(t).map(([what, id]) => ({ what, method: "PATCH", path: `/api/v1/tokens/${id}`, json: { name: "Taken over" }, only: "session" as const, expect: NO_TOKEN })),
   "DELETE /api/v1/tokens/:id": (t) => theirTokens(t).map(([what, id]) => ({ what, method: "DELETE", path: `/api/v1/tokens/${id}`, only: "session" as const, expect: NO_TOKEN })),
-  "GET /api/v1/connect/requests/:code": (t) => [
-    ...theirCodes(t).map(([what, code]) => ({ what, method: "GET", path: `/api/v1/connect/requests/${code}`, only: "session" as const, expect: NO_REQUEST })),
-  ],
   "GET /api/v1/media/:id/preview": (t) => [
     { what: "the preview of their online image", method: "GET", path: mediaPath(t.media.image, "/preview"), expect: NO_ITEM },
     { what: "the preview of their unfinished item", method: "GET", path: mediaPath(t.media.uploading, "/preview"), expect: NO_ITEM },
@@ -209,6 +206,7 @@ const CASES: Record<string, Entry> = {
 const createInto = (t: Ids, target: Json, more: Json = {}) => ({ manifest: manifestOf(t.pictures.draft.map((s) => s.bytes), "Taken over"), target, ...more });
 
 const BODY_IDS: Record<string, Entry> = {
+  "POST /api/v1/connect/lookup": (t) => theirCodes(t).map(([what, code]) => ({ what, method: "POST", path: "/api/v1/connect/lookup", json: { user_code: code }, field: "user_code", only: "session" as const, expect: NO_REQUEST })),
   "POST /api/v1/connect/confirm": (t) => theirCodes(t).map(([what, code]) => ({ what, method: "POST", path: "/api/v1/connect/confirm", json: { user_code: code }, field: "user_code", only: "session" as const, expect: NO_REQUEST })),
   "POST /api/v1/connect/refuse": (t) => theirCodes(t).map(([what, code]) => ({ what, method: "POST", path: "/api/v1/connect/refuse", json: { user_code: code }, field: "user_code", only: "session" as const, expect: NO_REQUEST })),
   "POST /api/v1/uploads": (t, m) => [
@@ -1072,7 +1070,7 @@ describe("one workspace against another", () => {
       // The caller confirms it; then the other workspace finds nothing and changes nothing.
       expect((await fire(deps, { method: "POST", path: "/api/v1/connect/confirm", json: { user_code: code } }, BY_SESSION.of(mine))).status).toBe(204);
       for (const req of [
-        { method: "GET", path: `/api/v1/connect/requests/${code}` },
+        { method: "POST", path: "/api/v1/connect/lookup", json: { user_code: code } },
         { method: "POST", path: "/api/v1/connect/confirm", json: { user_code: code } },
         { method: "POST", path: "/api/v1/connect/refuse", json: { user_code: code } },
       ]) {

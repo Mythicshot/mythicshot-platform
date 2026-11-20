@@ -34,7 +34,7 @@ const METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "tr
 /** The operations anyone may call, with no credential at all. */
 const PUBLIC = ["GET /healthz", "POST /api/v1/signin/request", "POST /api/v1/signin/complete", "POST /api/v1/connect/start", "POST /api/v1/connect/token"];
 /** The operations that take a session and no token. */
-const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "GET /api/v1/connect/requests/:code", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id"];
+const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "POST /api/v1/connect/lookup", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id"];
 /** The site admin's operations: an admin's session alone, and a 404 (never a 401) to everyone else. */
 const ADMIN_ONLY = ["GET /api/v1/admin/summary", "GET /api/v1/admin/accounts", "PATCH /api/v1/admin/workspaces/:id"];
 
@@ -113,7 +113,7 @@ describe("the API description", () => {
       expect(declared, key).toEqual(inPath);
       for (const name of inPath) seen.add(name);
     }
-    expect([...seen].sort()).toEqual(["code", "id", "n", "step_id"]);
+    expect([...seen].sort()).toEqual(["id", "n", "step_id"]);
   });
 
   it("the version and every limit come from the code", () => {

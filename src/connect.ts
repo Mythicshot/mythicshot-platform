@@ -14,7 +14,8 @@
 //   install: a search must start after the copy was taken, for this install alone, and is
 //   worth something only while the code is open, for at most CONNECT_MS. Guessing online is
 //   held off by the wrong-try limits (LIMITS_CONNECT in src/rate.ts).
-// Neither code is ever put in a URL, a log line or the audit record.
+// Neither code is ever put in a URL (every request takes them in its JSON body), a log line
+// or the audit record.
 //
 // The routes:
 // - POST /api/v1/connect/start and POST /api/v1/connect/token are for the app, which has no
@@ -22,15 +23,20 @@
 //   is refused with 400 `credentials_not_allowed`, the way a request with both credentials is
 //   refused with `mixed_credentials`, so no client comes to rely on sending one. They answer on
 //   the tours and the app address, whichever the app is set up with.
-// - GET /api/v1/connect/requests/:code, POST /api/v1/connect/confirm and POST
-//   /api/v1/connect/refuse are for the dashboard: a session alone (a token is the one 401),
-//   with the anti-forgery header for a change, on the app address.
+// - POST /api/v1/connect/lookup, POST /api/v1/connect/confirm and POST /api/v1/connect/refuse
+//   are for the dashboard: a session alone (a token is the one 401), each with the session's
+//   anti-forgery header and an Origin of the site, on the app address. The lookup is a POST
+//   too, so the short code never travels in an address, and no other site can spend a
+//   person's wrong tries by sending their browser to a link.
 //
 // The token is made when the app collects it, in the one batch that marks the request
 // collected, never at confirmation: a confirmed request nobody collects leaves no token, and
 // of two collections at once only one can make it (the request's token id is the token's
 // primary key, and the batch is guarded). Confirming picks the token's id, so the record of
-// the confirmation can name it.
+// the confirmation can name it, and records the confirming session: the token is made only
+// while that session is still live (not revoked, not expired), decided in the statement that
+// makes it, so signing out everywhere, or ending that session, before the app collects
+// leaves no token.
 //
 // Every answer to a device code that cannot give a token (unknown, expired, refused, already
 // collected, or not a device code at all) is the one 410 `expired_code`, byte for byte, after
@@ -220,10 +226,9 @@ async function countNetwork(deps: Deps, network: string | null, limits: Limit[])
  * over, the account's count is given back. Answers the hits, to be given back once the code
  * turns out right, or the 429.
  */
-async function countTry(req: Request, deps: Deps, userId: string): Promise<CountedHit[] | Response> {
+async function countTry(deps: Deps, userId: string, network: string | null): Promise<CountedHit[] | Response> {
   const account = await hitLimitRefundable(deps, LIMITS_CONNECT.wrongAccount, await accountKey(userId));
   if (account.over) return tooMany(account.retryAfterSeconds);
-  const network = await networkKey(clientAddressOf(req));
   if (network === null) return [account];
   const net = await hitLimitRefundable(deps, LIMITS_CONNECT.wrongNetwork, network);
   if (net.over) {
@@ -327,11 +332,12 @@ export function connectRoutes(app: Hono, deps: Deps): void {
     // no request has: the same calls as for any code nobody has.
     const hash = await hashToken(wellFormed ? given : "");
     const now = deps.now();
-    type Row = { id: string; confirmed_at: number | null; last_poll_at: number | null; confirmed_by: string | null; workspace_id: string | null; token_id: string | null; workspace_name: string | null };
+    type Row = { id: string; confirmed_at: number | null; last_poll_at: number | null; confirmed_by: string | null; workspace_id: string | null; token_id: string | null; workspace_name: string | null; username: string | null };
     const row = await deps.db.first<Row>(
-      `SELECT r.id, r.confirmed_at, r.last_poll_at, r.confirmed_by, r.workspace_id, r.token_id, w.name AS workspace_name
+      `SELECT r.id, r.confirmed_at, r.last_poll_at, r.confirmed_by, r.workspace_id, r.token_id, w.name AS workspace_name, u.username
          FROM connect_request r
          LEFT JOIN workspace w ON w.id = r.workspace_id
+         LEFT JOIN user u ON u.id = r.confirmed_by
         WHERE r.device_code_hash = ? AND r.expires_at > ? AND r.refused_at IS NULL AND r.collected_at IS NULL`,
       [hash, now],
     );
@@ -346,9 +352,11 @@ export function connectRoutes(app: Hono, deps: Deps): void {
 
     // The token is made here, in the batch that marks the request collected:
     // 1. the token row, named by the id confirming picked, for the confirmed workspace, only
-    //    while the request is confirmed, uncollected, not refused and not expired, and its
-    //    confirming account is active, a member of that workspace, and no account of the
-    //    workspace is disabled (the rule a token's lookup has);
+    //    while the request is confirmed, uncollected, not refused and not expired, its
+    //    confirming account is active and a member of that workspace, no account of the
+    //    workspace is disabled (the rule a token's lookup has), and the session it was
+    //    confirmed from is still the account's, not revoked and not expired (the rule a
+    //    session's lookup has);
     // 2. the record, which is also the guard: unless 1 made exactly one row, it fails and the
     //    whole batch is undone;
     // 3. the request is marked collected.
@@ -363,11 +371,13 @@ export function connectRoutes(app: Hono, deps: Deps): void {
                   FROM connect_request r
                   JOIN user u ON u.id = r.confirmed_by
                   JOIN membership m ON m.user_id = u.id AND m.workspace_id = r.workspace_id
+                  JOIN session s ON s.id = r.confirmed_session AND s.user_id = r.confirmed_by
                  WHERE r.id = ? AND r.confirmed_at IS NOT NULL AND r.refused_at IS NULL AND r.collected_at IS NULL AND r.expires_at > ?
+                   AND s.revoked_at IS NULL AND s.expires_at > ?
                    AND u.status = 'active'
                    AND NOT EXISTS (SELECT 1 FROM user d WHERE d.status = 'disabled'
                                      AND (d.workspace_id = r.workspace_id OR d.id IN (SELECT m2.user_id FROM membership m2 WHERE m2.workspace_id = r.workspace_id)))`,
-          params: [await hashToken(token), now, row.id, now],
+          params: [await hashToken(token), now, row.id, now, now],
         },
         auditStatement(deps, { event: "connection_collected", userId: row.confirmed_by, workspaceId: row.workspace_id, subject: row.token_id, detail: { request: row.id } }, { onlyAfterOneChange: true }),
         { sql: "UPDATE connect_request SET collected_at = ?, last_poll_at = ? WHERE id = ? AND collected_at IS NULL", params: [now, now, row.id] },
@@ -381,40 +391,33 @@ export function connectRoutes(app: Hono, deps: Deps): void {
       status: "connected",
       token,
       workspace: { id: row.workspace_id, name: row.workspace_name },
+      // Who confirmed, by username only (null when the account has none), never the email
+      // address: the app shows it, so a person whose code someone else confirmed notices.
+      account: { username: row.username },
       version: VERSION,
       ...(hosts === null ? {} : { addresses: { tours: hosts.tours, app: hosts.app } }),
     });
   });
 
   /**
-   * What the dashboard shows before a person confirms: the device's name and when it asked,
-   * for an open request (neither confirmed nor refused, not expired) and nothing else; every
-   * other code, and one that is not a code, is the one 404. Each lookup counts as a wrong try
-   * until it is found right.
+   * The dashboard's three requests with a short code, each a POST with the code in its JSON
+   * body, a session alone, its anti-forgery header and an Origin of the site.
+   *
+   * lookup answers what the dashboard shows before a person confirms: the device's name,
+   * when it asked, and whether the person's network is the one the app asked from (false
+   * when either is not known), for an open request (neither confirmed nor refused, not
+   * expired) and nothing else.
+   *
+   * confirm and refuse settle an open request once, for the caller: confirm binds it to the
+   * caller's account, its one workspace and the session it was confirmed from, and picks the
+   * id its token will have; refuse ends it. The change, its record (which guards it: unless
+   * the change was made, nothing is) and the giving back of the try are one batch.
+   *
+   * For all three, every code that names no open request, also one settled a moment ago by
+   * someone else, and one that is not a code, is the one 404, and nothing changes. Each try
+   * counts as a wrong one until the code is found right.
    */
-  app.get("/api/v1/connect/requests/:code", async (c) => {
-    const req = c.req.raw;
-    const auth = await requireAuth(req, deps, { only: "session" });
-    if (auth instanceof Response) return auth;
-    if (auth.session === undefined) return unauthorized();
-    const tries = await countTry(req, deps, auth.session.userId);
-    if (tries instanceof Response) return tries;
-    const code = parseUserCode(c.req.param("code"));
-    if (code === null) return noRequest();
-    const row = await deps.db.first<{ device_name: string; created_at: number }>(`SELECT device_name, created_at ${OPEN_BY_CODE}`, [await userCodeHash(await codeKey(deps), code), deps.now()]);
-    if (row === null) return noRequest();
-    await deps.db.batch(tries.map(refundStatement));
-    return json(200, { device_name: row.device_name, asked_at: row.created_at });
-  });
-
-  /**
-   * Settles an open request once, for the caller: confirm binds it to the caller's account
-   * and its one workspace, and picks the id its token will have; refuse ends it. The change,
-   * its record (which guards it: unless the change was made, nothing is) and the giving back
-   * of the try are one batch. Every code that names no open request, also one settled a
-   * moment ago by someone else, is the one 404, and nothing changes.
-   */
-  const settle = (how: "confirm" | "refuse") => async (c: { req: { raw: Request } }) => {
+  const withCode = (how: "lookup" | "confirm" | "refuse") => async (c: { req: { raw: Request } }) => {
     const req = c.req.raw;
     const auth = await requireAuth(req, deps, { only: "session" });
     if (auth instanceof Response) return auth;
@@ -422,14 +425,19 @@ export function connectRoutes(app: Hono, deps: Deps): void {
     const body = await ownJsonBody(req, deps, NEEDS_USER_CODE);
     if (body instanceof Response) return body;
     const userId = auth.session.userId;
-    const tries = await countTry(req, deps, userId);
+    const network = await networkKey(clientAddressOf(req));
+    const tries = await countTry(deps, userId, network);
     if (tries instanceof Response) return tries;
     const code = parseUserCode(body.user_code);
     if (code === null) return noRequest();
     const hash = await userCodeHash(await codeKey(deps), code);
     const now = deps.now();
-    const row = await deps.db.first<{ id: string }>(`SELECT id ${OPEN_BY_CODE}`, [hash, now]);
+    const row = await deps.db.first<{ id: string; device_name: string; created_at: number; network_key: string | null }>(`SELECT id, device_name, created_at, network_key ${OPEN_BY_CODE}`, [hash, now]);
     if (row === null) return noRequest();
+    if (how === "lookup") {
+      await deps.db.batch(tries.map(refundStatement));
+      return json(200, { device_name: row.device_name, asked_at: row.created_at, same_network: network !== null && row.network_key === network });
+    }
     const open = "id = ? AND confirmed_at IS NULL AND refused_at IS NULL AND expires_at > ?";
     // The caller's account must still be active and a member of the workspace the session resolved to.
     const active = "EXISTS (SELECT 1 FROM user u JOIN membership m ON m.user_id = u.id WHERE u.id = ? AND m.workspace_id = ? AND u.status = 'active')";
@@ -437,8 +445,8 @@ export function connectRoutes(app: Hono, deps: Deps): void {
     const change =
       how === "confirm"
         ? {
-            sql: `UPDATE connect_request SET confirmed_at = ?, confirmed_by = ?, workspace_id = ?, token_id = ? WHERE ${open} AND ${active}`,
-            params: [now, userId, auth.workspaceId, tokenId, row.id, now, userId, auth.workspaceId],
+            sql: `UPDATE connect_request SET confirmed_at = ?, confirmed_by = ?, confirmed_session = ?, workspace_id = ?, token_id = ? WHERE ${open} AND ${active}`,
+            params: [now, userId, auth.session.id, auth.workspaceId, tokenId, row.id, now, userId, auth.workspaceId],
           }
         : { sql: `UPDATE connect_request SET refused_at = ? WHERE ${open} AND ${active}`, params: [now, row.id, now, userId, auth.workspaceId] };
     const record =
@@ -453,6 +461,7 @@ export function connectRoutes(app: Hono, deps: Deps): void {
     }
     return noContent();
   };
-  app.post("/api/v1/connect/confirm", settle("confirm"));
-  app.post("/api/v1/connect/refuse", settle("refuse"));
+  app.post("/api/v1/connect/lookup", withCode("lookup"));
+  app.post("/api/v1/connect/confirm", withCode("confirm"));
+  app.post("/api/v1/connect/refuse", withCode("refuse"));
 }
