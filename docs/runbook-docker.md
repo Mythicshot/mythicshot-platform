@@ -413,7 +413,7 @@ It prints `The admin account "yourname" was created.`, says that your tours, the
 
 If it says `The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.`, the admin exists and only the link is missing: get one as in step 3, where the settings file is `.env`.
 
-2. Open the link in your browser and press "Sign in". It works once and for 15 minutes, and signs you in to the dashboard. Run the first command again and it says `This site already has an admin. Nothing was changed.`
+2. Open the link in your browser and press "Sign in". It works once and for 15 minutes; the press lands you on the dashboard's Tours page, `/tours`. Run the first command again and it says `This site already has an admin. Nothing was changed.`
 
 > [!WARNING]
 > The link signs in whoever opens it first, like a password for 15 minutes: open it in your own browser and never paste it into a chat, a ticket or a file.

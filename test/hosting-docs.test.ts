@@ -649,7 +649,7 @@ describe("the shared cPanel hosting guide", () => {
     expect(part).toMatch(/^> \[!WARNING\]\n> Never open the database with the hosting's `sqlite3` tool/m);
     // The sign-in page is in this version: the guide no longer says it is to come.
     expect(part).not.toMatch(/later version|arrives in|Once the version with the sign-in page/);
-    expect(part).toContain('3. Open the link in your browser and press "Sign in". It works once and for 15 minutes, and signs you in to the dashboard.');
+    expect(part).toContain("3. Open the link in your browser and press \"Sign in\". It works once and for 15 minutes; the press lands you on the dashboard's Tours page, `/tours`.");
     expect(part).not.toMatch(/ends with the link and no other line|in one step/);
     expect(part).toContain("The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.");
     // A link for an existing account is a recovery tool: on for one run, off again; signing in normally needs no shell.
@@ -720,7 +720,7 @@ describe("the shared cPanel hosting guide", () => {
     // The sign-in page is in this version: the runbook no longer says it is to come.
     const admin = runbook.slice(runbook.indexOf("### Make yourself the admin"), runbook.indexOf("### If the setup did not finish"));
     expect(admin).not.toMatch(/later version|arrives in|Once the version with the sign-in page/);
-    expect(admin).toContain('2. Open the link in your browser and press "Sign in". It works once and for 15 minutes, and signs you in to the dashboard.');
+    expect(admin).toContain("2. Open the link in your browser and press \"Sign in\". It works once and for 15 minutes; the press lands you on the dashboard's Tours page, `/tours`.");
     expect(runbook).toContain("The admin was made, but no link was made. To get one, add the line RECOVERY_LINKS=on to the site's settings file, run the command again with --email alone, then remove the line.");
     expect(runbook).toMatch(/`RECOVERY_LINKS=on`[^\n]*`\.env`[^\n]*remove the line again/);
     expect(runbook).toMatch(/by a link sent by mail[^\n]*needs no shell/);

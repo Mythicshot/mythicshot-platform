@@ -21,6 +21,10 @@ import adminTs from "../src/node/admin.ts?raw";
 import configTs from "../src/node/config.ts?raw";
 import mailThreadTs from "../src/node/mail-thread.ts?raw";
 import signinTs from "../src/signin.ts?raw";
+import mailTs from "../src/mail.ts?raw";
+import accountTs from "../src/dash/account.ts?raw";
+import accountEmailTs from "../src/dash/account-email.ts?raw";
+import dashAdminTs from "../src/dash/admin.ts?raw";
 
 const DOCS = import.meta.glob(["../README.md", "../LICENSE", "../docs/*.md"], {
   query: "?raw",
@@ -476,6 +480,52 @@ describe("the sentences the guides quote from the server command and the log", (
     expect(docs[DOCKER]).toContain("`signin: the hourly limit of sign-in mails was reached; none was sent`");
     expect(configTs).toContain("`mail: off, because ${setting} is missing or not usable. The site runs; sign-in mails are not sent.`");
     expect(docs[README]).toContain("`mail: off, because SMTP_PORT is missing or not usable. The site runs; sign-in mails are not sent.`");
+  });
+
+  it("the mails, the email-change pages and the allowance question the README quotes say exactly that in the code", () => {
+    const readme = docs[README];
+    // The mail to the new address and the notice to the old one, with the default site name.
+    for (const [code, quoted] of [
+      ["`Confirm your new ${name} email address`", "`Confirm your new Mythicshot email address`"],
+      ["`Open this link to make this the email address of your ${name} account:`", "`Open this link to make this the email address of your Mythicshot account:`"],
+      [
+        "`It works once and for 15 minutes, and you need to be signed in to that ${name} account when you open it. Until you confirm it there, nothing changes. If you did not ask for this, ignore this mail.`",
+        "`It works once and for 15 minutes, and you need to be signed in to that Mythicshot account when you open it. Until you confirm it there, nothing changes. If you did not ask for this, ignore this mail.`",
+      ],
+      ["`Your ${name} email address was changed`", "`Your Mythicshot email address was changed`"],
+      ['`The email address of the ${name} account "${username}"`', '`The email address of the Mythicshot account "<username>" was changed to n…@example.com.`'],
+      ["`${account} was changed to ${maskEmail(newEmail)}.`", "was changed to n…@example.com.`"],
+      ['"If this was you, there is nothing to do."', "`If this was you, there is nothing to do.`"],
+      ['"If it was not, answer this mail or contact the person who runs this site."', "`If it was not, answer this mail or contact the person who runs this site.`"],
+    ] as const) {
+      expect(mailTs, code).toContain(code);
+      expect(readme, quoted).toContain(quoted);
+    }
+    expect(mailTs).toContain('export const DEFAULT_SITE_NAME = "Mythicshot";');
+    // The pages, word for word.
+    const pages: [string, string][] = [
+      [accountEmailTs, "Confirm your new email address"],
+      [accountEmailTs, "Press the button to make this your Mythicshot email address."],
+      [accountEmailTs, "Sign in first"],
+      [accountEmailTs, "Sign in with your current email address, then open the link from your mail again."],
+      [accountEmailTs, "Your email address is now "],
+      [accountEmailTs, "Sign-in links go to this address from now on. We sent a notice to "],
+      [accountEmailTs, "This link no longer works. Ask for a new one from your account page."],
+      [accountEmailTs, "If you have more than one account, sign in to the one that asked for the change and open the link again."],
+      [accountTs, "Open the link we sent there to finish. It works once and for 15 minutes. Until then you keep signing in with "],
+      [accountTs, "This site cannot send mail, so an email address cannot be changed here."],
+      [dashAdminTs, "That is less than this workspace uses. Nothing is deleted, but its new uploads are refused until it is under "],
+      [dashAdminTs, "That is exactly what this workspace uses. Nothing is deleted, but its new uploads are refused until it is under "],
+      [dashAdminTs, "An allowance of 0 refuses every upload from this workspace."],
+      [dashAdminTs, "Write a size such as 500 MB or 10 GB."],
+      [dashAdminTs, "Save anyway"],
+    ];
+    for (const [source, said] of pages) {
+      expect(source, said).toContain(said);
+      expect(readme, said).toContain(said.trimEnd());
+    }
+    // The units the allowance field takes: B, KB, MB and GB at 1024, and no TB.
+    expect(dashAdminTs).toContain("var UNITS = { b: 1, byte: 1, bytes: 1, kb: 1024, mb: 1048576, gb: 1073741824 };");
   });
 
   it("the README says the mail thread does not take the app's NODE_OPTIONS, as the code makes it", () => {

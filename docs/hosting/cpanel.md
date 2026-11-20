@@ -542,7 +542,7 @@ Open this link within 15 minutes to sign in:
 https://app.example.com/signin/link#…
 ```
 
-3. Open the link in your browser and press "Sign in". It works once and for 15 minutes, and signs you in to the dashboard. With two addresses it is on the app address; with one address it is on the name in a `SITE_HOST=tours.example.com` line of the settings file. Without either, the command prints only the part after the address, `/signin/link#…`, and you put your site's address in front of it.
+3. Open the link in your browser and press "Sign in". It works once and for 15 minutes; the press lands you on the dashboard's Tours page, `/tours`. With two addresses it is on the app address; with one address it is on the name in a `SITE_HOST=tours.example.com` line of the settings file. Without either, the command prints only the part after the address, `/signin/link#…`, and you put your site's address in front of it.
 
 > [!WARNING]
 > The link signs in whoever opens it first, like a password for 15 minutes: open it in your own browser and never paste it into a chat, a ticket or a file.
