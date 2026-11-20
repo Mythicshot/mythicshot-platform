@@ -809,6 +809,12 @@ describe("one workspace against another", () => {
       w.tick();
       // Their address answers what a free address answers, and nothing is stored or sent.
       const asked = await request("POST /api/v1/account/email", mine, { email: theirs.email });
+      // Nor later: asking for their address ended the caller's own open change exactly as a free
+      // address would, so confirming that change says nothing of whose the address is.
+      const mineEnded = await request("POST /api/v1/account/email/confirm", mine, { code: mine.emailCode });
+      const neverBefore = await request("POST /api/v1/account/email/confirm", mine, { code: "dpe_" + "1".repeat(40) });
+      expect(mineEnded.status, mineEnded.text).toBe(400);
+      expect(seen(mineEnded)).toEqual(seen(neverBefore));
       const nobodys = await request("POST /api/v1/account/email", mine, { email: `nobody-${mine.name.toLowerCase()}@example.com` });
       expect({ status: asked.status, body: asked.text }).toEqual(free);
       expect(seen(asked)).toEqual(seen(nobodys));

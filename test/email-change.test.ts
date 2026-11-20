@@ -99,7 +99,7 @@ function recordKinds(deps: Deps): string[] {
     all: (sql, params) => (kinds.push("all"), db.all(sql, params)),
     first: (sql, params) => (kinds.push("first"), db.first(sql, params)),
     run: (sql, params) => (kinds.push("run"), db.run(sql, params)),
-    batch: (stmts) => (kinds.push(`batch ${stmts.length}`), db.batch(stmts)),
+    batch: (stmts) => (kinds.push(`batch ${stmts.length}: ${stmts.map((x) => x.sql.replace(/\s+/g, " ").trim()).join(" | ")}`), db.batch(stmts)),
   };
   deps.db = wrapped;
   return kinds;
@@ -173,16 +173,10 @@ describe("asking for an email change", () => {
 
     const free = await ask(deps, s, NEW, { app });
     const freeCalls = split(kinds);
-    expect(await padCount(deps)).toBe(0);
-    kinds.length = 0;
     const taken = await ask(deps, s, b.email, { app });
     const takenCalls = split(kinds);
-    expect(await padCount(deps)).toBe(1);
-    kinds.length = 0;
     const own = await ask(deps, s, a.email, { app });
     const ownCalls = split(kinds);
-    expect(await padCount(deps)).toBe(2);
-    kinds.length = 0;
 
     expect(seen(free)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
     expect(seen(taken)).toEqual(seen(free));
@@ -191,27 +185,48 @@ describe("asking for an email change", () => {
     expect(freeCalls.before).toEqual(["all", "first", "first", "first", "first", "first", "first", "run"]);
     expect(takenCalls.before).toEqual(freeCalls.before);
     expect(ownCalls.before).toEqual(freeCalls.before);
-    // After it, one batch of two rows each way: the change and its audit row, or the pad and the audit row.
-    expect(freeCalls.after).toEqual(["batch 2"]);
+    // After it, one batch of the very same two statements each way, statement for statement:
+    // the account's change replaced (for a taken or own address by one nobody can confirm), and the audit row.
+    expect(freeCalls.after).toHaveLength(1);
+    expect(freeCalls.after[0]).toMatch(/^batch 2: INSERT INTO email_change .* \| INSERT INTO audit /);
     expect(takenCalls.after).toEqual(freeCalls.after);
     expect(ownCalls.after).toEqual(freeCalls.after);
+    // No pad is needed: every path writes the same rows.
+    expect(await padCount(deps)).toBe(0);
 
-    // A taken address: nothing stored, nothing mailed, neither to it nor to anyone. The free one did get its link.
+    // A taken address: no link and no mail, neither to it nor to anyone. The free one did get its link.
     expect(mail.sent.map((m) => m.to)).toEqual([NEW]);
-    expect((await changes(deps)).map((r) => r.new_email)).toEqual([NEW]);
+    // The account's one row is now the last request's, ended at once: it can never be confirmed.
+    expect(await changes(deps)).toEqual([expect.objectContaining({ user_id: a.userId, new_email: a.email, used_at: NOW })]);
     expect(await emailOf(deps, a.userId)).toBe(a.email);
     expect(await emailOf(deps, b.userId)).toBe(b.email);
     // Each request is in the audit record, by ids alone.
     expect(await countOf(deps, "audit WHERE event = 'email_change_requested'")).toBe(3);
   });
 
-  it("asking for a taken address does not replace the change the account asked for before", async () => {
+  it("asking for a taken address ends the change the account asked for before, as asking for a free one does", async () => {
     const { deps, mail, a, b } = await site();
     const s = await signIn(deps, a.userId);
     const code = await askedCode(deps, mail, s, NEW);
     expect((await ask(deps, s, b.email)).text).toBe(OK);
-    expect((await confirm(deps, s, code)).status).toBe(200);
-    expect(await emailOf(deps, a.userId)).toBe(NEW);
+    expect(seen(await confirm(deps, s, code))).toEqual({ status: 400, headers: API_HEADERS, body: BAD_CODE });
+    expect(await emailOf(deps, a.userId)).toBe(a.email);
+  });
+
+  it("a pending change tells nothing of a later request: ask for a mailbox of one's own, ask for another address, confirm the first; the same refusal whoever has it", async () => {
+    const answers: string[] = [];
+    for (const which of ["free", "taken", "own"] as const) {
+      const { deps, mail, a, b } = await site();
+      const s = await signIn(deps, a.userId);
+      const code = await askedCode(deps, mail, s, "mine-too@example.com");
+      const probe = which === "free" ? "nobody-here@example.com" : which === "taken" ? b.email : a.email;
+      expect((await ask(deps, s, probe)).text, which).toBe(OK);
+      const r = await confirm(deps, s, code);
+      expect(seen(r), which).toEqual({ status: 400, headers: API_HEADERS, body: BAD_CODE });
+      answers.push(JSON.stringify(seen(r)));
+      expect(await emailOf(deps, a.userId), which).toBe(a.email);
+    }
+    expect(new Set(answers).size).toBe(1);
   });
 
   it("refuses an address that is not one: a NUL, a line break, too long, odd unicode", async () => {
@@ -372,7 +387,8 @@ describe("asking for an email change", () => {
     const r = await ask(deps, s, NEW);
     expect(seen(r)).toEqual({ status: 200, headers: API_HEADERS, body: OK });
     expect(mail.sent).toEqual([]);
-    expect(await countOf(deps, "email_change")).toBe(0);
+    // No change is left open: the request ended any earlier one, as every request does.
+    expect(await countOf(deps, "email_change WHERE used_at IS NULL")).toBe(0);
     expect(errors.mock.calls).toEqual([[EMAIL_CHANGE_LINES.hour]]);
   });
 
@@ -612,8 +628,8 @@ describe("confirming an email change", () => {
     const sa = await signIn(deps, a.userId);
     const lines: unknown[][] = [];
     vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => void lines.push(args));
-    const code = await askedCode(deps, mail, sa, NEW);
     await ask(deps, sa, b.email);
+    const code = await askedCode(deps, mail, sa, NEW);
     await confirm(deps, sa, "dpe_" + "1".repeat(40));
     await confirm(deps, sa, code);
     const audit = JSON.stringify(await deps.db.all("SELECT * FROM audit"));

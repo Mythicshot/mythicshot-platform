@@ -13,12 +13,13 @@
 //
 // Asking for a change answers the same whether the new address is free, belongs to another
 // account or is the caller's own: the same status, body and headers, after the same
-// database calls in the same order. Whether a change is stored and a link sent is decided
-// in one job that runs after the answer, and that job writes as much either way (one batch
-// of two rows), the way asking for a sign-in link does (src/signin.ts). So the answer cannot
-// be used to find out which addresses have an account. For an address that is taken,
-// nothing is stored and nothing is sent: not even a notice to its owner, which would let
-// anyone send mail to any account's mailbox at will.
+// database calls in the same order. Whether a link is sent is decided in one job that runs
+// after the answer, and that job runs the very same statements either way: every request
+// replaces the account's earlier change, so neither the answer nor anything that happens to
+// that earlier change later can be used to find out which addresses have an account. For an
+// address that is taken, the new row is ended at once under a code nobody is told, and
+// nothing is sent: not even a notice to its owner, which would let anyone send mail to any
+// account's mailbox at will.
 //
 // A code is "dpe_" and 40 hex characters (160 random bits): a prefix of its own, so a
 // sign-in code ("dpl_") is never taken as one, nor one of these as a sign-in code. Only its
@@ -36,7 +37,7 @@ import { apiError, json } from "./http.ts";
 import { emailChangedMail, emailChangeLink, emailChangeMail, linkOrigin } from "./mail.ts";
 import { canMailLinks, deferOf, isNotNullViolation, isUniqueViolation, mailOf, type Deps } from "./ports.ts";
 import { LIMITS_EMAIL_CHANGE, LIMITS_SIGNIN, SITE_KEY, SITE_QUIET_KEY, accountKey, hitLimit, recipientKey, sweepCounters } from "./rate.ts";
-import { MAIL_REASONS, afterTheAnswer, ownJsonBody, padStatement, withHeader } from "./signin.ts";
+import { MAIL_REASONS, afterTheAnswer, ownJsonBody, withHeader } from "./signin.ts";
 
 /** A change's link works for 15 minutes, as a sign-in link does. */
 export const EMAIL_CHANGE_MS = 900_000;
@@ -88,51 +89,46 @@ function reasonOf(err: unknown): string {
   return typeof reason === "string" && MAIL_REASONS.includes(reason) ? reason : "failed";
 }
 
-/** What the job after a change request does. `link` is set only when a change is to be stored and mailed. */
-type ChangeJob = { userId: string; workspaceId: string; overHour: boolean; link: { to: string; origin: string } | null };
+/**
+ * What the job after a change request does. `to` is the address asked for; `origin` is set
+ * only when a link is to be mailed to it (the address is free and the cap allows).
+ */
+type ChangeJob = { userId: string; workspaceId: string; overHour: boolean; to: string; origin: string | null };
 
 /**
- * The work of a change request that runs after the answer. Every job waits once for a
- * digest and then writes one batch of two rows: for a change that is stored, the change
- * (replacing the account's earlier one) and the audit row; for any other request (the
- * address is taken or the caller's own, or the site's mail cap is reached) one row of the
- * pad counter and the same audit row. Only then is the link mailed. A change that cannot be
- * written is one fixed line and no mail; a mail that fails is one fixed line. Nothing is
- * tried twice.
+ * The work of a change request that runs after the answer. Every job, whatever the address,
+ * makes a code, waits for its digest and writes the same batch of the same two statements:
+ * the account's one change row is replaced (so its earlier change ends, whatever was asked
+ * for now) and the audit row. Only when a link is to be mailed is the new row left open;
+ * otherwise it is written as used at once, under a code nobody is ever told, so it can never
+ * be confirmed. Either way the earlier change is gone, so nothing later can tell which
+ * addresses have an account. Only then is the link mailed. A change that cannot be written
+ * is one fixed line and no mail; a mail that fails is one fixed line. Nothing is tried twice.
  */
 async function changeJob(deps: Deps, job: ChangeJob): Promise<void> {
   await afterTheAnswer();
   if (job.overHour) console.error(EMAIL_CHANGE_LINES.hour);
-  const record = () => auditStatement(deps, { event: "email_change_requested", userId: job.userId, workspaceId: job.workspaceId, subject: job.userId });
-  if (job.link === null) {
-    try {
-      // Making a code waits once for its digest before the batch; so does this.
-      await crypto.subtle.digest("SHA-256", crypto.getRandomValues(new Uint8Array(24)));
-      await deps.db.batch([padStatement(deps), record()]);
-    } catch {
-      // A pad or a record of a request that changes nothing: nothing anyone asked for is lost.
-    }
-    return;
-  }
-  const { to, origin } = job.link;
-  let link: string;
+  const { to, origin } = job;
+  let link: string | null = null;
   try {
     const code = "dpe_" + randomHex(20);
     const hash = await hashToken(code);
+    const now = deps.now();
     await deps.db.batch([
       {
         // One row per account: asking again replaces the earlier change and its code.
-        sql: `INSERT INTO email_change (id, user_id, new_email, code_hash, created_at) VALUES (?, ?, ?, ?, ?)
-              ON CONFLICT (user_id) DO UPDATE SET id = excluded.id, new_email = excluded.new_email, code_hash = excluded.code_hash, created_at = excluded.created_at, used_at = NULL`,
-        params: [newId("emc"), job.userId, to, hash, deps.now()],
+        sql: `INSERT INTO email_change (id, user_id, new_email, code_hash, created_at, used_at) VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT (user_id) DO UPDATE SET id = excluded.id, new_email = excluded.new_email, code_hash = excluded.code_hash, created_at = excluded.created_at, used_at = excluded.used_at`,
+        params: [newId("emc"), job.userId, to, hash, now, origin === null ? now : null],
       },
-      record(),
+      auditStatement(deps, { event: "email_change_requested", userId: job.userId, workspaceId: job.workspaceId, subject: job.userId }),
     ]);
-    link = emailChangeLink(origin, code);
+    if (origin !== null) link = emailChangeLink(origin, code);
   } catch {
     console.error(EMAIL_CHANGE_LINES.notMade);
     return;
   }
+  if (link === null) return;
   try {
     await mailOf(deps).send(emailChangeMail(to, link));
   } catch (err) {
@@ -251,7 +247,7 @@ export function emailChangeRoutes(app: Hono, deps: Deps): void {
 
     // canMailLinks said there is an address for links; it comes from the settings alone.
     const origin = linkOrigin(deps.config) ?? "";
-    deferOf(deps)(changeJob(deps, { userId, workspaceId: auth.workspaceId, overHour: free && cap.over, link: free && !cap.over ? { to: email, origin } : null }));
+    deferOf(deps)(changeJob(deps, { userId, workspaceId: auth.workspaceId, overHour: free && cap.over, to: email, origin: free && !cap.over ? origin : null }));
     return json(200, { ok: true });
   });
 
