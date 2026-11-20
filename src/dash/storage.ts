@@ -1,25 +1,34 @@
-// The Storage page of the dashboard, /storage, as in the approved mockups 5 and 6, in the
-// form this version has (tours only; images and short clips come with a later plan): the
-// workspace's name, the allowance bar with the line "<used> of <allowance> used · N tours"
-// (no bar, only the total, when no allowance is set), the over-allowance warning, what
-// takes the room (the pictures in tours, logos, uploads in progress, as GET /api/v1/usage
-// counts them), and the largest tours (GET /api/v1/usage/largest) with a small bar each and
-// a Delete button. Its body is fixed text; its script, /dash/storage.js, fills it through
-// textContent, so a title can never become markup.
+// The Storage page of the dashboard, /storage, as in the approved mockups 5 and 6: the
+// workspace's name, the allowance bar with the line "<used> of <allowance> used · N images ·
+// N GIFs · N tours" (no bar, only the total, when no allowance is set; a count of images or
+// GIFs is left out while it is 0, as mockup 6 shows a workspace with tours only), the
+// over-allowance warning, what takes the room (the pictures in tours, GIFs, images, logos,
+// uploads in progress, as GET /api/v1/usage counts them), and the largest things of every
+// kind (the `largest` list of GET /api/v1/usage/largest), each marked Tour, Image or GIF,
+// with a small bar and a Delete button. The Images and GIFs pages are not part of this page.
+// Its body is fixed text; its script, /dash/storage.js, fills it through textContent, so a
+// title can never become markup.
 //
 // The bars are sized through the CSSOM (element.style.width), which the content security
 // policy allows, as the Admin page sizes its bars; no style attribute is ever written.
 //
-// Delete asks the Tours page's question, with its sentences, through the dashboard's one
-// question helper (Dash.question, src/dash/script.ts): while it is open the bar and the page
-// are inert and hidden from screen readers, Escape and Tab are handled for the whole
-// document, a click on the backdrop is Keep it, and its buttons are disabled while the
-// request runs. Every row's Delete is disabled while a delete runs and while the numbers are
-// read again after it, as on the Tours page. A delete is done when the tour is gone: 200, 404 (already gone), or 500
-// cleanup_pending (gone, with files left for later requests to remove). After any outcome
-// the page reads the usage and the largest tours again; when that fails after a delete that
-// worked, the page says the change was made and asks for a reload. Message lines are hidden
-// while they have nothing to say.
+// Delete asks a question through the dashboard's one question helper (Dash.question,
+// src/dash/script.ts): for a tour the Tours page's question with its sentences, for an image
+// or a GIF the same question in the item's words. While it is open the bar and the page are
+// inert and hidden from screen readers, Escape and Tab are handled for the whole document, a
+// click on the backdrop is Keep it, and its buttons are disabled while the request runs.
+// Every row's Delete is disabled while a delete runs and while the numbers are read again
+// after it, as on the Tours page.
+// - A tour is deleted as the Tours page deletes it: DELETE /api/v1/tours/:id again while it
+//   answers 202. It is done when the tour is gone: 200, 404 (already gone), or 500
+//   cleanup_pending (gone, with files left for later requests to remove).
+// - An image or a GIF: DELETE /api/v1/media/:id, sent again (at most ITEM_ROUNDS times in
+//   all) while it answers 500 cleanup_pending, as the API asks. It is done on 204, 404
+//   (already gone), or a last cleanup_pending: the item is closing by then, so it counts for
+//   nothing and is no longer listed, and the workspace's sweep removes what is left.
+// After any outcome the page reads the usage and the largest list again; when that fails
+// after a delete that worked, the page says the change was made and asks for a reload.
+// Message lines are hidden while they have nothing to say.
 import { dashHtml } from "./shell.ts";
 
 const STORAGE_MAIN = `  <div id="storage-page">
@@ -32,21 +41,23 @@ const STORAGE_MAIN = `  <div id="storage-page">
       <p class="total" id="storage-total"></p>
       <p class="over-box" id="storage-over" hidden>You are over your storage allowance. New uploads are refused until you delete tours or get more room.</p>
       <p class="hint" id="storage-online" hidden>Tours that are already online are not affected.</p>
-      <p class="hint" id="storage-counts">Tours and their pictures count. Deleting a tour frees its space within a few minutes.</p>
+      <p class="hint" id="storage-counts">Images, GIFs and tours all count. Deleting one frees its space within a few minutes.</p>
     </div>
     <div class="card">
       <h2 class="card-title" id="h-room" tabindex="-1">What takes the room</h2>
       <div class="room"><span>Tours</span><span class="r" id="room-tours"></span></div>
+      <div class="room"><span>GIFs</span><span class="r" id="room-gifs"></span></div>
+      <div class="room"><span>Images</span><span class="r" id="room-images"></span></div>
       <div class="room"><span>Logos</span><span class="r" id="room-logos"></span></div>
       <div class="room"><span>Uploads in progress</span><span class="r" id="room-uploads"></span></div>
     </div>
     <div class="card" id="largest" hidden>
-      <h2 class="card-title" id="h-largest" tabindex="-1">Largest tours</h2>
+      <h2 class="card-title" id="h-largest" tabindex="-1">Largest items</h2>
       <table class="largest" aria-labelledby="h-largest">
-        <thead><tr><th scope="col">Tour</th><th scope="col" class="mini-cell"><span class="vh">Share</span></th><th scope="col" class="n">Size</th><th scope="col"><span class="vh">Actions</span></th></tr></thead>
+        <thead><tr><th scope="col">Item</th><th scope="col" class="mini-cell"><span class="vh">Share</span></th><th scope="col" class="n">Size</th><th scope="col"><span class="vh">Actions</span></th></tr></thead>
         <tbody id="largest-rows"></tbody>
       </table>
-      <p class="hint"><span id="largest-all"></span><a href="/tours">Tours page</a>.</p>
+      <p class="hint" id="largest-all">Everything else is on the Images, GIFs and Tours pages.</p>
     </div>
   </section>
   </div>
@@ -71,31 +82,51 @@ export const STORAGE_JS = `(function () {
     of: " of ",
     used: " used",
     dot: " · ",
+    oneImage: "1 image",
+    images: " images",
+    oneGif: "1 GIF",
+    gifs: " GIFs",
     oneTour: "1 tour",
     tours: " tours",
-    allBefore: "All ",
-    allAfter: " tours are on the ",
-    oneOnTours: "Your tour is on the ",
+    tagTour: "Tour",
+    tagImage: "Image",
+    tagGif: "GIF",
+    untitledImage: "Untitled image",
+    untitledGif: "Untitled GIF",
     remove: "Delete",
     askBefore: 'Delete "',
     askAfter: '"?',
+    askTour: "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.",
+    askItem: "Its link stops working for everyone and it is removed. This cannot be undone. The copy on your computer is not touched.",
+    goTour: "Delete tour",
+    goImage: "Delete image",
+    goGif: "Delete GIF",
     deleting: "Deleting…",
     publishBusy: "This tour is being published. Try again when that is done.",
     notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
   };
-  // A delete is driven by at most this many requests.
+  // A tour's delete is driven by at most this many requests.
   var MAX_ROUNDS = 1000;
+  // An item's delete is sent at most this many times while its files are not all removed yet.
+  var ITEM_ROUNDS = 3;
   var TOUR_ID = /^tour_[0-9a-f]{24}$/;
+  var ITEM_ID = /^med_[0-9a-f]{24}$/;
+  // What each kind of entry is called on the page, and asked about.
+  var KINDS = {
+    tour: { id: TOUR_ID, tag: TEXT.tagTour, untitled: "", ask: TEXT.askTour, go: TEXT.goTour },
+    image: { id: ITEM_ID, tag: TEXT.tagImage, untitled: TEXT.untitledImage, ask: TEXT.askItem, go: TEXT.goImage },
+    gif: { id: ITEM_ID, tag: TEXT.tagGif, untitled: TEXT.untitledGif, ask: TEXT.askItem, go: TEXT.goGif },
+  };
   // What the page behind the question is, made inert while it is open.
   var BEHIND = ["dash-top", "storage-page"];
   // The question before a delete (Dash.question, src/dash/script.ts).
   var question = Dash.question({ backdrop: "delete-dialog", box: "delete-box", role: "alertdialog", title: "delete-title", message: "delete-message", behind: BEHIND, buttons: ["delete-keep", "delete-go"] });
 
   var $ = function (id) { return document.getElementById(id); };
-  // The tour the question is about, and whether its delete is running.
+  // The entry the question is about, and whether its delete is running.
   var asking = null;
   var working = false;
-  // Each listed tour's Delete button, by tour id, to give the focus back after the question.
+  // Each listed entry's Delete button, by id, to give the focus back after the question.
   var deleteOf = {};
 
   function el(tag, cls, text) {
@@ -120,7 +151,12 @@ export const STORAGE_JS = `(function () {
     return Math.round(Math.max(0, Math.min(100, share)) * 100) / 100;
   }
 
-  // Every listed tour's Delete, disabled while a delete runs and while the numbers are read again.
+  // "1 image", "48 images": a count with its word, singular for one.
+  function counted(n, one, many) {
+    return n === 1 ? one : n + many;
+  }
+
+  // Every listed entry's Delete, disabled while a delete runs and while the numbers are read again.
   function rowsDisabled(on) {
     for (var id in deleteOf) if (Object.prototype.hasOwnProperty.call(deleteOf, id)) deleteOf[id].disabled = on;
   }
@@ -128,45 +164,69 @@ export const STORAGE_JS = `(function () {
   // ---- What the page shows ----
 
   function usageOk(u) {
-    if (u === null || typeof u !== "object" || !isSize(u.used_bytes) || !isSize(u.tours)) return false;
+    if (u === null || typeof u !== "object" || !isSize(u.used_bytes) || !isSize(u.tours) || !isSize(u.images) || !isSize(u.gifs)) return false;
     if (u.allowance_bytes !== null && !isSize(u.allowance_bytes)) return false;
     var c = u.counted;
-    return c !== null && typeof c === "object" && isSize(c.pictures) && isSize(c.logos) && isSize(c.uploads_in_progress);
+    return c !== null && typeof c === "object" && isSize(c.pictures) && isSize(c.logos) && isSize(c.uploads_in_progress) && isSize(c.images) && isSize(c.gifs);
   }
 
-  function row(t, i, max) {
+  // Whether an entry of the largest list is one the page can show and delete.
+  function entryOk(e) {
+    if (e === null || typeof e !== "object" || !Object.prototype.hasOwnProperty.call(KINDS, e.kind)) return false;
+    var k = KINDS[e.kind];
+    if (typeof e.id !== "string" || !k.id.test(e.id) || !isSize(e.bytes)) return false;
+    return e.kind === "tour" ? typeof e.title === "string" : e.title === null || typeof e.title === "string";
+  }
+
+  // The name an entry is shown and asked about by: its title, or "Untitled image" or "Untitled GIF" for an item without one.
+  function nameOf(e) {
+    return e.kind !== "tour" && (e.title === null || e.title === "") ? KINDS[e.kind].untitled : String(e.title);
+  }
+
+  function row(e, i, max) {
     var tr = el("tr");
-    var titleId = "largest-" + i;
-    var name = el("td", "t", String(t.title));
-    name.setAttribute("id", titleId);
-    tr.appendChild(name);
+    var nameId = "largest-" + i;
+    var kindId = nameId + "-kind";
+    var title = el("td", "t");
+    var name = el("span", "name", nameOf(e));
+    name.setAttribute("id", nameId);
+    var tag = el("span", "tag", KINDS[e.kind].tag);
+    tag.setAttribute("id", kindId);
+    title.appendChild(name);
+    title.appendChild(tag);
+    tr.appendChild(title);
     var mini = el("td", "mini-cell");
     mini.setAttribute("aria-hidden", "true");
     var track = el("div", "mini");
     var fill = el("div", "mini-fill");
-    var share = max > 0 ? (t.bytes / max) * 100 : 0;
+    var share = max > 0 ? (e.bytes / max) * 100 : 0;
     fill.style.width = pct(share) + "%";
     track.appendChild(fill);
     mini.appendChild(track);
     tr.appendChild(mini);
-    tr.appendChild(el("td", "n size", Dash.formatBytes(t.bytes)));
+    tr.appendChild(el("td", "n size", Dash.formatBytes(e.bytes)));
     var cell = el("td", "del");
     var btn = el("button", "btn sm danger", TEXT.remove);
     btn.type = "button";
-    btn.setAttribute("aria-describedby", titleId);
+    // A screen reader hears which entry, and of which kind, the button deletes.
+    btn.setAttribute("aria-describedby", nameId + " " + kindId);
     btn.disabled = working;
-    btn.addEventListener("click", function () { ask(t, btn); });
+    btn.addEventListener("click", function () { ask(e); });
     cell.appendChild(btn);
     tr.appendChild(cell);
-    deleteOf[t.id] = btn;
+    deleteOf[e.id] = btn;
     return tr;
   }
 
-  function show(u, tours, workspace) {
+  function show(u, entries, workspace) {
     var limit = u.allowance_bytes;
     var over = limit !== null && u.over === true;
     $("storage-workspace").textContent = workspace;
-    $("storage-total").textContent = Dash.formatBytes(u.used_bytes) + (limit !== null ? TEXT.of + Dash.formatBytes(limit) : "") + TEXT.used + TEXT.dot + (u.tours === 1 ? TEXT.oneTour : u.tours + TEXT.tours);
+    var parts = [Dash.formatBytes(u.used_bytes) + (limit !== null ? TEXT.of + Dash.formatBytes(limit) : "") + TEXT.used];
+    if (u.images > 0) parts.push(counted(u.images, TEXT.oneImage, TEXT.images));
+    if (u.gifs > 0) parts.push(counted(u.gifs, TEXT.oneGif, TEXT.gifs));
+    parts.push(counted(u.tours, TEXT.oneTour, TEXT.tours));
+    $("storage-total").textContent = parts.join(TEXT.dot);
     var bar = $("storage-bar");
     bar.hidden = limit === null;
     if (limit !== null) {
@@ -178,17 +238,18 @@ export const STORAGE_JS = `(function () {
     $("storage-online").hidden = !over;
     $("storage-counts").hidden = over;
     $("room-tours").textContent = Dash.formatBytes(u.counted.pictures);
+    $("room-gifs").textContent = Dash.formatBytes(u.counted.gifs);
+    $("room-images").textContent = Dash.formatBytes(u.counted.images);
     $("room-logos").textContent = Dash.formatBytes(u.counted.logos);
     $("room-uploads").textContent = Dash.formatBytes(u.counted.uploads_in_progress);
 
-    var list = tours.filter(function (t) { return t !== null && typeof t === "object" && typeof t.id === "string" && TOUR_ID.test(t.id) && isSize(t.bytes); });
+    var list = entries.filter(entryOk);
     var max = 0;
-    list.forEach(function (t) { if (t.bytes > max) max = t.bytes; });
+    list.forEach(function (e) { if (e.bytes > max) max = e.bytes; });
     deleteOf = {};
     var rows = $("largest-rows");
     rows.textContent = "";
     for (var i = 0; i < list.length; i++) rows.appendChild(row(list[i], i, max));
-    $("largest-all").textContent = u.tours === 1 ? TEXT.oneOnTours : TEXT.allBefore + u.tours + TEXT.allAfter;
     $("largest").hidden = list.length === 0;
     $("dash-load").textContent = "";
     $("storage").hidden = false;
@@ -196,7 +257,7 @@ export const STORAGE_JS = `(function () {
 
   var workspace = "";
 
-  // The usage and the largest tours. Resolves to true when shown, false when the visitor
+  // The usage and the largest list. Resolves to true when shown, false when the visitor
   // was sent to sign in, or the answer that failed (null when no answer came); then the page
   // keeps what it showed before.
   function load() {
@@ -205,29 +266,33 @@ export const STORAGE_JS = `(function () {
       var usage = got[0];
       var largest = got[1];
       if (usage.status !== 200 || !usageOk(usage.data)) return usage;
-      if (largest.status !== 200 || largest.data === null || typeof largest.data !== "object" || !Array.isArray(largest.data.tours)) return largest;
-      show(usage.data, largest.data.tours, workspace);
+      if (largest.status !== 200 || largest.data === null || typeof largest.data !== "object" || !Array.isArray(largest.data.largest)) return largest;
+      show(usage.data, largest.data.largest, workspace);
       return true;
     }).then(null, function () { return null; });
   }
 
   // ---- The question before a delete ----
 
-  function ask(t) {
+  function ask(e) {
     if (working || asking !== null) return;
+    var k = KINDS[e.kind];
+    // The question's words for this kind; the dialog is closed, so its button has no saved label.
+    $("delete-text").textContent = k.ask;
+    $("delete-go").textContent = k.go;
     var opened = question.open({
-      title: TEXT.askBefore + String(t.title) + TEXT.askAfter,
+      title: TEXT.askBefore + nameOf(e) + TEXT.askAfter,
       focus: "delete-keep",
-      // Back to the tour's Delete when it is still listed, else to the page's heading.
-      back: function () { return deleteOf[t.id]; },
+      // Back to the entry's Delete when it is still listed, else to the page's heading.
+      back: function () { return deleteOf[e.id]; },
       fallback: "h-page",
       onClose: function () { asking = null; },
     });
-    if (opened) asking = { t: t };
+    if (opened) asking = { e: e };
   }
 
-  // Calls the delete until it is no longer in progress; the last answer.
-  function run(id) {
+  // Calls a tour's delete until it is no longer in progress; the last answer.
+  function runTour(id) {
     var rounds = 0;
     function next() {
       rounds++;
@@ -238,16 +303,33 @@ export const STORAGE_JS = `(function () {
     return next();
   }
 
-  // Whether the tour is gone (null: no answer came). One whose leftover files could not all
-  // be removed yet is gone too; later requests finish the cleaning.
-  function done(res) {
+  // Sends an item's delete again while its files are not all removed yet, at most ITEM_ROUNDS times; the last answer.
+  function runItem(id) {
+    var rounds = 0;
+    function next() {
+      rounds++;
+      return Dash.api("DELETE", "/api/v1/media/" + encodeURIComponent(id)).then(function (res) {
+        return leftovers(res) && rounds < ITEM_ROUNDS ? next() : res;
+      });
+    }
+    return next();
+  }
+
+  function leftovers(res) {
+    return res !== null && res.status === 500 && Dash.errorOf(res) === "cleanup_pending";
+  }
+
+  // Whether the entry is gone (null: no answer came). One whose leftover files could not all
+  // be removed yet is gone too: it counts for nothing, and later requests finish the cleaning.
+  function done(e, res) {
     if (res === null) return false;
-    return res.status === 200 || res.status === 404 || (res.status === 500 && Dash.errorOf(res) === "cleanup_pending");
+    if (leftovers(res) || res.status === 404) return true;
+    return e.kind === "tour" ? res.status === 200 : res.status === 204;
   }
 
   // The sentence for a delete that did not happen.
-  function problem(res) {
-    if (res !== null && res.status === 409 && Dash.errorOf(res) === "publish_busy") return TEXT.publishBusy;
+  function problem(e, res) {
+    if (e.kind === "tour" && res !== null && res.status === 409 && Dash.errorOf(res) === "publish_busy") return TEXT.publishBusy;
     return Dash.failure(res);
   }
 
@@ -255,7 +337,7 @@ export const STORAGE_JS = `(function () {
     $("delete-keep").addEventListener("click", function () { question.dismiss(); });
     $("delete-go").addEventListener("click", function () {
       if (asking === null || working) return;
-      var t = asking.t;
+      var e = asking.e;
       working = true;
       question.say("");
       sayIn($("storage-message"), "");
@@ -263,7 +345,7 @@ export const STORAGE_JS = `(function () {
       rowsDisabled(true);
       function settle(res) {
         if (res !== null && res.status === 401) { Dash.signedOut(); return; }
-        var ok = done(res);
+        var ok = done(e, res);
         if (ok) question.close(false);
         // However the delete ended, the numbers are read again before the page says anything;
         // the rows' Delete buttons stay disabled until then.
@@ -277,11 +359,11 @@ export const STORAGE_JS = `(function () {
             $("h-page").focus();
             return;
           }
-          question.say(problem(res));
+          question.say(problem(e, res));
           $("delete-go").focus();
         });
       }
-      run(t.id).then(settle, function () { return settle(null); });
+      (e.kind === "tour" ? runTour(e.id) : runItem(e.id)).then(settle, function () { return settle(null); });
     });
   }
 

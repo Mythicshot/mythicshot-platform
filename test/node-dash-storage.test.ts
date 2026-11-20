@@ -15,7 +15,7 @@ import { STORAGE_HTML, STORAGE_JS } from "../src/dash/storage.ts";
 import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
 import { formatBytes } from "../src/usage.ts";
-import { fixtures, send, uploadTour, type Json } from "./bundle.ts";
+import { fixtures, gif, png, send, uploadTour, type Json } from "./bundle.ts";
 import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
 
 const APP = "https://app.example.com";
@@ -27,8 +27,10 @@ const BUSY = "This tour is being published. Try again when that is done.";
 const NOT_RELOADED = "The change was made, but the list could not be loaded again. Reload the page to see it.";
 const OVER = "You are over your storage allowance. New uploads are refused until you delete tours or get more room.";
 const ONLINE = "Tours that are already online are not affected.";
-const COUNTS = "Tours and their pictures count. Deleting a tour frees its space within a few minutes.";
+const COUNTS = "Images, GIFs and tours all count. Deleting one frees its space within a few minutes.";
 const QUESTION = "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.";
+const QUESTION_ITEM = "Its link stops working for everyone and it is removed. This cannot be undone. The copy on your computer is not touched.";
+const EVERYTHING_ELSE = "Everything else is on the Images, GIFs and Tours pages.";
 
 const KB = 1024;
 const MB = 1024 * KB;
@@ -131,23 +133,40 @@ const session = (workspace = "Cowfee Raid Tools"): Answer => ({
   status: 200,
   json: { account: { id: "usr_1", username: "solex", email: "solex@example.com", admin: false }, workspace: { id: "ws_1", name: workspace }, session: { id: "ses_1", created_at: 0, expires_at: 0 }, csrf: CSRF },
 });
-type UsageNumbers = { pictures: number; logos: number; uploads: number; allowance: number | null; tours: number };
+type UsageNumbers = { pictures: number; logos: number; uploads: number; allowance: number | null; tours: number; imageBytes?: number; gifBytes?: number; images?: number; gifs?: number };
 const usage = (n: UsageNumbers): Answer => {
-  const used = n.pictures + n.logos + n.uploads;
-  return { status: 200, json: { used_bytes: used, allowance_bytes: n.allowance, over: n.allowance !== null && used > n.allowance, tours: n.tours, counted: { pictures: n.pictures, logos: n.logos, uploads_in_progress: n.uploads } } };
+  const imageBytes = n.imageBytes ?? 0;
+  const gifBytes = n.gifBytes ?? 0;
+  const used = n.pictures + n.logos + n.uploads + imageBytes + gifBytes;
+  return {
+    status: 200,
+    json: {
+      used_bytes: used,
+      allowance_bytes: n.allowance,
+      over: n.allowance !== null && used > n.allowance,
+      tours: n.tours,
+      images: n.images ?? 0,
+      gifs: n.gifs ?? 0,
+      counted: { pictures: n.pictures, logos: n.logos, uploads_in_progress: n.uploads, images: imageBytes, gifs: gifBytes },
+    },
+  };
 };
 
 const T1 = "tour_" + "1".repeat(24);
 const T2 = "tour_" + "2".repeat(24);
 const T3 = "tour_" + "3".repeat(24);
-const largest = (tours: { id: string; title: string; bytes: number }[]): Answer => ({ status: 200, json: { tours } });
+const G1 = "med_" + "a".repeat(24);
+const I1 = "med_" + "b".repeat(24);
+type Entry = { kind: "tour" | "image" | "gif"; id: string; title: string | null; bytes: number };
+/** The answer of GET /api/v1/usage/largest for these entries: `largest` as given, `tours` the tours among them. */
+const largest = (entries: Entry[]): Answer => ({ status: 200, json: { tours: entries.filter((e) => e !== null && e.kind === "tour").map(({ id, title, bytes }) => ({ id, title, bytes })), largest: entries } });
 
-/** Mockup 5, in this version: 1.2 GB of 5 GB, 12 tours, the three largest. */
-const M5 = { pictures: 790 * MB, logos: 340 * KB, uploads: 438 * MB + 500 * KB, allowance: 5 * GB, tours: 12 };
-const M5_TOURS = [
-  { id: T1, title: "Full onboarding, long cut", bytes: 412 * MB },
-  { id: T2, title: "Timeline rehearsal walkthrough", bytes: 255 * MB },
-  { id: T3, title: "Loot council vote, full round", bytes: 96 * MB },
+/** Mockup 5: 1.2 GB of 5 GB, 48 images, 9 GIFs and 12 tours, the three largest of them. */
+const M5 = { pictures: 790 * MB, gifBytes: 250 * MB, imageBytes: 64 * MB, logos: 340 * KB, uploads: 96 * MB, allowance: 5 * GB, tours: 12, images: 48, gifs: 9 };
+const M5_TOURS: Entry[] = [
+  { kind: "tour", id: T1, title: "Full onboarding, long cut", bytes: 412 * MB },
+  { kind: "tour", id: T2, title: "Timeline rehearsal walkthrough", bytes: 255 * MB },
+  { kind: "gif", id: G1, title: "Loot council vote, full round", bytes: 96 * MB },
 ];
 
 function standard(extra: Record<string, Answer | Answer[]> = {}): Responder {
@@ -156,11 +175,13 @@ function standard(extra: Record<string, Answer | Answer[]> = {}): Responder {
 
 const rows = (tab: Tab) => tab.$("largest-rows").children.filter((c): c is FakeElement => c instanceof FakeElement);
 const cells = (row: FakeElement) => row.children.filter((c): c is FakeElement => c instanceof FakeElement);
-const titleOf = (row: FakeElement) => cells(row)[0].textContent;
+/** The name a row shows: its first cell's name, without the kind beside it. */
+const titleOf = (row: FakeElement) => cells(row)[0].all().find((e) => e.className === "name")!.textContent;
+const kindOf = (row: FakeElement) => cells(row)[0].all().find((e) => e.className === "tag")!.textContent;
 const deleteOf = (row: FakeElement) => row.all().find((e) => e.tagName === "button")!;
 const fillOf = (row: FakeElement) => row.all().find((e) => e.className === "mini-fill")!;
 const line = (tab: Tab) => tab.$("storage-total").textContent;
-const room = (tab: Tab) => [tab.$("room-tours").textContent, tab.$("room-logos").textContent, tab.$("room-uploads").textContent];
+const room = (tab: Tab) => ["tours", "gifs", "images", "logos", "uploads"].map((k) => tab.$(`room-${k}`).textContent);
 /** Whether the bar and the page behind the question are inert and hidden from screen readers (both or neither). */
 const inert = (tab: Tab) =>
   [tab.$("dash-top"), tab.$("storage-page")].map((e) => {
@@ -171,26 +192,27 @@ const key = (el: FakeElement, k: string, shiftKey = false) => el.dispatch("keydo
 const gets = (tab: Tab, path: string) => tab.fetched.filter((f) => f.method === "GET" && f.path === path).length;
 
 describe("the Storage page", () => {
-  it("shows mockup 5: the workspace, the bar, the line, what takes the room, the largest tours and the hint", async () => {
+  it("shows mockup 5: the workspace, the bar, the line with the counts, what takes the room, the largest items with their kinds and the hint", async () => {
     const tab = openStorage(standard());
     await tab.settle();
     expect(tab.left()).toBeNull();
     expect(tab.fetched.map((f) => `${f.method} ${f.path}`).sort()).toEqual(["GET /api/v1/session", "GET /api/v1/usage", "GET /api/v1/usage/largest"]);
     expect(tab.$("storage-workspace").textContent).toBe("Cowfee Raid Tools");
-    expect(line(tab)).toBe("1.2 GB of 5 GB used · 12 tours");
+    expect(line(tab)).toBe("1.2 GB of 5 GB used · 48 images · 9 GIFs · 12 tours");
     const bar = tab.$("storage-bar");
-    expect([bar.shown, bar.className, tab.$("storage-fill").style.width]).toEqual([true, "meter", "24%"]);
+    expect([bar.shown, bar.className, tab.$("storage-fill").style.width]).toEqual([true, "meter", "23.44%"]);
     expect([tab.$("storage-over").shown, tab.$("storage-online").shown, tab.$("storage-counts").shown]).toEqual([false, false, true]);
-    expect(room(tab)).toEqual(["790 MB", "340 KB", "438.5 MB"]);
-    expect(rows(tab).map((r) => [titleOf(r), fillOf(r).style.width, cells(r)[2].textContent, deleteOf(r).textContent])).toEqual([
-      ["Full onboarding, long cut", "100%", "412 MB", "Delete"],
-      ["Timeline rehearsal walkthrough", "61.89%", "255 MB", "Delete"],
-      ["Loot council vote, full round", "23.3%", "96 MB", "Delete"],
+    expect(room(tab)).toEqual(["790 MB", "250 MB", "64 MB", "340 KB", "96 MB"]);
+    expect(rows(tab).map((r) => [titleOf(r), kindOf(r), fillOf(r).style.width, cells(r)[2].textContent, deleteOf(r).textContent])).toEqual([
+      ["Full onboarding, long cut", "Tour", "100%", "412 MB", "Delete"],
+      ["Timeline rehearsal walkthrough", "Tour", "61.89%", "255 MB", "Delete"],
+      ["Loot council vote, full round", "GIF", "23.3%", "96 MB", "Delete"],
     ]);
-    // Each Delete names its tour for a screen reader; the small bars are drawings.
+    // Each Delete names its entry and its kind for a screen reader; the kind is a tag beside the name; the small bars are drawings.
     for (const [i, r] of rows(tab).entries()) {
-      expect([deleteOf(r).getAttribute("type"), deleteOf(r).className, deleteOf(r).getAttribute("aria-describedby")]).toEqual(["button", "btn sm danger", cells(r)[0].id]);
-      expect(cells(r)[0].id).toBe(`largest-${i}`);
+      const [name, tag] = cells(r)[0].children.filter((c): c is FakeElement => c instanceof FakeElement);
+      expect([name.tagName, name.className, name.id, tag.tagName, tag.className, tag.id]).toEqual(["span", "name", `largest-${i}`, "span", "tag", `largest-${i}-kind`]);
+      expect([deleteOf(r).getAttribute("type"), deleteOf(r).className, deleteOf(r).getAttribute("aria-describedby")]).toEqual(["button", "btn sm danger", `largest-${i} largest-${i}-kind`]);
       expect(cells(r)[1].getAttribute("aria-hidden")).toBe("true");
     }
     expect(tab.$("largest").shown).toBe(true);
@@ -199,27 +221,40 @@ describe("the Storage page", () => {
       "solex",
       "Storage",
       "Cowfee Raid Tools",
-      "1.2 GB of 5 GB used · 12 tours",
+      "1.2 GB of 5 GB used · 48 images · 9 GIFs · 12 tours",
       COUNTS,
       "What takes the room",
-      "Largest tours",
+      "Largest items",
       "Delete",
       "Delete",
       "Delete",
-      "All 12 tours are on the Tours page.",
+      EVERYTHING_ELSE,
     ]);
-    // What takes the room, row by row.
-    expect(tab.$("h-room").parent!.all().filter((e) => e.className === "room").map((r) => r.textContent)).toEqual(["Tours790 MB", "Logos340 KB", "Uploads in progress438.5 MB"]);
+    // What takes the room, row by row, in the mockup's order.
+    expect(tab.$("h-room").parent!.all().filter((e) => e.className === "room").map((r) => r.textContent)).toEqual(["Tours790 MB", "GIFs250 MB", "Images64 MB", "Logos340 KB", "Uploads in progress96 MB"]);
     expect(tab.fetched.filter((f) => f.method !== "GET")).toEqual([]);
   });
 
   it("with no allowance there is no bar, only the total", async () => {
     const tab = openStorage(standard({ "GET /api/v1/usage": usage({ ...M5, allowance: null }) }));
     await tab.settle();
-    expect(line(tab)).toBe("1.2 GB used · 12 tours");
+    expect(line(tab)).toBe("1.2 GB used · 48 images · 9 GIFs · 12 tours");
     expect(tab.$("storage-bar").shown).toBe(false);
     expect(tab.$("storage-over").shown).toBe(false);
     expect(tab.$("storage-counts").shown).toBe(true);
+  });
+
+  it("writes one of each in the singular, and leaves out a count of images or GIFs that is 0, as mockup 6 does", async () => {
+    for (const [n, text] of [
+      [{ images: 1, gifs: 1, tours: 1 }, "2 MB used · 1 image · 1 GIF · 1 tour"],
+      [{ images: 2, gifs: 0, tours: 0 }, "2 MB used · 2 images · 0 tours"],
+      [{ images: 0, gifs: 3, tours: 1 }, "2 MB used · 3 GIFs · 1 tour"],
+      [{ images: 0, gifs: 0, tours: 5 }, "2 MB used · 5 tours"],
+    ] as const) {
+      const tab = openStorage(standard({ "GET /api/v1/usage": usage({ pictures: 2 * MB, logos: 0, uploads: 0, allowance: null, ...n }) }));
+      await tab.settle();
+      expect(line(tab), JSON.stringify(n)).toBe(text);
+    }
   });
 
   it("shows mockup 6 when the workspace is over: the bar full in the warning colour, the warning, and that online tours are not affected", async () => {
@@ -229,6 +264,14 @@ describe("the Storage page", () => {
     expect([tab.$("storage-bar").shown, tab.$("storage-bar").className, tab.$("storage-fill").style.width]).toEqual([true, "meter over", "100%"]);
     expect([tab.$("storage-over").shown, tab.$("storage-online").shown, tab.$("storage-counts").shown]).toEqual([true, true, false]);
     expect(tab.shows().slice(4, 7)).toEqual(["5.3 GB of 5 GB used · 31 tours", OVER, ONLINE]);
+  });
+
+  it("items take the workspace over as tours do", async () => {
+    const tab = openStorage(standard({ "GET /api/v1/usage": usage({ pictures: 0, logos: 0, uploads: 0, imageBytes: 3 * GB, gifBytes: 3 * GB, allowance: 5 * GB, tours: 0, images: 4, gifs: 2 }) }));
+    await tab.settle();
+    expect(line(tab)).toBe("6 GB of 5 GB used · 4 images · 2 GIFs · 0 tours");
+    expect([tab.$("storage-bar").className, tab.$("storage-over").shown]).toEqual(["meter over", true]);
+    expect(room(tab)).toEqual(["0 bytes", "3 GB", "3 GB", "0 bytes", "0 bytes"]);
   });
 
   it("the bar's width is used over allowance, from 0 to 100%; exactly the allowance is full but not over", async () => {
@@ -249,34 +292,60 @@ describe("the Storage page", () => {
     const tab = openStorage(standard({ "GET /api/v1/usage": usage({ pictures: 0, logos: 0, uploads: 0, allowance: 5 * GB, tours: 0 }), "GET /api/v1/usage/largest": largest([]) }));
     await tab.settle();
     expect(line(tab)).toBe("0 bytes of 5 GB used · 0 tours");
-    expect(room(tab)).toEqual(["0 bytes", "0 bytes", "0 bytes"]);
+    expect(room(tab)).toEqual(["0 bytes", "0 bytes", "0 bytes", "0 bytes", "0 bytes"]);
     expect(tab.$("largest").shown).toBe(false);
     expect(rows(tab)).toEqual([]);
     expect(tab.$("storage-counts").shown).toBe(true);
   });
 
-  it("writes one tour in the singular, and a title holding markup as text", async () => {
+  it("shows a title holding markup as text, for a tour and for an item, and an untitled item by its kind", async () => {
+    const markup = '<img src=x onerror="alert(1)">';
     const tab = openStorage(
       standard({
         "GET /api/v1/session": session("<i>ws</i>"),
-        "GET /api/v1/usage": usage({ pictures: 2 * MB, logos: 0, uploads: 0, allowance: null, tours: 1 }),
-        "GET /api/v1/usage/largest": largest([{ id: T1, title: '<img src=x onerror="alert(1)">', bytes: 2 * MB }]),
+        "GET /api/v1/usage": usage({ pictures: 2 * MB, logos: 0, uploads: 0, allowance: null, tours: 1, imageBytes: 3 * MB, gifBytes: 4 * MB, images: 2, gifs: 1 }),
+        "GET /api/v1/usage/largest": largest([
+          { kind: "gif", id: G1, title: null, bytes: 4 * MB },
+          { kind: "image", id: I1, title: markup, bytes: 2 * MB + 1 },
+          { kind: "tour", id: T1, title: markup, bytes: 2 * MB },
+          { kind: "image", id: "med_" + "c".repeat(24), title: null, bytes: MB },
+        ]),
       }),
     );
     await tab.settle();
-    expect(line(tab)).toBe("2 MB used · 1 tour");
-    expect(tab.$("largest-all").textContent + "Tours page.").toBe("Your tour is on the Tours page.");
-    const title = cells(rows(tab)[0])[0];
-    expect(title.textContent).toBe('<img src=x onerror="alert(1)">');
-    expect(title.children.every((c) => !(c instanceof FakeElement))).toBe(true);
+    expect(rows(tab).map((r) => [titleOf(r), kindOf(r)])).toEqual([
+      ["Untitled GIF", "GIF"],
+      [markup, "Image"],
+      [markup, "Tour"],
+      ["Untitled image", "Image"],
+    ]);
+    for (const r of rows(tab)) {
+      const name = cells(r)[0].all().find((e) => e.className === "name")!;
+      expect(name.children.every((c) => !(c instanceof FakeElement))).toBe(true);
+    }
     expect(tab.$("storage-workspace").textContent).toBe("<i>ws</i>");
     expect(tab.doc.root.all().some((e) => e.tagName === "img" || e.tagName === "i")).toBe(false);
   });
 
-  it("leaves out a row the API did not answer as a tour", async () => {
-    const tab = openStorage(standard({ "GET /api/v1/usage/largest": largest([{ id: "x", title: "a", bytes: 1 }, null as never, { id: T2, title: "ok", bytes: 5 }, { id: T3, title: "no size", bytes: "5" as never }]) }));
+  it("leaves out an entry the API did not answer as a tour, an image or a GIF", async () => {
+    const tab = openStorage(
+      standard({
+        "GET /api/v1/usage/largest": largest([
+          { kind: "tour", id: "x", title: "a", bytes: 1 },
+          null as never,
+          { kind: "tour", id: T2, title: "ok", bytes: 5 },
+          { kind: "tour", id: T3, title: "no size", bytes: "5" as never },
+          { kind: "tour", id: T3, title: null, bytes: 5 },
+          { kind: "image", id: T1, title: "a tour's id", bytes: 5 },
+          { kind: "gif", id: G1, title: 5 as never, bytes: 5 },
+          { kind: "clip" as never, id: G1, title: "no such kind", bytes: 5 },
+          { kind: "toString" as never, id: G1, title: "inherited", bytes: 5 },
+          { kind: "image", id: I1, title: "item ok", bytes: 4 },
+        ]),
+      }),
+    );
     await tab.settle();
-    expect(rows(tab).map(titleOf)).toEqual(["ok"]);
+    expect(rows(tab).map(titleOf)).toEqual(["ok", "item ok"]);
   });
 
   it("says when the numbers cannot be read, with the approved sentences, and shows none of them", async () => {
@@ -285,7 +354,9 @@ describe("the Storage page", () => {
       [{ "GET /api/v1/usage/largest": { status: 429, json: { error: "rate_limited" } } }, TOO_MANY],
       [{ "GET /api/v1/usage": "network" }, FAILED],
       [{ "GET /api/v1/usage": { status: 200, json: { used_bytes: "1" } } }, FAILED],
-      [{ "GET /api/v1/usage/largest": { status: 200, json: { tours: "x" } } }, FAILED],
+      [{ "GET /api/v1/usage/largest": { status: 200, json: { tours: [], largest: "x" } } }, FAILED],
+      [{ "GET /api/v1/usage/largest": { status: 200, json: { tours: [] } } }, FAILED],
+      [{ "GET /api/v1/usage": { status: 200, json: { used_bytes: 1, allowance_bytes: null, over: false, tours: 0, counted: { pictures: 1, logos: 0, uploads_in_progress: 0 } } } }, FAILED],
     ] as const) {
       const tab = openStorage(standard(table as Record<string, Answer>));
       await tab.settle();
@@ -379,8 +450,7 @@ describe("deleting from the Storage page", () => {
     expect([go.textContent, go.disabled, keep.disabled, go.getAttribute("aria-busy")]).toEqual(["Delete tour", false, false, null]);
     expect([gets(tab, "/api/v1/usage"), gets(tab, "/api/v1/usage/largest")]).toEqual([2, 2]);
     expect(rows(tab).map(titleOf)).toEqual(["Full onboarding, long cut", "Loot council vote, full round"]);
-    expect(line(tab)).toBe("973.8 MB of 5 GB used · 11 tours");
-    expect(tab.$("largest-all").textContent).toBe("All 11 tours are on the ");
+    expect(line(tab)).toBe("945.3 MB of 5 GB used · 48 images · 9 GIFs · 11 tours");
     expect(tab.doc.activeElement).toBe(tab.$("h-page"));
     expect([tab.$("storage-message").textContent, tab.$("storage-message").hidden]).toEqual(["", true]);
     expect([tab.$("delete-message").textContent, tab.$("delete-message").hidden]).toEqual(["", true]);
@@ -425,7 +495,7 @@ describe("deleting from the Storage page", () => {
       expect(inert(tab), what).toEqual([true, true]);
       expect([gets(tab, "/api/v1/usage"), gets(tab, "/api/v1/usage/largest")], what).toEqual([2, 2]);
       expect(rows(tab).map(titleOf), what).toEqual(["Timeline rehearsal walkthrough", "Loot council vote, full round"]);
-      expect(line(tab), what).toBe("1.2 GB of 5 GB used · 11 tours");
+      expect(line(tab), what).toBe("1.2 GB of 5 GB used · 48 images · 9 GIFs · 11 tours");
       // Closed now, the focus goes to the heading, as the row it came from is no longer shown.
       tab.$("delete-keep").click();
       expect(tab.$("delete-dialog").shown, what).toBe(false);
@@ -535,6 +605,155 @@ describe("deleting from the Storage page", () => {
   });
 });
 
+
+describe("deleting an image or a GIF from the Storage page", () => {
+  const GIF_ROW = 2;
+  const deletes = (tab: Tab) => tab.fetched.filter((f) => f.method === "DELETE").map((f) => [f.path, f.headers["X-Csrf-Token"], f.body]);
+  const withoutGif = largest(M5_TOURS.slice(0, 2));
+  const afterGif = usage({ ...M5, gifBytes: M5.gifBytes - 96 * MB, gifs: 8 });
+
+  it("asks in the item's words, with its kind on the button; a tour's question comes back as it was", async () => {
+    const markup = '<b onclick="x()">Raid</b>';
+    const tab = openStorage(standard({ "GET /api/v1/usage/largest": largest([...M5_TOURS, { kind: "image", id: I1, title: null, bytes: MB }, { kind: "image", id: "med_" + "d".repeat(24), title: markup, bytes: KB }]) }));
+    await tab.settle();
+    deleteOf(rows(tab)[GIF_ROW]).click();
+    expect(tab.$("delete-dialog").shown).toBe(true);
+    expect(tab.shows().slice(-4)).toEqual(['Delete "Loot council vote, full round"?', QUESTION_ITEM, "Keep it", "Delete GIF"]);
+    expect(tab.doc.activeElement).toBe(tab.$("delete-keep"));
+    expect(inert(tab)).toEqual([true, true]);
+    tab.$("delete-keep").click();
+    expect(tab.doc.activeElement).toBe(deleteOf(rows(tab)[GIF_ROW]));
+    // An untitled image is asked about by its kind.
+    deleteOf(rows(tab)[3]).click();
+    expect(tab.shows().slice(-4)).toEqual(['Delete "Untitled image"?', QUESTION_ITEM, "Keep it", "Delete image"]);
+    tab.pressOnPage("Escape");
+    // A title holding markup is text in the question too.
+    deleteOf(rows(tab)[4]).click();
+    expect(tab.$("delete-title").textContent).toBe(`Delete "${markup}"?`);
+    expect(tab.$("delete-title").children.every((c) => !(c instanceof FakeElement))).toBe(true);
+    expect(tab.doc.root.all().some((e) => e.tagName === "b")).toBe(false);
+    tab.$("delete-dialog").click();
+    // A tour's question has the Tours page's words again.
+    deleteOf(rows(tab)[0]).click();
+    expect(tab.shows().slice(-4)).toEqual(['Delete "Full onboarding, long cut"?', QUESTION, "Keep it", "Delete tour"]);
+    expect(tab.fetched.filter((f) => f.method !== "GET")).toEqual([]);
+  });
+
+  it("Delete GIF sends DELETE /api/v1/media/:id with the anti-forgery header, then shows the numbers and the list as they are now", async () => {
+    const tab = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: { status: 204 }, "GET /api/v1/usage": [usage(M5), afterGif], "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
+    await tab.settle();
+    deleteOf(rows(tab)[GIF_ROW]).click();
+    const go = tab.$("delete-go");
+    go.click();
+    expect([go.textContent, go.disabled, tab.$("delete-keep").disabled]).toEqual(["Deleting…", true, true]);
+    await tab.settle();
+    expect(deletes(tab)).toEqual([[`/api/v1/media/${G1}`, CSRF, undefined]]);
+    expect(tab.$("delete-dialog").shown).toBe(false);
+    expect(inert(tab)).toEqual([false, false]);
+    expect([go.textContent, go.disabled]).toEqual(["Delete GIF", false]);
+    expect([gets(tab, "/api/v1/usage"), gets(tab, "/api/v1/usage/largest")]).toEqual([2, 2]);
+    expect(rows(tab).map(titleOf)).toEqual(["Full onboarding, long cut", "Timeline rehearsal walkthrough"]);
+    expect(line(tab)).toBe("1.1 GB of 5 GB used · 48 images · 8 GIFs · 12 tours");
+    expect(room(tab)[1]).toBe("154 MB");
+    expect(tab.doc.activeElement).toBe(tab.$("h-page"));
+    expect(tab.$("storage-message").hidden).toBe(true);
+  });
+
+  it("files left to remove (500 cleanup_pending): the delete is sent again, and counts as done when they stay", async () => {
+    const pending = { status: 500, json: { error: "cleanup_pending", detail: "the item is deleted, but some of its files could not be removed yet; delete it again to retry" } };
+    for (const [answer, sent] of [
+      [[pending, { status: 204 }], 2],
+      [[pending, pending, { status: 404, json: { error: "not_found" } }], 3],
+      [[pending], 3],
+    ] as const) {
+      const tab = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: [...answer] as Answer[], "GET /api/v1/usage": [usage(M5), afterGif], "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
+      await tab.settle();
+      deleteOf(rows(tab)[GIF_ROW]).click();
+      tab.$("delete-go").click();
+      await tab.settle();
+      const what = JSON.stringify(answer);
+      expect(deletes(tab), what).toEqual(Array.from({ length: sent }, () => [`/api/v1/media/${G1}`, CSRF, undefined]));
+      expect(tab.$("delete-dialog").shown, what).toBe(false);
+      expect(rows(tab).map(titleOf), what).toEqual(["Full onboarding, long cut", "Timeline rehearsal walkthrough"]);
+      expect([tab.$("storage-message").hidden, tab.$("delete-message").hidden], what).toEqual([true, true]);
+      expect(tab.doc.activeElement, what).toBe(tab.$("h-page"));
+    }
+  });
+
+  it("an item already gone (404) counts as deleted", async () => {
+    const tab = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: { status: 404, json: { error: "not_found", detail: "no such item" } }, "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
+    await tab.settle();
+    deleteOf(rows(tab)[GIF_ROW]).click();
+    tab.$("delete-go").click();
+    await tab.settle();
+    expect(deletes(tab)).toHaveLength(1);
+    expect(tab.$("delete-dialog").shown).toBe(false);
+    expect(rows(tab)).toHaveLength(2);
+  });
+
+  it("a delete that fails keeps the question open with its sentence and still reads the numbers again; a tour's sentence is not used for an item", async () => {
+    for (const [answer, text] of [
+      [{ status: 500, json: { error: "internal" } }, FAILED],
+      [{ status: 429, json: { error: "rate_limited" } }, TOO_MANY],
+      [{ status: 409, json: { error: "publish_busy" } }, FAILED],
+      ["network", FAILED],
+    ] as const) {
+      const tab = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: answer as Answer, "GET /api/v1/usage": [usage(M5), usage({ ...M5, images: 47 })] }));
+      await tab.settle();
+      deleteOf(rows(tab)[GIF_ROW]).click();
+      tab.$("delete-go").click();
+      await tab.settle();
+      const what = JSON.stringify(answer);
+      expect(deletes(tab), what).toHaveLength(1);
+      expect(tab.$("delete-dialog").shown, what).toBe(true);
+      expect([tab.$("delete-message").textContent, tab.$("delete-message").hidden], what).toEqual([text, false]);
+      expect([tab.$("delete-go").textContent, tab.$("delete-go").disabled], what).toEqual(["Delete GIF", false]);
+      expect(tab.doc.activeElement, what).toBe(tab.$("delete-go"));
+      // The page shows the numbers as they are now.
+      expect([gets(tab, "/api/v1/usage"), gets(tab, "/api/v1/usage/largest")], what).toEqual([2, 2]);
+      expect(line(tab), what).toBe("1.2 GB of 5 GB used · 47 images · 9 GIFs · 12 tours");
+      tab.$("delete-keep").click();
+      expect(tab.doc.activeElement, what).toBe(deleteOf(rows(tab)[GIF_ROW]));
+    }
+  });
+
+  it("when the list cannot be read again after an item's delete that worked, or was left half-finished, the page says the change was made and asks for a reload", async () => {
+    const pending = { status: 500, json: { error: "cleanup_pending" } };
+    for (const [answer, reread] of [
+      [{ status: 204 }, { status: 500, json: { error: "internal" } }],
+      [pending, "network"],
+    ] as const) {
+      const tab = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: answer as Answer, "GET /api/v1/usage/largest": [largest(M5_TOURS), reread as Answer] }));
+      await tab.settle();
+      deleteOf(rows(tab)[GIF_ROW]).click();
+      tab.$("delete-go").click();
+      await tab.settle();
+      const what = JSON.stringify(answer);
+      expect(tab.$("delete-dialog").shown, what).toBe(false);
+      expect([tab.$("storage-message").textContent, tab.$("storage-message").shown], what).toEqual([NOT_RELOADED, true]);
+      expect(tab.doc.activeElement, what).toBe(tab.$("h-page"));
+      // The rows as last shown get their Delete back.
+      expect(rows(tab).map((r) => deleteOf(r).disabled), what).toEqual([false, false, false]);
+    }
+  });
+
+  it("a double click on Delete GIF sends one request, and a lost session goes to /signin", async () => {
+    const once = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: { status: 204 }, "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
+    await once.settle();
+    deleteOf(rows(once)[GIF_ROW]).click();
+    once.$("delete-go").click();
+    once.$("delete-go").click();
+    await once.settle();
+    expect(deletes(once)).toHaveLength(1);
+    const out = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: SIGNED_OUT }));
+    await out.settle();
+    deleteOf(rows(out)[GIF_ROW]).click();
+    out.$("delete-go").click();
+    await out.settle();
+    expect(out.left()).toBe("/signin");
+  });
+});
+
 // ---- Against the real app ----
 
 function browser(deps: Deps, cookie: string) {
@@ -581,5 +800,70 @@ describe("the Storage page against the real app", () => {
     expect(tab.$("largest").shown).toBe(false);
     expect((await send(deps, "GET", "/api/v1/tours", { token: owner.token })).json.tours).toEqual([]);
     expect((await send(deps, "GET", "/api/v1/tours", { token: other.token })).json.tours).toHaveLength(1);
+  });
+});
+
+describe("the Storage page against the real app, with shared items", () => {
+  /** Shares one image or clip through the API and finishes it; returns its id. */
+  async function share(deps: Deps, token: string, kind: "image" | "clip", bytes: number, title: string | null, commit = true): Promise<string> {
+    const body = kind === "image" ? { kind, content_type: "image/png", bytes, width: 64, height: 64, title } : { kind, content_type: "image/gif", bytes, width: 32, height: 32, duration_ms: 1200, title };
+    if (title === null) delete (body as { title?: unknown }).title;
+    const made = await send(deps, "POST", "/api/v1/media", { token, body: JSON.stringify(body), headers: { "content-type": "application/json" } });
+    expect(made.status, made.text).toBe(201);
+    const id = made.json.id as string;
+    const file = kind === "image" ? png(64, 64, bytes) : gif(32, 32, bytes);
+    expect((await send(deps, "PUT", `/api/v1/media/${id}/parts/0`, { token, body: file as NonNullable<RequestInit["body"]> })).status).toBe(204);
+    if (commit) expect((await send(deps, "POST", `/api/v1/media/${id}/commit`, { token })).status).toBe(200);
+    return id;
+  }
+
+  it("shows the workspace's own items with their kinds and counts, never another's, and deletes an image and a GIF through the API", async () => {
+    const { deps } = await makeDeps({ hosts: { tours: "tours.example.com", app: "app.example.com" }, storageAllowanceBytes: 5 * GB });
+    await seedAccount(deps, { admin: true, username: "itemcheck-admin" });
+    const owner = await seedAccount(deps, { username: "itemcheck" });
+    const other = await seedAccount(deps, { username: "itemcheck-other" });
+    const made = await redeemSignInCode(deps, await createSignInCode(deps, owner.userId), FIREFOX, null);
+    const cookie = `${SESSION_COOKIE}=${made!.secret}`;
+    await uploadTour(deps, owner.token, fixtures.v3 as Json);
+    const image = await share(deps, owner.token, "image", 900_000, '<script>x</script>');
+    const clip = await share(deps, owner.token, "clip", 800_000, null);
+    // An unfinished image: its bytes count and it is listed, but it is not one of the images yet.
+    await share(deps, owner.token, "image", 700_000, "Still sending", false);
+    // Another workspace's items never show here.
+    await share(deps, other.token, "image", 950_000, "Not yours");
+    await share(deps, other.token, "clip", 850_000, "Not yours either");
+    const before = (await send(deps, "GET", "/api/v1/usage", { token: owner.token })).json;
+
+    const tab = openStorage(browser(deps, cookie));
+    await tab.settle();
+    expect(line(tab)).toBe(`${formatBytes(before.used_bytes)} of 5 GB used · 1 image · 1 GIF · 1 tour`);
+    expect(rows(tab).map((r) => [titleOf(r), kindOf(r)])).toEqual([
+      ["<script>x</script>", "Image"],
+      ["Untitled GIF", "GIF"],
+      ["Still sending", "Image"],
+      [(fixtures.v3 as Json).title, "Tour"],
+    ]);
+    expect(room(tab)[1]).toBe(formatBytes(before.counted.gifs));
+    expect(room(tab)[2]).toBe(formatBytes(before.counted.images));
+    expect(tab.doc.root.all().some((e) => e.tagName === "script" && e.textContent === "x")).toBe(false);
+
+    // The image, then the GIF.
+    deleteOf(rows(tab)[0]).click();
+    expect(tab.$("delete-go").textContent).toBe("Delete image");
+    tab.$("delete-go").click();
+    await tab.settle();
+    expect(tab.$("delete-dialog").shown).toBe(false);
+    expect(rows(tab).map(titleOf)).toEqual(["Untitled GIF", "Still sending", (fixtures.v3 as Json).title]);
+    deleteOf(rows(tab)[0]).click();
+    expect(tab.$("delete-go").textContent).toBe("Delete GIF");
+    tab.$("delete-go").click();
+    await tab.settle();
+    expect(rows(tab).map(kindOf)).toEqual(["Image", "Tour"]);
+    expect(line(tab)).toMatch(/ used · 1 tour$/);
+    for (const id of [image, clip]) expect((await send(deps, "GET", `/api/v1/media/${id}`, { token: owner.token })).status).toBe(404);
+    const after = (await send(deps, "GET", "/api/v1/usage", { token: owner.token })).json;
+    expect(after.used_bytes).toBe(before.used_bytes - before.counted.gifs - 900_000);
+    // The other workspace's items are untouched.
+    expect((await send(deps, "GET", "/api/v1/usage", { token: other.token })).json).toMatchObject({ images: 1, gifs: 1 });
   });
 });

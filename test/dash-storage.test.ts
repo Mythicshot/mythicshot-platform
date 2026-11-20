@@ -1,8 +1,8 @@
 // The dashboard's Storage page: GET /storage and its own script /dash/storage.js. What their
 // answers are (headers, where they answer, that they cost no database or storage call and
-// hold nothing about anyone), the exact wording of the approved mockups 5 and 6 as they
-// stand in this version (tours only: no Images or GIFs), and what the script's text may and
-// may not do. What the script does when it runs is tested under Node in
+// hold nothing about anyone), the exact wording of the approved mockups 5 and 6 (images,
+// GIFs and tours; the Images and GIFs pages themselves are not linked or tabbed from here),
+// and what the script's text may and may not do. What the script does when it runs is tested under Node in
 // test/node-dash-storage.test.ts.
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
@@ -67,19 +67,20 @@ const STORAGE_WORDING = [
   "Storage",
   "You are over your storage allowance. New uploads are refused until you delete tours or get more room.",
   "Tours that are already online are not affected.",
-  "Tours and their pictures count. Deleting a tour frees its space within a few minutes.",
+  "Images, GIFs and tours all count. Deleting one frees its space within a few minutes.",
   "What takes the room",
   "Tours",
+  "GIFs",
+  "Images",
   "Logos",
   "Uploads in progress",
-  "Largest tours",
-  "Tour",
+  "Largest items",
+  "Item",
   // Proposed: the names a screen reader gives the bar's column and the buttons' column; the eye does not see them.
   "Share",
   "Size",
   "Actions",
-  "Tours page",
-  ".",
+  "Everything else is on the Images, GIFs and Tours pages.",
   "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.",
   "Keep it",
   "Delete tour",
@@ -90,14 +91,26 @@ const STORAGE_TEXT: Record<string, string> = {
   of: " of ",
   used: " used",
   dot: " · ",
+  oneImage: "1 image",
+  images: " images",
+  oneGif: "1 GIF",
+  gifs: " GIFs",
   oneTour: "1 tour",
   tours: " tours",
-  allBefore: "All ",
-  allAfter: " tours are on the ",
-  oneOnTours: "Your tour is on the ",
+  tagTour: "Tour",
+  tagImage: "Image",
+  tagGif: "GIF",
+  untitledImage: "Untitled image",
+  untitledGif: "Untitled GIF",
   remove: "Delete",
   askBefore: 'Delete "',
   askAfter: '"?',
+  askTour: "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.",
+  // Proposed: the question for an image or a GIF, in the tour question's words.
+  askItem: "Its link stops working for everyone and it is removed. This cannot be undone. The copy on your computer is not touched.",
+  goTour: "Delete tour",
+  goImage: "Delete image",
+  goGif: "Delete GIF",
   deleting: "Deleting…",
   publishBusy: "This tour is being published. Try again when that is done.",
   notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
@@ -197,23 +210,33 @@ describe("the Storage page", () => {
     // The sentences, each where it belongs.
     expect(doc.getElementById("storage-over")!.textContent).toBe("You are over your storage allowance. New uploads are refused until you delete tours or get more room.");
     expect(doc.getElementById("storage-online")!.textContent).toBe("Tours that are already online are not affected.");
-    expect(doc.getElementById("storage-counts")!.textContent).toBe("Tours and their pictures count. Deleting a tour frees its space within a few minutes.");
-    expect(doc.getElementById("h-largest")!.textContent).toBe("Largest tours");
-    const all = doc.getElementById("largest-all")!.parent!;
-    const link = all.all().find((e) => e.tagName === "a")!;
-    expect([link.getAttribute("href"), link.textContent]).toEqual(["/tours", "Tours page"]);
-    expect(STORAGE_TEXT.allBefore + 12 + STORAGE_TEXT.allAfter + link.textContent + ".").toBe("All 12 tours are on the Tours page.");
-    // The question before a delete: the Tours page's own sentences.
+    expect(doc.getElementById("storage-counts")!.textContent).toBe("Images, GIFs and tours all count. Deleting one frees its space within a few minutes.");
+    expect(doc.getElementById("h-largest")!.textContent).toBe("Largest items");
+    expect(doc.getElementById("largest-all")!.textContent).toBe("Everything else is on the Images, GIFs and Tours pages.");
+    // What takes the room, in the mockup's order.
+    const rooms = doc.body.all().filter((e) => e.className === "room");
+    expect(rooms.map((r) => [r.all().find((c) => c.tagName === "span" && c.className === "")!.textContent, r.all().find((c) => c.className === "r")!.id])).toEqual([
+      ["Tours", "room-tours"],
+      ["GIFs", "room-gifs"],
+      ["Images", "room-images"],
+      ["Logos", "room-logos"],
+      ["Uploads in progress", "room-uploads"],
+    ]);
+    // The summary line's words, as mockup 5 writes it.
+    expect("1.2 GB" + STORAGE_TEXT.of + "5 GB" + STORAGE_TEXT.used + STORAGE_TEXT.dot + 48 + STORAGE_TEXT.images + STORAGE_TEXT.dot + 9 + STORAGE_TEXT.gifs + STORAGE_TEXT.dot + 12 + STORAGE_TEXT.tours).toBe("1.2 GB of 5 GB used · 48 images · 9 GIFs · 12 tours");
+    // The question before a delete: for a tour the Tours page's own sentences, which the page holds until a question is asked.
     expect(STORAGE_TEXT.askBefore + "Loot master setup" + STORAGE_TEXT.askAfter).toBe('Delete "Loot master setup"?');
-    expect(doc.getElementById("delete-text")!.textContent).toBe("Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.");
-    expect([doc.getElementById("delete-keep")!.textContent, doc.getElementById("delete-go")!.textContent]).toEqual(["Keep it", "Delete tour"]);
+    expect(doc.getElementById("delete-text")!.textContent).toBe(STORAGE_TEXT.askTour);
+    expect(STORAGE_TEXT.askTour).toBe("Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.");
+    expect([doc.getElementById("delete-keep")!.textContent, doc.getElementById("delete-go")!.textContent]).toEqual(["Keep it", STORAGE_TEXT.goTour]);
     // The script's words are exactly these, and it has no other sentence.
     expect(scriptText(STORAGE_JS)).toEqual(STORAGE_TEXT);
     const words = new Set(Object.values(STORAGE_TEXT));
     const sentences = scriptStrings(STORAGE_JS).filter((t) => /[a-z]/i.test(t) && /\s/.test(t) && t !== "use strict");
     for (const t of sentences) expect(words.has(t) || CLASS_NAMES.includes(t), `a text outside TEXT: ${JSON.stringify(t)}`).toBe(true);
-    // No Images or GIFs in this version.
-    for (const word of ["Images", "GIFs", "image", "GIF", "/images", "/gifs"]) for (const text of [STORAGE_HTML, STORAGE_JS]) expect(text, word).not.toContain(word);
+    // The Images and GIFs pages are another task's: no tab, link or address of them here. The tabs are the shell's four.
+    for (const path of ["/images", "/gifs"]) for (const text of [STORAGE_HTML, STORAGE_JS]) expect(text, path).not.toContain(path);
+    expect(doc.body.all().filter((e) => e.tagName === "a").map((a) => a.getAttribute("href"))).toEqual(["/tours", "/storage", "/account", "/admin"]);
     for (const api of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "createContextualFragment", "DOMParser", "srcdoc", "confirm(", "alert(", "prompt("]) expect(STORAGE_JS, api).not.toContain(api);
   });
 
@@ -248,8 +271,9 @@ describe("the Storage page", () => {
     expect(STORAGE_JS).not.toMatch(/\bfetch\(/);
     expect(STORAGE_JS).not.toMatch(/csrf/i);
     const requests = [...STORAGE_JS.matchAll(/\bapi\("([A-Z]+)", ("[^"]*")/g)].map((m) => `${m[1]} ${m[2]}`);
-    expect(requests.sort()).toEqual(['DELETE "/api/v1/tours/"', 'GET "/api/v1/usage"', 'GET "/api/v1/usage/largest"']);
+    expect(requests.sort()).toEqual(['DELETE "/api/v1/media/"', 'DELETE "/api/v1/tours/"', 'GET "/api/v1/usage"', 'GET "/api/v1/usage/largest"']);
     expect(STORAGE_JS).toContain('Dash.api("DELETE", "/api/v1/tours/" + encodeURIComponent(id))');
+    expect(STORAGE_JS).toContain('Dash.api("DELETE", "/api/v1/media/" + encodeURIComponent(id))');
     const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "setTimeout(", "document.referrer", "navigator"];
     for (const api of forbidden) expect(STORAGE_JS, api).not.toContain(api);
     // A lost session goes to /signin through the shared script.
@@ -282,7 +306,7 @@ describe("the Storage page", () => {
     expect(asked.length).toBeGreaterThan(10);
     for (const id of asked) expect(ids.has(id), `#${id}`).toBe(true);
     // The empty headers have names a screen reader reads and the eye does not see.
-    expect(all.filter((e) => e.tagName === "th").map((th) => [th.textContent, th.all().map((c) => c.className)])).toEqual([["Tour", []], ["Share", ["vh"]], ["Size", []], ["Actions", ["vh"]]]);
+    expect(all.filter((e) => e.tagName === "th").map((th) => [th.textContent, th.all().map((c) => c.className)])).toEqual([["Item", []], ["Share", ["vh"]], ["Size", []], ["Actions", ["vh"]]]);
     const phone = [...DASH_CSS.matchAll(/@media \(max-width: 720px\) \{\n([\s\S]*?)\n\}/g)].map((m) => m[1]).join("\n");
     expect(phone).toContain(".largest .mini-cell { display: none; }");
     expect(DASH_CSS).not.toMatch(/overflow-x|100vw/);
