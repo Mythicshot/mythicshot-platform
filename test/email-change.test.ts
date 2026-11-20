@@ -698,6 +698,17 @@ describe("confirming an email change", () => {
     expect(Number(over.headers.get("retry-after"))).toBeGreaterThan(0);
   });
 
+  it("the notice goes out also when every site mail cap is reached: it is one mail per change actually made, and must not be stoppable", async () => {
+    const { deps, mail, a } = await site();
+    const s = await signIn(deps, a.userId);
+    const code = await askedCode(deps, mail, s, NEW);
+    for (const cap of [LIMITS_SIGNIN.mailSite, LIMITS_EMAIL_CHANGE.mailSite]) {
+      await deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?) ON CONFLICT (bucket, key, window_start) DO UPDATE SET count = excluded.count", [cap.bucket, SITE_KEY, NOW - (NOW % cap.windowMs), cap.most + 5]);
+    }
+    expect((await confirm(deps, s, code)).status).toBe(200);
+    expect(mail.sent.map((m) => m.to)).toEqual([NEW, a.email]);
+  });
+
   it("with mail off by the time the link is opened, the change is made and one fixed line says no notice was sent", async () => {
     const { deps, mail, a } = await site();
     const s = await signIn(deps, a.userId);

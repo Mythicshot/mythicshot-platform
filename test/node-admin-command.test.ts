@@ -808,6 +808,17 @@ describe("the server command", () => {
     }
   });
 
+  it("change-email sends no notice, not even with mail set up: the person at the server tells the account's owner", async () => {
+    const s = await site();
+    expect((await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"])).code).toBe(0);
+    const mailers: FakeMailer[] = [];
+    const opts: AdminOptions = { makeMailer: () => (mailers.push(new FakeMailer()), mailers[mailers.length - 1]) };
+    const r = await run({ ...s.env, ...SMTP, ...ON }, ["change-email", "--username", "alex", "--email", "new@example.com"], opts);
+    expect(r.code).toBe(0);
+    expect(mailers.flatMap((m) => m.sent)).toEqual([]);
+    expect(mailers).toHaveLength(0);
+  });
+
   it("change-email stops on a database without the email-change migration", async () => {
     const dir = mkdtempSync(join(tmpdir(), "dp-admin-cmd-"));
     made.push(dir);
