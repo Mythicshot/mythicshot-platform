@@ -45,7 +45,7 @@ function site(opts: { version?: string; date?: string; usage?: Answer; picture?:
 describe("answers", () => {
   it("the same answers at another moment are identical: only the date header differs", () => {
     const c = compareAnswers(site(), site({ date: "Fri, 20 Nov 2026 11:11:11 GMT" }));
-    expect(c).toEqual({ identical: 6, allowed: 0, added: [], problems: [] });
+    expect(c).toEqual({ identical: 6, allowed: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
   });
 
   it("a newer version in the workspace answer is the one allowed body difference, and content-length follows it", () => {
@@ -105,6 +105,98 @@ describe("answers", () => {
     expect(compareAnswers(site({ usage: answer(200, '{"used_bytes":1}') }), site()).problems).toHaveLength(1);
     expect(compareAnswers(site({ usage: answer(404, '{"error":"not_found","detail":"no such workspace"}') }), site({ usage: answer(200, '{"used_bytes":1}') })).problems).toHaveLength(1);
     expect(compareAnswers(site({ usage: answer(200, '{"used_bytes":1}') }), site({ usage: answer(200, '{"used_bytes":2}') })).problems).toHaveLength(1);
+  });
+});
+
+describe("answers that only add fields", () => {
+  const ADD = { allowAddedFields: true };
+  const usage = (body: unknown, headers: Record<string, string> = {}) => [rec("token 1: usage (one address)", "GET /api/v1/usage", answer(200, JSON.stringify(body), headers))];
+  const OLD = { used_bytes: 1500, tours: 2, counted: { pictures: 1000, logos: 500 } };
+  const compare = (before: unknown, after: unknown) => compareAnswers(usage(before), usage(after), ADD);
+
+  it("an added top-level key is allowed, counted apart and named by its path, and content-length follows it", () => {
+    const c = compare(OLD, { ...OLD, images: 3 });
+    expect(c).toEqual({ identical: 0, allowed: 0, addedFields: 1, addedFieldsByRoute: { "GET /api/v1/usage": ["images"] }, added: [], problems: [] });
+  });
+
+  it("an added nested key is allowed, named by its full path", () => {
+    const c = compare(OLD, { ...OLD, counted: { ...OLD.counted, images: 10, gifs: 20 }, gifs: 1 });
+    expect(c.problems).toEqual([]);
+    expect(c.addedFieldsByRoute).toEqual({ "GET /api/v1/usage": ["counted.gifs", "counted.images", "gifs"] });
+  });
+
+  it("a key added inside every element of an array is allowed and named once, and once per route across answers", () => {
+    const tours = (extra: (i: number) => Record<string, unknown>) => ({ tours: [1, 2, 3].map((i) => ({ id: `tour_${i}`, slug: `slug${i}`, meta: { n: i }, ...extra(i) })) });
+    const before = [rec("token 1: tour list (app address)", "GET /api/v1/tours", answer(200, JSON.stringify(tours(() => ({}))))), rec("token 1: tour list (tours address)", "GET /api/v1/tours", answer(200, JSON.stringify(tours(() => ({})))))];
+    const after = [rec("token 1: tour list (app address)", "GET /api/v1/tours", answer(200, JSON.stringify(tours((i) => ({ views: i * 7 }))))), rec("token 1: tour list (tours address)", "GET /api/v1/tours", answer(200, JSON.stringify(tours((i) => (i === 2 ? { views: 1, kind: "tour" } : { views: 0 })))))];
+    const c = compareAnswers(before, after, ADD);
+    expect(c.problems).toEqual([]);
+    expect(c.addedFields).toBe(2);
+    expect(c.addedFieldsByRoute).toEqual({ "GET /api/v1/tours": ["tours[].kind", "tours[].views"] });
+  });
+
+  it("the paths never hold a value, and a key that does not look like a field name is written as *", () => {
+    const secret = "owner@example.com";
+    const c = compare({ by_id: { tour_1: { title: "Acme" } } }, { by_id: { tour_1: { title: "Acme", note: secret }, [secret]: { x: 1 } } });
+    expect(c.addedFieldsByRoute).toEqual({ "GET /api/v1/usage": ["by_id.*", "by_id.tour_1.note"] });
+    expect(JSON.stringify(c)).not.toContain("example.com");
+  });
+
+  it("a changed value beside an added key fails, and the problem names no value", () => {
+    const c = compare(OLD, { ...OLD, used_bytes: 1501, images: 3 });
+    expect(c.addedFields).toBe(0);
+    expect(c.problems).toHaveLength(1);
+    expect(c.problems[0]).toMatch(/^token 1: usage \(one address\): header content-length differs, body differs \(\d+ and \d+ bytes\)$/);
+    // Deeper, and a changed type (a number that became a string) fails too.
+    expect(compare(OLD, { ...OLD, counted: { pictures: 1000, logos: 499, images: 1 } }).problems).toHaveLength(1);
+    expect(compare(OLD, { ...OLD, tours: "2", images: 1 }).problems).toHaveLength(1);
+    expect(compare({ a: null }, { a: {}, b: 1 }).problems).toHaveLength(1);
+    expect(compare({ a: [1] }, { a: { 0: 1 }, b: 1 }).problems).toHaveLength(1);
+  });
+
+  it("a removed key fails, even beside an added one", () => {
+    const { tours: _gone, ...rest } = OLD;
+    expect(compare(OLD, rest).problems).toHaveLength(1);
+    expect(compare(OLD, { ...rest, images: 1 }).problems).toHaveLength(1);
+    expect(compare(OLD, { ...OLD, counted: { pictures: 1000, images: 1 } }).problems).toHaveLength(1);
+  });
+
+  it("an array whose length changes fails, and so does a changed element", () => {
+    expect(compare({ tours: [{ id: "a" }, { id: "b" }] }, { tours: [{ id: "a", x: 1 }] }).problems).toHaveLength(1);
+    expect(compare({ tours: [{ id: "a" }] }, { tours: [{ id: "a" }, { id: "b" }] }).problems).toHaveLength(1);
+    expect(compare({ tours: [{ id: "a" }, { id: "b" }] }, { tours: [{ id: "b", x: 1 }, { id: "a", x: 1 }] }).problems).toHaveLength(1);
+  });
+
+  it("a changed status or another header fails, and content-length may differ only with an allowed body", () => {
+    const b = usage(OLD);
+    const status = [rec(b[0].key, b[0].route, { ...answer(201, JSON.stringify({ ...OLD, images: 1 })) })];
+    expect(compareAnswers(b, status, ADD).problems).toHaveLength(1);
+    expect(compareAnswers(b, usage({ ...OLD, images: 1 }, { etag: '"x"' }), ADD).problems).toHaveLength(1);
+    // The same body with another content-length is not an added field.
+    const sameBody = usage(OLD);
+    sameBody[0].answer.headers["content-length"] = "9999";
+    expect(compareAnswers(b, sameBody, ADD).problems).toEqual(["token 1: usage (one address): header content-length differs"]);
+  });
+
+  it("a non-JSON answer stays byte-exact, even when its text would parse as JSON with an added key", () => {
+    const page = (body: string) => [rec("token 1: tour 1 page", "GET /t/:slug", answer(200, body, { "content-type": "text/html; charset=utf-8" }))];
+    expect(compareAnswers(page('{"a":1}'), page('{"a":1,"b":2}'), ADD).problems).toHaveLength(1);
+    expect(compareAnswers(page("<p>a</p>"), page("<p>a</p><p>b</p>"), ADD).problems).toHaveLength(1);
+    // A JSON content type whose body is not JSON: compared byte for byte, and it fails.
+    expect(compareAnswers(usage(OLD), [rec("token 1: usage (one address)", "GET /api/v1/usage", answer(200, "{not json"))], ADD).problems).toHaveLength(1);
+  });
+
+  it("the version swap and added fields together on the workspace answer are allowed", () => {
+    const me = (v: string, extra = "") => [rec("token 1: workspace (one address)", "GET /api/v1/me", answer(200, `{"workspace":"Acme","version":"${v}"${extra}}`))];
+    const c = compareAnswers(me("0.1.24"), me("0.1.25", ',"region":"eu"'), ADD);
+    expect(c.problems).toEqual([]);
+    expect(c.addedFieldsByRoute).toEqual({ "GET /api/v1/me": ["region"] });
+  });
+
+  it("without the allowance (the way back, the same build twice) an added field is a difference like any other", () => {
+    const c = compareAnswers(usage(OLD), usage({ ...OLD, images: 3 }));
+    expect(c.addedFields).toBe(0);
+    expect(c.problems).toHaveLength(1);
   });
 });
 

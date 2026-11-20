@@ -28,10 +28,12 @@ Nothing else of your environment reaches the builds: no mail settings and no set
 ## What it checks
 
 1. The old build on the copy: the health of each address, then for each token the workspace, the tour list and the usage (when the build has it), every listed tour's page and every picture on it.
-2. The new build on the same copy, which applies the pending database changes as it starts. Every answer must be the same to the byte, except the `date` header and the version number in the workspace answer. A route the old build did not have, the usage, is checked against a sum the command makes from the database itself.
+2. The new build on the same copy, which applies the pending database changes as it starts. Every answer must be the same to the byte, except the `date` header, the version number in the workspace answer, and a JSON answer that only adds fields (below). A route the old build did not have, the usage, is checked against a sum the command makes from the database itself.
 3. Every file of both image stores, every row the old tables had in the columns they had, the new account tables with one membership and one sign-in method per account and no admin, the database's own two checks, and the list of applied changes.
-4. The way back: the old build again, on the changed copy, must answer as it did before the update.
+4. The way back: the old build again, on the changed copy, must answer as it did before the update. Here no added field is allowed: every answer must be the same to the byte but the `date` header.
 5. Two new builds started at the same moment on a fresh copy: both start, and each database change is applied once.
+
+A JSON answer only adds fields when its new body is the old body with new keys in its objects, at any depth: every old key is still there with the same value, and every list has the same length, its items compared one by one under the same rule. Such an answer is allowed in step 2 and counted on its own ("differ only by added fields"), and the report names each added field once per route by its path, such as `counted.images` or `tours[].views`, never with a value. Its `content-length` header may differ; no other header may. A changed or removed value, a value of another type, a list of another length or another status still fails, and an answer that is not JSON must still be the same to the byte.
 
 The report is one line per check, PASS or FAIL with counts, and ends with `RESULT: PASS` or `RESULT: FAIL`. It never holds a token, an email address or a name from the data. The command exits with status 1 when a check fails.
 

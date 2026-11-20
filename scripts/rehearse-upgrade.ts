@@ -512,8 +512,10 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     const next = await runPhase(newBuild, copy, args.mode, work, tokens, report, `new build ${newBuild.version}`);
     if (next === null) return 1;
 
-    const cmp = compareAnswers(old.answers, next.answers);
-    report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
+    // The old build against the new one: a JSON answer that only adds fields is allowed, and named.
+    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true });
+    report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.addedFields} differ only by added fields, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
+    for (const route of Object.keys(cmp.addedFieldsByRoute).sort()) report.line(`      added fields, ${route}: ${cmp.addedFieldsByRoute[route].join(", ")}`);
 
     for (const [i, token] of tokens.entries()) {
       const ws = next.endDb.snapshot.api_token?.rows.find((r) => r[next.endDb.snapshot.api_token.columns.indexOf("hash")] === tokenHash(token));
