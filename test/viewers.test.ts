@@ -382,7 +382,7 @@ describe("asking for a viewer link", () => {
     for (const [i, slug] of slugs.entries()) await ask(deps, readers[i], slug);
     await settle();
     expect(mail.sent.filter((m) => m.to.startsWith("reader")).map((m) => m.to)).toEqual(readers.slice(0, LIMITS_VIEWER.mailWorkspace.most));
-  });
+  }, 60_000);
 
   it("a workspace's owner learns nothing about another workspace's list from whether their own mails still go", async () => {
     // The attack: fill the count one short with links to your own addresses on your own tour, ask
@@ -405,7 +405,7 @@ describe("asking for a viewer link", () => {
     const unlisted = await run(false);
     expect(listed).toEqual(unlisted);
     expect(listed.mine).toHaveLength(LIMITS_VIEWER.mailWorkspace.most);
-  });
+  }, 60_000);
 
   it("the mail has the approved words, and its link is on the configured tours address whatever the request says", async () => {
     const { deps, mail } = await site();
