@@ -44,6 +44,8 @@ type Row = {
   app: number;
   unknown: number;
   img: number;
+  /** The tours address when the img address is set beside it: as `tours` unless given (a media route moves to the img address). */
+  toursImg?: number;
 };
 
 const api = (method: string, path: string): Row => ({ method, path, one: 401, tours: 401, app: 401, unknown: 421, img: 404 });
@@ -53,6 +55,14 @@ const session = (method: string, path: string, status: number, body?: unknown): 
 const page = (path: string): Row => ({ method: "GET", path, one: 200, tours: 404, app: 200, unknown: 421, img: 404 });
 /** An admin route: the one 404 to anyone but an admin's session, and on the app address only. */
 const admin = (method: string, path: string, body?: unknown): Row => ({ method, path, body, one: 404, tours: 404, app: 404, unknown: 421, img: 404 });
+
+/**
+ * A shared item's page, file, download or preview, or the pages' stylesheet and script: rule
+ * `media`. The sample link id is one nobody has, so an item route answers the 404 page
+ * wherever it answers at all; the two files answer 200.
+ */
+const media = (path: string, status: number): Row => ({ method: "GET", path, one: status, tours: status, app: 404, unknown: 421, img: status, toursImg: 404 });
+const LINK = "abcdefghijklmnopqrst";
 
 /** Keyed like HOST_RULES: "<METHOD> <route path>" exactly as in the route table. */
 const ROWS: Record<string, Row> = {
@@ -126,6 +136,15 @@ const ROWS: Record<string, Row> = {
   "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421, img: 404 },
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { method: "GET", path: "/player.js", one: 200, tours: 200, app: 404, unknown: 421, img: 404 },
   "GET /t/:slug": { method: "GET", path: "/t/no-such-tour", one: 404, tours: 404, app: 308, unknown: 421, img: 404 },
+  // Shared items: on the img address when it is set, else on the tours address.
+  "GET /i/:name": media(`/i/${LINK}`, 404),
+  "GET /i/:name/download": media(`/i/${LINK}/download`, 404),
+  "GET /i/:name/preview": media(`/i/${LINK}/preview`, 404),
+  "GET /r/:name": media(`/r/${LINK}.mp4`, 404),
+  "GET /r/:name/download": media(`/r/${LINK}/download`, 404),
+  "GET /r/:name/preview": media(`/r/${LINK}/preview`, 404),
+  "GET /s/share.css": media("/s/share.css", 200),
+  "GET /s/share.js": media("/s/share.js", 200),
   // The documentation page lives on the app address: the tours address sends the page on and has none of its files.
   "GET /docs": { method: "GET", path: "/docs", one: 200, tours: 308, app: 200, unknown: 421, img: 404 },
   "GET /docs/:file{(?:viewer|docs)\\.[0-9a-f]{16}\\.(?:js|css)}": { method: "GET", path: "/docs/viewer.0123456789abcdef.js", one: 200, tours: 404, app: 200, unknown: 421, img: 404 },
@@ -153,6 +172,10 @@ const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
 const DOCS_PAGE_KEY = "GET /docs";
 /** The page's own files and the licence notices. */
 const DOCS_FILE_KEYS = KEYS.filter((k) => k.startsWith("GET /docs/"));
+/** Shared items' pages, files and previews, and the pages' two files. */
+const MEDIA_KEYS = KEYS.filter((k) => /^GET \/(?:i|r|s)\//.test(k));
+/** The media routes that look an item up: one database call each. */
+const ITEM_KEYS = MEDIA_KEYS.filter((k) => !k.startsWith("GET /s/"));
 
 function sendRow(deps: Deps, row: Row, origin: string): Promise<Call> {
   if (row.body === undefined) return send(deps, row.method, row.path, { origin });
@@ -167,7 +190,8 @@ async function column(deps: Deps, origin: string): Promise<Record<string, Call>>
 }
 
 const statuses = (answers: Record<string, Call>) => Object.fromEntries(KEYS.map((k) => [k, answers[k].status]));
-const expected = (col: "one" | "tours" | "app" | "unknown" | "img") => Object.fromEntries(KEYS.map((k) => [k, ROWS[k][col]]));
+const expected = (col: "one" | "tours" | "app" | "unknown" | "img" | "toursImg") =>
+  Object.fromEntries(KEYS.map((k) => [k, col === "toursImg" ? (ROWS[k].toursImg ?? ROWS[k].tours) : ROWS[k][col]]));
 
 /** An install with a setup code and nothing claimed, in one-address mode. */
 const oneAddress = (config?: Parameters<typeof makeDeps>[0]) => makeDeps({ setupCode: CODE, ...config });
@@ -266,9 +290,10 @@ describe("the host-routing matrix", () => {
     // 15, and the eight routes of shared items.
     expect(API_KEYS.length).toBe(23);
     expect(WIZARD_KEYS.length).toBe(5);
-    // No route of the shipped app is a media route yet, so the img address has health alone.
-    expect(Object.values(HOST_RULES).filter((r) => r === "media")).toEqual([]);
-    for (const key of KEYS) expect(ROWS[key].img, key).toBe(key === "GET /healthz" ? 200 : 404);
+    // The shared items' routes are the media routes, and the img address has them and health alone.
+    expect(MEDIA_KEYS.length).toBe(8);
+    expect(KEYS.filter((k) => HOST_RULES[k] === "media")).toEqual(MEDIA_KEYS);
+    for (const key of KEYS) if (key !== "GET /healthz" && !MEDIA_KEYS.includes(key)) expect(ROWS[key].img, key).toBe(404);
   });
 
   it("one-address mode answers every route on any host as before", async () => {
@@ -393,11 +418,13 @@ describe("the host-routing matrix", () => {
   it("with the img address set, the tours and app addresses answer every route exactly as with two addresses", async () => {
     const two = await twoAddress();
     const three = await threeAddress();
-    for (const [origin, col] of [[TOURS, "tours"], [APP, "app"]] as const) {
+    for (const [origin, col] of [[TOURS, "toursImg"], [APP, "app"]] as const) {
       const before = await column(two.deps, origin);
       const after = await column(three.deps, origin);
       expect(statuses(after), origin).toEqual(expected(col));
-      for (const key of KEYS) {
+      // The media routes leave the tours address for the img address, where they answer instead.
+      for (const key of MEDIA_KEYS) expectNotHere(after[key], `${origin} ${key}`);
+      for (const key of KEYS.filter((k) => !MEDIA_KEYS.includes(k))) {
         const what = `${origin} ${key}`;
         expect(after[key].status, what).toBe(before[key].status);
         expect(after[key].text, what).toBe(before[key].text);
@@ -410,19 +437,24 @@ describe("the host-routing matrix", () => {
     expect(statuses(await column(three.deps, UNKNOWN))).toEqual(expected("unknown"));
   });
 
-  it("the img address answers health and nothing else, and costs no database or storage call for the rest", async () => {
+  it("the img address answers health and the shared items' routes and nothing else, and costs no database or storage call for the rest", async () => {
     const { deps, calls } = await threeAddress();
     const before = calls();
     const answers = await column(deps, IMG);
     expect(statuses(answers)).toEqual(expected("img"));
+    for (const key of ITEM_KEYS) {
+      expect(answers[key].headers.get("content-type"), key).toBe("text/html; charset=utf-8");
+      expect(answers[key].text, key).toContain("This link no longer works");
+      expect(answers[key].calls, key).toBe(1);
+    }
     for (const key of KEYS) {
-      if (key === "GET /healthz") continue;
+      if (key === "GET /healthz" || MEDIA_KEYS.includes(key)) continue;
       expectNotHere(answers[key], key);
       expect(answers[key].headers.get("location"), key).toBeNull();
     }
     expect(answers["GET /healthz"].text).toBe('{"ok":true,"address":"img"}');
     expect(answers["GET /healthz"].headers.get("content-type")).toBe("application/json");
-    expect(calls() - before).toBe(1);
+    expect(calls() - before).toBe(1 + ITEM_KEYS.length);
     // Its name matches in capitals, with a trailing dot and with a default port; another port is unknown.
     for (const origin of ["https://IMG.Example.com", "https://img.example.com.", "http://img.example.com:80"]) {
       expect((await send(deps, "GET", "/healthz", { origin })).text, origin).toBe('{"ok":true,"address":"img"}');
