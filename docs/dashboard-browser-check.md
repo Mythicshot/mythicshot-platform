@@ -1,6 +1,6 @@
-# Browser check of the dashboard: the bar and the Tours page
+# Browser check of the dashboard: the bar, the Tours, Storage and Account pages, and changing an email address
 
-The tests run the dashboard's scripts against a stand-in document, and against the real app in the same process, but they cannot open a browser. This list is what a person goes through by hand before the Tours page is called done: once in Chrome and once in Firefox, each with the developer tools open. Write down for each step whether it passed, and for anything that did not, what the page showed.
+The tests run the dashboard's scripts against a stand-in document, and against the real app in the same process, but they cannot open a browser. This list is what a person goes through by hand before a dashboard page is called done: once in Chrome and once in Firefox, each with the developer tools open. Write down for each step whether it passed, and for anything that did not, what the page showed.
 
 Chrome and Firefox treat `http://localhost` as a secure address and keep the session cookie, which is marked `Secure` and named with the `__Host-` prefix. Another browser may refuse that cookie on plain `http://localhost`: every dashboard page then goes straight back to `/signin`. That is the browser, not the site; note it if you try one.
 
@@ -18,7 +18,7 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 - [ ] `http://localhost:3000/` while signed in lands on `/tours`; in a private window (nobody signed in) it lands on `/signin`. In the network panel the first answer is a `302` with `cache-control: no-store` and no body.
 - [ ] The bar across the top shows "Mythicshot", the tabs "Tours", "Storage", "Account" and "Admin" in that order, and the username `checker` on the right (an account without a username shows the word "Account" there, never an email address). "Tours" is marked as the current tab. There is no "Images" or "GIFs" tab.
 - [ ] View the page source: the Admin link is in it with `hidden` (the script shows it because `checker` is the admin), the username is not in it, and nothing else names an admin route. In a private window, `view-source:http://localhost:3000/tours` shows the very same text.
-- [ ] "Storage" leads to `/storage` (checked below). "Admin" leads to `/admin`, which answers `{"error":"not_found"}` until its page is built. "Account" leads to today's account page.
+- [ ] "Storage" leads to `/storage` (checked below). "Admin" leads to `/admin`, which answers `{"error":"not_found"}` until its page is built. "Account" leads to `/account` (checked below).
 - [ ] The console shows no error and no policy violation ("Refused to …" or "Content Security Policy"); the network panel shows only requests to `localhost:3000`: the page, its stylesheet and its two scripts (all three under `/dash/`), and `GET /api/v1/session`, `/api/v1/me`, `/api/v1/tours` and `/api/v1/usage`.
 - [ ] The page's answer, the stylesheet and both scripts carry the same six headers as the sign-in pages: `content-security-policy: default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `x-frame-options: DENY`, `referrer-policy: no-referrer`, `cache-control: no-store`, `x-content-type-options: nosniff` and `cross-origin-opener-policy: same-origin`.
 
@@ -74,6 +74,46 @@ Do this part twice: first with the server started as in "Set up" (no allowance),
 - [ ] Delete every tour: the line reads "0 bytes used · 0 tours" (or "0 bytes of 5 GB used · 0 tours"), "What takes the room" shows "0 bytes" three times, the hint is shown, and there is no "Largest tours" table.
 - [ ] At 380 pixels wide and at 320, the small bars in the table are left out, nothing scrolls sideways and a long title wraps; in dark mode the bars and the amber warning are readable.
 
+## The Account page
+
+This part folds in the account page's checks that used to be in [the sign-in pages' check](signin-browser-check.md): the account page is a dashboard page now, and its storage block is the Storage page above. Sign in in the other browser too (a new link from the test tool, as in "Set up" step 4 of the sign-in pages' check).
+
+- [ ] After signing in through a link, the browser lands on `/tours`, not on `/account`. `/signin` while signed in goes straight to `/tours` too; `/account` in a private window (nobody signed in) goes straight to `/signin`.
+- [ ] "Account" in the bar opens `/account`, marked as the current tab; the tab's title is "Account". The network panel shows `GET /api/v1/session` and `GET /api/v1/sessions` and nothing else to `/api/v1`, and the page, its stylesheet and its two scripts under `/dash/` carry the six headers listed in "The bar". There is no storage block on this page.
+- [ ] Under the heading "Account": "Signed in as checker". The card "Your details" has three rows: "Username" with `checker`, "Email address" with `owner@example.com`, and "Workspace" with the workspace's name.
+- [ ] Mail is off on this scratch site, so there is no "Change" button next to the address, and under it the line "This site cannot send mail, so the email address cannot be changed here."
+- [ ] The card "Where you are signed in" has a row with the green tag "This browser", the browser and system, such as "Firefox on Windows", and "since" today's day and month; and a row for the other browser with its name, "last used" with today's day and month, and a "Sign out" button. Under them, the buttons "Sign out" and "Sign out everywhere" side by side.
+- [ ] Nothing of the account shows until it has all arrived, then everything shows at once (try it with the network panel's throttling at its slowest). Each "Sign out" reads "Signing out…" while its request runs, and a second press sends nothing.
+- [ ] The other browser's "Sign out" sends `DELETE /api/v1/sessions/ses_…` with an `X-Csrf-Token` header and `Origin: http://localhost:3000`, and the row disappears with the focus on "Where you are signed in". In the other browser, reloading `/account` goes to `/signin`.
+- [ ] With the server stopped, a row's "Sign out" gives "That session could not be ended. Reload the page." and the row stays; "Sign out" and "Sign out everywhere" give "Something went wrong. Try again in a moment." and come back. Start the server again.
+- [ ] Sign the other browser in again. "Sign out" greys out both buttons, sends `POST /api/v1/signout` with an `X-Csrf-Token` header and `Origin: http://localhost:3000`, and lands on `/signin`; the answer clears the cookie (`Max-Age=0`). The other browser's `/account` still loads.
+- [ ] Sign in again in this browser. "Sign out everywhere" sends `POST /api/v1/signout/everywhere` with an `X-Csrf-Token` header and lands on `/signin`; in the other browser, reloading `/account` now goes to `/signin` too.
+- [ ] At 380 pixels wide and at 320, the rows wrap without a sideways scroll, a long email address wraps, and the two sign-out buttons stack when they do not fit side by side. With a screen reader, each row's "Sign out" names that row's browser.
+
+## Changing the email address
+
+The Change button needs a site that can send mail, which this scratch site cannot: `MAIL_MODE=smtp` needs a real mail server over TLS. Do this part only on a test site whose mail works and where you own both test mailboxes; otherwise write down that it was not checked by hand (the tests run the whole change end to end against the real app with a stand-in mailer).
+
+- [ ] "Change" next to the address opens the question "Change your email address" in the page, never a browser dialog: the field "New email address" with the cursor in it, "We send a link to the new address. Your address changes when you open it." and the buttons "Cancel" and "Send the link". The bar and the page behind are dimmed and cannot be clicked or reached with Tab; Tab and Shift+Tab go round the field and the two buttons.
+- [ ] "Cancel", Escape and a click on the dimmed area each close it, with no request, and put the focus back on "Change". Opening it again shows an empty field.
+- [ ] "name" and an empty field give "That does not look like an email address." under the hint, with no request, and the field is marked as wrong.
+- [ ] A new address: "Send the link" reads "Sending…", the field and both buttons are greyed out, Escape and the dimmed area do nothing, and the focus stays in the question. The request is `POST /api/v1/account/email` with the body `{"email":"…"}`, an `X-Csrf-Token` header and the site's `Origin`. Then "Check <new address>" with "Open the link we sent there to finish. It works once and for 15 minutes. Until then you keep signing in with <present address>." and "Done", which has the focus. "Done", Escape and the dimmed area close it with the focus on "Change"; the address on the page has not changed.
+- [ ] Ask again with the address of another account on the site, then with this account's own address: the page shows exactly the same "Check …" box each time, and no mail arrives at either.
+- [ ] The mail at the new address says "It works once and for 15 minutes, and you need to be signed in to Mythicshot when you open it." and holds one link to `/account/email#c=dpe_…`.
+- [ ] With the server stopped, "Send the link" gives "Something went wrong. Try again in a moment." in the question, which stays open with its buttons back. Start the server again.
+
+## The page an email-change link opens
+
+The dead-link and signed-out states can be checked on this scratch site with a made-up code of the right shape: `dpe_` followed by 40 characters from `0-9a-f`.
+
+- [ ] `http://localhost:3000/account/email` with nothing after it, and with `#c=abc`, shows "Confirm your new email address", "This link no longer works. Ask for a new one from your account page." and "Back to your account" (a link to `/account`) at once, with no request to `/api/v1` in the network panel. The "Account" tab is the current one.
+- [ ] With `#c=dpe_` and the 40 characters: the address bar shows `http://localhost:3000/account/email` with no `#c=…` once the page has loaded, the page shows "Confirm your new email address", "Press the button to make this your Mythicshot email address." and "Confirm", and the only request so far is `GET /api/v1/session`. No request anywhere carries the code in its address or in a `Referer` header.
+- [ ] "Confirm" reads "Confirming…" and sends one `POST /api/v1/account/email/confirm` with the body `{"code":"dpe_…"}`, an `X-Csrf-Token` header and `Origin: http://localhost:3000`; the made-up code gives "This link no longer works. Ask for a new one from your account page." with the link back.
+- [ ] Reloading the page after it loaded shows the dead link with no request: the code left the address bar when the page first loaded. A long press on Back shows no address with `#c=` in it.
+- [ ] In a private window (nobody signed in), the address with a code shows "Sign in first", "Sign in with your current email address, then open the link from your mail again." and "Sign in", which goes to `/signin`; no confirm request is sent.
+- [ ] On a test site with mail (as in "Changing the email address"): opening the mailed link in a browser signed in to this account and pressing "Confirm" shows "Your email address is now <new address>", "Sign-in links go to this address from now on. We sent a notice to <old address>." and "Back to your account", which shows the new address on `/account`. The old mailbox gets "Your Mythicshot email address was changed" with the new address partly hidden. The same link opened again gives the dead link.
+- [ ] At 320 pixels wide the box fits without a sideways scroll and a long address wraps; in dark mode it is readable.
+
 ## When something fails
 
 - [ ] With the server stopped, any button gives "Something went wrong. Try again in a moment." under the heading line (in the question, for "Delete tour") and comes back. Start the server again.
@@ -94,7 +134,7 @@ Do this part twice: first with the server started as in "Set up" (no allowance),
 
 Set up the site with two addresses as in "Two addresses" of the sign-in pages' check.
 
-- [ ] `/tours`, and the stylesheet and scripts under `/dash/`, on the tours address answer `{"error":"not_found"}`; `/` on the tours address sends the browser to `/` on the app address, which sends it on to `/tours` or `/signin`.
+- [ ] `/tours`, `/storage`, `/account`, `/account/email`, and the stylesheet and scripts under `/dash/`, on the tours address answer `{"error":"not_found"}`; `/` on the tours address sends the browser to `/` on the app address, which sends it on to `/tours` or `/signin`.
 - [ ] On the app address, a published tour's "Open" and "Copy link" use the tours address: `http://` and the tours name, the port, `/t/<slug>`.
 
 ## Afterwards

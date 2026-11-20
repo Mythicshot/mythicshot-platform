@@ -15,6 +15,8 @@ import { DASH_JS } from "./script.ts";
 import { DASH_CSS } from "./style.ts";
 import { TOURS_HTML, TOURS_JS } from "./tours.ts";
 import { STORAGE_HTML, STORAGE_JS } from "./storage.ts";
+import { ACCOUNT_HTML, ACCOUNT_JS } from "./account.ts";
+import { ACCOUNT_EMAIL_HTML, ACCOUNT_EMAIL_JS } from "./account-email.ts";
 
 /** One dashboard page: where it is served, its document, and its own script. */
 export type DashPage = { path: string; html: string; script: { path: string; body: string } };
@@ -23,6 +25,17 @@ export type DashPage = { path: string; html: string; script: { path: string; bod
 export const DASH_PAGES: readonly DashPage[] = [
   { path: "/tours", html: TOURS_HTML, script: { path: "/dash/tours.js", body: TOURS_JS } },
   { path: "/storage", html: STORAGE_HTML, script: { path: "/dash/storage.js", body: STORAGE_JS } },
+  { path: "/account", html: ACCOUNT_HTML, script: { path: "/dash/account.js", body: ACCOUNT_JS } },
+];
+
+/**
+ * The dashboard's pages that a mailed link opens: served as DASH_PAGES are, and kept apart
+ * because their scripts read the code after `#` in the address and take it out of the
+ * address bar, which no page in DASH_PAGES may do (test/dash.test.ts). Their own checks are
+ * in test/dash-account.test.ts.
+ */
+export const DASH_LINK_PAGES: readonly DashPage[] = [
+  { path: "/account/email", html: ACCOUNT_EMAIL_HTML, script: { path: "/dash/account-email.js", body: ACCOUNT_EMAIL_JS } },
 ];
 
 const HTML = "text/html; charset=utf-8";
@@ -37,7 +50,7 @@ function sendTo(path: "/tours" | "/signin"): Response {
 export function dashRoutes(app: Hono): void {
   const serve = (body: string, type: string) => () => new Response(body, { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": type } });
   app.get("/", (c) => sendTo(sessionCookiePresent(c.req.raw) ? "/tours" : "/signin"));
-  for (const page of DASH_PAGES) {
+  for (const page of [...DASH_PAGES, ...DASH_LINK_PAGES]) {
     app.get(page.path, serve(page.html, HTML));
     app.get(page.script.path, serve(page.script.body, JS));
   }

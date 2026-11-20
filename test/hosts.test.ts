@@ -100,6 +100,9 @@ const ROWS: Record<string, Row> = {
   "GET /dash/dash.js": page("/dash/dash.js"),
   "GET /storage": page("/storage"),
   "GET /dash/storage.js": page("/dash/storage.js"),
+  "GET /dash/account.js": page("/dash/account.js"),
+  "GET /account/email": page("/account/email"),
+  "GET /dash/account-email.js": page("/dash/account-email.js"),
   "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421 },
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { method: "GET", path: "/player.js", one: 200, tours: 200, app: 404, unknown: 421 },
   "GET /t/:slug": { method: "GET", path: "/t/no-such-tour", one: 404, tours: 404, app: 308, unknown: 421 },
@@ -229,8 +232,8 @@ describe("the host-routing matrix", () => {
     for (const key of PAGE_KEYS) expect(HOST_RULES[key], key).toBe("app");
     for (const key of DASH_KEYS) expect(HOST_RULES[key], key).toBe("app");
     expect(HOST_RULES[ROOT_KEY]).toBe("app-redirect");
-    expect(PAGE_KEYS.length).toBe(5);
-    expect(DASH_KEYS.length).toBe(6);
+    expect(PAGE_KEYS.length).toBe(6);
+    expect(DASH_KEYS.length).toBe(8);
     expect(SESSION_KEYS.length).toBe(9);
     expect(ADMIN_KEYS.length).toBe(3);
     expect(DESCRIPTION_KEYS.length).toBe(2);

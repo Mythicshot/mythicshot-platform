@@ -5,7 +5,11 @@
 // Dash.start asks GET /api/v1/session once. Without a session the visitor is sent to
 // /signin. With one it keeps the anti-forgery value in one variable of this function, puts
 // the username in the bar and shows the Admin tab for an admin, all through textContent
-// and `hidden`, then hands the page { username, admin, workspace }. Every request goes
+// and `hidden`, then hands the page { username, admin, workspace } and, for the Account
+// page, { named, email, sessionId, emailChange } (whether the account has a username, its
+// address, this session's id, and whether the address can be changed here). A page that
+// has something to say to a visitor who is not signed in passes a second function, which is
+// called instead of sending the visitor to /signin. Every request goes
 // through Dash.api: to this site only, with the browser's session for this address, no
 // referrer, and the X-Csrf-Token header on every change, as the account page sends it.
 // Nothing here writes to storage, to a cookie or to an address.
@@ -56,8 +60,8 @@ export const DASH_JS = `var Dash = (function () {
 
   // Sizes as the owner chose them: 1024 to the next unit, as the server counts, at most
   // one decimal and no trailing .0 (1.2 GB, 5 GB, 512 KB). The server's formatBytes
-  // (src/usage.ts) and the account page write them the same way; all three are held to
-  // the one table in test/sizes.ts.
+  // (src/usage.ts) writes them the same way; both are held to the one table in
+  // test/sizes.ts.
   function formatBytes(n) {
     if (n < 1024) return n === 1 ? TEXT.oneByte : n + TEXT.bytes;
     var units = ["KB", "MB", "GB"];
@@ -82,11 +86,16 @@ export const DASH_JS = `var Dash = (function () {
     location.replace("/signin");
   }
 
-  // Who is signed in, then the page. A visitor who is not signed in goes to /signin.
-  function start(page) {
+  // Who is signed in, then the page. A visitor who is not signed in goes to /signin, or to
+  // the page's own whenSignedOut when it has one.
+  function start(page, whenSignedOut) {
     var load = $("dash-load");
     api("GET", "/api/v1/session").then(function (res) {
-      if (res.status === 401) { signedOut(); return; }
+      if (res.status === 401) {
+        if (typeof whenSignedOut === "function") whenSignedOut();
+        else signedOut();
+        return;
+      }
       var d = res.data;
       if (res.status !== 200 || d === null || typeof d !== "object" || typeof d.csrf !== "string" || d.account === null || typeof d.account !== "object" || d.workspace === null || typeof d.workspace !== "object") {
         load.textContent = failure(res);
@@ -95,11 +104,20 @@ export const DASH_JS = `var Dash = (function () {
       csrf = d.csrf;
       var who = d.account;
       // Without a username the bar says Account, never the email address: people record their screens.
-      var name = typeof who.username === "string" && who.username !== "" ? who.username : TEXT.account;
+      var named = typeof who.username === "string" && who.username !== "";
+      var name = named ? who.username : TEXT.account;
       $("dash-user").textContent = name;
       var admin = who.admin === true;
       if (admin) $("tab-admin").hidden = false;
-      return page({ username: name, admin: admin, workspace: typeof d.workspace.name === "string" ? d.workspace.name : "" });
+      return page({
+        username: name,
+        admin: admin,
+        workspace: typeof d.workspace.name === "string" ? d.workspace.name : "",
+        named: named,
+        email: typeof who.email === "string" ? who.email : "",
+        sessionId: d.session !== null && typeof d.session === "object" && typeof d.session.id === "string" ? d.session.id : "",
+        emailChange: d.email_change === true,
+      });
     }).then(null, function () {
       load.textContent = TEXT.failed;
     });
