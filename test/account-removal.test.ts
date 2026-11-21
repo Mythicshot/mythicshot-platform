@@ -137,7 +137,8 @@ describe("disabling an account", () => {
     // The tour page and the picture route make the one database call they always made, and the picture its one store read.
     expect((await send(deps, "GET", requests[0].path)).calls).toBe(1);
     expect((await send(deps, "GET", requests[1].path)).calls).toBe(2);
-    expect((await send(deps, "GET", requests[0].unknown)).calls).toBe(1);
+    // A link that finds no public tour also asks whether a restricted tour has it (src/restricted.ts).
+    expect((await send(deps, "GET", requests[0].unknown)).calls).toBe(2);
     expect((await send(deps, "GET", requests[1].unknown)).calls).toBe(1);
 
     // A sign-in code made a moment before, and an open email change, are ended with the sessions.
@@ -165,8 +166,9 @@ describe("disabling an account", () => {
     // Asked with an ETag the page had, the page is still the not-found one.
     const etag = before.public[0].headers.find(([k]) => k === "etag")?.[1] ?? "";
     expect(seen(await send(deps, "GET", requests[0].path, { headers: { "if-none-match": etag } }))).toEqual(seen(await send(deps, "GET", requests[0].unknown, { headers: { "if-none-match": etag } })));
-    // The checks cost no call more.
-    expect((await send(deps, "GET", requests[0].path)).calls).toBe(1);
+    // The checks cost no call more: the page makes the two calls an unknown link makes (the
+    // public lookup, then the look for a restricted tour, src/restricted.ts).
+    expect((await send(deps, "GET", requests[0].path)).calls).toBe(2);
     expect((await send(deps, "GET", requests[1].path)).calls).toBe(1);
 
     // Every route, with each of the workspace's tokens and with the account's session (ended, and

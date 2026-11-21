@@ -60,7 +60,7 @@ const STAND_IN_SLUG = "aaaaaaaaaa";
 /** A tour id of the right shape that no tour has (newId draws 96 random bits; this one is all zeros), for mayView when there is no tour. */
 const NO_TOUR = { id: "tour_" + "0".repeat(24) };
 
-/** What a restricted tour's page and pictures answer with, and the not-shared and gate pages too: never kept by any cache. */
+/** What a restricted tour's page and pictures answer with: never kept by any cache. (The gate and the not-shared page answer the sign-in pages' `no-store`.) */
 export const RESTRICTED_CACHE = "private, no-store";
 
 /** The restricted tour page's policy: the public page's, with images from this origin alone and no framing anywhere. */
@@ -162,7 +162,7 @@ function platformPage(body: string, status = 200, type = HTML): Response {
  * malformed (then no call is made).
  */
 export async function restrictedAnswer(req: Request, deps: Deps, slug: string): Promise<Response | null> {
-  const tour = await tourForServing(deps, { slug });
+  const tour = await servedTour(deps, slug);
   if (!servable(tour)) return null;
   // Built before anything about the visitor is read, so a snapshot that cannot be served
   // answers not found to everyone alike.
@@ -180,6 +180,23 @@ export async function restrictedAnswer(req: Request, deps: Deps, slug: string): 
   return new Response(restrictedPageHtml(page, tour.slug, email), { status: 200, headers: RESTRICTED_PAGE_HEADERS });
 }
 
+/**
+ * The tour, or null also on a database a migration has not reached yet (no access setting,
+ * no private text, no switch table): such a database has no restricted tour, and the tour
+ * page must answer an unknown slug there as it always did, never with an error. Any other
+ * failure is a failure.
+ */
+async function servedTour(deps: Deps, slug: string): Promise<ServedTour | null> {
+  try {
+    return await tourForServing(deps, { slug });
+  } catch (err) {
+    for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
+      if (/no such (?:table|column)/.test(e.message)) return null;
+    }
+    throw err;
+  }
+}
+
 /** The one answer of the picture route for anything it does not serve: the picture route's (/p/) own 404. */
 const missing = () => json(404, { error: "not_found" });
 
@@ -195,7 +212,7 @@ export function restrictedRoutes(app: Hono, deps: Deps): void {
   app.get("/t/:slug/v/:name", async (c) => {
     const name = c.req.param("name");
     if (!PICTURE_NAME.test(name)) return missing();
-    const tour = await tourForServing(deps, { slug: c.req.param("slug") });
+    const tour = await servedTour(deps, c.req.param("slug"));
     if (!servable(tour)) return missing();
     const picture = tour.pictures.get(name);
     if (picture === undefined) return missing();
