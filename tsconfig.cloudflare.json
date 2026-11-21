@@ -35,6 +35,7 @@
     "scripts/**",
     "test/harness.node.ts",
     "test/node-admin-page.ts",
+    "test/node-tours-page.ts",
     "node_modules",
     "dist"
   ]

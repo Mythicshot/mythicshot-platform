@@ -152,6 +152,33 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
 .menu button.danger { color: var(--error); }
 .copy { flex: 1 1 100%; min-width: 0; min-height: 36px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--field); color: var(--text); font: inherit; font-size: 0.85rem; }
 .copy:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* Its Sharing box (the restricted tours set's mockups 2 and 3). */
+#share-box { max-width: 480px; max-height: 100%; overflow-y: auto; }
+.opts { margin: 0 0 4px; padding: 0; border: 0; min-width: 0; }
+.dialog label.opt { display: flex; gap: 12px; align-items: flex-start; margin: 0 0 8px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; font-weight: 400; font-size: inherit; cursor: pointer; }
+.opt:has(input:checked) { border-color: var(--accent); background: var(--ok-bg); }
+.opt:has(input:disabled) { opacity: 0.55; cursor: not-allowed; }
+.opt input { flex: 0 0 auto; width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--accent); }
+.opt input:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; }
+.opt-text { min-width: 0; }
+.opt-name { display: block; font-weight: 600; }
+.opt-d { display: block; color: var(--muted); font-size: 0.88rem; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 10px; padding: 0; list-style: none; }
+.chips:empty { display: none; }
+.chip { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; min-width: 0; padding: 2px 3px 2px 10px; border-radius: 999px; background: var(--tag-bg); color: var(--tag-text); font-size: 0.84rem; }
+.chip .name { min-width: 0; }
+.chip button { flex: 0 0 auto; min-width: 28px; min-height: 28px; padding: 0; border: 0; border-radius: 999px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.chip button:hover:not(:disabled) { background: var(--line); }
+.chip button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+.chip button:disabled { opacity: 0.45; cursor: not-allowed; }
+#share-add-message { margin: 8px 0 0; }
+.progress { display: block; width: 100%; height: 10px; margin: 8px 0 6px; border: 0; border-radius: 8px; background: var(--line); color: var(--accent); appearance: none; overflow: hidden; }
+.progress::-webkit-progress-bar { background: var(--line); border-radius: 8px; }
+.progress::-webkit-progress-value { background: var(--accent); border-radius: 8px; }
+.progress::-moz-progress-bar { background: var(--accent); border-radius: 8px; }
+@media (max-width: 720px) {
+  .tours td.view { display: none; }
+}
 @media (max-width: 720px) {
   .tours, .tours tbody, .tours tr, .tours td { display: block; }
   .tours thead, .tours td.size, .tours td.when { display: none; }
