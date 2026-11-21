@@ -25,11 +25,20 @@ export type Recorded = { key: string; route: string; answer: Answer };
  *   (onlyAddedFields: byte for byte, keys in their order, and every added key shaped like
  *   a field name), with `content-length` let follow the longer body. Such answers are
  *   counted apart, with the added field paths named once per route and no value.
+ * - from the old build to the new one only (never on the way back, never between two
+ *   runs of the same build): in a tour page answer (route `GET /t/:slug`, HTML by its
+ *   content type), the content-hashed names of the player's own two files, which change
+ *   whenever the player's script or stylesheet does (playerNamesOnly). Only the name inside
+ *   the page's own two tags, written exactly as src/page.ts writes them, is swapped for a
+ *   fixed stand-in on both sides; the bodies must be the same length and every other byte
+ *   the same, and the `etag` header (a hash of the body) is let follow only then. Such
+ *   answers are counted apart, and no file name is ever printed.
  * The API description's ETags would be a further entry, but the rehearsal records no
  * description answer: its text changes with every version by design.
  */
 export const IGNORED_HEADERS: readonly string[] = ["date"];
 export const VERSION_ROUTE = "GET /api/v1/me";
+export const PAGE_ROUTE = "GET /t/:slug";
 
 /**
  * Routes a newer build may answer that an older one did not have. When the older build
@@ -46,6 +55,8 @@ export type AnswerComparison = {
   identical: number;
   /** Answers that differ only in the version value of GET /api/v1/me. */
   allowed: number;
+  /** Tour pages that differ only in the player's file names (playerNamesOnly), when the comparison allows it. */
+  playerNames: number;
   /**
    * Answers whose newer JSON body only adds object keys (see onlyAddedFields), when the
    * comparison allows it: the count, and per route the added field paths, each once.
@@ -102,6 +113,59 @@ export function answerProblems(before: Answer, after: Answer): string[] {
   out.push(...headerProblems(before.headers, after.headers));
   if (!sameBytes(before.body, after.body)) out.push(`body differs (${before.body.length} and ${after.body.length} bytes)`);
   return out;
+}
+
+/**
+ * The page's own two tags naming the player's files, exactly as src/page.ts writes them
+ * (pageHtml, and the not-found page's stylesheet tag): the name is `/player.` and 16
+ * lowercase hex digits, then `.css` or `.js`. Nothing a customer writes can make such a
+ * tag: the title is escaped for HTML (escapeHtml turns `<` and `"` into entities) and the
+ * tour's data is JSON with `<` written as < (scriptJson), so a title or step text
+ * holding `/player.0123456789abcdef.js` is never inside one of these tags and is compared
+ * byte for byte like the rest of the page. Only the whole tag is matched, never the bare name.
+ */
+const PLAYER_CSS_TAG = /<link rel="stylesheet" href="\/player\.[0-9a-f]{16}\.css">/g;
+const PLAYER_JS_TAG = /<script src="\/player\.[0-9a-f]{16}\.js" defer><\/script>/g;
+/** The fixed stand-ins both sides' tags are swapped for: no hash, so neither build's name survives. */
+const PLAYER_CSS_STAND_IN = '<link rel="stylesheet" href="/player.(name).css">';
+const PLAYER_JS_STAND_IN = '<script src="/player.(name).js" defer></script>';
+const HTML_TYPE = /^text\/html\s*(?:;|$)/i;
+
+/** The page's text with its player tags swapped for the stand-ins, or null when it is not exact UTF-8 or names either file more than once. */
+function withPlayerStandIns(body: Uint8Array): { text: string; css: number; js: number } | null {
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(body);
+  } catch {
+    return null;
+  }
+  const css = text.match(PLAYER_CSS_TAG)?.length ?? 0;
+  const js = text.match(PLAYER_JS_TAG)?.length ?? 0;
+  if (css > 1 || js > 1) return null;
+  return { text: text.replace(PLAYER_CSS_TAG, PLAYER_CSS_STAND_IN).replace(PLAYER_JS_TAG, PLAYER_JS_STAND_IN), css, js };
+}
+
+/**
+ * Whether two answers of a tour page differ only in the names of the player's files:
+ * - the route is GET /t/:slug and both answers are HTML by their content type;
+ * - the same status, and every header the same but the ignored ones and `etag`, which is
+ *   present in both or in neither;
+ * - the bodies differ, are the same length, and are each exact UTF-8 naming each player
+ *   file at most once, in the same tags on both sides;
+ * - with each player tag swapped for its fixed stand-in, the two texts are the same.
+ * Identical bodies with a differing etag are not this case: that stays a difference.
+ */
+export function playerNamesOnly(route: string, before: Answer, after: Answer): boolean {
+  if (route !== PAGE_ROUTE || before.status !== after.status) return false;
+  if (!HTML_TYPE.test(before.headers["content-type"] ?? "") || !HTML_TYPE.test(after.headers["content-type"] ?? "")) return false;
+  const strip = (h: Record<string, string>) => Object.fromEntries(Object.entries(h).filter(([k]) => k !== "etag"));
+  if (headerProblems(strip(before.headers), strip(after.headers)).length > 0) return false;
+  if (("etag" in before.headers) !== ("etag" in after.headers)) return false;
+  if (before.body.length !== after.body.length || sameBytes(before.body, after.body)) return false;
+  const b = withPlayerStandIns(before.body);
+  const a = withPlayerStandIns(after.body);
+  if (b === null || a === null || b.css !== a.css || b.js !== a.js) return false;
+  return b.text === a.text;
 }
 
 /**
@@ -228,9 +292,13 @@ export function isPlainNotFound(a: Answer): boolean {
  * newer body only adds object keys is let through too (onlyAddedFields), after the version
  * swap on GET /api/v1/me, and counted apart with its added paths. Without it (the way back,
  * the same build twice) such an answer is a difference like any other.
+ *
+ * With `allowPlayerNames` (the old build against the new one only), a tour page that
+ * differs only in the player's file names is let through (playerNamesOnly) and counted
+ * apart. Without it, such a page is a difference like any other.
  */
-export function compareAnswers(before: Recorded[], after: Recorded[], opts: { allowAddedFields?: boolean } = {}): AnswerComparison {
-  const result: AnswerComparison = { identical: 0, allowed: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] };
+export function compareAnswers(before: Recorded[], after: Recorded[], opts: { allowAddedFields?: boolean; allowPlayerNames?: boolean } = {}): AnswerComparison {
+  const result: AnswerComparison = { identical: 0, allowed: 0, playerNames: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] };
   const later = new Map(after.map((r) => [r.key, r]));
   const earlier = new Set(before.map((r) => r.key));
   for (const b of before) {
@@ -255,6 +323,10 @@ export function compareAnswers(before: Recorded[], after: Recorded[], opts: { al
     const swapped = withVersionOf(b.route, b.answer, a.answer);
     if (swapped !== null && answerProblems(swapped, a.answer).length === 0) {
       result.allowed++;
+      continue;
+    }
+    if (opts.allowPlayerNames === true && playerNamesOnly(b.route, b.answer, a.answer)) {
+      result.playerNames++;
       continue;
     }
     const only = opts.allowAddedFields === true ? onlyAddedFields(swapped ?? b.answer, a.answer) : null;

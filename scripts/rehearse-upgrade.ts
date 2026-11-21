@@ -646,8 +646,31 @@ export function resultLine(failed: number, addedFields: number): string {
  * (a session counts only from a page of its own address, which the rehearsal's plain-HTTP
  * requests can be only on a local name), an address for links, and a mail setting whose
  * server is never contacted (restricting needs a site that can mail; nothing is mailed by it).
+ * The mail settings must be complete for mail to be on (mailFromEnv in src/node/config.ts),
+ * so they hold a user and a password too: placeholders that are plainly not real, for a
+ * server on the discard port of 127.0.0.1 that no build ever connects to here.
  */
-export const RESTRICT_SETTINGS: Readonly<Record<string, string>> = { SITE_HOST: "localhost", MAIL_MODE: "smtp", MAIL_FROM: "rehearsal@example.com", SMTP_HOST: "127.0.0.1", SMTP_PORT: "9" };
+export const RESTRICT_SETTINGS: Readonly<Record<string, string>> = {
+  SITE_HOST: "localhost",
+  MAIL_MODE: "smtp",
+  MAIL_FROM: "rehearsal@example.com",
+  SMTP_HOST: "127.0.0.1",
+  SMTP_PORT: "9",
+  SMTP_USER: "rehearsal",
+  SMTP_PASSWORD: "not-a-real-password",
+};
+
+const ERROR_CODE = /^[a-z_]{1,40}$/;
+
+/**
+ * The line for a refused change of who views a tour: its status and, when the answer is a
+ * JSON object whose `error` is shaped like one of the API's codes (lowercase letters and
+ * underscores, at most 40), that code in brackets. No other part of the body is ever shown.
+ */
+export function refusalLine(a: Answer): string {
+  const code = jsonOf(a)?.error;
+  return typeof code === "string" && ERROR_CODE.test(code) ? `the change answered ${a.status} (${code})` : `the change answered ${a.status}`;
+}
 
 /** A session for the account of the token's workspace, written into the scratch copy only (made the site's admin there when the copy has none, which signing in needs). Null when the workspace has no account. */
 export async function scratchSession(dbPath: string, token: string): Promise<{ cookie: string; csrf: string } | null> {
@@ -727,7 +750,7 @@ async function restrictedWayBack(args: Args, oldBuild: BuildInfo, newBuild: Buil
     const headers = { cookie: session.cookie, "x-csrf-token": session.csrf, origin: `http://${host}`, "sec-fetch-site": "same-origin", "content-type": "application/json" };
     let a = await fetchAnswer(port, "PUT", `/api/v1/tours/${tour.id}/access`, host, { body: JSON.stringify({ access: "me" }), headers });
     for (let i = 0; a.status === 202 && i < 100; i++) a = await fetchAnswer(port, "PUT", `/api/v1/tours/${tour.id}/access`, host, { body: JSON.stringify({ access: "me" }), headers });
-    if (!report.check(a.status === 200 && jsonOf(a)?.access === "me", `${what}: the new build restricted one tour of token 1 (${pictures.length} pictures) through its API`, [`the change answered ${a.status}`])) return;
+    if (!report.check(a.status === 200 && jsonOf(a)?.access === "me", `${what}: the new build restricted one tour of token 1 (${pictures.length} pictures) through its API`, [refusalLine(a)])) return;
   } finally {
     await stopBuild(r);
   }
@@ -799,10 +822,11 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     const next = await runPhase(newBuild, copy, modes.next, work, tokens, report, `new build ${newBuild.version}`);
     if (next === null) return 1;
 
-    // The old build against the new one: a JSON answer that only adds fields is allowed, and named.
-    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true });
+    // The old build against the new one: a JSON answer that only adds fields is allowed, and
+    // named; a tour page that names the new build's player files is allowed, and counted.
+    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true, allowPlayerNames: true });
     addedCount = addedFieldCount(cmp);
-    report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.addedFields} differ only by added fields, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
+    report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.playerNames} differ only in the player's file names, ${cmp.addedFields} differ only by added fields, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
     for (const route of Object.keys(cmp.addedFieldsByRoute).sort()) report.line(`      added fields, ${route}: ${cmp.addedFieldsByRoute[route].join(", ")}`);
 
     for (const [i, token] of tokens.entries()) {
@@ -844,8 +868,9 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     // --- the way back: the old build on the migrated copy
     const back = await runPhase(oldBuild, copy, modes.old, work, tokens, report, `way back: old build ${oldBuild.version} on the migrated copy`);
     if (back !== null) {
+      // Nothing of the new build's allowances: the old build must answer as it did, but the date.
       const again = compareAnswers(old.answers, back.answers);
-      report.check(again.problems.length === 0 && again.added.length === 0, `way back: answers ${again.identical} identical to before the update, ${again.allowed + again.added.length} allowed differences, ${again.problems.length} differ`, again.problems);
+      report.check(again.problems.length === 0 && again.added.length === 0, `way back: answers ${again.identical} identical to before the update, ${again.allowed + again.playerNames + again.added.length} allowed differences, ${again.problems.length} differ`, again.problems);
       const s = compareStores(old.stores, back.stores);
       report.check(storesSame(s), `way back: stores ${s.files} files identical (${s.missing} missing, ${s.extra} extra, ${s.changed} changed)`);
       const keptMigrations = migrationProblems(back.endDb.migrations, newBuild.migrations);
