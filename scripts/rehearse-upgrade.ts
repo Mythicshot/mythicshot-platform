@@ -56,6 +56,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ACCOUNT_TABLES,
   addedFieldCount,
+  identityProblems,
+  playerFileProblems,
+  playerFilesIn,
+  PAGE_ROUTE,
   checkAccountsBackfill,
   compareAnswers,
   compareRows,
@@ -448,6 +452,31 @@ export async function recordSite(port: number, mode: Mode, tokens: string[]): Pr
   return out;
 }
 
+export type PlayerFiles = { files: number; failed: number; problems: string[] };
+
+/**
+ * Asks, on the tours address, every distinct player file (script and stylesheet) the
+ * recorded tour pages that answered 200 name in their own two tags (playerFilesIn), and
+ * checks each answers 200 with its type. Problems name a file by its kind and number only.
+ */
+export async function checkPlayerFiles(port: number, host: string, answers: Recorded[]): Promise<PlayerFiles> {
+  const names = new Set<string>();
+  for (const r of answers) if (r.route === PAGE_ROUTE && r.answer.status === 200) for (const n of playerFilesIn(r.answer.body)) names.add(n);
+  const problems: string[] = [];
+  let failed = 0;
+  const counts = { css: 0, js: 0 };
+  for (const name of [...names].sort((a, b) => Number(a.endsWith(".js")) - Number(b.endsWith(".js")) || (a < b ? -1 : 1))) {
+    const kind = name.endsWith(".css") ? "css" : "js";
+    const label = `${kind === "css" ? "stylesheet" : "script"} ${++counts[kind]}`;
+    const p = playerFileProblems(name, await fetchAnswer(port, "GET", name, host));
+    if (p.length > 0) {
+      failed++;
+      problems.push(`${label}: ${p.join(", ")}`);
+    }
+  }
+  return { files: names.size, failed, problems };
+}
+
 /** Every file under drafts/ and public/ of a data folder, with its size and SHA-256. */
 export function listStores(dataDir: string): StoreListing {
   const out: StoreListing = new Map();
@@ -594,7 +623,7 @@ class Report {
 
 const MODE_WORDS: Record<Mode, string> = { one: "one address", two: "two addresses", three: "three addresses" };
 
-type Phase = { answers: Recorded[]; stores: StoreListing; startedDb: DbRead; endDb: DbRead };
+type Phase = { answers: Recorded[]; stores: StoreListing; startedDb: DbRead; endDb: DbRead; playerFiles: PlayerFiles | null };
 
 /**
  * One build on one data folder: start it, read the database as it is once the build is up
@@ -603,7 +632,7 @@ type Phase = { answers: Recorded[]; stores: StoreListing; startedDb: DbRead; end
  * removing pictures past their grace, happen in every phase alike), stop it, and read the
  * stores and the database again.
  */
-async function runPhase(build: BuildInfo, dataDir: string, mode: Mode, workDir: string, tokens: string[], report: Report, what: string): Promise<Phase | null> {
+async function runPhase(build: BuildInfo, dataDir: string, mode: Mode, workDir: string, tokens: string[], report: Report, what: string, askPlayerFiles = false): Promise<Phase | null> {
   const port = await freePort();
   const r = spawnBuild(build.dir, dataDir, mode, workDir, port);
   const hosts = healthHosts(mode);
@@ -618,13 +647,15 @@ async function runPhase(build: BuildInfo, dataDir: string, mode: Mode, workDir: 
   report.check(true, `${what}: starts on 127.0.0.1 and answers health on ${hosts.length} address(es)`);
   const startedDb = readDb(join(dataDir, "db.sqlite"));
   let answers: Recorded[];
+  let playerFiles: PlayerFiles | null = null;
   try {
     await recordSite(port, mode, tokens);
     answers = await recordSite(port, mode, tokens);
+    if (askPlayerFiles) playerFiles = await checkPlayerFiles(port, HOSTS[mode].tours, answers);
   } finally {
     await stopBuild(r);
   }
-  return { answers, stores: listStores(dataDir), startedDb, endDb: readDb(join(dataDir, "db.sqlite")) };
+  return { answers, stores: listStores(dataDir), startedDb, endDb: readDb(join(dataDir, "db.sqlite")), playerFiles };
 }
 
 const tokenHash = (t: string) => createHash("sha256").update(t, "utf8").digest("hex");
@@ -646,8 +677,31 @@ export function resultLine(failed: number, addedFields: number): string {
  * (a session counts only from a page of its own address, which the rehearsal's plain-HTTP
  * requests can be only on a local name), an address for links, and a mail setting whose
  * server is never contacted (restricting needs a site that can mail; nothing is mailed by it).
+ * The mail settings must be complete for mail to be on (mailFromEnv in src/node/config.ts),
+ * so they hold a user and a password too: placeholders that are plainly not real, for a
+ * server on the discard port of 127.0.0.1 that no build ever connects to here.
  */
-export const RESTRICT_SETTINGS: Readonly<Record<string, string>> = { SITE_HOST: "localhost", MAIL_MODE: "smtp", MAIL_FROM: "rehearsal@example.com", SMTP_HOST: "127.0.0.1", SMTP_PORT: "9" };
+export const RESTRICT_SETTINGS: Readonly<Record<string, string>> = {
+  SITE_HOST: "localhost",
+  MAIL_MODE: "smtp",
+  MAIL_FROM: "rehearsal@example.com",
+  SMTP_HOST: "127.0.0.1",
+  SMTP_PORT: "9",
+  SMTP_USER: "rehearsal",
+  SMTP_PASSWORD: "not-a-real-password",
+};
+
+const ERROR_CODE = /^[a-z_]{1,40}$/;
+
+/**
+ * The line for a refused change of who views a tour: its status and, when the answer is a
+ * JSON object whose `error` is shaped like one of the API's codes (lowercase letters and
+ * underscores, at most 40), that code in brackets. No other part of the body is ever shown.
+ */
+export function refusalLine(a: Answer): string {
+  const code = jsonOf(a)?.error;
+  return typeof code === "string" && ERROR_CODE.test(code) ? `the change answered ${a.status} (${code})` : `the change answered ${a.status}`;
+}
 
 /** A session for the account of the token's workspace, written into the scratch copy only (made the site's admin there when the copy has none, which signing in needs). Null when the workspace has no account. */
 export async function scratchSession(dbPath: string, token: string): Promise<{ cookie: string; csrf: string } | null> {
@@ -727,7 +781,7 @@ async function restrictedWayBack(args: Args, oldBuild: BuildInfo, newBuild: Buil
     const headers = { cookie: session.cookie, "x-csrf-token": session.csrf, origin: `http://${host}`, "sec-fetch-site": "same-origin", "content-type": "application/json" };
     let a = await fetchAnswer(port, "PUT", `/api/v1/tours/${tour.id}/access`, host, { body: JSON.stringify({ access: "me" }), headers });
     for (let i = 0; a.status === 202 && i < 100; i++) a = await fetchAnswer(port, "PUT", `/api/v1/tours/${tour.id}/access`, host, { body: JSON.stringify({ access: "me" }), headers });
-    if (!report.check(a.status === 200 && jsonOf(a)?.access === "me", `${what}: the new build restricted one tour of token 1 (${pictures.length} pictures) through its API`, [`the change answered ${a.status}`])) return;
+    if (!report.check(a.status === 200 && jsonOf(a)?.access === "me", `${what}: the new build restricted one tour of token 1 (${pictures.length} pictures) through its API`, [refusalLine(a)])) return;
   } finally {
     await stopBuild(r);
   }
@@ -796,14 +850,21 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     report.line(`      pending for the new build: ${pending.length === 0 ? "none" : pending.join(", ")}`);
 
     // --- the new build on the same copy
-    const next = await runPhase(newBuild, copy, modes.next, work, tokens, report, `new build ${newBuild.version}`);
+    const next = await runPhase(newBuild, copy, modes.next, work, tokens, report, `new build ${newBuild.version}`, true);
     if (next === null) return 1;
 
-    // The old build against the new one: a JSON answer that only adds fields is allowed, and named.
-    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true });
+    // The old build against the new one: a JSON answer that only adds fields is allowed, and
+    // named; a tour page that names the new build's player files is allowed, and counted.
+    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true, allowPlayerNames: true });
     addedCount = addedFieldCount(cmp);
-    report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.addedFields} differ only by added fields, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
+    report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.playerNames} differ only in the player's file names, ${cmp.addedFields} differ only by added fields, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
     for (const route of Object.keys(cmp.addedFieldsByRoute).sort()) report.line(`      added fields, ${route}: ${cmp.addedFieldsByRoute[route].join(", ")}`);
+
+    // The player files the new build's tour pages name must be there: a page that names a
+    // file its own build does not serve would pass the comparison above and play nothing.
+    const pf = next.playerFiles;
+    if (pf === null || pf.files === 0) report.line("SKIP  player files: no tour page of the new build answered with a player file to ask for");
+    else report.check(pf.problems.length === 0, `player files: ${pf.files - pf.failed} of ${pf.files} named by the new build's tour pages answer 200 with their type`, pf.problems);
 
     for (const [i, token] of tokens.entries()) {
       const ws = next.endDb.snapshot.api_token?.rows.find((r) => r[next.endDb.snapshot.api_token.columns.indexOf("hash")] === tokenHash(token));
@@ -844,8 +905,10 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     // --- the way back: the old build on the migrated copy
     const back = await runPhase(oldBuild, copy, modes.old, work, tokens, report, `way back: old build ${oldBuild.version} on the migrated copy`);
     if (back !== null) {
+      // Nothing of the new build's allowances: the old build must answer as it did, but the date.
       const again = compareAnswers(old.answers, back.answers);
-      report.check(again.problems.length === 0 && again.added.length === 0, `way back: answers ${again.identical} identical to before the update, ${again.allowed + again.added.length} allowed differences, ${again.problems.length} differ`, again.problems);
+      const backProblems = identityProblems(again);
+      report.check(backProblems.length === 0, `way back: answers ${again.identical} identical to before the update, ${again.allowed + again.playerNames + again.added.length} allowed differences, ${again.problems.length} differ`, backProblems);
       const s = compareStores(old.stores, back.stores);
       report.check(storesSame(s), `way back: stores ${s.files} files identical (${s.missing} missing, ${s.extra} extra, ${s.changed} changed)`);
       const keptMigrations = migrationProblems(back.endDb.migrations, newBuild.migrations);
@@ -874,7 +937,9 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     ]);
     if (raceAnswers !== null) {
       const same = compareAnswers(next.answers, raceAnswers);
-      report.check(same.problems.length === 0, `two new builds: answers ${same.identical} identical to the single new build's, ${same.problems.length} differ`, same.problems);
+      // The same build twice: the same to the byte but the date, with nothing set aside.
+      const raceProblems = identityProblems(same);
+      report.check(raceProblems.length === 0 && same.added.length === 0, `two new builds: answers ${same.identical} identical to the single new build's, ${same.problems.length} differ`, raceProblems);
     }
   } finally {
     rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

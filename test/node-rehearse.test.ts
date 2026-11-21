@@ -1,9 +1,10 @@
 // The comparisons of the upgrade rehearsal (scripts/rehearse-compare.ts), without starting
 // any build: the allow-list lets through the date header, the version value and (from the
-// old build to the new one only) fields a JSON answer adds, and every kind of real
-// difference fails. The address modes are checked on build folders made here and against a
+// old build to the new one only) fields a JSON answer adds and the player's file names in a
+// tour page, and every kind of real difference fails. The address modes are checked on build folders made here and against a
 // stand-in server on 127.0.0.1. The full rehearsal starts the builds themselves and is run
 // on its own: npm run rehearse:upgrade.
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -16,7 +17,11 @@ import {
   compareAnswers,
   compareRows,
   compareStores,
+  identityProblems,
   migrationProblems,
+  playerFileProblems,
+  playerFilesIn,
+  playerNamesOnly,
   storesSame,
   usageFromRows,
   usageProblems,
@@ -27,6 +32,7 @@ import {
 } from "../scripts/rehearse-compare.ts";
 import {
   buildModes,
+  checkPlayerFiles,
   CLIENT_ADDRESS,
   errorLineProblems,
   fetchAnswer,
@@ -41,6 +47,7 @@ import {
   PROXY_SETTINGS,
   readTokens,
   recordSite,
+  refusalLine,
   resultLine,
   spawnBuild,
   startPair,
@@ -49,7 +56,10 @@ import {
   type Mode,
   type Running,
 } from "../scripts/rehearse-upgrade.ts";
-import { PROXY_HINT } from "../src/node/config.ts";
+import { configFromEnv, mailFromEnv, PROXY_HINT } from "../src/node/config.ts";
+import { linkOrigin, NO_MAIL } from "../src/mail.ts";
+import { NOT_FOUND_HTML, pageHtml, type PageTour } from "../src/page.ts";
+import { PLAYER_CSS_PATH, PLAYER_JS_PATH } from "../src/player/assets.ts";
 import { RESTRICT_SETTINGS, scratchSession } from "../scripts/rehearse-upgrade.ts";
 import { createApp } from "../src/app.ts";
 import { NodeDb } from "../src/node/db.ts";
@@ -83,7 +93,7 @@ function site(opts: { version?: string; date?: string; usage?: Answer; picture?:
 describe("answers", () => {
   it("the same answers at another moment are identical: only the date header differs", () => {
     const c = compareAnswers(site(), site({ date: "Fri, 20 Nov 2026 11:11:11 GMT" }));
-    expect(c).toEqual({ identical: 6, allowed: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
+    expect(c).toEqual({ identical: 6, allowed: 0, playerNames: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
   });
 
   it("a newer version in the workspace answer is the one allowed body difference, and content-length follows it", () => {
@@ -154,7 +164,7 @@ describe("answers that only add fields", () => {
 
   it("an added top-level key is allowed, counted apart and named by its path, and content-length follows it", () => {
     const c = compare(OLD, { ...OLD, images: 3 });
-    expect(c).toEqual({ identical: 0, allowed: 0, addedFields: 1, addedFieldsByRoute: { "GET /api/v1/usage": ["images"] }, added: [], problems: [] });
+    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 0, addedFields: 1, addedFieldsByRoute: { "GET /api/v1/usage": ["images"] }, added: [], problems: [] });
   });
 
   it("an added nested key is allowed, named by its full path", () => {
@@ -295,6 +305,145 @@ describe("answers that only add fields", () => {
     const c = compareAnswers(usage(OLD), usage({ ...OLD, images: 3 }));
     expect(c.addedFields).toBe(0);
     expect(c.problems).toHaveLength(1);
+  });
+});
+
+describe("tour pages that differ only in the player's file names", () => {
+  // Two builds' names: the player's script changed between them, its stylesheet did not.
+  const JS_A = "/player.7ddc1a5921f8bd94.js";
+  const JS_B = "/player.399e3f2c7b7c723a.js";
+  const CSS_A = "/player.b5cf31940e7c03b2.css";
+  const CSS_B = "/player.00112233445566ff.css";
+  const NEW = { allowAddedFields: true, allowPlayerNames: true };
+  const IMAGE = "p/" + "a".repeat(32) + ".png";
+  type PageOpts = { js?: string; css?: string; title?: string; image?: string; text?: string; etag?: string | null; headers?: Record<string, string>; status?: number; route?: string; type?: string };
+
+  /** A tour page as the server writes it (pageHtml), with the player's names of the given build in its two tags, and the etag a hash of the body as the server's is. */
+  function pageBody(o: PageOpts = {}): string {
+    const tour = { title: o.title ?? "Send an invoice", chapters: [{ steps: [{ image: o.image ?? IMAGE, text: o.text ?? "Click New" }] }] } as unknown as PageTour;
+    const html = pageHtml(tour, "");
+    expect(html).toContain(`<script src="${PLAYER_JS_PATH}" defer></script>`);
+    return html.replace(`<script src="${PLAYER_JS_PATH}" defer>`, `<script src="${o.js ?? JS_A}" defer>`).replace(`<link rel="stylesheet" href="${PLAYER_CSS_PATH}">`, `<link rel="stylesheet" href="${o.css ?? CSS_A}">`);
+  }
+  const etagOf = (body: string) => `"${createHash("sha256").update(body).digest("hex").slice(0, 32)}"`;
+  function page(o: PageOpts = {}, body = pageBody(o)): Recorded[] {
+    const headers: Record<string, string> = { "content-type": o.type ?? "text/html; charset=utf-8", "cache-control": "public, max-age=60", "content-security-policy": "default-src 'none'", ...o.headers };
+    if (o.etag !== null) headers.etag = o.etag ?? etagOf(body);
+    return [rec("token 1: tour 1 page", o.route ?? "GET /t/:slug", answer(o.status ?? 200, body, headers))];
+  }
+  const fails = (before: Recorded[], after: Recorded[]) => {
+    const c = compareAnswers(before, after, NEW);
+    expect(c.playerNames).toBe(0);
+    expect(c.problems).toHaveLength(1);
+    return c.problems[0];
+  };
+
+  it("a page whose script name (or both names) changed is allowed, counted apart, its etag let follow, and no name is printed", () => {
+    const c = compareAnswers(page(), page({ js: JS_B }), NEW);
+    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 1, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
+    expect(page()[0].answer.headers.etag).not.toBe(page({ js: JS_B })[0].answer.headers.etag);
+    expect(compareAnswers(page(), page({ js: JS_B, css: CSS_B }), NEW).playerNames).toBe(1);
+    expect(compareAnswers(page(), page({ css: CSS_B }), NEW).playerNames).toBe(1);
+    for (const name of [JS_A, JS_B, CSS_A, CSS_B]) expect(JSON.stringify(c)).not.toContain(name.slice(8, 24));
+    // The not-found page names the stylesheet in the same tag.
+    const notFound = (css: string) => [rec("token 1: tour 2 page", "GET /t/:slug", answer(404, NOT_FOUND_HTML.replace(PLAYER_CSS_PATH, css), { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }))];
+    expect(compareAnswers(notFound(CSS_A), notFound(CSS_B), NEW).playerNames).toBe(1);
+  });
+
+  it("without the allowance (the way back, two runs of the same build) a changed name is a difference like any other", () => {
+    for (const opts of [{}, { allowAddedFields: true }]) {
+      const c = compareAnswers(page(), page({ js: JS_B }), opts);
+      expect(c.playerNames).toBe(0);
+      const n = new TextEncoder().encode(pageBody()).length;
+      expect(c.problems).toEqual([`token 1: tour 1 page: header etag differs, body differs (${n} and ${n} bytes)`]);
+    }
+  });
+
+  it("identical bodies with a differing etag still fail, allowance or not", () => {
+    expect(fails(page({ etag: '"a"' }), page({ etag: '"b"' }))).toBe("token 1: tour 1 page: header etag differs");
+    expect(fails(page({ etag: '"a"' }), page({ etag: null }))).toBe("token 1: tour 1 page: header etag missing");
+    // An etag on one side only, beside changed names.
+    expect(fails(page(), page({ js: JS_B, etag: null }))).toMatch(/header etag missing/);
+  });
+
+  it("with changed names, each side's etag must be its own page's, by the server's rule (a quoted SHA-256 of the page, 32 hex digits)", () => {
+    const oldPage = page();
+    const oldEtag = oldPage[0].answer.headers.etag;
+    // The correct pair: each etag the hash of its own body.
+    expect(oldEtag).toBe(etagOf(pageBody()));
+    expect(compareAnswers(oldPage, page({ js: JS_B }), NEW).playerNames).toBe(1);
+    // A stale etag on the new side: the old page's, kept for a changed page.
+    expect(fails(oldPage, page({ js: JS_B, etag: oldEtag }))).toMatch(/^token 1: tour 1 page: body differs/);
+    // A fixed etag on both sides, the same or not.
+    expect(fails(page({ etag: '"x"' }), page({ js: JS_B, etag: '"x"' }))).toMatch(/body differs/);
+    expect(fails(page({ etag: '"x"' }), page({ js: JS_B, etag: '"y"' }))).toMatch(/header etag differs/);
+    // A wrong etag on the old side only (here the new page's), the new one right.
+    expect(fails(page({ etag: etagOf(pageBody({ js: JS_B })) }), page({ js: JS_B }))).toMatch(/^token 1: tour 1 page: body differs/);
+    expect(fails(page({ etag: '"x"' }), page({ js: JS_B }))).toMatch(/header etag differs/);
+    // The same hash written another way: weak, unquoted, capitals, or the whole 64 digits.
+    const hex = etagOf(pageBody({ js: JS_B })).slice(1, -1);
+    const full = createHash("sha256").update(pageBody({ js: JS_B })).digest("hex");
+    for (const etag of [`W/"${hex}"`, hex, `"${hex.toUpperCase()}"`, `"${full}"`]) expect(fails(oldPage, page({ js: JS_B, etag })), etag).toMatch(/body differs/);
+  });
+
+  it("a changed picture address, title or step text fails, with or without a changed player name", () => {
+    const other = "p/" + "b".repeat(32) + ".png";
+    for (const js of [JS_A, JS_B]) {
+      expect(fails(page(), page({ js, image: other }))).toMatch(/^token 1: tour 1 page: header etag differs, body differs/);
+      expect(fails(page(), page({ js, title: "Send an invoicf" }))).toMatch(/body differs/);
+      expect(fails(page(), page({ js, text: "Click Old" }))).toMatch(/body differs/);
+    }
+  });
+
+  it("any other header that changes, appears or goes fails, and so does a status, a content type or a route other than a tour page's", () => {
+    expect(fails(page(), page({ js: JS_B, headers: { "cache-control": "no-store" } }))).toMatch(/header cache-control differs/);
+    expect(fails(page(), page({ js: JS_B, headers: { "content-security-policy": "default-src *" } }))).toMatch(/header content-security-policy differs/);
+    expect(fails(page(), page({ js: JS_B, headers: { "set-cookie": "a=1" } }))).toMatch(/header set-cookie added/);
+    expect(fails(page({ headers: { "x-extra": "1" } }), page({ js: JS_B }))).toMatch(/header x-extra missing/);
+    expect(fails(page(), page({ js: JS_B, status: 404 }))).toMatch(/status 200 became 404/);
+    expect(fails(page({ type: "text/plain" }), page({ js: JS_B, type: "text/plain" }))).toMatch(/body differs/);
+    expect(fails(page({ route: "GET /p/:name" }), page({ js: JS_B, route: "GET /p/:name" }))).toMatch(/body differs/);
+    expect(playerNamesOnly("GET /t/:slug", page()[0].answer, page({ js: JS_B })[0].answer)).toBe(true);
+    expect(playerNamesOnly("GET /api/v1/me", page()[0].answer, page({ js: JS_B })[0].answer)).toBe(false);
+  });
+
+  it("customer text shaped like a player name is never swapped: changed, it fails; the same on both sides, it stays the same", () => {
+    const shaped = (h: string) => `/player.${h}.js`;
+    const tag = (h: string) => `<script src="${shaped(h)}" defer></script>`;
+    const h1 = "0123456789abcdef";
+    const h2 = "fedcba9876543210";
+    // In the title (escaped in the page) and in a step's text (inside the page's JSON), bare or as a whole tag.
+    for (const [x, y] of [[shaped(h1), shaped(h2)], [tag(h1), tag(h2)]]) {
+      for (const js of [JS_A, JS_B]) {
+        expect(fails(page({ title: x }), page({ js, title: y }))).toMatch(/body differs/);
+        expect(fails(page({ text: x }), page({ js, text: y }))).toMatch(/body differs/);
+      }
+      // Unchanged customer text of that shape: only the server's own tag differs, which is allowed.
+      expect(compareAnswers(page({ title: x, text: x }), page({ js: JS_B, title: x, text: x }), NEW).playerNames).toBe(1);
+    }
+    // The escaping that keeps it so: no customer text makes a tag of the server's.
+    expect(pageBody({ title: tag(h1), text: tag(h1) }).split(tag(h1)).length).toBe(1);
+  });
+
+  it("only the page's own tags exactly as the server writes them are swapped: the name in another tag, a second tag or other markup fails", () => {
+    const html = (head: string) => `<!doctype html>\n<head>\n${head}\n</head>\n`;
+    const raw = (head: string) => page({}, html(head));
+    // A bare name in another attribute or tag.
+    expect(fails(raw(`<a href="${JS_A}">x</a>`), raw(`<a href="${JS_B}">x</a>`))).toMatch(/body differs/);
+    // The tag written another way (no defer, other quotes, another attribute order).
+    expect(fails(raw(`<script src="${JS_A}"></script>`), raw(`<script src="${JS_B}"></script>`))).toMatch(/body differs/);
+    expect(fails(raw(`<script src='${JS_A}' defer></script>`), raw(`<script src='${JS_B}' defer></script>`))).toMatch(/body differs/);
+    expect(fails(raw(`<link href="${CSS_A}" rel="stylesheet">`), raw(`<link href="${CSS_B}" rel="stylesheet">`))).toMatch(/body differs/);
+    // A name of another shape: capitals, or 15 hex digits and a letter more elsewhere.
+    expect(fails(raw(`<script src="/player.7DDC1A5921F8BD94.js" defer></script>`), raw(`<script src="/player.399E3F2C7B7C723A.js" defer></script>`))).toMatch(/body differs/);
+    expect(fails(raw(`<script src="/player.7ddc1a5921f8bd9.js" defer></script>x`), raw(`<script src="/player.399e3f2c7b7c723.js" defer></script>x`))).toMatch(/body differs/);
+    // The same tag twice.
+    const two = (a: string, b: string) => `<script src="${a}" defer></script><script src="${b}" defer></script>`;
+    expect(fails(raw(two(JS_A, JS_A)), raw(two(JS_B, JS_B)))).toMatch(/body differs/);
+    // One side has the tag, the other has it in a form the server does not write.
+    expect(fails(raw(`<script src="${JS_A}" defer></script>`), raw(`<script src="${JS_B}" async></script>`))).toMatch(/body differs/);
+    // The one allowed form, on its own, passes.
+    expect(compareAnswers(raw(`<script src="${JS_A}" defer></script>`), raw(`<script src="${JS_B}" defer></script>`), NEW).playerNames).toBe(1);
   });
 });
 
@@ -806,6 +955,99 @@ describe("the way back with a restricted tour", () => {
   });
 
   it("the new build restricts with one address, an address for links and a mail setting whose server is never contacted", () => {
-    expect(RESTRICT_SETTINGS).toEqual({ SITE_HOST: "localhost", MAIL_MODE: "smtp", MAIL_FROM: "rehearsal@example.com", SMTP_HOST: "127.0.0.1", SMTP_PORT: "9" });
+    expect(RESTRICT_SETTINGS).toEqual({ SITE_HOST: "localhost", MAIL_MODE: "smtp", MAIL_FROM: "rehearsal@example.com", SMTP_HOST: "127.0.0.1", SMTP_PORT: "9", SMTP_USER: "rehearsal", SMTP_PASSWORD: "not-a-real-password" });
+  });
+
+  it("the app's own settings parser takes those settings as mail on, with an address for links, and contacts nothing", () => {
+    const config = configFromEnv(RESTRICT_SETTINGS);
+    expect(linkOrigin(config)).not.toBeNull();
+    const made: unknown[] = [];
+    const mail = mailFromEnv(RESTRICT_SETTINGS, config, (settings) => {
+      made.push(settings);
+      return NO_MAIL;
+    });
+    expect([mail.mode, mail.problem, mail.setting]).toEqual(["smtp", null, null]);
+    expect(made).toEqual([expect.objectContaining({ host: "127.0.0.1", port: 9, from: "rehearsal@example.com" })]);
+    // Without a user and a password (the settings before this fix) mail stays off, so a restriction is refused.
+    const { SMTP_USER: _u, SMTP_PASSWORD: _p, ...incomplete } = RESTRICT_SETTINGS;
+    expect(mailFromEnv(incomplete, configFromEnv(incomplete), () => NO_MAIL).mode).toBe("off");
+  });
+
+  it("a refused change names its error code when it is shaped like one, and never any other part of the answer", () => {
+    expect(refusalLine(answer(409, '{"error":"cannot_restrict"}'))).toBe("the change answered 409 (cannot_restrict)");
+    expect(refusalLine(answer(409, '{"error":"cannot_restrict","detail":"owner@example.com"}'))).toBe("the change answered 409 (cannot_restrict)");
+    for (const body of ['{"error":"owner@example.com"}', '{"error":"Cannot"}', '{"error":"a1"}', `{"error":"${"a".repeat(41)}"}`, '{"error":7}', '{"message":"cannot_restrict"}', '["cannot_restrict"]', "cannot_restrict", ""]) {
+      expect(refusalLine(answer(409, body)), body).toBe("the change answered 409");
+    }
+    expect(refusalLine(answer(500, "<html>"))).toBe("the change answered 500");
+  });
+});
+
+describe("the way back and the two new builds demand identity", () => {
+  const me = (v: string) => [rec("token 1: workspace (one address)", "GET /api/v1/me", answer(200, `{"workspace":"Acme","version":"${v}"}`))];
+  const usage = (a: Answer) => [rec("token 1: usage (one address)", "GET /api/v1/usage", a)];
+
+  it("the same answers but the date pass", () => {
+    expect(identityProblems(compareAnswers(site(), site({ date: "Fri, 20 Nov 2026 11:11:11 GMT" })))).toEqual([]);
+  });
+
+  it("a route answered by one side only, another version or any other difference fails", () => {
+    const added = compareAnswers(usage(answer(404, '{"error":"not_found"}')), usage(answer(200, '{"used_bytes":1}')));
+    expect(added.problems).toEqual([]);
+    expect(identityProblems(added)).toEqual(["token 1: usage (one address): answered by one side only"]);
+    expect(identityProblems(compareAnswers(me("0.1.45"), me("0.1.46")))).toEqual(["1 answer(s) differ in the version"]);
+    expect(identityProblems(compareAnswers(site(), site({ pictures: 1 })))).toEqual(["token 1: tour 1 picture 2: missing after"]);
+  });
+});
+
+describe("the new build's player files", () => {
+  const JS = "/player.399e3f2c7b7c723a.js";
+  const CSS = "/player.b5cf31940e7c03b2.css";
+  const html = (head: string) => enc.encode(`<!doctype html>\n<head>\n${head}\n</head>\n`);
+  const tags = `<link rel="stylesheet" href="${CSS}">\n<script src="${JS}" defer></script>`;
+
+  it("the names come from the page's own two tags only, each once", () => {
+    expect(playerFilesIn(html(tags))).toEqual([CSS, JS]);
+    expect(playerFilesIn(enc.encode(NOT_FOUND_HTML))).toEqual([PLAYER_CSS_PATH]);
+    // A name outside the server's tags, or in a tag written another way, is not one.
+    expect(playerFilesIn(html(`<a href="${JS}">x</a><script src="${JS}"></script>`))).toEqual([]);
+    expect(playerFilesIn(new Uint8Array([0xff, 0xfe]))).toEqual([]);
+  });
+
+  it("each file must answer 200 with its own type", () => {
+    const file = (status: number, type: string): Answer => ({ status, headers: { "content-type": type }, body: new Uint8Array() });
+    expect(playerFileProblems(JS, file(200, "text/javascript; charset=utf-8"))).toEqual([]);
+    expect(playerFileProblems(CSS, file(200, "text/css; charset=utf-8"))).toEqual([]);
+    expect(playerFileProblems(JS, file(404, "application/json"))).toEqual(["answered 404", "content type is not the script's"]);
+    expect(playerFileProblems(CSS, file(200, "text/javascript"))).toEqual(["content type is not the stylesheet's"]);
+    expect(playerFileProblems(JS, file(200, "text/javascriptx"))).toEqual(["content type is not the script's"]);
+  });
+
+  it("asks each distinct file the new build's tour pages name, on the tours address, and names none in its problems", async () => {
+    const seen: string[] = [];
+    const server = createServer((req, res) => {
+      seen.push(`${req.headers.host} ${req.url}`);
+      if (req.url === JS) {
+        res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
+        return res.end("x");
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end('{"error":"not_found"}');
+    });
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    const a = server.address();
+    const port = typeof a === "object" && a !== null ? a.port : 0;
+    const pageRec = (key: string, body: Uint8Array, status = 200) => rec(key, "GET /t/:slug", { status, headers: { "content-type": "text/html; charset=utf-8" }, body });
+    try {
+      const answers = [pageRec("token 1: tour 1 page", html(tags)), pageRec("token 1: tour 2 page", html(tags)), pageRec("token 1: tour 3 page", enc.encode(NOT_FOUND_HTML), 404), rec("x", "GET /p/:name", answer(200, tags, { "content-type": "text/html" }))];
+      const r = await checkPlayerFiles(port, "tours.example.com", answers);
+      expect(r.files).toBe(2);
+      expect(r.problems).toEqual(["stylesheet 1: answered 404, content type is not the stylesheet's"]);
+      expect(seen.sort()).toEqual([`tours.example.com ${CSS}`, `tours.example.com ${JS}`].sort());
+      expect(JSON.stringify(r)).not.toContain("b5cf3194");
+      expect((await checkPlayerFiles(port, "tours.example.com", [])).files).toBe(0);
+    } finally {
+      server.close();
+    }
   });
 });

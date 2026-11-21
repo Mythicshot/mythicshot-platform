@@ -138,7 +138,7 @@ Deleting removes the files from the server; it cannot reach copies that were alr
 
 ### Who may view a tour
 
-Each tour has a viewing setting: `public` (anyone with the link, the default and how every tour worked before 0.1.36), `people` (the addresses on the tour's list, and the workspace's own account) or `me` (the workspace's own account alone). The list holds up to 200 addresses and is kept when the setting moves away from `people`. The workspace's account is matched by its address as it is at the moment of the check, so an email change counts at once.
+Each tour has a viewing setting: `public` (anyone with the link, the default and how every tour worked before 0.1.38), `people` (the addresses on the tour's list, and the workspace's own account) or `me` (the workspace's own account alone). The list holds up to 200 addresses and is kept when the setting moves away from `people`. The workspace's account is matched by its address as it is at the moment of the check, so an email change counts at once.
 
 | Request | Answer |
 |---|---|
