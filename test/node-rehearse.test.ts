@@ -59,6 +59,11 @@ import {
   itemCoverageLines,
   seedDecision,
   rehearse,
+  versionBelow,
+  itemCachePolicy,
+  sharedItemsFor,
+  buildInfo,
+  runMain,
   knowsRestrictedServing,
   modeSettings,
   parseArgs,
@@ -1520,5 +1525,117 @@ describe("the item checks after review (Plan 2k, task 3)", () => {
     } finally {
       rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
+  });
+});
+
+const SLOW_STANDIN = { timeout: 60_000 };
+
+describe("compiled-file detection may only make the rehearsal stricter (Plan 2k, task 3, second review)", () => {
+  it("parses a version, and tells whether it is below another; an unknown one is neither", () => {
+    expect(versionBelow("0.1.46", "0.1.47")).toBe(true);
+    expect(versionBelow("0.1.47", "0.1.47")).toBe(false);
+    expect(versionBelow("0.2.0", "0.1.47")).toBe(false);
+    expect(versionBelow("0.1.100", "0.1.47")).toBe(false);
+    for (const v of ["unknown", "", "0.1", "0.1.47-beta", "v0.1.46"]) expect(versionBelow(v, "0.1.47"), v).toBeNull();
+  });
+
+  it("the cache allowance needs both: detection that the old build does not know item access, and a version below 0.1.47", () => {
+    expect(itemCachePolicy(false, "0.1.46")).toEqual({ allow: true, disagreement: null });
+    expect(itemCachePolicy(true, "0.1.48")).toEqual({ allow: false, disagreement: null });
+    // A 0.1.48 whose detection failed (a renamed file): no allowance, the strict verdict, and a FAIL for the disagreement.
+    const missed = itemCachePolicy(false, "0.1.48");
+    expect(missed.allow).toBe(false);
+    expect(missed.disagreement).toMatch(/0\.1\.48/);
+    const regressed: Recorded[] = [rec("token 1: item 1 file", "GET /i/:name", { status: 200, headers: { "cache-control": "public, max-age=3600" }, body: new Uint8Array() })];
+    const next = regressed.map((r) => ({ ...r, answer: { ...r.answer, headers: { "cache-control": "no-cache" } } }));
+    const cmp = compareAnswers(regressed, next, { allowItemCache: missed.allow });
+    expect([cmp.itemCache, cmp.problems.length]).toEqual([0, 1]);
+    const v = itemCacheVerdict(regressed, cmp.itemCache, !missed.allow, "0.1.48");
+    expect([v.kind, v.kind === "check" && v.ok]).toEqual(["check", false]);
+    // Detection says it knows, the version says it is older: no allowance, and a FAIL.
+    const odd = itemCachePolicy(true, "0.1.40");
+    expect(odd.allow).toBe(false);
+    expect(odd.disagreement).not.toBeNull();
+    // An unknown version: no allowance, whatever the detection.
+    for (const knows of [false, true]) expect(itemCachePolicy(knows, "unknown").allow).toBe(false);
+  });
+
+  describe("item pages: a build that serves an item's file is never skipped", () => {
+    const TOKEN = "dp_" + "2".repeat(40);
+    const LINK = "q".repeat(20);
+    /** A snapshot whose token 1 has one online PNG item. */
+    const snapshot: DbSnapshot = {
+      api_token: { columns: ["hash", "workspace_id"], rows: [[createHash("sha256").update(TOKEN, "utf8").digest("hex"), "ws_1"]] },
+      media: { columns: ["id", "workspace_id", "link_id", "kind", "content_type", "state", "created_at"], rows: [["med_a", "ws_1", LINK, "image", "image/png", "online", 1]] },
+    };
+    /** A stand-in old build of `version` that answers health, and an item's file with `fileStatus`; with or without the app's call of sharePageRoutes. */
+    function oldBuild(version: string, fileStatus: number, pagesInApp: boolean): string {
+      const dir = mkdtempSync(join(tmpdir(), "rehearse-pages-"));
+      mkdirSync(join(dir, "dist", "node"), { recursive: true });
+      mkdirSync(join(dir, "migrations"));
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ version, type: "module" }));
+      writeFileSync(join(dir, "dist", "app.js"), pagesInApp ? 'import { sharePageRoutes } from "./media-page.js";\nexport function createApp(app, deps) {\n  sharePageRoutes(app, deps);\n}\n' : "export function createApp() {}\n");
+      writeFileSync(
+        join(dir, "dist", "node", "entry.js"),
+        `import { createServer } from "node:http";
+createServer((req, res) => {
+  if (req.url === "/healthz") { res.writeHead(200, { "content-type": "application/json" }); return res.end('{"ok":true}'); }
+  if (req.url === "/i/${LINK}.png") { res.writeHead(${fileStatus}, { "content-type": "image/png" }); return res.end("x"); }
+  res.writeHead(404); res.end();
+}).listen(Number(process.env.PORT));
+`,
+      );
+      return dir;
+    }
+    type Line = { ok: boolean | null; text: string };
+    async function run(version: string, fileStatus: number, pagesInApp: boolean, snap: DbSnapshot = snapshot) {
+      const build = oldBuild(version, fileStatus, pagesInApp);
+      const work = mkdtempSync(join(tmpdir(), "rehearse-pages-work-"));
+      const lines: Line[] = [];
+      const report = { line: (text: string) => void lines.push({ ok: null, text }), check: (ok: boolean, text: string) => (lines.push({ ok, text }), ok) };
+      try {
+        const got = await sharedItemsFor(buildInfo(build), join(work, "copy"), snap, [TOKEN], work, report);
+        return { got, lines };
+      } finally {
+        rmSync(build, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    }
+
+    it("detection says no pages, but the old build serves the item's file: the items are used, with a FAIL for the detection", SLOW_STANDIN, async () => {
+      const { got, lines } = await run("0.1.18", 200, false);
+      expect(got?.items).toEqual([[{ letter: "i", link: LINK, ext: "png" }]]);
+      expect(lines.filter((l) => l.ok === false).map((l) => l.text)).toEqual([expect.stringMatching(/detection .*wrong/)]);
+      expect(lines.some((l) => l.text.startsWith("SKIP"))).toBe(false);
+    });
+
+    it("a version from 0.1.20 counts as having pages whatever the detection: a FAIL for the disagreement, and the items used", SLOW_STANDIN, async () => {
+      const { got, lines } = await run("0.1.48", 200, false);
+      expect(got?.items).toEqual([[{ letter: "i", link: LINK, ext: "png" }]]);
+      expect(lines.filter((l) => l.ok === false)).toHaveLength(1);
+      expect(lines.find((l) => l.ok === false)!.text).toMatch(/0\.1\.48/);
+    });
+
+    it("detection and version agree on pages and the file is served: no FAIL, no SKIP", SLOW_STANDIN, async () => {
+      const { got, lines } = await run("0.1.48", 200, true);
+      expect(got?.items).toEqual([[{ letter: "i", link: LINK, ext: "png" }]]);
+      expect(lines.filter((l) => l.ok === false || l.text.startsWith("SKIP"))).toEqual([]);
+    });
+
+    it("only an old build that truly serves no item file and cannot share one is a SKIP", SLOW_STANDIN, async () => {
+      const { got, lines } = await run("0.1.18", 404, false);
+      expect(got?.items).toEqual([[]]);
+      expect(lines.filter((l) => l.ok === false)).toEqual([]);
+      expect(lines.filter((l) => l.text.startsWith("SKIP"))).toHaveLength(1);
+    });
+  });
+
+  it("an error before the rehearsal's own work (a bad build folder) still ends with RESULT: FAIL", () => {
+    const lines: string[] = [];
+    const code = runMain(["/no/such/data", join(tmpdir(), "no-such-old-build"), join(tmpdir(), "no-such-new-build")], { REHEARSE_TOKENS: "dp_" + "1".repeat(40) }, (l) => lines.push(l), () => {});
+    return code.then((c) => {
+      expect(c).toBe(1);
+      expect(lines.at(-1)).toBe("RESULT: FAIL (the rehearsal could not start)");
+    });
   });
 });

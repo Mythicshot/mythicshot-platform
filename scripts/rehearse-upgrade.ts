@@ -670,6 +670,9 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv): Args {
   return { data: resolve(positional[0]), old: positional[1], next: positional[2], mode: mode as Mode, tokensFile };
 }
 
+/** What the report offers the steps that write to it. */
+export type ReportLike = { line(text: string): void; check(ok: boolean, text: string, problems?: string[]): boolean };
+
 /** The report: one line per check, and for a failed check one indented line per problem. */
 class Report {
   readonly lines: string[] = [];
@@ -1170,10 +1173,15 @@ export function seedDecision(s: { found: number; served: number; pages: boolean;
  *   API that refuses the share (an older shape) is a SKIP with the statuses, and the data's
  *   own items, if any, are still recorded;
  * - `skip-…`: a SKIP line saying why, and the data's own items, if any, are still recorded.
+ * Whether the old build has item pages is read from its compiled files (knowsItemPages) and its
+ * version (0.1.20 and later have them); when the two disagree a FAIL line says so, and the build
+ * is taken as having pages. Without pages by both, its files are still asked (and an item shared
+ * when it can): if any answers 200, the detection is wrong, a FAIL line says so and the items are
+ * used; only when none answers is it a SKIP, with no item answer recorded.
  * Null (the rehearsal stops) only when the old build does not start. `made` is how many items
  * the rehearsal shared, and `source` then a copy of the data with them, for the two new builds.
  */
-async function sharedItemsFor(oldBuild: BuildInfo, copy: string, snapshot: DbSnapshot, tokens: string[], work: string, report: Report): Promise<{ items: SharedItem[][]; made: number; source: string | null } | null> {
+export async function sharedItemsFor(oldBuild: BuildInfo, copy: string, snapshot: DbSnapshot, tokens: string[], work: string, report: ReportLike): Promise<{ items: SharedItem[][]; made: number; source: string | null } | null> {
   const rowsOf = (snap: DbSnapshot) =>
     tokens.map((t) => {
       const ws = workspaceOf(snap, t);
@@ -1192,10 +1200,15 @@ async function sharedItemsFor(oldBuild: BuildInfo, copy: string, snapshot: DbSna
   const skippedText = skipped > 0 ? `; ${plural(skipped, "online item")} left out (a type the item routes do not serve, or a malformed link)` : "";
   const holds = total === 0 ? "the data holds no published shared item in the tokens' workspaces" : `the data holds ${plural(total, "published item")} in the tokens' workspaces (${kinds(found)})`;
   const v = oldBuild.version;
-  const pages = knowsItemPages(oldBuild.dir);
+  const regexPages = knowsItemPages(oldBuild.dir);
+  const before20 = versionBelow(v, "0.1.20");
+  if (before20 === false && !regexPages) report.check(false, `shared items: the old build ${v} is 0.1.20 or later, which serves item pages, but its dist/app.js does not call sharePageRoutes; the detection disagrees with the version, so the build is taken as having pages`);
+  if (before20 === true && regexPages) report.check(false, `shared items: the old build ${v} is older than 0.1.20, which had no item pages, but its dist/app.js calls sharePageRoutes; the detection disagrees with the version, so the build is taken as having pages`);
+  const pages = regexPages || before20 === false;
   const mediaApi = knowsMediaApi(oldBuild.dir);
-  if (!pages) {
-    report.line(`SKIP  shared item answers: ${holds}${skippedText}, and the old build ${v} has no pages for shared items (dist/app.js does not call sharePageRoutes), so no item answer is recorded`);
+  const noPagesSkip = `SKIP  shared item answers: ${holds}${skippedText}, and the old build ${v} has no pages for shared items (dist/app.js does not call sharePageRoutes, and its version does not say otherwise)`;
+  if (!pages && total === 0 && !mediaApi) {
+    report.line(`${noPagesSkip}, so no item answer is recorded`);
     return { items: found.map(() => []), made: 0, source: null };
   }
   const port = await freePort();
@@ -1213,7 +1226,8 @@ async function sharedItemsFor(oldBuild: BuildInfo, copy: string, snapshot: DbSna
       return null;
     }
     for (const x of found.flat()) if ((await fetchAnswer(port, "GET", fileOf(x), HOSTS.one.app)).status === 200) served++;
-    decision = seedDecision({ found: total, served, pages, mediaApi });
+    // Asked whatever the detection says, so a wrong "no pages" can never drop servable items.
+    decision = seedDecision({ found: total, served, pages: true, mediaApi });
     if (decision === "share") {
       shared = await shareRehearsalItems(port, HOSTS.one.app, tokens[0]);
       if (shared.ok) {
@@ -1229,6 +1243,22 @@ async function sharedItemsFor(oldBuild: BuildInfo, copy: string, snapshot: DbSna
     await stopBuild(r);
   }
   const why = total === 0 ? holds : `${holds}, and none serves its file on the old build ${v} (each is restricted or answers as one that does not exist)`;
+  if (!pages) {
+    const now = shared?.ok === true ? rowsOf(readDb(join(copy, "db.sqlite")).snapshot).map((x) => x.items) : found;
+    const made = now.flat().length - total;
+    let source: string | null = null;
+    if (made > 0) {
+      // The copy now holds the items shared on it, so the two new builds start from it too.
+      source = join(work, "shared");
+      copyData(copy, source);
+    }
+    if (served + madeServed > 0) {
+      report.check(false, `shared items: the detection that the old build ${v} has no pages for shared items is wrong: ${served + madeServed} item file(s) answered 200 on it, so its items are asked as for a build with pages`);
+      return { items: now, made, source };
+    }
+    report.line(`${noPagesSkip}, and no item file answered 200 on it${made > 0 ? ` (it shared ${plural(made, "item")} that serve nothing)` : ""}, so no item answer is recorded`);
+    return { items: now.map(() => []), made, source };
+  }
   if (decision === "use") {
     report.line(`      shared items: ${holds}${skippedText}; ${served} of them serve their file on the old build ${v}. Each one's page, file, download and preview are asked with GET, with HEAD and with its ETag, and its file with one Range, of every build`);
     return { items: found, made: 0, source: null };
@@ -1257,6 +1287,37 @@ async function sharedItemsFor(oldBuild: BuildInfo, copy: string, snapshot: DbSna
 
 /** Whether the old-to-new comparison may let through a shared item's answer that differs only in its cache rule: only when the old build does not know who may view an item (before 0.1.47). */
 export const allowItemCacheFor = (oldKnowsItemAccess: boolean): boolean => !oldKnowsItemAccess;
+
+/** A version as three whole numbers, or null when it is not exactly `a.b.c`. */
+export function parseVersion(v: string): [number, number, number] | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v);
+  return m === null ? null : [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+/** Whether version `v` is below `than`; null when either cannot be read. */
+export function versionBelow(v: string, than: string): boolean | null {
+  const a = parseVersion(v);
+  const b = parseVersion(than);
+  if (a === null || b === null) return null;
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i];
+  return false;
+}
+
+/**
+ * Whether the cache allowance applies to an old build, from both the compiled-file detection
+ * (knowsItemAccess) and the build's version, so that a wrong detection can only make the
+ * rehearsal stricter: only when the detection says it does not know who may view an item AND
+ * its version is below 0.1.47; an unknown version gets no allowance. When the two disagree,
+ * `disagreement` is the FAIL line's text.
+ */
+export function itemCachePolicy(knowsAccess: boolean, version: string): { allow: boolean; disagreement: string | null } {
+  const below = versionBelow(version, "0.1.47");
+  const allow = !knowsAccess && below === true;
+  let disagreement: string | null = null;
+  if (!knowsAccess && below === false) disagreement = `shared item cache rule: the old build ${version} is 0.1.47 or later, but its compiled files do not show that it knows who may view an item (dist/media-access.js); the detection disagrees with the version, so no allowance applies`;
+  if (knowsAccess && below === true) disagreement = `shared item cache rule: the old build ${version} is older than 0.1.47, but its compiled files show that it knows who may view an item; the detection disagrees with the version, so no allowance applies`;
+  return { allow, disagreement };
+}
 
 export type ItemCacheVerdict = { kind: "none" } | { kind: "skip"; text: string } | { kind: "check"; ok: boolean; text: string; problems: string[] };
 
@@ -1369,12 +1430,13 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     // The old build against the new one: a JSON answer that only adds fields is allowed, and
     // named; a tour page that names the new build's player files is allowed, and counted; a
     // shared item's answer that changes only from 0.1.46's cache rule to no-cache is allowed, and counted.
-    const oldKnowsItemAccess = knowsItemAccess(oldBuild.dir);
-    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true, allowPlayerNames: true, allowItemCache: allowItemCacheFor(oldKnowsItemAccess) });
+    const cache = itemCachePolicy(knowsItemAccess(oldBuild.dir), oldBuild.version);
+    if (cache.disagreement !== null) report.check(false, cache.disagreement);
+    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true, allowPlayerNames: true, allowItemCache: cache.allow });
     addedCount = addedFieldCount(cmp);
     report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.playerNames} differ only in the player's file names, ${cmp.itemCache} shared item answers differ only in their cache rule, ${cmp.addedFields} differ only by added fields, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
     for (const route of Object.keys(cmp.addedFieldsByRoute).sort()) report.line(`      added fields, ${route}: ${cmp.addedFieldsByRoute[route].join(", ")}`);
-    const verdict = itemCacheVerdict(old.answers, cmp.itemCache, oldKnowsItemAccess, oldBuild.version);
+    const verdict = itemCacheVerdict(old.answers, cmp.itemCache, !cache.allow, oldBuild.version);
     if (verdict.kind === "skip") report.line(`SKIP  ${verdict.text}`);
     else if (verdict.kind === "check") report.check(verdict.ok, verdict.text, verdict.problems);
 
@@ -1484,18 +1546,33 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
   return report.failed === 0 ? 0 : 1;
 }
 
+/**
+ * Runs the rehearsal as the command does and returns the exit status: the report through
+ * `print`, an error's fixed text through `printError`. An error before the report's own last
+ * line (bad arguments or tokens, a build folder that is not one, a data folder without
+ * db.sqlite, a scratch folder that cannot be made) still ends the report with RESULT: FAIL.
+ */
+export async function runMain(argv: string[], env: NodeJS.ProcessEnv, print: (line: string) => void, printError: (line: string) => void): Promise<number> {
+  let ended = false;
+  const out = (l: string) => {
+    if (l.startsWith("RESULT: ")) ended = true;
+    print(l);
+  };
+  try {
+    return await rehearse(argv, env, out);
+  } catch (err) {
+    if (!ended) print("RESULT: FAIL (the rehearsal could not start)");
+    // Fixed text from this script only: none of it holds a token or a value from the data.
+    // A system error (a file that could not be read or copied) names a path, so only its code is shown.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    printError(typeof code === "string" ? `a file could not be read, copied or removed (${code})` : err instanceof Error ? err.message : "the rehearsal failed");
+    return 1;
+  }
+}
+
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   // A reader that goes away (the report piped into a pager that was closed) is not a failure of the rehearsal.
   process.stdout.on("error", () => {});
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => process.exit(130));
-  rehearse(process.argv.slice(2), process.env, (l) => process.stdout.write(l + "\n")).then(
-    (code) => process.exit(code),
-    (err: unknown) => {
-      // Fixed text from this script only: none of it holds a token or a value from the data.
-      // A system error (a file that could not be read or copied) names a path, so only its code is shown.
-      const code = (err as NodeJS.ErrnoException)?.code;
-      console.error(typeof code === "string" ? `a file could not be read, copied or removed (${code})` : err instanceof Error ? err.message : "the rehearsal failed");
-      process.exit(1);
-    },
-  );
+  void runMain(process.argv.slice(2), process.env, (l) => process.stdout.write(l + "\n"), (l) => console.error(l)).then((code) => process.exit(code));
 }
