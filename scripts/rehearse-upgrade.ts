@@ -717,6 +717,8 @@ async function restrictedWayBack(args: Args, oldBuild: BuildInfo, newBuild: Buil
     }
     slug = tour.slug;
     pictures = pictureAddresses(decoder.decode((await fetchAnswer(port, "GET", `/t/${slug}`, host)).body)) ?? [];
+    // Without the page's pictures the way back could pass for want of anything to ask: fail.
+    if (!report.check(pictures.length > 0, `${what}: the tour's public page names its pictures (${pictures.length})`, ["the tour's page named no picture, or could not be read, so the way back could not be checked"])) return;
     const session = await scratchSession(join(copy, "db.sqlite"), token);
     if (session === null) {
       report.check(false, `${what}: token 1's workspace has an account to sign in with`, ["it has none, so no session could change the tour"]);

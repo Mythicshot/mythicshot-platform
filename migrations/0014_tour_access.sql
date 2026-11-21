@@ -68,3 +68,32 @@ CREATE TABLE access_switch (
   created_at INTEGER NOT NULL,
   touched_at INTEGER NOT NULL
 ) STRICT;
+
+-- Defence in depth for a build older than this one, which knows nothing of the setting:
+-- whatever it is asked to do, the database refuses to make a restricted tour public. For a
+-- tour whose access is not 'public', a snapshot_object row with a public key (`p/`) is
+-- refused, and so is a snapshot.data other than the stub (src/access.ts, RESTRICTED_STUB),
+-- on insert and on update; so an older build's publish of such a tour fails as a whole
+-- (its commit is one batch) and leaves the tour as it was, and so does its rename of one.
+-- A data that is NULL is left to the column's own NOT NULL. This build never writes either:
+-- a move to public changes the setting first, in the same batch.
+CREATE TRIGGER restricted_tour_no_public_picture BEFORE INSERT ON snapshot_object
+  WHEN substr(NEW.image_key, 1, 2) = 'p/' AND EXISTS (SELECT 1 FROM tour WHERE id = NEW.tour_id AND access <> 'public')
+BEGIN
+  SELECT RAISE(ABORT, 'a restricted tour cannot have a public picture');
+END;
+CREATE TRIGGER restricted_tour_no_public_picture_update BEFORE UPDATE OF image_key, tour_id ON snapshot_object
+  WHEN substr(NEW.image_key, 1, 2) = 'p/' AND EXISTS (SELECT 1 FROM tour WHERE id = NEW.tour_id AND access <> 'public')
+BEGIN
+  SELECT RAISE(ABORT, 'a restricted tour cannot have a public picture');
+END;
+CREATE TRIGGER restricted_tour_stub_insert BEFORE INSERT ON snapshot
+  WHEN NEW.data IS NOT NULL AND NEW.data <> '{"restricted":true}' AND EXISTS (SELECT 1 FROM tour WHERE id = NEW.tour_id AND access <> 'public')
+BEGIN
+  SELECT RAISE(ABORT, 'a restricted tour''s snapshot holds the stub only');
+END;
+CREATE TRIGGER restricted_tour_stub_update BEFORE UPDATE OF data, tour_id ON snapshot
+  WHEN NEW.data IS NOT NULL AND NEW.data <> '{"restricted":true}' AND EXISTS (SELECT 1 FROM tour WHERE id = NEW.tour_id AND access <> 'public')
+BEGIN
+  SELECT RAISE(ABORT, 'a restricted tour''s snapshot holds the stub only');
+END;

@@ -116,19 +116,19 @@ describe("the cPanel script's backup with a real Node.js", () => {
 });
 
 /** The test of the refusal to go back while a tour is restricted (stand-ins only; it runs here too, being one). */
-const RESTRICTED_TEST = "test_update_refuses_the_way_back_when_a_tour_is_restricted";
+const RESTRICTED_TESTS = ["test_update_refuses_the_way_back_when_a_tour_is_restricted", "test_downgrade_below_access_is_refused_while_a_tour_is_restricted"];
 
 describe("the way back while a tour is restricted", () => {
   it("the Bash file has the test of the refusal", () => {
-    expect(readFileSync(join(ROOT, HARNESS), "utf8")).toMatch(new RegExp(`^${RESTRICTED_TEST}\\(\\) \\{$`, "m"));
+    for (const name of RESTRICTED_TESTS) expect(readFileSync(join(ROOT, HARNESS), "utf8")).toMatch(new RegExp(`^${name}\\(\\) \\{$`, "m"));
   });
 
-  it.skipIf("reason" in found)(`refuses the commands to go back, names the backup and what restoring it loses${"reason" in found ? ` (skipped: ${found.reason})` : ""}`, () => {
-    const r = spawnSync((found as { bash: string }).bash, [HARNESS, "--inside", RESTRICTED_TEST], { cwd: ROOT, encoding: "utf8", timeout: 280_000, windowsHide: true });
+  it.skipIf("reason" in found)(`refuses the commands to go back and a downgrade below 0.1.38 while a tour is restricted or the database cannot be read, names the backup and what restoring it loses${"reason" in found ? ` (skipped: ${found.reason})` : ""}`, () => {
+    const r = spawnSync((found as { bash: string }).bash, [HARNESS, "--inside", ...RESTRICTED_TESTS], { cwd: ROOT, encoding: "utf8", timeout: 280_000, windowsHide: true });
     const output = `${r.stdout}
 ${r.stderr}`;
-    expect(output).toContain(`PASS  ${RESTRICTED_TEST}`);
-    expect(output).toMatch(/^1 passed, 0 failed, 0 skipped$/m);
+    for (const name of RESTRICTED_TESTS) expect(output, name).toContain(`PASS  ${name}`);
+    expect(output).toMatch(new RegExp(`^${RESTRICTED_TESTS.length} passed, 0 failed, 0 skipped$`, "m"));
     expect(r.status, output).toBe(0);
   }, 300_000);
 

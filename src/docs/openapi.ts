@@ -359,9 +359,32 @@ function schemas(): Record<string, Schema> {
         viewers: { type: "array", maxItems: MAX_VIEWERS, items: { type: "string" }, description: "The addresses on the tour's list, in order, as the server wrote them (trimmed, lowercase). Kept when the setting is not people." },
         limit: { type: "integer", const: MAX_VIEWERS, description: "The most addresses the list may hold." },
         can_restrict: { type: "boolean", description: "Whether this site can send mail, which people and me need: false means the tour cannot be made restricted here (one that is stays so)." },
-        switching: orNull(object(["done", "total"], { done: whole("Pictures moved so far."), total: whole("Pictures to move in all.") }, "A move of the live pictures in progress.")),
+        switching: orNull(
+          object(
+            ["done", "total", "target"],
+            { done: whole("Pictures moved so far."), total: whole("Pictures to move in all."), target: { type: "string", enum: ["public", "restricted"], description: "Which way the move goes: to public, or to restricted (people or me)." } },
+            "A move of the live pictures in progress.",
+          ),
+        ),
       },
       "Who may view the tour.",
+    ),
+    TourAccessForToken: object(
+      ["access", "viewers_count", "limit", "can_restrict", "switching"],
+      {
+        access: ACCESS_FIELD,
+        viewers_count: whole(`How many addresses the tour's list holds (at most ${MAX_VIEWERS}); the addresses themselves are answered to a signed-in session only.`),
+        limit: { type: "integer", const: MAX_VIEWERS, description: "The most addresses the list may hold." },
+        can_restrict: { type: "boolean", description: "Whether this site can send mail, which making a public tour people or me needs." },
+        switching: orNull(
+          object(
+            ["done", "total", "target"],
+            { done: whole("Pictures moved so far."), total: whole("Pictures to move in all."), target: { type: "string", enum: ["public", "restricted"], description: "Which way the move goes: to public, or to restricted (people or me)." } },
+            "A move of the live pictures in progress.",
+          ),
+        ),
+      },
+      "Who may view the tour, as a token reads it: without the addresses.",
     ),
     AccessBody: input(
       ["access"],
@@ -375,8 +398,13 @@ function schemas(): Record<string, Schema> {
       },
     ),
     AccessSwitching: object(
-      ["status", "done", "total"],
-      { status: { type: "string", const: "switching" }, done: whole("Pictures moved so far."), total: whole("Pictures to move in all.") },
+      ["status", "done", "total", "target"],
+      {
+        status: { type: "string", const: "switching" },
+        done: whole("Pictures moved so far."),
+        total: whole("Pictures to move in all."),
+        target: { type: "string", enum: ["public", "restricted"], description: "Which way the move goes: to public, or to restricted (people or me)." },
+      },
       "The live pictures are moving between the stores. Send the same request again.",
     ),
     Me: object(
@@ -991,11 +1019,11 @@ function paths(): OpenApiDoc["paths"] {
       get: {
         tags: ["Tours"],
         summary: "Who may view a tour",
-        description: `The tour's setting and its whole list of addresses, the most the list may hold, whether this site can make a tour restricted (it needs mail), and the progress of a move of the live pictures, if one is under way. While a published tour is being made public its setting stays restricted until the move is done.`,
+        description: `The tour's setting and, to a signed-in session, its whole list of addresses (a token gets only how many there are, as viewers_count, so a token that leaked does not give the addresses away), the most the list may hold, whether this site can make a tour restricted (it needs mail), and the progress of a move of the live pictures, if one is under way. While a published tour is being made public its setting stays restricted until the move is done.`,
         operationId: "getTourAccess",
         security: TOKEN,
         parameters: [tourId],
-        responses: { "200": answer("Who may view the tour.", ref("TourAccess")), "401": UNAUTHORIZED, "404": noTour },
+        responses: { "200": answer("Who may view the tour: with a session, the whole list; with a token, only how many addresses it holds.", { oneOf: [ref("TourAccess"), ref("TourAccessForToken")] }), "401": UNAUTHORIZED, "404": noTour },
       },
       put: {
         tags: ["Tours"],

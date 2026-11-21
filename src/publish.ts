@@ -64,7 +64,7 @@
 // access_switching); unpublish cancels the switch. The public page and the picture route
 // serve a tour only while its setting is 'public'.
 import type { Hono } from "hono";
-import { RESTRICTED_STUB, carryOnSwitch } from "./access.ts";
+import { CARRY_CALLS, RESTRICTED_STUB, carryOnSwitch } from "./access.ts";
 import { beforeAccountsToo, noDisabledAccount } from "./accounts.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
@@ -379,9 +379,16 @@ export async function runLimited(jobs: (() => Promise<void>)[], limit: number): 
  * its target key is in (storeOfKey). A publish copies from draft keys; an access switch
  * from a live key to its new name in the other store (src/access.ts).
  */
+/** A copy whose source object is not in its store (it carries no key, so it is safe to log). */
+export class MissingSource extends Error {
+  constructor() {
+    super("a source image is missing");
+  }
+}
+
 export async function copyOne(deps: Deps, c: Copy): Promise<void> {
   const file = await storeOfKey(deps, c.from).get(c.from);
-  if (file === null) throw new Error("a source image is missing");
+  if (file === null) throw new MissingSource();
   const bytes = new Uint8Array(await new Response(file.body).arrayBuffer());
   const cacheControl = c.to.startsWith("p/") ? PUBLIC_CACHE : PRIVATE_CACHE;
   await storeOfKey(deps, c.to).put(c.to, bytes, { contentType: mime(typeOfKey(c.to)), cacheControl });
@@ -454,7 +461,7 @@ export const DROP_ABANDONED_JOBS_SQL = `DELETE FROM publish_job WHERE tour_id IN
  * thrown. Answers "failed" if anything failed, "more" if this tour still has due keys,
  * else "clean".
  */
-export async function housekeeping(deps: Deps, workspaceId: string, tourId: string | null, pages: number): Promise<"clean" | "more" | "failed"> {
+export async function housekeeping(deps: Deps, workspaceId: string, tourId: string | null, pages: number, carry = 0): Promise<"clean" | "more" | "failed"> {
   try {
     const now = deps.now();
     const stale = now - STALE_PUBLISH_MS;
@@ -470,9 +477,11 @@ export async function housekeeping(deps: Deps, workspaceId: string, tourId: stri
         break;
       }
     }
-    // A switch of a tour to restricted that its client left is moved on a few pictures
-    // (src/access.ts; at most 15 calls, and it never throws), so it finishes without it.
-    await carryOnSwitch(deps, workspaceId);
+    // A switch its client left is carried on (to restricted: a few pictures moved) or ended
+    // (to public: cancelled), within the calls the caller can give, `carry` (src/access.ts,
+    // carryOnSwitch; it never throws). Only callers with that much room give any: the tour
+    // list and unpublish give CARRY_CALLS; an upload's create, publish and a delete give none.
+    if (carry > 0) await carryOnSwitch(deps, workspaceId, carry);
     return result;
   } catch {
     console.error("publish: could not remove old public images; will retry later");
@@ -863,7 +872,7 @@ export function publishRoutes(app: Hono, deps: Deps): void {
     ]);
     // Nothing of the tour is served from here on; deleting the objects takes as many
     // requests as it takes, UNPUBLISH_PAGES pages of keys at a time.
-    const cleared = await housekeeping(deps, ws, tour.id, UNPUBLISH_PAGES);
+    const cleared = await housekeeping(deps, ws, tour.id, UNPUBLISH_PAGES, CARRY_CALLS);
     if (cleared === "failed") {
       return apiError(500, "cleanup_pending", "the tour is unpublished, but some of its public images could not be removed yet; unpublish again to retry");
     }
