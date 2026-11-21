@@ -18,6 +18,7 @@ import { COPY_BATCH, MAX_PUBLISH_STEPS, MAX_SNAPSHOT_BYTES, PUBLIC_CACHE, STALE_
 import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
 import { DELETE_FILES_PER_CALL } from "../tours.ts";
 import { EMAIL_CHANGE_MS } from "../email-change.ts";
+import { DOWNLOAD_URL_MAX } from "../https-address.ts";
 import { CONNECT_MS, DEVICE_NAME_MAX, OPEN_PER_NETWORK, POLL_INTERVAL_S, USER_CODE_ALPHABET, VERIFY_PATH } from "../connect.ts";
 import { INVITE_KEPT_MS, INVITE_MS, MAX_INVITES } from "../invites.ts";
 import { MAX_TOKENS_LISTED } from "../tokens.ts";
@@ -595,7 +596,7 @@ function schemas(): Record<string, Schema> {
         email_change: { type: "boolean", description: "true when the site can mail the link an email change needs; false when its mail is off, and POST /api/v1/account/email then answers mail_off." },
         download_url: {
           type: ["string", "null"],
-          maxLength: 300,
+          maxLength: DOWNLOAD_URL_MAX,
           description: "The address of the public page the desktop app is downloaded from, from the site's DOWNLOAD_URL setting: an https address with a host name, an optional port and a path, no user name and no fragment. null when the site has none. The dashboard links to it.",
         },
       },

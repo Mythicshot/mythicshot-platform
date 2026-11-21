@@ -32,7 +32,7 @@ export const DASH_JS = `var Dash = (function () {
   // The address of the app's download page, from the session's download_url, kept only
   // when it is of the shape the server checks the setting against (STRICT_HTTPS_SHAPE and
   // DOWNLOAD_URL_MAX in src/https-address.ts; a test holds them equal): else "".
-  var DOWNLOAD_URL = /^https:\\/\\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?\\/[A-Za-z0-9._~!$&'()*+,;=:@%\\/?-]*$/;
+  var DOWNLOAD_URL = /^https:\\/\\/(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)*(?![0-9]+(?::|\\/))[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?::[0-9]{1,5})?\\/[A-Za-z0-9._~!$&'()*+,;=:@%\\/?-]*$/;
   var DOWNLOAD_URL_MAX = ${DOWNLOAD_URL_MAX};
   var download = "";
 

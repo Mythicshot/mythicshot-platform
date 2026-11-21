@@ -10,12 +10,13 @@ export const DOWNLOAD_URL_MAX = 300;
 /**
  * The shape of an address the strict rule keeps, as URL writes it: https, a plain host name
  * (letters, digits and hyphens in dot-separated labels, no label starting or ending with a
- * hyphen), an optional port, then a path of characters that need no escaping anywhere and
+ * hyphen, and a last label that is not digits alone, so no IP address in any form), an
+ * optional port, then a path of characters that need no escaping anywhere and
  * an optional query; no fragment, no user name, no space, quote, angle bracket or backslash.
  * The dashboard's shared script checks the address it is handed against this same
  * expression (DOWNLOAD_URL in src/dash/script.ts; a test holds the two equal).
  */
-export const STRICT_HTTPS_SHAPE = /^https:\/\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?\/[A-Za-z0-9._~!$&'()*+,;=:@%\/?-]*$/;
+export const STRICT_HTTPS_SHAPE = /^https:\/\/(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)*(?![0-9]+(?::|\/))[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?::[0-9]{1,5})?\/[A-Za-z0-9._~!$&'()*+,;=:@%\/?-]*$/;
 
 /**
  * The same shape for the text as written, before URL reads it: any case, and the path may
@@ -30,8 +31,10 @@ const STRICT_WRITTEN = /^https:\/\/[a-z0-9.-]+(?::[0-9]{1,5})?(?:[\/?][A-Za-z0-9
  * https, name a host and carry no user name or password. With `strict` it must also be
  * written in the shape STRICT_HTTPS_SHAPE describes (so no fragment, user name, backslash,
  * quote or escaped host), name a host normaliseHost keeps as it is (no empty label, label
- * edge hyphen or trailing dot), and, as URL writes it back, be at most `maxChars` long and
- * of STRICT_HTTPS_SHAPE.
+ * edge hyphen or trailing dot), name the host URL reads as written, lower-cased (URL turns
+ * `0x7f.1` or `2130706433` into `127.0.0.1`, another host than the one written), have a
+ * last label that is not digits alone (no IP address in any form), and, as URL writes it
+ * back, be at most `maxChars` long and of STRICT_HTTPS_SHAPE.
  */
 export function httpsAddressFrom(raw: unknown, opts: { maxChars: number; strict?: boolean }): string | null {
   if (typeof raw !== "string") return null;
@@ -48,6 +51,9 @@ export function httpsAddressFrom(raw: unknown, opts: { maxChars: number; strict?
   if (url.protocol !== "https:" || url.hostname === "" || url.username !== "" || url.password !== "") return null;
   if (opts.strict !== true) return url.href;
   if (normaliseHost(url.host) !== url.host) return null;
+  // The host as written: from after `https://` to the port, path or query.
+  const written = text.slice("https://".length).split(/[:/?]/)[0].toLowerCase();
+  if (url.hostname !== written || /^[0-9]+$/.test(url.hostname.split(".").pop() ?? "")) return null;
   const href = url.href;
   return href.length <= opts.maxChars && STRICT_HTTPS_SHAPE.test(href) ? href : null;
 }

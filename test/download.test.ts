@@ -26,6 +26,9 @@ const GOOD: [string, string][] = [
   ["https://downloads.example.com:443/get", "https://downloads.example.com/get"],
   ["https://example.com/a/b-c_d.e~f/%20x", "https://example.com/a/b-c_d.e~f/%20x"],
   ["https://xn--bcher-kva.example/", "https://xn--bcher-kva.example/"],
+  // A host name with digits, even a label of digits alone, as long as the last label is not all digits.
+  ["https://cdn1.example.com/get", "https://cdn1.example.com/get"],
+  ["https://1.2.3.example/get", "https://1.2.3.example/get"],
 ];
 
 /** Every bad form: none of them is used, and each gives the one fixed line. */
@@ -54,6 +57,14 @@ const BAD: [string, string][] = [
   ["a space in the path", "https://downloads.example.com/get it"],
   ["a control character", "https://downloads.example.com/get\u0000"],
   ["a port out of range", "https://downloads.example.com:70000/"],
+  ["a dotted IPv4 address", "https://192.0.2.10/get"],
+  ["a loopback address", "https://127.0.0.1/"],
+  ["a whole-number address", "https://2130706433/"],
+  ["a hex and short address", "https://0x7f.1/"],
+  ["a hex address", "https://0x7f000001/"],
+  ["an octal address", "https://0177.0.0.1/"],
+  ["a short dotted address", "https://127.1/"],
+  ["a name whose last label is digits", "https://downloads.example.123/"],
   ["too long", `https://downloads.example.com/${"a".repeat(DOWNLOAD_URL_MAX - "https://downloads.example.com/".length + 1)}`],
 ];
 
@@ -92,6 +103,11 @@ describe("DOWNLOAD_URL", () => {
     }
     // Every address the strict rule keeps is of the shape the page checks again.
     for (const [, href] of GOOD) expect(STRICT_HTTPS_SHAPE.test(href), href).toBe(true);
+    // A host that is not a host name as written: the strict rule refuses it, INVITE_CONTACT keeps its wider rule unchanged.
+    expect(httpsAddressFrom("https://0x7f.1/invite", { maxChars: 2000 })).toBe("https://127.0.0.1/invite");
+    expect(httpsAddressFrom("https://0x7f.1/invite", { maxChars: 2000, strict: true })).toBeNull();
+    // The page's shape refuses every IP-address form as served, too.
+    for (const href of ["https://127.0.0.1/", "https://192.0.2.10/get", "https://2130706433/", "https://127.1/", "https://0x7f.1/", "https://192.0.2.10:8443/"]) expect(STRICT_HTTPS_SHAPE.test(href), href).toBe(false);
   });
 
   it("the page script checks the address again with the very same shape and length", () => {
@@ -123,6 +139,7 @@ describe("the session answer's download_url", () => {
     const session = (openapi() as unknown as { components: { schemas: Record<string, { required: string[]; properties: Record<string, { type: unknown; description: string }> }> } }).components.schemas.Session;
     expect(session.required).toContain("download_url");
     expect(session.properties.download_url.type).toEqual(["string", "null"]);
+    expect((session.properties.download_url as unknown as { maxLength: number }).maxLength).toBe(DOWNLOAD_URL_MAX);
     expect(session.properties.download_url.description).toMatch(/DOWNLOAD_URL/);
   });
 });

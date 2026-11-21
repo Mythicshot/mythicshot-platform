@@ -6,7 +6,7 @@
 // test/node-dash-pages.test.ts, against a stand-in document.
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
-import { DASH_PAGES } from "../src/dash/routes.ts";
+import { DASH_LINK_PAGES, DASH_PAGES } from "../src/dash/routes.ts";
 import { DASH_JS } from "../src/dash/script.ts";
 import { DASH_TABS, dashHtml } from "../src/dash/shell.ts";
 import { DASH_CSS } from "../src/dash/style.ts";
@@ -441,10 +441,12 @@ describe("the dashboard's pages and files", () => {
     expect(DASH_JS).toContain('if (download === "") return null;');
     expect(DASH_JS).toContain("download = usableDownload(d.download_url);");
     expect(DASH_JS).toContain('return typeof v === "string" && v.length <= DOWNLOAD_URL_MAX && DOWNLOAD_URL.test(v) ? v : "";');
-    // Two pages ask for it by its text only, and neither sets an href itself.
-    const users = DASH_PAGES.filter((p) => p.script.body.includes("Dash.downloadLink(")).map((p) => p.path);
+    // Two pages ask for it by its text only, and neither sets an href itself; no page a mailed link opens asks for it.
+    const every = [...DASH_PAGES, ...DASH_LINK_PAGES];
+    expect(DASH_LINK_PAGES.length).toBeGreaterThan(0);
+    const users = every.filter((p) => p.script.body.includes("Dash.downloadLink(")).map((p) => p.path);
     expect(users.sort()).toEqual(["/account", "/connections"]);
-    for (const p of DASH_PAGES.filter((q) => users.includes(q.path))) expect(p.script.body, p.path).not.toMatch(/setAttribute\("href"|\.href\s*=/);
+    for (const p of every.filter((q) => users.includes(q.path))) expect(p.script.body, p.path).not.toMatch(/setAttribute\("href"|\.href\s*=/);
   });
 
   it("the pages are usable with the keyboard and a screen reader, at phone width and in both colour schemes", () => {
