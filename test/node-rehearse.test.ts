@@ -1120,8 +1120,10 @@ describe("the way back with a restricted tour, when the old build can serve rest
     expect(tourContentOf("<html>no data</html>", TOUR_ID)).toBeNull();
   });
 
-  it("a fixed 403 gate, private and no-store, without an etag, that forbids framing and holds nothing of the tour, passes", () => {
+  it("a fixed 403 gate that no cache may store, without an etag, that forbids framing and holds nothing of the tour, passes", () => {
     expect(gateProblems(gate(), content())).toEqual([]);
+    // What the gate of 0.1.44 and later sends: no-store alone, which no cache, shared or private, may keep.
+    expect(gateProblems(gate(GATE_BODY, 403, { ...GATE_HEADERS, "cache-control": "no-store" }), content())).toEqual([]);
     // Framing forbidden by either header alone is enough.
     expect(gateProblems(gate(GATE_BODY, 403, { ...GATE_HEADERS, "x-frame-options": "SAMEORIGIN" }), content())).toEqual([]);
   });
@@ -1147,8 +1149,8 @@ describe("the way back with a restricted tour, when the old build can serve rest
     const c = content();
     expect(gateProblems(gate(GATE_BODY, 200), c)).toEqual(["the page answered 200, not 403"]);
     expect(gateProblems(gate(GATE_BODY, 404), c)).toEqual(["the page answered 404, not 403"]);
-    const cacheable = ["the page may be kept by a cache: its cache-control is not private and no-store"];
-    for (const cc of ["public, max-age=60", "no-store", "private", "private, max-age=60"]) expect(gateProblems(gate(GATE_BODY, 403, { ...GATE_HEADERS, "cache-control": cc }), c), cc).toEqual(cacheable);
+    const cacheable = ["the page may be kept by a cache: its cache-control does not say no-store"];
+    for (const cc of ["public, max-age=60", "private", "private, max-age=60", "max-age=0", "no-cache"]) expect(gateProblems(gate(GATE_BODY, 403, { ...GATE_HEADERS, "cache-control": cc }), c), cc).toEqual(cacheable);
     const noCache = { ...GATE_HEADERS };
     delete noCache["cache-control"];
     expect(gateProblems(gate(GATE_BODY, 403, noCache), c)).toEqual(cacheable);

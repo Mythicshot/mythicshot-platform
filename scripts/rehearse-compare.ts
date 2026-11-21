@@ -632,7 +632,8 @@ const bareName = (n: string) => n.slice(n.lastIndexOf("/") + 1);
 /**
  * What is wrong with the old build's page for a restricted tour, asked with no viewer cookie,
  * when that build can serve restricted tours (from 0.1.44): it must be the gate, which is
- * fixed text. So: status 403; `cache-control` both `private` and `no-store`; no `etag`;
+ * fixed text. So: status 403; `cache-control` with `no-store`, which no cache, shared or private, may keep
+ * (the gate sends exactly that; `private` alone would let the browser keep it); no `etag`;
  * framing forbidden (`X-Frame-Options: DENY`, or `frame-ancestors 'none'` in its policy);
  * and nothing of the tour in its body, as written or HTML-escaped: not its title, no text of
  * at least MIN_CONTENT_CHARS characters, no picture address or name, not its id. Each problem
@@ -643,7 +644,7 @@ export function gateProblems(page: Answer, content: TourContent): string[] {
   if (page.status !== 403) out.push(`the page answered ${page.status}, not 403`);
   const h = Object.fromEntries(Object.entries(page.headers).map(([k, v]) => [k.toLowerCase(), v]));
   const cache = (h["cache-control"] ?? "").toLowerCase().split(",").map((d) => d.trim());
-  if (!cache.includes("private") || !cache.includes("no-store")) out.push("the page may be kept by a cache: its cache-control is not private and no-store");
+  if (!cache.includes("no-store")) out.push("the page may be kept by a cache: its cache-control does not say no-store");
   if ("etag" in h) out.push("the page carries an etag");
   const xfo = (h["x-frame-options"] ?? "").trim().toUpperCase() === "DENY";
   const fa = /(?:^|;)\s*frame-ancestors\s+'none'\s*(?:;|$)/i.test(h["content-security-policy"] ?? "");

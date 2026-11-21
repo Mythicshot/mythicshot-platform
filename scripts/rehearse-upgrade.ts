@@ -765,7 +765,7 @@ export async function scratchSession(dbPath: string, token: string): Promise<{ c
  *
  * An old build that can serve restricted tours (knowsRestrictedServing, from its compiled
  * files) answers the page with its gate instead, to a request without a viewer cookie: then
- * the page must be a fixed 403 that no cache keeps, carries no etag, cannot be framed and holds
+ * the page must be a fixed 403 that no cache may store (no-store), carries no etag, cannot be framed and holds
  * nothing of what the tour's public page showed (gateProblems, from tourContentOf, kept in
  * memory and never printed), and every picture address and restricted picture address
  * (/t/<slug>/v/<name>) must answer as an unknown picture (servesNoPicture).
@@ -860,7 +860,7 @@ async function restrictedWayBack(args: Args, oldBuild: BuildInfo, newBuild: Buil
       }
       report.check(
         problems.length === 0,
-        `${what}: old build ${oldBuild.version} serves restricted tours, and answers its gate with nothing of the tour (page: a fixed 403, private and no-store, not framable; ${asUnknown} of ${pictures.length} picture addresses and ${routeUnknown} of ${content.names.length} restricted picture addresses as unknown)`,
+        `${what}: old build ${oldBuild.version} serves restricted tours, and answers its gate with nothing of the tour (page: a fixed 403, no-store, no etag, not framable; ${asUnknown} of ${pictures.length} picture addresses and ${routeUnknown} of ${content.names.length} restricted picture addresses as unknown)`,
         problems,
       );
       return;
