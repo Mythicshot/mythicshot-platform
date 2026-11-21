@@ -2,6 +2,15 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.49 (2026-11-21)
+
+This version changes no answer of the site: only the upgrade rehearsal, tests and guides change.
+
+- The upgrade rehearsal (`npm run rehearse:upgrade`) now also compares shared images and clips. For every published item of each token's workspace in the data, it asks the item's page, file, download and preview on the old build, the new one and the way back, in each address mode, with GET, with HEAD and with the ETag it got, and the file once with a Range, and compares the answers byte for byte under the same rules as the rest. When the old build is 0.1.46 or older, a line checks that each item answer differs from the new build's only in its cache rule (`public, max-age=…` before, `no-cache` from 0.1.47), which is allowed from the old build to the new one only.
+- When the data holds no shared item, the report says so in its own line. If the old build can share one (0.1.35 and later), it first shares one image and one clip on the scratch copy, before anything is recorded, and the report says it did; otherwise the line is a SKIP and no item answer is recorded.
+- The README, the cPanel guide and the Docker and Cloudflare runbooks now each say once that restricting an image or clip takes effect at the next request on the site; that a CDN or proxy rule overriding the site's cache headers, such as a "cache everything" rule with a lifetime of its own, defeats that and must not cover `/i/` and `/r/`; what to check by hand before going back below 0.1.47 on Docker and Cloudflare (`cpanel.sh` refuses it); and that an older version cannot finish deleting a restricted item whose list holds an address (its delete stops serving the item and removes its files, but answers `500 cleanup_pending` and leaves the row until 0.1.47 or later removes it).
+- New tests: the Tours page holds none of the item-only parts of the Sharing box; a restricted item answers the same gate for all four extensions its route takes, with GET and HEAD; revalidating after a restriction covers an item's preview.
+
 ## 0.1.48 (2026-11-21)
 
 - The Images and GIFs pages of the dashboard now let you choose who can view each item, with the same Sharing box the Tours page has. A new "Who can view" column shows "Anyone with the link", "Only me", or how many people are on the item's list ("Nobody yet", "1 person", "4 people"); on a phone it joins the line under the title. Each row now has "Copy link", "Open" and "More", and "More" holds "Sharing…" and "Delete" (Delete moved there from the row, as on the Tours page; it still asks first).
