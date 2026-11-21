@@ -149,10 +149,12 @@ unset TUNNEL_TOKEN
 # The two host names come from .env, the domain question and --app-domain only: this
 # script never takes either from the environment. One left there would be read by
 # Compose before .env, so both are taken out. So is the third address's IMG_HOST, which
-# the tunnel stack file passes on from .env.
+# the tunnel stack file passes on from .env, and the site's home page, HOME_URL, which it
+# passes on the same way: only .env supplies either.
 unset APP_DOMAIN
 unset DOMAIN
 unset IMG_HOST
+unset HOME_URL
 
 case "$0" in
   install.sh | */install.sh) SELF="$0" ;;
@@ -2312,7 +2314,7 @@ services:
       # The public page the desktop app is downloaded from, linked on the dashboard: an https address.
       DOWNLOAD_URL: ${DOWNLOAD_URL:-}
       # The site's home page, which the logo and name at the top of the dashboard link to:
-      # an https address. A value the app cannot use stops it from starting.
+      # an https address. A value the app cannot use leaves the logo without a link.
       HOME_URL: ${HOME_URL:-}
       # The sign-in lifetimes in whole days, each 0 or off to switch it off: a browser session
       # ends this long after its sign-in (default 90), a connection from Mythicshot stops after

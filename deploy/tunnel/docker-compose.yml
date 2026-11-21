@@ -38,7 +38,7 @@ services:
       # The public page the desktop app is downloaded from, linked on the dashboard: an https address.
       DOWNLOAD_URL: ${DOWNLOAD_URL:-}
       # The site's home page, which the logo and name at the top of the dashboard link to:
-      # an https address. A value the app cannot use stops it from starting.
+      # an https address. A value the app cannot use leaves the logo without a link.
       HOME_URL: ${HOME_URL:-}
       # The sign-in lifetimes in whole days, each 0 or off to switch it off: a browser session
       # ends this long after its sign-in (default 90), a connection from Mythicshot stops after

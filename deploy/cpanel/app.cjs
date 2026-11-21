@@ -31,7 +31,7 @@
 // invite, shown on the sign-in page), DOWNLOAD_URL (the https address of the public
 // page the desktop app is downloaded from, linked on the dashboard), HOME_URL (the site's
 // home page, which the logo and name at the top of the dashboard link to; a value the app
-// cannot use stops it from starting, with one line in the log), and the three sign-in
+// cannot use leaves the logo without a link, with one line in the log), and the three sign-in
 // lifetimes in whole days, SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and CONNECTION_MAX_DAYS
 // (0 or off switches one off; a value the app cannot use is its default, with one line in
 // the log). PORT and PUBLIC_IMAGE_BASE are read by the app too
