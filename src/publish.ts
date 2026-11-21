@@ -64,7 +64,7 @@
 // access_switching); unpublish cancels the switch. The public page and the picture route
 // serve a tour only while its setting is 'public'.
 import type { Hono } from "hono";
-import { CARRY_CALLS, RESTRICTED_STUB, carryOnSwitch, planFirstPublish, type FirstPublishPlan } from "./access.ts";
+import { CARRY_CALLS, RESTRICTED_STUB, alreadySet, carryOnSwitch, planFirstPublish, type FirstPublishPlan } from "./access.ts";
 import { beforeAccountsToo, noDisabledAccount } from "./accounts.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
@@ -776,6 +776,9 @@ export function publishRoutes(app: Hono, deps: Deps): void {
     if (plan instanceof Response) return plan;
     const tour = await tourState(d, auth, id);
     if (tour === null) return notFound();
+    // A stated setting the tour already had ("same") must still be its setting now: a change
+    // in the dashboard since the decision is refused, and nothing is published.
+    if (body.access !== null && plan === null && tour.access !== body.access.access) return alreadySet();
 
     const asked = body.publishId;
     // A publish that went live answers the same however often it is asked.
@@ -822,6 +825,7 @@ export function publishRoutes(app: Hono, deps: Deps): void {
         const again = await tourState(d, auth, tour.id);
         if (again === null) return notFound();
         if (again.switching === 1) return accessSwitching();
+        if (body.access !== null && plan === null && again.access !== body.access.access) return alreadySet();
         Object.assign(s, plan === null ? shown(again) : { access: plan.access, viewers: plan.viewers });
         started = plan === null ? await startPublish(d, auth, tour.id, again.access !== "public") : await startPublish(d, auth, tour.id, isRestricted(plan.access), plan.stmts);
         if (started.kind === "changed") return (await tourState(d, auth, tour.id)) === null ? notFound() : draftMoved();

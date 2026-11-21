@@ -93,6 +93,10 @@ export function creationAccess(o: Record<string, unknown>, what: string): Access
   if (!hasAccessFields(o)) return null;
   const access = Object.hasOwn(o, "access") ? o.access : undefined;
   if (access === undefined || access === null) return apiError(400, "bad_access", "access must be given with viewers: one of public, people and me");
+  // `pad`: text of any content that a client adds so that the body is longer than an older
+  // server takes (1,024 bytes for a first publish, 4,096 for an item's create), which then
+  // refuses it whole instead of misreading it. It counts in the body's limit and is ignored.
+  if (Object.hasOwn(o, "pad") && o.pad !== null && typeof o.pad !== "string") return apiError(400, "bad_request", "pad must be text");
   return accessFields(o, what);
 }
 
@@ -135,7 +139,10 @@ export function changeAudit(deps: Deps, auth: Auth, event: AuditEvent, id: strin
       subject: id,
       // `at: "creation"` marks a setting stated when the thing was created (a shared item's
       // create, a tour's first publish), which only a token's request does.
-      detail: atCreation ? { from, to, viewers_before: before, viewers: after, by, at: "creation" } : { from, to, viewers_before: before, viewers: after, by },
+      // A token is named by its id, never its secret.
+      detail: atCreation
+        ? { from, to, viewers_before: before, viewers: after, by, at: "creation", ...(auth.session === undefined ? { token_id: auth.tokenId } : {}) }
+        : { from, to, viewers_before: before, viewers: after, by },
     },
     guard ? { onlyAfterOneChange: true } : {},
   );

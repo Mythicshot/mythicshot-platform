@@ -278,7 +278,23 @@ type State = {
   due: number;
   /** True when the tour has been published at least once (see `everPublished`). */
   ever: boolean;
+  /**
+   * Read only for a first publish (readState's `creation`): true when the last change of the
+   * tour's setting or list on record is a token's at creation (its audit entry has
+   * `at: "creation"` and `by: "token"`), so no session has written either since.
+   */
+  ownCreation: boolean;
 };
+
+/**
+ * Whether the last change of who may view the tour `t` on record was a token's at creation:
+ * its latest tour_access_changed audit entry, in the order they were written, among those
+ * written since the tour was made (which the audit's index on its time bounds). Every change a
+ * session makes to the setting or the list writes such an entry, so one ends it. No parameter.
+ */
+const OWN_CREATION = `coalesce((SELECT json_extract(a.detail, '$.at') = 'creation' AND json_extract(a.detail, '$.by') = 'token' FROM audit a
+    WHERE a.at >= t.created_at AND a.event = 'tour_access_changed' AND a.subject = t.id AND a.workspace_id = t.workspace_id
+    ORDER BY a.at DESC, a.rowid DESC LIMIT 1), 0)`;
 
 /**
  * Whether a tour has been published at least once, over a tour row `t` in scope: it is
@@ -291,8 +307,8 @@ const EVER_PUBLISHED = `(t.ever_published = 1 OR t.status = 'published' OR t.pub
    OR EXISTS (SELECT 1 FROM snapshot e WHERE e.tour_id = t.id) OR EXISTS (SELECT 1 FROM access_switch e WHERE e.tour_id = t.id))`;
 
 /** One call. Null for a tour that is not this workspace's. */
-async function readState(deps: Deps, auth: Auth, id: string): Promise<State | null> {
-  type Row = { id: string; access: Access; live: number; viewers: string; switch_id: string | null; target: "public" | "private" | null; total: number | null; copied: number; stray: number; due: number; ever: number };
+async function readState(deps: Deps, auth: Auth, id: string, creation = false): Promise<State | null> {
+  type Row = { id: string; access: Access; live: number; viewers: string; switch_id: string | null; target: "public" | "private" | null; total: number | null; copied: number; stray: number; due: number; ever: number; own: number };
   const row = await deps.db.first<Row>(
     `SELECT t.id, t.access, s.tour_id IS NOT NULL AS live,
             (SELECT json_group_array(v.email) FROM tour_viewer v WHERE v.tour_id = t.id) AS viewers,
@@ -300,7 +316,7 @@ async function readState(deps: Deps, auth: Auth, id: string): Promise<State | nu
             (SELECT count(*) FROM public_object o WHERE o.publish_id = w.switch_id AND o.tour_id = t.id AND o.state = 'pending' AND o.copied = 1) AS copied,
             (SELECT count(*) FROM public_object o WHERE o.tour_id = t.id AND o.state = 'retired' AND substr(o.image_key, 1, 2) = 'p/') AS stray,
             (SELECT count(*) FROM public_object o WHERE o.tour_id = t.id AND o.state = 'retired' AND o.delete_after <= ?) AS due,
-            ${EVER_PUBLISHED} AS ever
+            ${EVER_PUBLISHED} AS ever, ${creation ? OWN_CREATION : "0"} AS own
        FROM tour t LEFT JOIN snapshot s ON s.tour_id = t.id LEFT JOIN access_switch w ON w.tour_id = t.id
       WHERE t.id = ? AND t.workspace_id = ?`,
     [deps.now(), id, auth.workspaceId],
@@ -315,6 +331,7 @@ async function readState(deps: Deps, auth: Auth, id: string): Promise<State | nu
     stray: row.stray,
     due: row.due,
     ever: row.ever === 1,
+    ownCreation: row.own === 1,
   };
 }
 
@@ -945,7 +962,7 @@ export type FirstPublishPlan =
 
 const publishedBefore = () =>
   apiError(409, "already_published", "this tour has been published before, so who may view it can be changed in the dashboard only; publish without access and viewers to publish it as it is set");
-const alreadySet = () =>
+export const alreadySet = () =>
   apiError(409, "access_already_set", "who may view this tour was already set in the dashboard; publish without access and viewers to publish it as it is set, or change it in the dashboard");
 
 /**
@@ -962,11 +979,21 @@ const alreadySet = () =>
  */
 export async function planFirstPublish(deps: Deps, auth: Auth, id: string, body: AccessBody): Promise<FirstPublishPlan | null> {
   if (!TOUR_ID.test(id)) return null;
-  const st = await readState(deps, auth, id);
+  // One call, whatever is decided below: the state, with whether the last change on record
+  // was a token's own at creation. Every answer below follows from that one read, so a right
+  // and a wrong guess of a list cost the same calls and answer the same.
+  const st = await readState(deps, auth, id, true);
   if (st === null) return null;
   if (st.ever) return { kind: "refuse", res: publishedBefore() };
   const list = body.viewers ?? st.viewers;
-  if (body.access === st.access && sameList(list, st.viewers)) return { kind: "same" };
+  if (body.access === st.access) {
+    // The setting it has, with no list stated (or none on either side): the publish of today.
+    if (body.viewers === null || (body.viewers.length === 0 && st.viewers.length === 0)) return { kind: "same" };
+    // A stated list against a list the tour holds is compared only when a token wrote that
+    // list at creation and nobody changed it since (a resend after a lost answer); a list set
+    // in the dashboard is never compared, so a token cannot test guesses of it.
+    if (body.viewers.length > 0 && st.viewers.length > 0) return st.ownCreation && sameList(body.viewers, st.viewers) ? { kind: "same" } : { kind: "refuse", res: alreadySet() };
+  }
   if (st.access !== "public" || st.viewers.length > 0 || st.switch !== null) return { kind: "refuse", res: alreadySet() };
   if (viewing.cannotRestrict(deps, st.access, body.access)) return { kind: "refuse", res: cannotRestrictAnswer() };
   const ws = auth.workspaceId;
