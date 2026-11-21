@@ -73,10 +73,11 @@ describe("the mark's file", () => {
 });
 
 describe("what the guides say about a HOME_URL the app cannot use", () => {
-  /** The lines of a file that name HOME_URL, with the lines around them up to a blank line. */
+  /** The paragraphs of a file that name HOME_URL (a table's row is a paragraph of its own). */
   const around = (text: string) =>
     text
       .split(/\n\s*\n/)
+      .flatMap((block) => block.split(/\n(?=\|)/))
       .filter((block) => block.includes("HOME_URL"))
       .join("\n\n");
 
