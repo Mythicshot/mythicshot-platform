@@ -725,6 +725,28 @@ touch ~/apps/tours/tmp/restart.txt
 
 **How to tell it worked:** the Account page shows the card "Mythicshot for Windows" with "Open the download page". A value that cannot be used never stops the app: the card is not shown, and the app's log has the line `download page: off, because DOWNLOAD_URL is not a usable https address. The site runs; the dashboard shows no download link.` To take the link away, remove the line and restart.
 
+### Link the logo to your home page
+
+The mark and the name "Mythicshot" at the top of the dashboard, the sign-in pages and the invite page can be one link to your site's home page (see [The brand and the home page](../../README.md#the-brand-and-the-home-page) in the README). Without the line they show and are no link.
+
+1. Add a line with your home page's full address, the one beginning with https, to the settings file in place of the part in angle brackets, and save. The address rule is in [Settings](../../README.md#settings) in the README.
+
+```sh
+nano ~/apps/tours-config.env
+```
+
+```text
+HOME_URL=<your home page's address>
+```
+
+2. Restart the app, so that it reads the new line.
+
+```sh
+touch ~/apps/tours/tmp/restart.txt
+```
+
+**How to tell it worked:** clicking the mark or the name at the top of the dashboard opens your home page in the same tab. A value the app cannot use stops it from starting, so the site cannot be reached: then the app's log has the line `HOME_URL is not a usable address.` followed by the rule: fix or remove the line and restart. To take the link away, remove the line and restart.
+
 ### Change how long sign-ins last
 
 A browser session ends 90 days after its sign-in however active it is, and a computer connected by signing in from Mythicshot stops working after 90 days without use; each then signs in again, and nothing is lost. A third limit, off unless set, ends a connection a number of days after it was made. What each setting means is in [Settings](../../README.md#settings) in the README.

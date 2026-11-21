@@ -1218,6 +1218,19 @@ DOWNLOAD_URL=https://downloads.example.com/mythicshot/
 
 **How to tell it worked:** the Account page shows the card "Mythicshot for Windows" with "Open the download page". A value that cannot be used never stops the app: the card is not shown, and `docker compose logs app` has the line `download page: off, because DOWNLOAD_URL is not a usable https address. The site runs; the dashboard shows no download link.` To take the link away, remove the line and recreate the container.
 
+### Link the logo to your home page
+
+The mark and the name "Mythicshot" at the top of the dashboard, the sign-in pages and the invite page can be one link to your site's home page (see [The brand and the home page](../README.md#the-brand-and-the-home-page) in the README). Add a line to `.env` with that page's `https://` address, then recreate the container as above. Both routes hand it on: the direct stack passes the whole `.env`, and the tunnel stack names `HOME_URL` among the settings it passes. The address rule is in [Settings](../README.md#settings) in the README.
+
+```text
+HOME_URL=https://www.example.com/
+```
+
+> [!WARNING]
+> A `HOME_URL` the app cannot use stops the app from starting, so the site cannot be reached until the line is corrected or removed and the container recreated.
+
+**How to tell it worked:** clicking the mark or the name at the top of the dashboard opens your home page in the same tab. If the site does not come back, `docker compose logs app` has the line `HOME_URL is not a usable address.` followed by the rule. To take the link away, remove the line and recreate the container.
+
 ### Change how long sign-ins last
 
 A browser session ends 90 days after its sign-in however active it is, and a computer connected by signing in from Mythicshot stops working after 90 days without use; each then signs in again, and nothing is lost. A third limit, off unless set, ends a connection a number of days after it was made. Add a line to `.env` for each limit to change, a whole number of days from 1 to 3650 or `off`, then recreate the container as above. Both routes hand them on: the direct stack passes the whole `.env`, and the tunnel stack names `SESSION_MAX_DAYS`, `CONNECTION_IDLE_DAYS` and `CONNECTION_MAX_DAYS` among the settings it passes. What each means is in [Settings](../README.md#settings) in the README.
