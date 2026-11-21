@@ -15,6 +15,7 @@ import { MalformedSnapshot, notFoundPage, pageTour, renderPage } from "../src/pa
 import { ACCOUNT_PAGE_HEADERS } from "../src/pages.ts";
 import type { Db, Deps, FileStore } from "../src/ports.ts";
 import { COPY_BATCH } from "../src/publish.ts";
+import { PLAYER_CSS_PATH, PLAYER_JS_PATH } from "../src/player/assets.ts";
 import { LIMITS_VIEWER } from "../src/rate.ts";
 import { RESTRICTED_GATE, RESTRICTED_PAGE_CSP, RESTRICTED_PAGE_HEADERS, restrictedPageHtml, workspaceKeyOf } from "../src/restricted.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
@@ -22,6 +23,7 @@ import { VIEW_DENIED_HTML, VIEW_GATE_HTML } from "../src/view-page.ts";
 import { VIEWER_CODE_MS, VIEWER_COOKIE } from "../src/viewers.ts";
 import { send, uploadTour, type Call, type Json } from "./bundle.ts";
 import { manifestOf } from "./isolation-world.ts";
+import FROZEN from "./fixtures/public-page-0.1.38.json" with { type: "json" };
 
 const SLOW = { timeout: 900_000 };
 const TWO: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -411,6 +413,38 @@ async function seenOf(res: Response) {
 }
 
 describe("public tours", () => {
+  it("answer the very bytes 0.1.38 answered for a fixed tour, apart from the player's file names (and so the ETag)", SLOW, async () => {
+    const s = await site();
+    const { deps, p } = s;
+    await deps.db.run("UPDATE snapshot SET data = ? WHERE tour_id = ?", [FROZEN.snapshot, p.id]);
+    const listed = await viewerFor(deps, LISTED, s.a.slug);
+    const fill = (body: string) => body.split("{{PLAYER_JS}}").join(PLAYER_JS_PATH).split("{{PLAYER_CSS}}").join(PLAYER_CSS_PATH);
+    expect(FROZEN.cases).toHaveLength(4);
+    for (const c of FROZEN.cases) {
+      deps.config.publicImageBase = c.base;
+      const what = `${c.kind} with base "${c.base}"`;
+      for (const cookie of [null, listed]) {
+        const r = await send(deps, "GET", c.kind === "page" ? `/t/${p.slug}` : `/t/${UNKNOWN_SLUG}`, { origin: TOURS, headers: cookie === null ? {} : { cookie } });
+        expect(r.status, what).toBe(c.status);
+        expect(r.text, what).toBe(fill(c.body));
+        const headers = Object.fromEntries(r.headers.entries());
+        const etag = headers.etag;
+        delete headers.etag;
+        expect(headers, what).toEqual(c.headers);
+        expect(etag !== undefined, what).toBe(c.etag);
+        if (etag !== undefined) {
+          // The same rule as before: the first 16 bytes of the body's SHA-256, quoted.
+          const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(r.text)));
+          expect(etag, what).toBe(`"${[...digest.subarray(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("")}"`);
+          const again = await send(deps, "GET", `/t/${p.slug}`, { origin: TOURS, headers: { "if-none-match": etag } });
+          expect([again.status, again.bytes.length, again.calls], what).toEqual([304, 0, 1]);
+        }
+        expect(r.calls, what).toBe(c.kind === "page" ? 1 : 2);
+      }
+    }
+    deps.config.publicImageBase = "";
+  });
+
   it("answer byte for byte as before, with one database call, also with a viewer cookie, an account cookie or both", SLOW, async () => {
     const s = await site();
     const { deps, p } = s;
