@@ -207,9 +207,8 @@ describe("the call budget, route by route", () => {
     expect(same.status).toBe(201);
     expect(same.json.have).toHaveLength(200);
     // 2 authentication, the chapter, 17 for the sweep (one statement closes every stale
-    // upload, one lists five, three remove each), 5 housekeeping (with its look for a move
-    // of a tour to restricted to carry on, src/access.ts), the pictures, the batch, one look.
-    expect(same.calls).toBe(28);
+    // upload, one lists five, three remove each), 4 housekeeping, the pictures, the batch, one look.
+    expect(same.calls).toBe(27);
     expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM upload"))!.n).toBe(1);
     noted(await putStep(deps, a.token, same.json.upload_id, 7, stepImage(big.steps[6], 7)), STEP); // 409: the chapter has it
     // An abort of it deletes none of the 200 pictures it points at.
@@ -294,9 +293,9 @@ describe("the call budget, route by route", () => {
     deps.db.batch = realBatch;
     expect(creates).toBe(2);
     expect([refused.status, refused.json.error, refused.json.needed_bytes], refused.text).toEqual([413, "storage_full", 380]);
-    // 2 authentication, the chapter, 17 for the sweep, 5 housekeeping, the pictures, and
+    // 2 authentication, the chapter, 17 for the sweep, 4 housekeeping, the pictures, and
     // twice: the batch, one look, the cap and the chapter, usage.
-    expect(refused.calls).toBe(34);
+    expect(refused.calls).toBe(33);
     expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM upload WHERE closing_at IS NULL"))!.n).toBe(0);
   }, 600_000);
 
@@ -459,13 +458,12 @@ describe("the call budget, route by route", () => {
     expect(raced).toBe(1);
     expect(fresh.status).toBe(202);
     expect(fresh.json.total).toBe(401);
-    // 2 authentication, 5 housekeeping (with its look for a move to restricted to carry on),
-    // the state, 4 to stop the old publish, 2 for the start that lost, one look, 2 for the
-    // start that won, then copies sized from what is left (each a read and a write) and the 2
-    // that mark them.
-    expect(fresh.calls).toBe(17 + 2 * fresh.json.done + 2);
-    expect(fresh.json.done).toBe(8);
-    // Losing twice answers 409 after 2 + 5 + 1 + 2 + 1 + 2 + 1 calls and copies nothing.
+    // 2 authentication, 4 housekeeping, the state, 4 to stop the old publish, 2 for the start
+    // that lost, one look, 2 for the start that won, then copies sized from what is left
+    // (each a read and a write) and the 2 that mark them.
+    expect(fresh.calls).toBe(16 + 2 * fresh.json.done + 2);
+    expect(fresh.json.done).toBe(9);
+    // Losing twice answers 409 after 2 + 4 + 1 + 2 + 1 + 2 + 1 calls and copies nothing.
     expect((await call(deps, "POST", `/api/v1/tours/${tourId}/unpublish`, { token: a.token })).status).toBeLessThan(300);
     let lost = 0;
     deps.db.batch = async (stmts) => {
@@ -476,7 +474,7 @@ describe("the call budget, route by route", () => {
     deps.db.batch = realBatch;
     expect(lost).toBe(2);
     expect([twice.status, twice.json.error]).toEqual([409, "publish_busy"]);
-    expect(twice.calls).toBe(14);
+    expect(twice.calls).toBe(13);
   }, 600_000);
 
   it("manage: rename with a publish in progress near the snapshot cap; delete of a 400-step tour published twice, with open uploads into it, an abandoned publish and plenty to sweep", async () => {
