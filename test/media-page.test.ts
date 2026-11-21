@@ -119,7 +119,7 @@ function expectFileHeaders(r: Call, type: string): void {
   expect(r.headers.get("content-type")).toBe(type);
   expect(r.headers.get("x-content-type-options")).toBe("nosniff");
   expect(r.headers.get("content-security-policy")).toBe(FILE_CSP);
-  expect(r.headers.get("cache-control")).toBe("public, max-age=3600");
+  expect(r.headers.get("cache-control")).toBe("no-cache");
   expect(r.headers.get("accept-ranges")).toBe("bytes");
   expect(r.headers.get("etag")).toMatch(/^"[0-9a-f]{32}"$/);
   expect(r.headers.get("set-cookie")).toBeNull();
@@ -131,7 +131,7 @@ describe("the page of an image", () => {
     const item = await seedItem(deps, a.workspaceId, IMAGE());
     const r = await get(deps, `/i/${item.link}`);
     expect(r.status, r.text).toBe(200);
-    expectPageHeaders(r, "public, max-age=60");
+    expectPageHeaders(r, "no-cache");
     expect(r.calls).toBe(2);
     const t = r.text;
     expect(t).toContain(`<header class="top"><span class="brand">Mythicshot</span><span class="who">Shared image</span></header>`);
@@ -187,7 +187,7 @@ describe("the page of a clip", () => {
     const item = await seedItem(deps, a.workspaceId, { ...MP4(), preview: png(256, 144, 900) });
     const r = await get(deps, `/r/${item.link}`);
     expect(r.status).toBe(200);
-    expectPageHeaders(r, "public, max-age=60");
+    expectPageHeaders(r, "no-cache");
     const t = r.text;
     expect(t).toContain(`<span class="who">Shared clip</span>`);
     expect(t).toContain(
@@ -339,7 +339,7 @@ describe("the file", () => {
     expect(r.status).toBe(200);
     expect(r.bytes).toEqual(preview);
     expect(r.headers.get("content-type")).toBe("image/png");
-    expect(r.headers.get("cache-control")).toBe("public, max-age=3600");
+    expect(r.headers.get("cache-control")).toBe("no-cache");
     expect(r.headers.get("content-disposition")).toBe(`inline; filename="${item.link}-preview.png"`);
     const cached = await get(deps, `/r/${item.link}/preview`, { "if-none-match": r.headers.get("etag")! });
     expect([cached.status, cached.calls]).toEqual([304, 2]);

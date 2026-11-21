@@ -636,6 +636,8 @@ Use this route when the server cannot take connections from the internet: a serv
 | Containers | app, caddy | app, caddy, cloudflared |
 | Secrets in `.env` | the setup code | the setup code and the tunnel token |
 
+Shared images and clips: from 0.1.47 their pages and files are sent with `Cache-Control: no-cache`, so a cache in front of the site (a tunnel's or a CDN's edge, a proxy) asks the site before it serves one again and a restricted, deleted or disabled item is not served from it. A copy such a cache stored under 0.1.46 or earlier can still be served for up to an hour after the update (a page for up to a minute); purge the cache after the update if an item must stop being seen at once. A browser that already loaded a file keeps it.
+
 ### What to have ready for the tunnel
 
 1. Items 1, 4 and 5 of [step 1](#1-what-to-have-ready): the Debian server, root access, and a computer to build the image on.

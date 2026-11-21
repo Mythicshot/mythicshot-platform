@@ -91,9 +91,15 @@ const PREVIEW_TYPES: Readonly<Record<string, string>> = { png: "image/png", jpg:
 const LINK_ID = /^[a-z2-7]{20}$/;
 const FILE_NAME = /^([a-z2-7]{20})\.(png|jpg|gif|mp4)$/;
 
-/** A page lives a minute in a cache, then a cheap 304 by ETag, as a tour page does. */
-export const SHARE_PAGE_CACHE = "public, max-age=60";
-/** A file, a preview, the stylesheet and the script: an hour. An online item never changes. */
+/**
+ * An item's page, file, download and preview, from 0.1.47: a browser or a shared cache may
+ * keep a copy, but must ask the site before it uses it again (a cheap 304 by ETag while the
+ * item is public). An item's address stays the same when it is restricted, deleted or its
+ * account disabled, so a copy kept under max-age would go on answering for it without the
+ * site's checks; 0.1.46 allowed a minute for a page and an hour for a file.
+ */
+export const SHARE_ITEM_CACHE = "no-cache";
+/** The pages' stylesheet and script: an hour. They are fixed text and hold nothing of any item. */
 export const SHARE_FILE_CACHE = "public, max-age=3600";
 /** The database calls of every request here: the lookup, onlineItemFiles. */
 export const SHARE_LOOKUP_CALLS = SERVE_LOOKUP_CALLS;
@@ -372,7 +378,7 @@ async function serveFile(c: Context, deps: Deps, item: ShareItem, attachment: bo
   } else {
     // The ETag names this exact set of objects: their keys hold the claims, which never change while the item is online.
     etag = await digestTag(`file:${item.contentType}:${item.bytes}:${item.parts.join(",")}`);
-    headers = { ...fileHeaders(type, item, attachment), "cache-control": SHARE_FILE_CACHE, etag };
+    headers = { ...fileHeaders(type, item, attachment), "cache-control": SHARE_ITEM_CACHE, etag };
     if (matchesEtag(c.req.header("if-none-match") ?? null, etag)) return new Response(null, { status: 304, headers });
   }
 
@@ -422,7 +428,7 @@ async function servePreview(c: Context, deps: Deps, item: ShareItem, restricted 
     headers = { ...base, ...RESTRICTED_EXTRA, "content-security-policy": RESTRICTED_FILE_CSP };
   } else {
     const etag = await digestTag(`preview:${preview.type}:${preview.key}`);
-    headers = { ...base, "cache-control": SHARE_FILE_CACHE, etag };
+    headers = { ...base, "cache-control": SHARE_ITEM_CACHE, etag };
     if (matchesEtag(c.req.header("if-none-match") ?? null, etag)) return new Response(null, { status: 304, headers });
   }
   const file = await deps.drafts.get(preview.key);
@@ -439,7 +445,7 @@ async function servePage(c: Context, deps: Deps, item: ShareItem, viewer?: strin
   if (viewer !== undefined) return new Response(sharePageHtml(item, originOf(deps.config), viewer), { status: 200, headers: RESTRICTED_SHARE_PAGE_HEADERS });
   const html = sharePageHtml(item, originOf(deps.config));
   const etag = await digestTag(html);
-  const headers = { ...PAGE_HEADERS, "cache-control": SHARE_PAGE_CACHE, etag };
+  const headers = { ...PAGE_HEADERS, "cache-control": SHARE_ITEM_CACHE, etag };
   if (matchesEtag(c.req.header("if-none-match") ?? null, etag)) return new Response(null, { status: 304, headers });
   return new Response(html, { status: 200, headers });
 }
@@ -465,8 +471,14 @@ export function sharePageRoutes(app: Hono, deps: Deps): void {
       const item = await lookup(deps, kind, name?.link ?? null);
       if (name === null || item === null) return shareNotFound();
       if (item.access !== "public") {
-        if (name.ext !== null && name.ext !== FILE_TYPES[item.contentType].ext) return shareNotFound();
-        return restrictedAnswer(c, deps, item, (email) => (name.ext === null ? servePage(c, deps, item, email) : serveFile(c, deps, item, false, true)));
+        // The extension is checked only past the viewer check, so a visitor who may not view
+        // the item gets the same gate (or not-shared page) for every extension this route
+        // takes, and learns nothing of its type.
+        return restrictedAnswer(c, deps, item, async (email) => {
+          if (name.ext === null) return servePage(c, deps, item, email);
+          if (name.ext !== FILE_TYPES[item.contentType].ext) return shareNotFound();
+          return serveFile(c, deps, item, false, true);
+        });
       }
       if (name.ext === null) return servePage(c, deps, item);
       if (name.ext !== FILE_TYPES[item.contentType].ext) return shareNotFound();

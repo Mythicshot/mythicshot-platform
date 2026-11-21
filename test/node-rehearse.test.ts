@@ -97,9 +97,35 @@ function site(opts: { version?: string; date?: string; usage?: Answer; picture?:
 }
 
 describe("answers", () => {
+  it("an item's answer may change only its Cache-Control, from exactly one of 0.1.46's two public values to exactly no-cache, from the old build to the new one", () => {
+    const item = (cc: string, extra: Record<string, string> = {}, body = "<!doctype html><title>Shared</title>") =>
+      answer(200, body, { "content-type": "text/html; charset=utf-8", "cache-control": cc, etag: '"0123"', date: "Thu, 19 Nov 2026 10:00:00 GMT", ...extra });
+    const pair = (route: string, before: Answer, after: Answer, opts: { allowItemCache?: boolean } = { allowItemCache: true }) =>
+      compareAnswers([rec("token 1: item", route, before)], [rec("token 1: item", route, after)], opts);
+    for (const route of ["GET /i/:name", "GET /i/:name/download", "GET /i/:name/preview", "GET /r/:name", "GET /r/:name/download", "GET /r/:name/preview"]) {
+      for (const old of ["public, max-age=60", "public, max-age=3600"]) {
+        const c = pair(route, item(old), item("no-cache"));
+        expect([c.itemCache, c.identical, c.problems], `${route} ${old}`).toEqual([1, 0, []]);
+      }
+    }
+    // Nowhere else, never the other way, never to another value, never with anything else changed, and never on the way back.
+    expect(pair("GET /t/:slug", item("public, max-age=60"), item("no-cache")).problems).toHaveLength(1);
+    expect(pair("GET /p/:name", item("public, max-age=3600"), item("no-cache")).problems).toHaveLength(1);
+    expect(pair("GET /i/:name", item("no-cache"), item("public, max-age=60")).problems).toHaveLength(1);
+    for (const to of ["no-store", "private", "no-cache, max-age=60", " no-cache", "No-Cache", "public, max-age=3600"]) expect(pair("GET /i/:name", item("public, max-age=60"), item(to)).problems, to).toHaveLength(1);
+    for (const from of ["public, max-age=61", "public,max-age=60", "no-store"]) expect(pair("GET /i/:name", item(from), item("no-cache")).problems, from).toHaveLength(1);
+    expect(pair("GET /i/:name", item("public, max-age=60"), item("no-cache", { etag: '"4567"' })).problems).toHaveLength(1);
+    expect(pair("GET /i/:name", item("public, max-age=60"), item("no-cache", {}, "<!doctype html><title>Other</title>")).problems).toHaveLength(1);
+    expect(pair("GET /i/:name", item("public, max-age=60"), item("no-cache"), {}).problems).toHaveLength(1);
+    expect(pair("GET /i/:name", item("public, max-age=60"), { ...item("no-cache"), status: 304 }).problems).toHaveLength(1);
+    const noHeader = item("public, max-age=60");
+    delete noHeader.headers["cache-control"];
+    expect(pair("GET /i/:name", noHeader, item("no-cache")).problems).toHaveLength(1);
+  });
+
   it("the same answers at another moment are identical: only the date header differs", () => {
     const c = compareAnswers(site(), site({ date: "Fri, 20 Nov 2026 11:11:11 GMT" }));
-    expect(c).toEqual({ identical: 6, allowed: 0, playerNames: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
+    expect(c).toEqual({ identical: 6, allowed: 0, playerNames: 0, itemCache: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
   });
 
   it("a newer version in the workspace answer is the one allowed body difference, and content-length follows it", () => {
@@ -170,7 +196,7 @@ describe("answers that only add fields", () => {
 
   it("an added top-level key is allowed, counted apart and named by its path, and content-length follows it", () => {
     const c = compare(OLD, { ...OLD, images: 3 });
-    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 0, addedFields: 1, addedFieldsByRoute: { "GET /api/v1/usage": ["images"] }, added: [], problems: [] });
+    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 0, itemCache: 0, addedFields: 1, addedFieldsByRoute: { "GET /api/v1/usage": ["images"] }, added: [], problems: [] });
   });
 
   it("an added nested key is allowed, named by its full path", () => {
@@ -346,7 +372,7 @@ describe("tour pages that differ only in the player's file names", () => {
 
   it("a page whose script name (or both names) changed is allowed, counted apart, its etag let follow, and no name is printed", () => {
     const c = compareAnswers(page(), page({ js: JS_B }), NEW);
-    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 1, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
+    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 1, itemCache: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
     expect(page()[0].answer.headers.etag).not.toBe(page({ js: JS_B })[0].answer.headers.etag);
     expect(compareAnswers(page(), page({ js: JS_B, css: CSS_B }), NEW).playerNames).toBe(1);
     expect(compareAnswers(page(), page({ css: CSS_B }), NEW).playerNames).toBe(1);

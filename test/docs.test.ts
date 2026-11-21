@@ -32,7 +32,7 @@ import signinPageTs from "../src/signin/page.ts?raw";
 import smtpTs from "../src/node/smtp.ts?raw";
 import usageTs from "../src/usage.ts?raw";
 import { AUDIT_EVENTS } from "../src/audit.ts";
-import { SHARE_FILE_CACHE, SHARE_FILE_CSP, SHARE_PAGE_CACHE } from "../src/media-page.ts";
+import { SHARE_FILE_CACHE, SHARE_FILE_CSP, SHARE_ITEM_CACHE } from "../src/media-page.ts";
 import { EMAIL_CHANGE_LINES, EMAIL_CHANGE_MS } from "../src/email-change.ts";
 import { LIMITS_EMAIL_CHANGE, LIMITS_SIGNIN } from "../src/rate.ts";
 import { SESSION_MS, SIGNIN_CODE_MS } from "../src/sessions.ts";
@@ -540,9 +540,10 @@ describe("the sentences the guides quote from the server command and the log", (
   });
 
   it("the README says how long shared files and pages may stay in caches, and why a hosted service sets IMG_HOST, as the code makes it", () => {
-    expect([SHARE_FILE_CACHE, SHARE_PAGE_CACHE]).toEqual(["public, max-age=3600", "public, max-age=60"]);
+    expect([SHARE_ITEM_CACHE, SHARE_FILE_CACHE]).toEqual(["no-cache", "public, max-age=3600"]);
     expect(SHARE_FILE_CSP).toBe("default-src 'none'; sandbox");
-    expect(docs[README]).toContain("Files and previews may stay in browser and shared caches for up to an hour after an item is deleted or its account disabled, and pages for up to a minute.");
+    expect(docs[README]).toContain("From 0.1.47 an item's page, file, download and preview are sent with `Cache-Control: no-cache`: a browser or a shared cache may keep a copy, but must ask the site before it uses it again, so a deleted, restricted or disabled item is not served from a cache.");
+    expect(docs[README]).toContain("A copy a shared cache stored under 0.1.46 or earlier may still be served for up to an hour after the update, and a page for up to a minute; a browser that already loaded a file still has it.");
     expect(docs[README]).toContain(
       "With one address, shared files are served on the same address as the dashboard, protected only by their fixed type and the `nosniff` and `sandbox` headers, so a hosted service should set `IMG_HOST`, with the two other addresses, to give them an address of their own.",
     );

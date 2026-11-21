@@ -368,7 +368,7 @@ describe("a restricted item, for every visitor and every way of asking", () => {
     // Made public: the same link serves everyone again, as any public item.
     expect((await setAccess(deps, mode, s.ownerSession, s.image.id, { access: "public" })).status).toBe(200);
     const open = await send(deps, "GET", `/i/${s.image.link}.png`, { origin: mode.media });
-    expect([open.status, open.headers.get("cache-control"), open.headers.get("etag") !== null]).toEqual([200, "public, max-age=3600", true]);
+    expect([open.status, open.headers.get("cache-control"), open.headers.get("etag") !== null]).toEqual([200, "no-cache", true]);
   });
 
   it("ranges are answered after the check every time; no 304, and If-Range never matches; HEAD reads no part", SLOW, async () => {
@@ -580,8 +580,22 @@ describe("the media viewer scope", () => {
 });
 
 describe("public items", () => {
-  it("answer the very bytes 0.1.46 answered, with the same calls, also with viewer cookies of either kind or an account's", SLOW, async () => {
+  it("answer the very bytes 0.1.46 answered, with the same calls, also with viewer cookies of either kind or an account's, but for Cache-Control: no-cache on an item's answers", SLOW, async () => {
     const frozen = FROZEN as unknown as { modes: Record<string, FrozenAnswer[]> };
+    // The one difference from 0.1.46 (see the test below for why): an item's page, file,
+    // download and preview answers that said `public, max-age=60` or `public, max-age=3600`
+    // say `no-cache`; every other byte, header and call is 0.1.46's. The pages' stylesheet and
+    // script keep their hour, and the 404s and 416s their `no-store`.
+    const OLD_VALUES = ["public, max-age=60", "public, max-age=3600"];
+    const permitted = (r: { path: string }, old: FrozenAnswer): FrozenAnswer => {
+      const cc = old.headers.find(([k]) => k === "cache-control")?.[1];
+      if (!/^\/[ir]\//.test(r.path) || cc === undefined || !OLD_VALUES.includes(cc)) return old;
+      return { ...old, headers: old.headers.map(([k, v]) => [k, k === "cache-control" ? "no-cache" : v] as [string, string]) };
+    };
+    for (const mode of FROZEN_MODES) {
+      const changed = frozenRequests().filter((r, i) => permitted(r, frozen.modes[mode.name][i]) !== frozen.modes[mode.name][i]);
+      expect(changed.length, mode.name).toBe(59);
+    }
     for (const mode of FROZEN_MODES) {
       const { deps } = await makeDeps({ hosts: mode.hosts, ...(mode.siteHost ? { siteHost: mode.siteHost } : {}) });
       const owner = await seedAccount(deps, { admin: true });
@@ -598,11 +612,75 @@ describe("public items", () => {
           const headers = { ...headersFor(r, got), ...(cookie === null ? {} : { cookie }) };
           const answer = await frozenAnswer(await send(deps, r.method, r.path, { origin: mode.origin, headers }));
           got.push(answer);
-          expect(answer, `${mode.name}: ${r.method} ${r.path} #${i} with ${cookie === null ? "no cookie" : "cookies"}`).toEqual(want[i]);
+          expect(answer, `${mode.name}: ${r.method} ${r.path} #${i} with ${cookie === null ? "no cookie" : "cookies"}`).toEqual(permitted(r, want[i]));
         }
       }
     }
   });
+});
+
+describe("caches and a public item made restricted", () => {
+  it("no answer of a public item may be kept by a cache without asking the site: once the item is restricted its link must answer the gate, not a copy", SLOW, async () => {
+    // Why public items answer `Cache-Control: no-cache` from 0.1.47: an item's address stays
+    // the same when it is restricted, so a shared cache (a CDN, a proxy, a tunnel's edge)
+    // holding a public answer under max-age would go on serving the bytes to anyone after the
+    // restriction, for up to the hour 0.1.46 allowed. With no-cache every reuse asks the site
+    // first; the ETag keeps that cheap while the item is public.
+    const s = await site(MODES[2]);
+    const { deps, mode } = s;
+    for (const path of routesOf(s.open)) {
+      if (path.endsWith("/preview")) continue; // the GIF has no preview
+      const r = await send(deps, "GET", path, { origin: mode.media });
+      expect([r.status, r.headers.get("cache-control")], path).toEqual([200, "no-cache"]);
+      expect(r.headers.get("etag"), path).toMatch(/^"[0-9a-f]{32}"$/);
+    }
+    // A cache asking again with the ETag it holds gets 304 while the item is public ...
+    const file = `/r/${s.open.link}.gif`;
+    const etag = (await send(deps, "GET", file, { origin: mode.media })).headers.get("etag")!;
+    const fresh = await send(deps, "GET", file, { origin: mode.media, headers: { "if-none-match": etag } });
+    expect([fresh.status, fresh.headers.get("cache-control"), fresh.bytes.length]).toEqual([304, "no-cache", 0]);
+    // ... and once it is restricted, the gate, never a 304 that would let the copy be reused.
+    expect((await setAccess(deps, mode, s.ownerSession, s.open.id, { access: "me" })).status).toBe(200);
+    for (const path of [file, `/r/${s.open.link}`, `/r/${s.open.link}/download`]) {
+      const again = await send(deps, "GET", path, { origin: mode.media, headers: { "if-none-match": etag } });
+      expect([again.status, again.text], path).toEqual([403, MEDIA_GATE_HTML.clip]);
+      expect(again.headers.get("cache-control"), path).toBe("no-store");
+      expect(again.headers.get("etag"), path).toBeNull();
+    }
+  });
+});
+
+describe("a restricted item tells nobody its file type", () => {
+  for (const mode of [MODES[0], MODES[2]]) {
+    it(`every extension its route takes answers the same gate without a session, and the same not-shared page with one not on the list (${mode.name})`, SLOW, async () => {
+      const s = await site(mode);
+      const { deps } = s;
+      const other = await mediaViewerFor(deps, mode, OTHER);
+      const owner = await mediaViewerFor(deps, mode, s.owner.email);
+      for (const [item, html, exts] of [
+        [s.image, { gate: MEDIA_GATE_HTML.image, denied: MEDIA_DENIED_HTML.image }, ["png", "jpg"]],
+        [s.clip, { gate: MEDIA_GATE_HTML.clip, denied: MEDIA_DENIED_HTML.clip }, ["gif", "mp4"]],
+      ] as const) {
+        const seen = new Set<string>();
+        for (const ext of exts) {
+          const path = `/${item.letter}/${item.link}.${ext}`;
+          const gate = await send(deps, "GET", path, { origin: mode.media });
+          const denied = await send(deps, "GET", path, { origin: mode.media, headers: { cookie: other } });
+          expect([gate.status, gate.text], path).toEqual([403, html.gate]);
+          expect([denied.status, denied.text], path).toEqual([403, html.denied]);
+          seen.add(JSON.stringify([[...gate.headers.entries()].sort(), [...denied.headers.entries()].sort(), gate.calls, denied.calls]));
+        }
+        // The two extensions cannot be told apart by any header or by the work done.
+        expect(seen.size, item.letter).toBe(1);
+        // To a viewer who may see it, the wrong extension is the one 404, the right one the file.
+        const wrong = exts.find((e) => e !== item.ext)!;
+        expect((await send(deps, "GET", `/${item.letter}/${item.link}.${wrong}`, { origin: mode.media, headers: { cookie: owner } })).status).toBe(404);
+        expect((await send(deps, "GET", `/${item.letter}/${item.link}.${item.ext}`, { origin: mode.media, headers: { cookie: owner } })).status).toBe(200);
+      }
+      // An extension no route takes is the one 404 for everyone, as for any link.
+      expect((await send(deps, "GET", `/i/${s.image.link}.webp`, { origin: mode.media })).status).toBe(404);
+    });
+  }
 });
 
 describe("the call budget of the new routes", () => {
