@@ -422,6 +422,8 @@ Use the commands the script printed, not the ones above: yours name the right ba
 cd ~/apps/tours && ./cpanel.sh status
 ```
 
+Going back below 0.1.51 has one more catch for tours whose first publish was started with a list and never finished: a change to the list made by the older version does not end the token's comparison of that list, so do not run an older version while such a publish is unfinished, and after coming forward again save each unpublished restricted tour's setting once in the dashboard (see [Who may view a tour](../../README.md#who-may-view-a-tour) in the README).
+
 ## 13. Troubleshooting
 
 | What you see | What to do |

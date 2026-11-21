@@ -295,6 +295,7 @@ type State = {
  * audit: the row says it, and a session's change or another token's ends it at once. A session
  * asks with no token id, which matches nothing.
  */
+// Limit: a list change made by a build before 0.1.51 on this database does not empty the mark (README, "Who may view a tour").
 export const OWN_CREATION = "(t.access_set_by IS NOT NULL AND t.access_set_by = ?)";
 
 /** Empties the mark of a setting written at creation (OWN_CREATION): every write of the setting or the list by the access PUT carries it. */
