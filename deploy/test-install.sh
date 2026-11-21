@@ -2617,7 +2617,7 @@ is_three_of() {
 # The sentence for a wrong role on an install with three addresses.
 wrong_role3() { printf 'https://%s/healthz answered, but the platform does not see it as its %s address. Check DOMAIN, APP_DOMAIN and IMG_HOST in /opt/demo-platform/.env, and that nothing in front of the platform changes the Host header.' "$1" "$2"; }
 # The sentence for an img address that answers without naming any role.
-old_img_platform() { printf 'https://%s/healthz answered, but the platform running here is older than the img address. Run: sudo bash %s update' "$1" "$SCRIPT"; }
+old_img_platform() { printf 'https://%s/healthz answered, but the platform running here is older than the img address, or IMG_HOST does not reach the app. Run: sudo bash %s update' "$1" "$SCRIPT"; }
 
 test_img_domain_validation() {
   new_sandbox; load_functions

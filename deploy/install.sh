@@ -206,6 +206,7 @@ SECRET_EXTRA=0
 DOMAIN=""
 APP_DOMAIN=""  # the app address of a two-address install (DOMAIN is then the address of the tours); empty: one address
 IMG_HOST=""    # the img address, for shared images and clips, only beside APP_DOMAIN; empty: none
+SKIP_IMG_CHECK=0  # 1 when status found that the Caddyfile does not answer for IMG_HOST
 ACME_EMAIL=""
 DATA_DIR=""   # the resolved path as the host sees it, without DP_ROOT; stored in .env
 DATA_PATH=""  # "$DP_ROOT$DATA_DIR", the path this script works on
@@ -1492,7 +1493,11 @@ install_stack_files() {
   check_rendered_addresses "$staged_compose"
   STAGED="$staged_compose"
   commit_file "$COMPOSE_FILE" "$INSTALL_DIR"
-  stage_file "$CADDYFILE" 0600 < <(caddyfile_for_install)
+  # Made first, so that a failure while making it stops the run (a process substitution
+  # could not). $(...) drops the file's one closing newline, which printf puts back.
+  local caddy_content
+  caddy_content="$(caddyfile_for_install)" || exit 1
+  stage_file "$CADDYFILE" 0600 < <(printf '%s\n' "$caddy_content")
   commit_file "$CADDYFILE" "$CADDY_DIR"
   CADDY_CHANGED="$COMMITTED"
 }
@@ -1503,27 +1508,38 @@ install_stack_files() {
 # file with the project folder, and so the .env, that the start uses, and with a token on
 # trial the way the start gets it. The rendering holds the setup code and the token: it
 # goes down a pipe to rendered_app_hosts and nowhere else, never to the terminal or a
-# file, and what comes back is compared and never printed.
+# file, and what comes back is compared and never printed. The app's IMG_HOST must also
+# come out as the IMG_HOST this script read (absent and empty alike when there is none):
+# Compose reads .env more leniently than read_env_file (an "export " in front, blanks
+# before the name or around the =), and a line only Compose takes would give the app a
+# third address that the Caddyfile written here does not answer for. With "img-only"
+# (update, on the stack file in place) only IMG_HOST is compared.
 check_rendered_addresses() {
-  local staged="$1" want="|" got
+  local staged="$1" only="${2:-}" want="|" got
   [ -z "$APP_DOMAIN" ] || want="$DOMAIN|$APP_DOMAIN"
-  info "asking Docker Compose how it fills in the new stack file's two address settings (what it prints is read here and not shown)"
-  got="$(with_trial_token docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged" config 2>/dev/null | rendered_app_hosts)" || got=""
-  [ "$got" = "$want" ] \
-    || die "This version of Docker Compose does not read the two-address settings in the stack file the way this script expects, so nothing was changed. Update Docker Compose and run install again."
+  # update asks without a word, so that it prints what it printed before 0.1.50.
+  [ "$only" = img-only ]     || info "asking Docker Compose how it fills in the new stack file's two address settings (what it prints is read here and not shown)"
+  got="$(with_trial_token docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged" config 2>/dev/null | rendered_app_hosts img)" || got=""
+  if [ -z "$got" ] || { [ "$only" != img-only ] && [ "${got%|*}" != "$want" ]; }; then
+    die "This version of Docker Compose does not read the two-address settings in the stack file the way this script expects, so nothing was changed. Update Docker Compose and run install again."
+  fi
+  [ "${got##*|}" = "$IMG_HOST" ] \
+    || die "Docker Compose hands the app another IMG_HOST than install.sh reads in .env, so nothing was changed. Write the line exactly as IMG_HOST=<name>, at the start of the line, without export, spaces or quotes (or remove it), and run install again."
 }
 
 # Reads a rendered stack file (the output of docker compose config) and prints the app
 # service's two settings as "<TOURS_HOST>|<APP_HOST>", quotes taken off; nothing unless
 # each is under services, app, environment exactly once. A setting without a value is
-# not an empty one. No other part of what is read is passed on.
+# not an empty one. No other part of what is read is passed on. With "img" it adds the
+# app's IMG_HOST as a third field, "<TOURS_HOST>|<APP_HOST>|<IMG_HOST>": empty when it is
+# absent or empty, "(no value)" or "(twice)" when it cannot be a name.
 rendered_app_hosts() {
-  awk -v sq="'" '
+  awk -v sq="'" -v img="${1:-}" '
     { sub(/\r$/, "") }
     /^[^ ]/ { top = $0; svc = ""; sec = ""; next }
     /^  [^ ]/ { svc = $0; sec = ""; next }
     /^    [^ ]/ { sec = $0; next }
-    top == "services:" && svc == "  app:" && sec == "    environment:" && /^      (TOURS_HOST|APP_HOST):( |$)/ {
+    top == "services:" && svc == "  app:" && sec == "    environment:" && /^      (TOURS_HOST|APP_HOST|IMG_HOST):( |$)/ {
       key = $1; sub(/:$/, "", key)
       val = $0; sub(/^      [A-Z_]+:/, "", val); gsub(/^ +| +$/, "", val)
       first = substr(val, 1, 1); last = substr(val, length(val), 1)
@@ -1531,7 +1547,14 @@ rendered_app_hosts() {
       else if (val == "") val = "(no value)"
       seen[key]++; value[key] = val
     }
-    END { if (seen["TOURS_HOST"] == 1 && seen["APP_HOST"] == 1) printf "%s|%s\n", value["TOURS_HOST"], value["APP_HOST"] }
+    END {
+      if (seen["TOURS_HOST"] != 1 || seen["APP_HOST"] != 1) exit
+      if (img != "img") { printf "%s|%s\n", value["TOURS_HOST"], value["APP_HOST"]; exit }
+      i = ""
+      if (seen["IMG_HOST"] > 1) i = "(twice)"
+      else if (seen["IMG_HOST"] == 1) i = value["IMG_HOST"]
+      printf "%s|%s|%s\n", value["TOURS_HOST"], value["APP_HOST"], i
+    }
   '
 }
 
@@ -1650,13 +1673,24 @@ start_stack() {
       restore_replaced || warn "could not put back every file this run replaced; see the lines above"
       run "${DC[@]}" up -d || warn "the previous setup did not start either"
     fi
+    # The Caddyfile put back may no longer match the IMG_HOST line of .env, which this
+    # run never changes: say which way, and what puts it right.
+    local hint="" back_img
+    if [ "$CADDY_CHANGED" = 1 ]; then
+      back_img="$(caddyfile_img_name)"
+      if [ "$back_img" != "$IMG_HOST" ] && [ -n "$IMG_HOST" ]; then
+        hint=" The earlier Caddyfile was put back, and it does not answer for IMG_HOST=$IMG_HOST in $LOGICAL_INSTALL_DIR/.env: remove that line, or put right what stopped the start and run: sudo bash $SELF install"
+      elif [ "$back_img" != "$IMG_HOST" ]; then
+        hint=" The earlier Caddyfile was put back, and it still answers for $back_img, which $LOGICAL_INSTALL_DIR/.env no longer holds as IMG_HOST: put that line back, or put right what stopped the start and run: sudo bash $SELF install"
+      fi
+    fi
     if [ "$MODE" = tunnel ] && [ "$PENDING" = 1 ]; then
-      die "starting failed: the tunnel still did not connect, so the site cannot be reached yet. The data folder and the backups were not changed. Run: sudo bash $SELF install; it asks for the tunnel token again. See the logs with: ${DC[*]} logs"
+      die "starting failed: the tunnel still did not connect, so the site cannot be reached yet. The data folder and the backups were not changed. Run: sudo bash $SELF install; it asks for the tunnel token again. See the logs with: ${DC[*]} logs$hint"
     fi
     if [ "$MODE" = tunnel ]; then
-      die "starting failed. The data folder, $ENV_FILE and the backups were not changed. If the token is the cause, replace it with: sudo bash $SELF install --new-token. See the logs with: ${DC[*]} logs"
+      die "starting failed. The data folder, $ENV_FILE and the backups were not changed. If the token is the cause, replace it with: sudo bash $SELF install --new-token. See the logs with: ${DC[*]} logs$hint"
     fi
-    die "starting failed. The data folder, $ENV_FILE and the backups were not changed. See the logs with: ${DC[*]} logs"
+    die "starting failed. The data folder, $ENV_FILE and the backups were not changed. See the logs with: ${DC[*]} logs$hint"
   fi
   save_new_token
   if [ "$CADDY_CHANGED" = 1 ] && [ "$caddy_was_running" = 1 ]; then
@@ -1746,7 +1780,7 @@ check_roles() {
   fi
   check_role "$DOMAIN" tours "$tries" || bad=1
   check_role "$APP_DOMAIN" app "$tries" || bad=1
-  if [ -n "$IMG_HOST" ]; then check_role "$IMG_HOST" img "$tries" || bad=1; fi
+  if [ -n "$IMG_HOST" ] && [ "$SKIP_IMG_CHECK" = 0 ]; then check_role "$IMG_HOST" img "$tries" || bad=1; fi
   [ "$bad" = 1 ] || return 0
   exit 1
 }
@@ -1778,7 +1812,7 @@ check_role() {
       # a current one for a host name that is neither of its two (or three). On the img
       # address, an app from before the img address does.
       if [[ "$body" != *'"address"'* ]] && [ "$role" = img ]; then
-        printf 'ERROR: %s answered, but the platform running here is older than the img address. Run: sudo bash %s update. If it is up to date already, the request reached it under another host name: check that nothing in front of the platform changes the Host header.\n' "$url" "$SELF" >&2
+        printf 'ERROR: %s answered, but the platform running here is older than the img address, or IMG_HOST does not reach the app. Run: sudo bash %s update. If it is up to date already, the request reached it under another host name: check that nothing in front of the platform changes the Host header.\n' "$url" "$SELF" >&2
         return 1
       fi
       if [[ "$body" != *'"address"'* ]]; then
@@ -1934,14 +1968,23 @@ cmd_update() {
     fi
     die "$ENV_FILE holds no APP_DOMAIN, but the Caddyfile here was written for two addresses, and update does not rewrite it. Nothing was changed. Run: sudo bash $SELF install"
   fi
-  if [ "$(caddyfile_img_name)" != "$IMG_HOST" ]; then
+  local found_img
+  found_img="$(caddyfile_img_name)"
+  if [ "$found_img" != "$IMG_HOST" ]; then
     if [ -n "$IMG_HOST" ]; then
       die "$ENV_FILE holds IMG_HOST=$IMG_HOST, but the Caddyfile here does not answer for that name, and update does not rewrite it. Nothing was changed. Run: sudo bash $SELF install"
     fi
-    die "$ENV_FILE holds no IMG_HOST, but the Caddyfile here answers for a third name, and update does not rewrite it. Nothing was changed. Run: sudo bash $SELF install"
+    # Also a name the owner added to the Caddyfile by hand: install would replace that
+    # edit, so the message says so before anyone runs it.
+    die "$ENV_FILE holds no IMG_HOST, but the Caddyfile here answers for a third name, $found_img, and update does not rewrite it. Nothing was changed. If that name was added to the Caddyfile by hand, install writes the Caddyfile for the addresses in .env and so replaces that edit (it keeps the edited file as a .bak copy); to keep the name as the img address, add IMG_HOST=$found_img to .env first. Then run: sudo bash $SELF install"
   fi
   refuse_snap
   check_docker_ready
+  # A hand-written IMG_HOST line that read_env_file does not take but Compose does would
+  # give the app a third address the Caddyfile does not answer for: checked here too,
+  # since update writes no file and starts the stack as it is.
+  # A dry run asks nothing, as install's does not.
+  [ "$DRY_RUN" = 1 ] || check_rendered_addresses "$COMPOSE_FILE" img-only
   take_lock
   local digests
   digests="$(docker image inspect --format '{{len .RepoDigests}}' "$IMAGE" 2>/dev/null || true)"
@@ -2013,6 +2056,17 @@ cmd_status() {
     info "mode: behind a Cloudflare Tunnel; no port is published. The tunnel has a published application for each of $DOMAIN and $APP_DOMAIN, both with the service URL $TUNNEL_SERVICE_URL"
   elif [ "$MODE" = tunnel ]; then
     info "mode: behind a Cloudflare Tunnel; no port is published. The tunnel's published application for $DOMAIN has the service URL $TUNNEL_SERVICE_URL"
+  fi
+  # .env and the Caddyfile disagree on the img address (a line added, changed or removed
+  # by hand without an install run since): said as such, and that address is not asked,
+  # since its answer would only point at a certificate.
+  local found_img
+  found_img="$(caddyfile_img_name)"
+  if [ "$found_img" != "$IMG_HOST" ] && [ -n "$IMG_HOST" ]; then
+    warn "the Caddyfile here does not answer for IMG_HOST=$IMG_HOST in $LOGICAL_INSTALL_DIR/.env, so the img address cannot work yet. Run: sudo bash $SELF install"
+    SKIP_IMG_CHECK=1
+  elif [ "$found_img" != "$IMG_HOST" ]; then
+    warn "the Caddyfile here answers for a third name, $found_img, that $LOGICAL_INSTALL_DIR/.env does not hold as IMG_HOST. Run: sudo bash $SELF install"
   fi
   check_roles 1
 }

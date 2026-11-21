@@ -1066,7 +1066,7 @@ Add `--img-domain` beside `--app-domain` to every run of the script, on either r
 sudo bash install.sh install --app-domain=app.example.com --img-domain=img.example.com
 ```
 
-The option must be a hostname in lowercase that differs from the tours address and the app address. Without `--app-domain` the script stops before it asks anything, with "the img address goes only beside an app address: give --app-domain=<name> too"; with the same name as one of the others, it stops before it writes anything, with "the img address must be a different name than the tours address and the app address". The summary before `Continue?` shows the img address, and after the usual closing lines the script prints one more.
+The option must be a hostname in lowercase that differs from the tours address and the app address. Without `--app-domain` the script stops before it asks anything, with "the img address goes only beside an app address: give --app-domain=<name> too"; with the same name as one of the others, it stops before it writes anything, with "the img address must be a different name than the tours address and the app address". The summary before `Continue?` shows the img address, and among the closing lines, right before the setup code, the script prints one more.
 
 ```text
 Shared images and clips are at https://img.example.com.
@@ -1079,7 +1079,7 @@ On the tunnel route the closing lines name the three hostnames, under "the tunne
 The script never rewrites an existing `.env`. Given `--img-domain=img.example.com` on an existing install, it stops with nothing changed and names the line to add. So the line is added by hand.
 
 1. Make a backup and open `.env` in a root shell, as in steps 3 and 4 of [On an install that has one address today](#on-an-install-that-has-one-address-today).
-2. Add this one line below the `APP_DOMAIN` line, with your own name in lowercase, and save. Change nothing else.
+2. Add this one line below the `APP_DOMAIN` line, with your own name in lowercase, at the start of the line, without quotes, without `export` and without spaces around the `=`, and save. Change nothing else. A quoted value is refused as not a valid host name, and a line written another way stops the run with "Docker Compose hands the app another IMG_HOST than".
 
 ```text
 IMG_HOST=img.example.com
@@ -1094,11 +1094,11 @@ IMG_HOST=img.example.com
 sudo bash install.sh install
 ```
 
-If the line holds something that cannot be the img address, every command stops first with nothing changed, saying "has an IMG_HOST that is not a valid host name or is the same as DOMAIN or APP_DOMAIN"; on an install without `APP_DOMAIN` it says "has an IMG_HOST but no APP_DOMAIN". `sudo bash install.sh update` writes no file: while the Caddyfile does not answer for exactly the `IMG_HOST` in `.env`, it stops with nothing changed, saying "but the Caddyfile here does not answer for that name" or "but the Caddyfile here answers for a third name"; run `sudo bash install.sh install`.
+If the line holds something that cannot be the img address, every command stops first with nothing changed, saying "has an IMG_HOST that is not a valid host name or is the same as DOMAIN or APP_DOMAIN"; on an install without `APP_DOMAIN` it says "has an IMG_HOST but no APP_DOMAIN". `sudo bash install.sh update` writes no file: while the Caddyfile does not answer for exactly the `IMG_HOST` in `.env`, it stops with nothing changed, saying "but the Caddyfile here does not answer for that name" or "but the Caddyfile here answers for a third name"; run `sudo bash install.sh install`. The second also comes up when a third name was added to the Caddyfile by hand: the message names it, and `install` replaces that edit with the file for the addresses in `.env` (the edited file is kept as `.bak-<date>-<time>`), so add `IMG_HOST` with that name first if it is meant as the img address. If the start fails after the line was added or removed, the script puts the earlier Caddyfile back and says so: remove the line again (or put it back), or put right what stopped the start and run `install` again.
 
 #### The check of the third address
 
-After every start, and with `status`, the script asks the img address for `/healthz` as it asks the two others, as in [The check of both addresses](#the-check-of-both-addresses), and requires `"address":"img"`. When it passes it says `img.example.com is the platform's img address`. An answer without any role there says "answered, but the platform running here is older than the img address": load the current image and run `sudo bash install.sh update`. A wrong role says "Check DOMAIN, APP_DOMAIN and IMG_HOST in /opt/demo-platform/.env" and ends the run with exit code 1; an address that was not asked or did not answer is a warning, as for the two others.
+After every start, and with `status`, the script asks the img address for `/healthz` as it asks the two others, as in [The check of both addresses](#the-check-of-both-addresses), and requires `"address":"img"`. When it passes it says `img.example.com is the platform's img address`. An answer without any role there says "answered, but the platform running here is older than the img address, or IMG_HOST does not reach the app": load the current image and run `sudo bash install.sh update`. While `.env` and the Caddyfile disagree on the img address, `status` says so ("the Caddyfile here does not answer for IMG_HOST") and does not ask that address. A wrong role says "Check DOMAIN, APP_DOMAIN and IMG_HOST in /opt/demo-platform/.env" and ends the run with exit code 1; an address that was not asked or did not answer is a warning, as for the two others.
 
 **How to tell it worked:** from your computer, this prints `{"ok":true,"address":"img"}`, and the tours and app addresses print their own roles as before.
 
@@ -1312,6 +1312,9 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `has an APP_DOMAIN that is not a valid host name or is the same as DOMAIN` | The `APP_DOMAIN` line in `.env` is mistyped, or names the tours address | Nothing was changed. Correct the line, or remove it for one address, then run `sudo bash install.sh`. |
 | A warning that `.env` has a `TOURS_HOST` or `APP_HOST` line | The line was added by hand; on this route it has no effect | Remove it. The second address is the `APP_DOMAIN` line only ([Two addresses](#two-addresses)). |
 | `the Caddyfile here was written for` one address, or for two addresses, at the start of `update` | `.env` and the Caddyfile disagree about the second address, and `update` writes no file | Nothing was changed. Run `sudo bash install.sh install`. |
+| `the Caddyfile here does not answer for that name` or `answers for a third name`, at the start of `update` | `.env` and the Caddyfile disagree about the img address, or a third name was added to the Caddyfile by hand | Nothing was changed. See [A third address for images and clips](#a-third-address-for-images-and-clips), then run `sudo bash install.sh install`. |
+| `Docker Compose hands the app another IMG_HOST than` | The `IMG_HOST` line has `export` in front, blanks before it or around the `=` | Nothing was changed. Write it as `IMG_HOST=img.example.com` at the start of the line, then run `sudo bash install.sh install`. |
+| After an `install` run that was stopped (Ctrl-C, a lost SSH connection) once it had written the Caddyfile, a name it added or removed is still answered the old way | The new Caddyfile is on disk, but Caddy was not restarted to read it, and a later run finds the file up to date and does not restart Caddy either | From a root shell in `/opt/demo-platform`, run `docker compose restart caddy`. |
 | `the platform running here is older than two addresses` | The app image is from before two addresses, or the `Host` header is changed on the way | See [The check of both addresses](#the-check-of-both-addresses). |
 | `the platform does not see it as its` tours or app address | An address reaches the platform under the other name | See [The check of both addresses](#the-check-of-both-addresses). |
 | With two addresses, `/setup` on the app address shows `{"error":"not_found"}` | The setup wizard is on the tours address only | Open `https://tours.example.com/setup`. |
