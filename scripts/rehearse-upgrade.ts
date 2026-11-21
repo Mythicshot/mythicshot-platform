@@ -64,7 +64,11 @@ import {
   compareAnswers,
   compareRows,
   compareStores,
+  gateProblems,
   migrationProblems,
+  servesNoPicture,
+  tourContentOf,
+  type TourContent,
   storesSame,
   usageFromRows,
   usageProblems,
@@ -118,6 +122,29 @@ export function knowsImgRole(buildDir: string): boolean {
   };
   const roles = /\bHOST_ROLES\s*=\s*\[([^\]]*)\]/.exec(read("dist", "hosts.js"));
   return roles !== null && /["']img["']/.test(roles[1]) && /["']IMG_HOST["']/.test(read("dist", "node", "config.js"));
+}
+
+/**
+ * Whether a build can serve restricted tours (from 0.1.44), from its own compiled files and
+ * never by starting it, nor from the data or its version number: its app (dist/app.js)
+ * imports restrictedAnswer from ./restricted.js and hands it to the page routes, and that
+ * file (dist/restricted.js) has the restricted picture route /t/:slug/v/:name. Such a build
+ * answers a restricted tour's page with its gate (403, fixed text) to a visitor who proved
+ * no address; an older one knows nothing of the setting and answers as for no tour at all.
+ */
+export function knowsRestrictedServing(buildDir: string): boolean {
+  const read = (...p: string[]) => {
+    try {
+      return readFileSync(join(buildDir, ...p), "utf8");
+    } catch {
+      return "";
+    }
+  };
+  const app = read("dist", "app.js");
+  const imports = /import\s*\{[^}]*\brestrictedAnswer\b[^}]*\}\s*from\s*["']\.\/restricted\.js["']/.test(app);
+  const handed = /\bpageRoutes\(\s*app\s*,\s*deps\s*,\s*restrictedAnswer\s*\)/.test(app);
+  const route = /\.get\(\s*["']\/t\/:slug\/v\/:name["']/.test(read("dist", "restricted.js"));
+  return imports && handed && route;
 }
 
 /**
@@ -735,6 +762,13 @@ export async function scratchSession(dbPath: string, token: string): Promise<{ c
  * the tour's page named while it was public. One report line for the restriction, one for
  * the way back. With an old build from before restricted tours this is the case that
  * matters: it knows nothing of the setting.
+ *
+ * An old build that can serve restricted tours (knowsRestrictedServing, from its compiled
+ * files) answers the page with its gate instead, to a request without a viewer cookie: then
+ * the page must be a fixed 403 that no cache keeps, carries no etag, cannot be framed and holds
+ * nothing of what the tour's public page showed (gateProblems, from tourContentOf, kept in
+ * memory and never printed), and every picture address and restricted picture address
+ * (/t/<slug>/v/<name>) must answer as an unknown picture (servesNoPicture).
  */
 async function restrictedWayBack(args: Args, oldBuild: BuildInfo, newBuild: BuildInfo, oldMode: Mode, work: string, tokens: string[], report: Report): Promise<void> {
   const what = "way back with a restricted tour";
@@ -745,6 +779,8 @@ async function restrictedWayBack(args: Args, oldBuild: BuildInfo, newBuild: Buil
   const r = spawnBuild(newBuild.dir, copy, "one", work, port, RESTRICT_SETTINGS);
   let slug: string | null = null;
   let pictures: string[] = [];
+  // What the tour showed of itself while public, kept in memory only and never printed.
+  let content: TourContent | null = null;
   try {
     try {
       await waitReady(r, healthHosts("one"), healthRoles("one"));
@@ -770,7 +806,9 @@ async function restrictedWayBack(args: Args, oldBuild: BuildInfo, newBuild: Buil
       }
     }
     slug = tour.slug;
-    pictures = pictureAddresses(decoder.decode((await fetchAnswer(port, "GET", `/t/${slug}`, host)).body)) ?? [];
+    const publicHtml = decoder.decode((await fetchAnswer(port, "GET", `/t/${slug}`, host)).body);
+    pictures = pictureAddresses(publicHtml) ?? [];
+    content = tourContentOf(publicHtml, tour.id);
     // Without the page's pictures the way back could pass for want of anything to ask: fail.
     if (!report.check(pictures.length > 0, `${what}: the tour's public page names its pictures (${pictures.length})`, ["the tour's page named no picture, or could not be read, so the way back could not be checked"])) return;
     const session = await scratchSession(join(copy, "db.sqlite"), token);
@@ -799,6 +837,34 @@ async function restrictedWayBack(args: Args, oldBuild: BuildInfo, newBuild: Buil
     const same = (x: Answer, y: Answer) => x.status === y.status && Buffer.from(x.body).equals(Buffer.from(y.body));
     const problems: string[] = [];
     const page = await fetchAnswer(oldPort, "GET", `/t/${slug}`, tours);
+    if (knowsRestrictedServing(oldBuild.dir)) {
+      // A build from 0.1.44 on serves restricted tours: to a visitor who proved no address it
+      // answers the gate, fixed text, and nothing of the tour by any address.
+      if (content === null) {
+        report.check(false, `${what}: the tour's public page could be read for its content`, ["the page held no tour data, so the old build's gate could not be checked"]);
+        return;
+      }
+      problems.push(...gateProblems(page, content));
+      const unknownPicture = await fetchAnswer(oldPort, "GET", `/p/${"0".repeat(32)}.png`, tours);
+      let asUnknown = 0;
+      for (const [i, address] of pictures.entries()) {
+        if (servesNoPicture(await fetchAnswer(oldPort, "GET", address, tours), unknownPicture)) asUnknown++;
+        else problems.push(`picture ${i + 1} was served by its public address`);
+      }
+      const unknownRestricted = await fetchAnswer(oldPort, "GET", `/t/${slug}/v/${"0".repeat(32)}.png`, tours);
+      let routeUnknown = 0;
+      for (const [i, name] of content.names.entries()) {
+        const bare = name.slice(name.lastIndexOf("/") + 1);
+        if (servesNoPicture(await fetchAnswer(oldPort, "GET", `/t/${slug}/v/${bare}`, tours), unknownRestricted)) routeUnknown++;
+        else problems.push(`picture ${i + 1} was served by the restricted picture route`);
+      }
+      report.check(
+        problems.length === 0,
+        `${what}: old build ${oldBuild.version} serves restricted tours, and answers its gate with nothing of the tour (page: a fixed 403, private and no-store, not framable; ${asUnknown} of ${pictures.length} picture addresses and ${routeUnknown} of ${content.names.length} restricted picture addresses as unknown)`,
+        problems,
+      );
+      return;
+    }
     const unknownPage = await fetchAnswer(oldPort, "GET", "/t/aaaaaaaaaa", tours);
     if (!same(page, unknownPage)) problems.push(`the tour's page answered ${page.status}, not as a tour that does not exist`);
     const unknownPicture = await fetchAnswer(oldPort, "GET", `/p/${"0".repeat(32)}.png`, tours);

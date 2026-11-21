@@ -287,6 +287,23 @@ describe("CONNECTION_IDLE_DAYS", () => {
     deps.now = () => clock.now;
   });
 
+  it("a slightly older lookup never moves the recorded use backwards, with no call more", async () => {
+    const { deps, a, at } = await site();
+    const t = await tokenOf(deps, a.workspaceId);
+    at(NOW + 10 * DAY_MS);
+    expect((await tours(deps, t.token)).status).toBe(200);
+    const one = (await tours(deps, t.token)).calls;
+    // A request whose lookup read the clock a moment earlier writes after the newer one.
+    at(NOW + 10 * DAY_MS - 5000);
+    const older = await tours(deps, t.token);
+    expect([older.status, older.calls]).toEqual([200, one]);
+    expect(await lastUsed(deps, t.id)).toBe(NOW + 10 * DAY_MS);
+    // A never-used token gets its first use recorded.
+    const fresh = await tokenOf(deps, a.workspaceId, "sign_in", "Fresh");
+    expect((await tours(deps, fresh.token)).status).toBe(200);
+    expect(await lastUsed(deps, fresh.id)).toBe(NOW + 10 * DAY_MS - 5000);
+  });
+
   it("a setting made smaller applies to a connection that already exists; off brings it back", async () => {
     const { deps, a, at, setLimits } = await site();
     const t = await tokenOf(deps, a.workspaceId);

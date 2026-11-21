@@ -217,7 +217,7 @@ const TOKEN_LOOKUP = TOKEN_LOOKUP_BEFORE_LIFETIMES + " AND " + tokenLifeSql("api
  */
 function isBeforeKinds(err: unknown): boolean {
   for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
-    if (/(?:^|: )no such column: (?:api_token.)?kind(?:$|:| at offset )/.test(e.message)) return true;
+    if (/(?:^|: )no such column: (?:api_token\.)?kind(?:$|:| at offset )/.test(e.message)) return true;
   }
   return false;
 }
@@ -254,7 +254,9 @@ async function tokenAuth(header: string, deps: Deps, touch: boolean): Promise<Au
   async function finish(row: Row | null): Promise<Auth | Response> {
     if (row === null || !constantTimeEqual(row.hash, hash)) return unauthorized();
     if (touch) {
-      await deps.db.run("UPDATE api_token SET last_used_at = ? WHERE id = ? AND workspace_id = ?", [now, row.id, row.workspace_id]);
+      // Never backwards: a request whose lookup read the clock a moment before another's may
+      // write after it, and the later use is the one kept.
+      await deps.db.run("UPDATE api_token SET last_used_at = max(coalesce(last_used_at, 0), ?) WHERE id = ? AND workspace_id = ?", [now, row.id, row.workspace_id]);
     }
     return { workspaceId: row.workspace_id, tokenId: row.id };
   }

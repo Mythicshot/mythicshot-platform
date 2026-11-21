@@ -37,9 +37,9 @@ const COLUMNS = "id, name, created_at, last_used_at, kind";
  * then on. A lapsed connection is still listed, so its owner sees why that computer asks to
  * sign in again, and can disconnect it; it is never brought back by being listed.
  */
-const entry = (deps: Deps, r: Row) => {
+const entry = (deps: Deps, now: number, r: Row) => {
   const end = tokenExpiry(deps.config, r).at;
-  return { id: r.id, name: r.name, created_at: r.created_at, last_used_at: r.last_used_at, kind: r.kind, expires_at: end, expired: end !== null && deps.now() >= end };
+  return { id: r.id, name: r.name, created_at: r.created_at, last_used_at: r.last_used_at, kind: r.kind, expires_at: end, expired: end !== null && now >= end };
 };
 
 /** The 401 of `requireAuth`, for a session that resolved without its part (never, in practice). */
@@ -59,7 +59,9 @@ export function tokenRoutes(app: Hono, deps: Deps): void {
     if (auth instanceof Response) return auth;
     if (auth.session === undefined) return unauthorized();
     const rows = await deps.db.all<Row>(`SELECT ${COLUMNS} FROM api_token WHERE workspace_id = ? AND revoked_at IS NULL ORDER BY created_at DESC, id LIMIT ?`, [auth.workspaceId, MAX_TOKENS_LISTED]);
-    return json(200, { tokens: rows.map((r) => entry(deps, r)) });
+    // One reading of the clock for the whole answer, so every entry is judged at the same time.
+    const now = deps.now();
+    return json(200, { tokens: rows.map((r) => entry(deps, now, r)) });
   });
 
   /**
@@ -89,7 +91,7 @@ export function tokenRoutes(app: Hono, deps: Deps): void {
     }
     const row = await deps.db.first<Row>(`SELECT ${COLUMNS} FROM api_token WHERE id = ? AND workspace_id = ? AND revoked_at IS NULL`, [id, auth.workspaceId]);
     // Revoked between the two calls: it is gone, as it would be a moment later.
-    return row === null ? noToken() : json(200, entry(deps, row));
+    return row === null ? noToken() : json(200, entry(deps, deps.now(), row));
   });
 
   /** Revokes one of the workspace's tokens, once: the change and its record are one batch, which the record guards. */
