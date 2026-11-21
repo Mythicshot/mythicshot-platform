@@ -1445,7 +1445,7 @@ describe("two addresses in the docs", () => {
     expect(CODE["../wrangler.jsonc"]).toMatch(/"TOURS_HOST": "",\n\s*"APP_HOST": ""/);
   });
 
-  it("the optional third address is described as optional, untried on real hosting, and not yet on Docker", () => {
+  it("the optional third address is described as optional, untried on real hosting, and set up by install.sh on Docker", () => {
     const readme = docs[README];
     expect(readme).toContain("### An optional third address for images and clips");
     expect(readme).toContain("It is optional: without it, shared images and clips answer on the tours address, and everything else answers exactly as described above whether the img address is set or not.");
@@ -1465,9 +1465,36 @@ describe("two addresses in the docs", () => {
     }
     const docker = docs[DOCKER];
     expect(docker).toContain("### A third address for images and clips");
-    expect(docker).toContain("On this route it is not available yet.");
-    expect(docker).toContain("> Do not add an `IMG_HOST` line to `.env` on this route yet: the app then serves images and clips only on a name Caddy does not answer for.");
-    // The Caddyfiles really have no place for it yet.
+    expect(docker).not.toContain("On this route it is not available yet.");
+    expect(docker).not.toContain("Do not add an `IMG_HOST` line");
+    expect(readme).not.toMatch(/on Docker not yet/);
+    // The runbook's steps are the script's: the option, the one line in .env, the check and the way back.
+    const third = docker.slice(docker.indexOf("### A third address for images and clips"), docker.indexOf("### Two addresses on the other routes"));
+    expect(third).toContain("sudo bash install.sh install --app-domain=app.example.com --img-domain=img.example.com");
+    expect(third).toContain("```text\nIMG_HOST=img.example.com\n```");
+    expect(third).toContain("#### Go back to two addresses");
+    expect(installSh).toContain("--img-domain=*)");
+    expect(installSh).toContain('IMG_HOST) IMG_HOST="$value" ;;');
+    expect(installSh).toContain('check_role "$IMG_HOST" img "$tries"');
+    // What the runbook quotes of the script is the script's own wording.
+    for (const quoted of [
+      "the img address goes only beside an app address: give --app-domain=<name> too",
+      "the img address must be a different name than the tours address and the app address",
+      "has an IMG_HOST that is not a valid host name or is the same as DOMAIN or APP_DOMAIN",
+      "has an IMG_HOST but no APP_DOMAIN",
+      "but the Caddyfile here does not answer for that name",
+      "but the Caddyfile here answers for a third name",
+      "answered, but the platform running here is older than the img address",
+      "Check DOMAIN, APP_DOMAIN and IMG_HOST in",
+      "the tunnel needs three published applications, one for each address",
+    ]) {
+      expect(third, quoted).toContain(quoted);
+      expect(installSh, quoted).toContain(quoted);
+    }
+    expect(third).toContain("img.example.com is the platform's img address");
+    expect(third).toContain("Shared images and clips are at https://img.example.com.");
+    // The stack files stay those of two addresses: the name goes into the Caddyfile only,
+    // and .env holds the app's own IMG_HOST, not a name of the script's.
     expect(installSh).not.toContain("IMG_DOMAIN");
     const cloudflare = docs[CLOUDFLARE];
     expect(cloudflare).toContain("A third var, `IMG_HOST`, is optional");
