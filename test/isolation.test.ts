@@ -789,7 +789,12 @@ describe("one workspace against another", () => {
       // copied yet, and the three the switch in progress has not moved yet.
       const notCopied = s.rows.public_object.filter((o) => o.state === "pending" && o.copied === 0 && !String(o.publish_id).startsWith("sws_")).map((o) => o.image_key);
       expect(notCopied).toHaveLength(4);
-      expect(Object.keys(s.files).filter((key) => s.files[key] === "missing")).toEqual(notCopied);
+      // And the public pictures the switch to restricted has moved: deleted from the public
+      // store as soon as their copies were marked; only the copies' rows still say where they
+      // came from (source_key).
+      const dropped = s.rows.public_object.filter((o) => String(o.publish_id).startsWith("sw_") && o.copied === 1).map((o) => o.source_key as string);
+      expect(dropped).toHaveLength(12);
+      expect(Object.keys(s.files).filter((key) => s.files[key] === "missing").sort()).toEqual([...notCopied, ...dropped].sort());
       expect(Object.keys(s.files).length).toBeGreaterThan(20);
     }
   });

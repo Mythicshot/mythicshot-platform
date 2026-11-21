@@ -440,6 +440,12 @@ export async function world(deps: Deps, keys: StoreKeys): Promise<World> {
     invite.id, invite.email, await hashToken(invite.code), a.userId, now, now + 7 * 86_400_000,
   ]);
   now += 60_000;
+  // Each side's switch in progress is one its client is still driving: housekeeping carries
+  // on a switch only once it has made no progress for a minute (src/access.ts), and the
+  // suite's requests, which move the clock a little each, must not do that work for it. Its
+  // heartbeat is put twelve hours on, so only a test that moves the clock a day sees it
+  // carried on.
+  await deps.db.run("UPDATE access_switch SET touched_at = ?", [now + 12 * 3_600_000]);
   log.length = 0;
   return { deps, keys, a, b, invite, tick: (ms = 100) => void (now += ms), writes: () => [...log], forgetWrites: () => void (log.length = 0) };
 }

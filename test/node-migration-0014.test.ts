@@ -50,7 +50,7 @@ describe("migration 0014", () => {
     expect(await migrate(db, upTo14)).toEqual([NAME]);
     const after = await dump();
     expect(after.tour).toEqual(before.tour.map((t) => ({ ...t, access: "public" })));
-    expect(after.snapshot).toEqual(before.snapshot);
+    expect(after.snapshot).toEqual(before.snapshot.map((n) => ({ ...(n as Record<string, unknown>), private_data: null })));
     expect(await db.all("SELECT * FROM tour_viewer UNION ALL SELECT tour_id, switch_id, target FROM access_switch")).toEqual([]);
     const list = await send(deps, "GET", "/api/v1/tours", { token: a.token });
     expect(list.json.tours).toMatchObject([{ id: tour, access: "public", viewers: 0 }]);
