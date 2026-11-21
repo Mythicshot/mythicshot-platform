@@ -146,6 +146,10 @@ if [ "${1:-}" != "-e" ]; then
   for a in "$@"; do printf 'arg[%s]\n' "$a"; done
   exit "${STUB_ADMIN_EXIT:-0}"
 fi
+# Called as: node -e <program> <database> restricted-check <sql> <sql>, by the check made
+# before the commands to go back are shown: answers STUB_RESTRICTED (0 unless set), the
+# number of restricted tours, and records nothing.
+if [ "${4:-}" = restricted-check ]; then printf '%s' "${STUB_RESTRICTED:-0}"; exit 0; fi
 # Called as: node -e <program> <database> <copy>. The program text is not recorded.
 printf 'node[venv=%s umask=%s] %s <program> %s %s\n' "${STUB_VENV:-none}" "$(umask)" "$1" "$3" "$4" >>"$STUB_LOG"
 [ "${STUB_NODE_FAIL:-0}" != 1 ] || { echo "Error: database is locked" >&2; exit 1; }
@@ -806,6 +810,33 @@ cd '$APP' && rm -f .cpanel-update && touch tmp/restart.txt"
   # And the install is an ordinary one again: the next update works.
   cpanel_in "$T/new" "" update --yes
   expect "an update after the rollback succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+}
+
+test_update_refuses_the_way_back_when_a_tour_is_restricted() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  : >"$LOG"
+  STUB_RESTRICTED=2 STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "exit code non-zero" test "$RC" != 0
+  expect "says the check failed" has "$OUT" "Version 0.2.0 is in place, but the health check did not pass"
+  expect "says plainly not to go back" has "$OUT" "Do not go back to the version that ran before"
+  expect "says why: the restricted tours" has "$OUT" "2 tour(s) here are restricted to people or to their owner"
+  local b; b="$(only_backup)"
+  expect "names the backup to restore instead" has "$OUT" "restore the backup taken before the update instead: $b"
+  expect "says what restoring it loses" has "$OUT" "Restoring it loses everything done on the site since that backup was taken"
+  expect "shows no command to go back" hasnt "$OUT" "To go back to the version that ran before"
+  expect "shows no rollback command" hasnt "$OUT" "mv dist.old dist"
+  expect "the check records nothing, the call order is unchanged" hasnt "$LOG" "restricted-check"
+  # With no restricted tour the commands are shown as before.
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  STUB_RESTRICTED=0 STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "no restricted tour: the commands are shown" has "$OUT" "To go back to the version that ran before"
+  expect "no restricted tour: no refusal" hasnt "$OUT" "Do not go back"
 }
 
 test_update_reports_failed_packages_with_rollback_commands() {

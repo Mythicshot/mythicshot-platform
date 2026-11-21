@@ -995,11 +995,54 @@ cmd_install() {
   return "$rc"
 }
 
+# How many tours of the database an earlier version must never run on: tours restricted to
+# people or to their owner, and tours whose move between public and restricted is under way
+# (who may view a tour came in 0.1.38; an earlier version knows nothing of it). Read only,
+# with the app's Node.js, else with a sqlite3 tool new enough for the database. Prints the
+# number; fails when it cannot tell (no database, nothing to read it with, a read error). A
+# database the new version has not migrated yet has no such tour: 0.
+ACCESS_COLUMN_SQL="SELECT count(*) AS n FROM pragma_table_info('tour') WHERE name = 'access'"
+RESTRICTED_SQL="SELECT (SELECT count(*) FROM tour WHERE access <> 'public') + (SELECT count(*) FROM access_switch) AS n"
+restricted_tours() {
+  local db out
+  [ -n "${DATA_DIR:-}" ] || read_data_dir >/dev/null 2>&1 || return 1
+  db="$DATA_DIR/db.sqlite"
+  [ -f "$db" ] || return 1
+  if node_env_has_node; then
+    out="$(
+      set +eu
+      # shellcheck source=/dev/null
+      . "$ACTIVATE" >/dev/null 2>&1 || exit 1
+      node -e 'const { DatabaseSync } = require("node:sqlite"); const [file, , hasSql, countSql] = process.argv.slice(1); const db = new DatabaseSync(file, { readOnly: true, timeout: 5000 }); try { const n = db.prepare(hasSql).get().n > 0 ? db.prepare(countSql).get().n : 0; process.stdout.write(String(n)); } finally { db.close(); }' "$db" restricted-check "$ACCESS_COLUMN_SQL" "$RESTRICTED_SQL" 2>/dev/null
+    )" || return 1
+  elif command -v sqlite3 >/dev/null 2>&1 && sqlite3_reads_strict_tables; then
+    out="$(sqlite3 -readonly "$db" "$ACCESS_COLUMN_SQL;" 2>/dev/null)" || return 1
+    if [ "$out" != 0 ]; then out="$(sqlite3 -readonly "$db" "$RESTRICTED_SQL;" 2>/dev/null)" || return 1; fi
+  else
+    return 1
+  fi
+  [[ "$out" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$out"
+}
+
 # The commands that bring the previous version back. Each line stands alone, changes
 # into the app folder itself and does nothing when its work is already done, so the
-# lines can be pasted one by one, and pasted again.
+# lines can be pasted one by one, and pasted again. When the database holds a restricted
+# tour (restricted_tours), no command is shown: the earlier version would show that tour to
+# anyone, so the only way back is the backup taken before the update.
 print_rollback() {
-  local cd="cd '$APP_DIR' &&"
+  local cd="cd '$APP_DIR' &&" restricted
+  if restricted="$(restricted_tours)"; then
+    if [ "$restricted" -gt 0 ]; then
+      say "Do not go back to the version that ran before"
+      info "$restricted tour(s) here are restricted to people or to their owner, or are being changed to or from that. The version that ran before does not know this setting and could show them to anyone."
+      info "To go back, restore the backup taken before the update instead: ${ROLLBACK_BACKUP:-look in $BACKUP_ROOT for the one from before the update}. Follow the guide's restore steps."
+      info "Restoring it loses everything done on the site since that backup was taken: tours uploaded, published, changed or deleted, who may view them, accounts, sign-ins and settings changed in the dashboard."
+      return 0
+    fi
+  else
+    warn "could not check the database for restricted tours. If any tour is restricted to people or to its owner, do not run the commands below: restore the backup taken before the update instead"
+  fi
   say "To go back to the version that ran before, run these commands"
   info "$cd [ -d dist.old ] && rm -rf dist && mv dist.old dist"
   info "$cd [ -d migrations.old ] && rm -rf migrations && mv migrations.old migrations"

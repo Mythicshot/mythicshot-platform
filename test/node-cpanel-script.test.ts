@@ -6,10 +6,13 @@
 // stand-in; no hosting, no network and no container is involved. Where there is no
 // usable Bash the test is skipped with the reason.
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { NodeDb } from "../src/node/db.ts";
+import { migrate } from "../src/node/migrate.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const HARNESS = "deploy/cpanel/test-cpanel.sh";
@@ -110,4 +113,57 @@ describe("the cPanel script's backup with a real Node.js", () => {
     expect(output).toMatch(new RegExp(`^${ADMIN_TESTS.length} passed, 0 failed, 0 skipped$`, "m"));
     expect(r.status, output).toBe(0);
   }, 300_000);
+});
+
+/** The test of the refusal to go back while a tour is restricted (stand-ins only; it runs here too, being one). */
+const RESTRICTED_TEST = "test_update_refuses_the_way_back_when_a_tour_is_restricted";
+
+describe("the way back while a tour is restricted", () => {
+  it("the Bash file has the test of the refusal", () => {
+    expect(readFileSync(join(ROOT, HARNESS), "utf8")).toMatch(new RegExp(`^${RESTRICTED_TEST}\\(\\) \\{$`, "m"));
+  });
+
+  it.skipIf("reason" in found)(`refuses the commands to go back, names the backup and what restoring it loses${"reason" in found ? ` (skipped: ${found.reason})` : ""}`, () => {
+    const r = spawnSync((found as { bash: string }).bash, [HARNESS, "--inside", RESTRICTED_TEST], { cwd: ROOT, encoding: "utf8", timeout: 280_000, windowsHide: true });
+    const output = `${r.stdout}
+${r.stderr}`;
+    expect(output).toContain(`PASS  ${RESTRICTED_TEST}`);
+    expect(output).toMatch(/^1 passed, 0 failed, 0 skipped$/m);
+    expect(r.status, output).toBe(0);
+  }, 300_000);
+
+  it("the check's own program and statements, run with this Node.js on real databases: 0 before migration 0014 and with public tours only, else the restricted tours and the moves under way", async () => {
+    const script = readFileSync(join(ROOT, "deploy/cpanel/cpanel.sh"), "utf8");
+    const program = /node -e '([^']*)' "\$db" restricted-check/.exec(script)?.[1];
+    const hasSql = /^ACCESS_COLUMN_SQL="([^"]*)"$/m.exec(script)?.[1];
+    const countSql = /^RESTRICTED_SQL="([^"]*)"$/m.exec(script)?.[1];
+    expect([typeof program, typeof hasSql, typeof countSql]).toEqual(["string", "string", "string"]);
+    const check = (db: string) => {
+      const r = spawnSync(process.execPath, ["-e", program!, db, "restricted-check", hasSql!, countSql!], { encoding: "utf8", windowsHide: true });
+      expect(r.status, r.stderr).toBe(0);
+      return r.stdout;
+    };
+    const migrations = fileURLToPath(new URL("../migrations/", import.meta.url));
+    const root = mkdtempSync(join(tmpdir(), "demo-platform-restricted-"));
+    const upTo13 = join(root, "upto13");
+    mkdirSync(upTo13);
+    for (const f of readdirSync(migrations).filter((f) => f.endsWith(".sql") && f < "0014")) copyFileSync(join(migrations, f), join(upTo13, f));
+    const file = join(root, "db.sqlite");
+    const db = new NodeDb(file);
+    try {
+      await migrate(db, upTo13);
+      await db.run("INSERT INTO workspace (id, name, created_at) VALUES ('ws_1', 'A', 1)");
+      await db.run("INSERT INTO tour (id, workspace_id, title, slug, status, created_at, updated_at) VALUES ('tour_1', 'ws_1', 'T', 'abcdefghij', 'draft', 1, 1)");
+      expect(check(file)).toBe("0"); // the earlier schema: no restricted tour can exist
+      await migrate(db, migrations);
+      expect(check(file)).toBe("0");
+      await db.run("UPDATE tour SET access = 'me' WHERE id = 'tour_1'");
+      expect(check(file)).toBe("1");
+      await db.run("INSERT INTO tour (id, workspace_id, title, slug, status, created_at, updated_at) VALUES ('tour_2', 'ws_1', 'U', 'bcdefghijk', 'draft', 1, 1)");
+      await db.run(`INSERT INTO access_switch (tour_id, switch_id, target, data, total, created_at, touched_at) VALUES ('tour_2', 'sw_${"0".repeat(24)}', 'public', '{}', 0, 1, 1)`);
+      expect(check(file)).toBe("2");
+    } finally {
+      db.close();
+    }
+  });
 });

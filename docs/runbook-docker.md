@@ -399,6 +399,21 @@ Keeping Debian and Docker patched is yours to do, for example with `apt-get upda
 
 **How to tell it worked:** the run ends with `==> Updated`, and `sudo bash install.sh status` shows the app `healthy`.
 
+### Going back to an earlier version
+
+Version 0.1.38 brings who may view a tour. A version before it does not know that setting, so once any tour has been made `people` or `me`, or is being changed to or from that, never start an earlier image on the same data: it could show that tour to anyone.
+
+> [!WARNING]
+> Do not go back to an earlier version once a tour is restricted; restore the backup taken before the update instead, which loses everything done on the site since it was taken.
+
+That backup is the one `install.sh update` wrote before the update (see [step 9](#9-back-up-and-restore)). Restoring it brings back the tours, links, accounts and settings as they were at that moment; tours uploaded, published, changed or deleted since, who may view them, sign-ins and dashboard changes since are lost. Find out first whether any tour is restricted, from a root shell in `/opt/demo-platform`:
+
+```sh
+docker compose exec -T app node -e 'const { DatabaseSync } = process.getBuiltinModule("node:sqlite"); const db = new DatabaseSync("/data/db.sqlite", { readOnly: true }); console.log(db.prepare("SELECT (SELECT count(*) FROM tour WHERE access <> ?) + (SELECT count(*) FROM access_switch) AS n").get("public").n); db.close();'
+```
+
+It prints a number: anything but `0` means restore, not go back.
+
 ### Make yourself the admin
 
 The version with accounts brings sign-in with a link sent instead of a password, and the dashboard behind it. An updated site keeps working exactly as before, its tours, links and tokens unchanged, and nobody can sign in until the site has an admin. The admin is made once, by a command run in the app container, with the settings the app itself runs with; there is no web page for it, and the setup code plays no part in it.

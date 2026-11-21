@@ -346,6 +346,15 @@ By hand, the same is `npx wrangler d1 migrations apply demo-platform --remote --
 
 **How to tell it worked:** `/healthz` prints `{"ok":true}` and Mythicshot's Test connection works.
 
+### Going back to an earlier version
+
+Version 0.1.38 brings who may view a tour. A version before it does not know that setting, so once any tour has been made `people` or `me`, or is being changed to or from that, never deploy an earlier version on the same database: it could show that tour to anyone.
+
+> [!WARNING]
+> Do not go back to an earlier version once a tour is restricted; restore the backup taken before the update instead, which loses everything done on the site since it was taken.
+
+Find out first with `npx wrangler d1 execute demo-platform --remote --config wrangler.deploy.jsonc --command "SELECT (SELECT count(*) FROM tour WHERE access <> 'public') + (SELECT count(*) FROM access_switch) AS n"`: anything but `0` means restore (see [Back up and restore](#back-up-and-restore)), not go back. Restoring brings back the tours, links, accounts and settings as they were when the backup was taken; everything done since is lost.
+
 ## Back up and restore
 
 | What | Where |
