@@ -253,6 +253,13 @@ const byText = (row: FakeElement, text: string) => {
   if (!found) throw new Error(`no "${text}" in the row`);
   return found;
 };
+/** Delete, which is in the row's More (Plan 2k): opens the menu and presses it, as a person does. */
+const pressDelete = (row: FakeElement) => {
+  byText(row, "More").click();
+  const entry = row.all().find((e) => e.getAttribute("role") === "menuitem" && e.textContent === "Delete");
+  if (!entry) throw new Error('no "Delete" in the menu');
+  entry.click();
+};
 const rowButtons = (tab: Tab) => rows(tab).flatMap((row) => row.all().filter((e) => e.tagName === "button"));
 const key = (el: FakeElement, k: string, shiftKey = false) => el.dispatch("keydown", { key: k, shiftKey });
 const line = (tab: Tab) => tab.$("media-count").textContent + tab.$("media-in").textContent + tab.$("media-used").textContent;
@@ -278,16 +285,18 @@ describe("the Images page", () => {
     expect(line(tab)).toBe("3 images in Cowfee Raid Tools · 2.1 MB used");
     const r = rows(tab);
     expect(r.map((row) => titleOf(row).textContent)).toEqual(["Loot window, settings tab", "Timeline, boss two", "Untitled image"]);
-    expect(r.map((row) => ({ ...details(row), size: cells(row)[2].textContent, when: cells(row)[3].textContent, controls: controlsOf(row).map((c) => c.textContent) }))).toEqual([
-      { wide: "1920 × 1080 · PNG · img.example.com/i/q8d2…", narrow: `1920 × 1080 · PNG · 1.4 MB · ${shown(day(2026, 11, 19))}`, size: "1.4 MB", when: "19 Nov", controls: ["Copy link", "Open", "Delete"] },
-      { wide: "1280 × 720 · JPEG · img.example.com/i/m04x…", narrow: `1280 × 720 · JPEG · 612 KB · ${shown(day(2026, 11, 19))}`, size: "612 KB", when: "19 Nov", controls: ["Copy link", "Open", "Delete"] },
-      { wide: "842 × 311 · PNG · img.example.com/i/z7ha…", narrow: `842 × 311 · PNG · 88 KB · ${shown(day(2026, 11, 18))}`, size: "88 KB", when: shown(day(2026, 11, 18)), controls: ["Copy link", "Open", "Delete"] },
+    expect(r.map((row) => ({ ...details(row), size: cells(row)[3].textContent, when: cells(row)[4].textContent, controls: controlsOf(row).map((c) => c.textContent) }))).toEqual([
+      { wide: "1920 × 1080 · PNG · img.example.com/i/q8d2…", narrow: `1920 × 1080 · PNG · 1.4 MB · ${shown(day(2026, 11, 19))}`, size: "1.4 MB", when: "19 Nov", controls: ["Copy link", "Open", "More"] },
+      { wide: "1280 × 720 · JPEG · img.example.com/i/m04x…", narrow: `1280 × 720 · JPEG · 612 KB · ${shown(day(2026, 11, 19))}`, size: "612 KB", when: "19 Nov", controls: ["Copy link", "Open", "More"] },
+      { wide: "842 × 311 · PNG · img.example.com/i/z7ha…", narrow: `842 × 311 · PNG · 88 KB · ${shown(day(2026, 11, 18))}`, size: "88 KB", when: shown(day(2026, 11, 18)), controls: ["Copy link", "Open", "More"] },
     ]);
     // The whole link is in the shortened text's title; Open is a real link in a new tab, without the opener or a referrer.
     expect(r[0].all().find((e) => e.className === "wide-only")!.getAttribute("title")).toBe("https://img.example.com/i/q8d2abcdefghijklmnop");
     const openLink = byText(r[0], "Open");
     expect([openLink.tagName, openLink.getAttribute("href"), openLink.getAttribute("target"), openLink.getAttribute("rel")]).toEqual(["a", "https://img.example.com/i/q8d2abcdefghijklmnop", "_blank", "noopener noreferrer"]);
-    expect([byText(r[0], "Delete").className, byText(r[0], "Copy link").className, openLink.className]).toEqual(["btn sm danger", "btn sm", "btn sm quiet"]);
+    expect([byText(r[0], "More").className, byText(r[0], "Copy link").className, openLink.className]).toEqual(["btn sm quiet", "btn sm", "btn sm quiet"]);
+    // Delete is in More, after Sharing…, as on the Tours page (Plan 2k).
+    expect(r[0].all().filter((e) => e.getAttribute("role") === "menuitem").map((e) => [e.textContent, e.className])).toEqual([["Sharing…", ""], ["Delete", "danger"]]);
     // The preview: the item's own route on this site, at a fixed size, lazily, with no referrer and no words; a plain box without one; no play mark on an image.
     const img = imgOf(r[0])!;
     expect([img.src, img.getAttribute("width"), img.getAttribute("height"), img.getAttribute("loading"), img.getAttribute("alt"), img.getAttribute("referrerpolicy")]).toEqual([`/api/v1/media/${M1}/preview`, "56", "36", "lazy", "", "no-referrer"]);
@@ -309,12 +318,12 @@ describe("the Images page", () => {
       "Images",
       "3 images in Cowfee Raid Tools · 2.1 MB used",
       "Copy link",
-      "Delete",
+      "More",
       "Copy link",
-      "Delete",
+      "More",
       "Copy link",
-      "Delete",
-      "Anyone with the link can see the image. Deleting it stops the link for everyone.",
+      "More",
+      'Deleting an image stops its link for everyone. "More" holds: Sharing, Delete.',
     ]);
   });
 
@@ -347,7 +356,7 @@ describe("the Images page", () => {
     // The only links in the rows are Open, to the item's own link.
     for (const row of r) expect(row.all().filter((e) => e.tagName === "a").map((a) => a.getAttribute("href"))).toEqual([row.all().find((e) => e.className === "wide-only")!.getAttribute("title")]);
     // The question names it as text too.
-    byText(r[1], "Delete").click();
+    pressDelete(r[1]);
     expect(tab.$("delete-title").textContent).toBe('Delete "javascript:alert("x")"?');
     expect(tab.$("delete-title").children.every((c) => !(c instanceof FakeElement))).toBe(true);
   });
@@ -360,11 +369,11 @@ describe("the Images page", () => {
       const wide = row.all().find((e) => e.className === "wide-only");
       return { hrefs: row.all().filter((e) => e.tagName === "a").map((a) => a.getAttribute("href")), controls: controlsOf(row).map((c) => c.textContent), text: wide?.textContent ?? null, title: wide?.getAttribute("title") ?? null };
     };
-    expect(await linkFor("https://img.example.com/i/q8d2abcdefghijklmnop")).toEqual({ hrefs: ["https://img.example.com/i/q8d2abcdefghijklmnop"], controls: ["Copy link", "Open", "Delete"], text: " · img.example.com/i/q8d2…", title: "https://img.example.com/i/q8d2abcdefghijklmnop" });
+    expect(await linkFor("https://img.example.com/i/q8d2abcdefghijklmnop")).toEqual({ hrefs: ["https://img.example.com/i/q8d2abcdefghijklmnop"], controls: ["Copy link", "Open", "More"], text: " · img.example.com/i/q8d2…", title: "https://img.example.com/i/q8d2abcdefghijklmnop" });
     expect((await linkFor("http://tours.localhost:8787/i/q8d2")).text).toBe(" · tours.localhost:8787/i/q8d2");
     // A path is put after this page's own origin, as the Tours page does in one-address mode.
-    expect(await linkFor("/i/q8d2abcdefghijklmnop", "http://localhost:3000")).toEqual({ hrefs: ["http://localhost:3000/i/q8d2abcdefghijklmnop"], controls: ["Copy link", "Open", "Delete"], text: " · localhost:3000/i/q8d2…", title: "http://localhost:3000/i/q8d2abcdefghijklmnop" });
-    const none = { hrefs: [], controls: ["Delete"], text: null, title: null };
+    expect(await linkFor("/i/q8d2abcdefghijklmnop", "http://localhost:3000")).toEqual({ hrefs: ["http://localhost:3000/i/q8d2abcdefghijklmnop"], controls: ["Copy link", "Open", "More"], text: " · localhost:3000/i/q8d2…", title: "http://localhost:3000/i/q8d2abcdefghijklmnop" });
+    const none = { hrefs: [], controls: ["More"], text: null, title: null };
     const hostile = [
       "javascript:alert(1)", "JAVASCRIPT:alert(1)", " javascript:alert(1)", "data:text/html,<b>x</b>", "vbscript:x", "//evil.example.net/i/x", "/\\evil.example.net/i/x", "\\\\evil.example.net/i/x",
       "https://evil.example.net", "https://user@evil.example.net/i/x", "https://evil.example.net//x", "https:/evil.example.net/i/x", "ftp://img.example.com/i/x", "/i/x y", '/i/x"><b>x', "/i/x\n", "i/x", "",
@@ -434,8 +443,8 @@ describe("the GIFs page", () => {
     ]);
     // Every box carries the play mark, with or without a preview.
     expect(r.map((row) => [thumbOf(row).className, imgOf(row)?.src ?? null])).toEqual([["thumb play", `/api/v1/media/${M1}/preview`], ["thumb play", null], ["thumb play", `/api/v1/media/${M3}/preview`]]);
-    expect(r.map((row) => controlsOf(row).map((c) => c.textContent))).toEqual([["Copy link", "Open", "Delete"], ["Copy link", "Open", "Delete"], ["Copy link", "Open", "Delete"]]);
-    expect(tab.$("media-hint").textContent).toBe("Anyone with the link can watch the GIF. Deleting it stops the link for everyone.");
+    expect(r.map((row) => controlsOf(row).map((c) => c.textContent))).toEqual([["Copy link", "Open", "More"], ["Copy link", "Open", "More"], ["Copy link", "Open", "More"]]);
+    expect(tab.$("media-hint").textContent).toBe('Deleting a GIF stops its link for everyone. "More" holds: Sharing, Delete.');
   });
 
   it("never shows an image, and has its own singular and empty state", async () => {
@@ -525,7 +534,7 @@ describe("Show more", () => {
     await tab.settle();
     // The Show more answer is held; the list is two rows still.
     expect(rows(tab)).toHaveLength(2);
-    byText(rows(tab)[0], "Delete").click();
+    pressDelete(rows(tab)[0]);
     tab.$("delete-go").click();
     await tab.settle();
     // The read after the delete waits for Show more.
@@ -545,12 +554,12 @@ describe("Show more", () => {
 });
 
 describe("deleting an item", () => {
-  it("asks first with the proposed question; Keep it, Escape and the backdrop close it, and the focus comes back to Delete", async () => {
+  it("asks first with the proposed question; Keep it, Escape and the backdrop close it, and the focus comes back to More", async () => {
     for (const which of ["images", "gifs"] as const) {
       const tab = openPage(which, standard(which));
       await tab.settle();
-      const del = byText(rows(tab)[2], "Delete");
-      del.click();
+      const more = byText(rows(tab)[2], "More");
+      pressDelete(rows(tab)[2]);
       expect(tab.$("delete-dialog").hidden).toBe(false);
       const untitled = which === "images" ? "Untitled image" : "Untitled GIF";
       expect(tab.shows().slice(-4)).toEqual([`Delete "${untitled}"?`, QUESTION, "Keep it", which === "images" ? "Delete image" : "Delete GIF"]);
@@ -560,14 +569,14 @@ describe("deleting an item", () => {
       expect(tab.doc.activeElement).toBe(tab.$("delete-go"));
       tab.$("delete-keep").click();
       expect(tab.$("delete-dialog").hidden).toBe(true);
-      expect(tab.doc.activeElement).toBe(del);
-      del.click();
+      expect(tab.doc.activeElement).toBe(more);
+      pressDelete(rows(tab)[2]);
       key(tab.doc.body, "Escape");
       expect(tab.$("delete-dialog").hidden).toBe(true);
-      del.click();
+      pressDelete(rows(tab)[2]);
       tab.$("delete-dialog").click();
       expect(tab.$("delete-dialog").hidden).toBe(true);
-      expect(tab.doc.activeElement).toBe(del);
+      expect(tab.doc.activeElement).toBe(more);
       for (const id of ["dash-top", "media-page"]) expect(tab.$(id).hasAttribute("inert"), id).toBe(false);
       expect(tab.fetched.filter((f) => f.method !== "GET")).toEqual([]);
     }
@@ -576,7 +585,7 @@ describe("deleting an item", () => {
   it("Delete image deletes with the anti-forgery header, closes the question and shows the list again", async () => {
     const tab = openPage("images", standard("images", { [`DELETE /api/v1/media/${M2}`]: { status: 204 }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list([MOCKUP_IMAGES[0], MOCKUP_IMAGES[2]])] }));
     await tab.settle();
-    byText(rows(tab)[1], "Delete").click();
+    pressDelete(rows(tab)[1]);
     const go = tab.$("delete-go");
     go.click();
     expect([go.textContent, go.disabled, tab.$("delete-keep").disabled, go.getAttribute("aria-busy")]).toEqual(["Deleting…", true, true, "true"]);
@@ -595,7 +604,7 @@ describe("deleting an item", () => {
     // The last one gone: the empty state.
     const last = openPage("gifs", standard("gifs", { [`DELETE /api/v1/media/${M1}`]: { status: 204 }, [`GET ${GIFS_LIST}`]: [list([MOCKUP_GIFS[0]]), list([])] }));
     await last.settle();
-    byText(rows(last)[0], "Delete").click();
+    pressDelete(rows(last)[0]);
     last.$("delete-go").click();
     await last.settle();
     expect(last.$("media-empty").shown).toBe(true);
@@ -606,7 +615,7 @@ describe("deleting an item", () => {
     // Finished on the second try, after a pause of 400 ms.
     const second = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: [{ status: 500, json: { error: "cleanup_pending" } }, { status: 204 }], [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
     await second.settle();
-    byText(rows(second)[0], "Delete").click();
+    pressDelete(rows(second)[0]);
     second.$("delete-go").click();
     await second.settle();
     // Nothing is sent again before the pause has passed.
@@ -624,7 +633,7 @@ describe("deleting an item", () => {
     // server marked the item deleted before removing its files, which a later request finishes.
     const never = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: { status: 500, json: { error: "cleanup_pending" } }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
     await never.settle();
-    byText(rows(never)[0], "Delete").click();
+    pressDelete(rows(never)[0]);
     never.$("delete-go").click();
     for (let i = 0; i < 4; i++) {
       await never.settle();
@@ -648,7 +657,7 @@ describe("deleting an item", () => {
     // The item answers 404: it was deleted, and the question closes as for a delete that answered.
     const gone = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [ITEM_M1]: { status: 404, json: { error: "not_found" } }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
     await gone.settle();
-    byText(rows(gone)[0], "Delete").click();
+    pressDelete(rows(gone)[0]);
     gone.$("delete-go").click();
     await gone.settle();
     expect(deletes(gone)).toHaveLength(1);
@@ -663,7 +672,7 @@ describe("deleting an item", () => {
     // A lost answer after a cleanup_pending: the item decides too.
     const later = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: [{ status: 500, json: { error: "cleanup_pending" } }, "network"], [ITEM_M1]: { status: 404, json: { error: "not_found" } }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
     await later.settle();
-    byText(rows(later)[0], "Delete").click();
+    pressDelete(rows(later)[0]);
     later.$("delete-go").click();
     await later.settle();
     later.tick();
@@ -679,7 +688,7 @@ describe("deleting an item", () => {
       const newer = [image(M4, "n4n4abcdefghijklmnop", { title: "Newer one" }), image(M5, "n5n5abcdefghijklmnop", { title: "Newer two" })];
       const still = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [ITEM_M1]: { status: 200, json: { ...MOCKUP_IMAGES[0], state } }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list([...newer, ...MOCKUP_IMAGES.slice(1)])] }));
       await still.settle();
-      byText(rows(still)[0], "Delete").click();
+      pressDelete(rows(still)[0]);
       still.$("delete-go").click();
       await still.settle();
       expect(items(still), state).toHaveLength(1);
@@ -704,7 +713,7 @@ describe("deleting an item", () => {
       const what = JSON.stringify(asked);
       const unknown = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [ITEM_M1]: asked, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
       await unknown.settle();
-      byText(rows(unknown)[0], "Delete").click();
+      pressDelete(rows(unknown)[0]);
       unknown.$("delete-go").click();
       await unknown.settle();
       expect(unknown.$("delete-dialog").hidden, what).toBe(false);
@@ -716,7 +725,7 @@ describe("deleting an item", () => {
     // A lost session while asking goes to sign in.
     const out = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: "network", [ITEM_M1]: SIGNED_OUT }));
     await out.settle();
-    byText(rows(out)[0], "Delete").click();
+    pressDelete(rows(out)[0]);
     out.$("delete-go").click();
     await out.settle();
     expect(out.left()).toBe("/signin");
@@ -724,7 +733,7 @@ describe("deleting an item", () => {
     // An answered delete never asks the item.
     const answered = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: { status: 204 }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
     await answered.settle();
-    byText(rows(answered)[0], "Delete").click();
+    pressDelete(rows(answered)[0]);
     answered.$("delete-go").click();
     await answered.settle();
     expect(items(answered)).toHaveLength(0);
@@ -742,7 +751,7 @@ describe("deleting an item", () => {
       // A lost answer asks the item, which is still online.
       const tab = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: [answer, { status: 404, json: { error: "not_found" } }], [`GET /api/v1/media/${M1}`]: { status: 200, json: { ...MOCKUP_IMAGES[0], state: "online" } }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
       await tab.settle();
-      byText(rows(tab)[0], "Delete").click();
+      pressDelete(rows(tab)[0]);
       tab.$("delete-go").click();
       await tab.settle();
       expect(deletes(tab), what).toHaveLength(1);
@@ -757,18 +766,18 @@ describe("deleting an item", () => {
       expect(tab.$("delete-dialog").hidden, what).toBe(true);
       expect(rows(tab), what).toHaveLength(2);
     }
-    // Keep it after a failed delete gives the focus to the row's Delete as the list now shows it.
+    // Keep it after a failed delete gives the focus to the row's More as the list now shows it.
     const kept = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: { status: 500, json: { error: "internal" } } }));
     await kept.settle();
-    byText(rows(kept)[0], "Delete").click();
+    pressDelete(rows(kept)[0]);
     kept.$("delete-go").click();
     await kept.settle();
     kept.$("delete-keep").click();
-    expect(kept.doc.activeElement).toBe(byText(rows(kept)[0], "Delete"));
+    expect(kept.doc.activeElement).toBe(byText(rows(kept)[0], "More"));
     // A lost session goes to sign in.
     const out = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: SIGNED_OUT }));
     await out.settle();
-    byText(rows(out)[0], "Delete").click();
+    pressDelete(rows(out)[0]);
     out.$("delete-go").click();
     await out.settle();
     expect(out.left()).toBe("/signin");
@@ -779,7 +788,7 @@ describe("deleting an item", () => {
       const what = JSON.stringify(reload);
       const tab = openPage("images", standard("images", { [`DELETE /api/v1/media/${M2}`]: { status: 204 }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), reload] }));
       await tab.settle();
-      byText(rows(tab)[1], "Delete").click();
+      pressDelete(rows(tab)[1]);
       tab.$("delete-go").click();
       await tab.settle();
       expect(tab.$("delete-dialog").hidden, what).toBe(true);
@@ -795,14 +804,14 @@ describe("deleting an item", () => {
     const held = holding((req) => req.method === "DELETE", standard("images", { [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
     const tab = openPage("images", held.respond);
     await tab.settle();
-    byText(rows(tab)[0], "Delete").click();
+    pressDelete(rows(tab)[0]);
     tab.$("delete-go").click();
     tab.$("delete-go").click();
     tab.$("delete-go").dispatch("click");
     await tab.settle();
     expect(deletes(tab)).toHaveLength(1);
     for (const b of rowButtons(tab)) expect(b.disabled, b.textContent).toBe(true);
-    expect(byText(rows(tab)[1], "Delete").click()).toBeNull();
+    expect(byText(rows(tab)[1], "More").click()).toBeNull();
     held.answer({ status: 204 });
     await tab.settle();
     expect(deletes(tab)).toHaveLength(1);
@@ -930,7 +939,7 @@ describe("the line from the usage", () => {
     );
     await tab.settle();
     expect(line(tab)).toBe("48 images in Cowfee Raid Tools · 64 MB used");
-    byText(rows(tab)[1], "Delete").click();
+    pressDelete(rows(tab)[1]);
     tab.$("delete-go").click();
     await tab.settle();
     expect(tab.fetched.filter((f) => f.path === "/api/v1/usage")).toHaveLength(2);
@@ -946,7 +955,7 @@ describe("the line from the usage", () => {
       }),
     );
     await fails.settle();
-    byText(rows(fails)[0], "Delete").click();
+    pressDelete(rows(fails)[0]);
     fails.$("delete-go").click();
     await fails.settle();
     expect(line(fails)).toBe("2 GIFs in Cowfee Raid Tools · 100.2 MB used");
@@ -993,7 +1002,7 @@ describe("the Images and GIFs pages against the real app", () => {
     expect(rows(gifs).map((r) => [titleOf(r).textContent, details(r).wide.split(" · ").slice(0, 2).join(" · "), imgOf(r) === undefined])).toEqual([["Untitled GIF", "4 s · 320 × 200", true]]);
 
     // Delete the image after the question, through the real API with the real anti-forgery check.
-    byText(rows(images)[0], "Delete").click();
+    pressDelete(rows(images)[0]);
     images.$("delete-go").click();
     await images.settle();
     expect(images.$("delete-dialog").hidden).toBe(true);
@@ -1017,7 +1026,7 @@ describe("the Images and GIFs pages against the real app", () => {
     await tab.settle();
     // One-address mode: the link is a path, put after this page's own origin.
     expect(byText(rows(tab)[0], "Open").getAttribute("href")).toMatch(/^https:\/\/app\.example\.com\/i\/[a-z0-9]+$/);
-    byText(rows(tab)[0], "Delete").click();
+    pressDelete(rows(tab)[0]);
     tab.$("delete-go").click();
     await tab.settle();
     expect(tab.$("delete-message").textContent).toBe(FAILED);

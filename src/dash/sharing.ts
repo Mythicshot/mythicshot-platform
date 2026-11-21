@@ -340,7 +340,7 @@ export function shareViewOf(p: SharePage): string {
   // restricted tour), or null for a tour that is not published, or a setting the page does not know.
   function viewOf(t) {
     if (t.status !== "published") return null;
-`, `  // Who can view an ${p.noun}, as the list says it: { text, tag } (an amber tag for a restricted
+`, `  // Who can view an item, as the list says it: { text, tag } (an amber tag for a restricted
   // one), or null for a setting the page does not know.
   function viewOf(t) {
 `)}    if (t.access === "public") return { text: TEXT.anyone, tag: false };
@@ -358,7 +358,8 @@ export function shareViewOf(p: SharePage): string {
  * shown, false when sent to sign in, else the failed answer or null) and Dash.
  */
 export function shareScript(p: SharePage): string {
-  const n = p.noun;
+  // The thing as the comments name it (the words a person reads are in TEXT).
+  const n = p.moves ? "tour" : "item";
   const M = (tours: string, item = "") => (p.moves ? tours : item);
   return `  // ---- Who can view: the Sharing box ----
 
@@ -536,7 +537,7 @@ ${M(`    if (s.view === "resume") return [$("share-close"), $("share-restricted"
     else $("share-input").removeAttribute("aria-invalid");
   }
 
-  // Sharing… in a ${M("published tour", n)}'s More: who can view it is read first, then the box opens.
+  // Sharing… in ${M("a published tour", "an item")}'s More: who can view it is read first, then the box opens.
   function askShare(t) {
     if (working || anyOpen() || !${p.idVar}.test(t.id)) return;
     var id = t.id;
