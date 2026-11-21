@@ -64,13 +64,14 @@
 // access_switching); unpublish cancels the switch. The public page and the picture route
 // serve a tour only while its setting is 'public'.
 import type { Hono } from "hono";
-import { CARRY_CALLS, RESTRICTED_STUB, carryOnSwitch } from "./access.ts";
+import { CARRY_CALLS, RESTRICTED_STUB, carryOnSwitch, planFirstPublish, type FirstPublishPlan } from "./access.ts";
 import { beforeAccountsToo, noDisabledAccount } from "./accounts.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
 import { legacySettings, safeUrl, type Autoplay, type Box, type Card, type Cover, type EndCard, type Link, type Note, type Theme, type Zoom } from "./manifest.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps, type FileStore, type Stmt } from "./ports.ts";
+import { ACCESS_BODY_BYTES, creationAccess, hasAccessFields, isRestricted, type AccessBody } from "./viewing.ts";
 
 export type SnapshotStep = {
   id: string;
@@ -569,7 +570,9 @@ function commitStatements(auth: Auth, tourId: string, publishId: string, justCop
     },
     { sql: "DELETE FROM public_object WHERE publish_id = ? AND state = 'pending'", params: [publishId] },
     { sql: "DELETE FROM publish_job WHERE publish_id = ?", params: [publishId] },
-    { sql: "UPDATE tour SET status = 'published', published_at = ? WHERE id = ? AND workspace_id = ?", params: [now, tourId, auth.workspaceId] },
+    // ever_published (migration 0017) is never cleared: unpublish leaves it, so a first publish
+    // can tell a tour that was published before (src/access.ts, EVER_PUBLISHED).
+    { sql: "UPDATE tour SET status = 'published', published_at = ?, ever_published = 1 WHERE id = ? AND workspace_id = ?", params: [now, tourId, auth.workspaceId] },
   ];
 }
 
@@ -616,23 +619,40 @@ const done = (slug: string, steps: number, s: Shown) => json(200, { slug, url: `
 const inProgress = (publishId: string, doneCount: number, total: number, s: Shown) =>
   json(202, { status: "in_progress", publish_id: publishId, done: doneCount, total, access: s.access, viewers: s.viewers });
 
-/** The publish route's body: nothing, or {"publish_id": "pub_..."} to continue that publish. */
-async function readPublishBody(req: Request): Promise<{ publishId: string | null } | Response> {
+/**
+ * The publish route's body: nothing, or {"publish_id": "pub_..."} to continue that publish,
+ * or, on the call that starts a tour's first publish only, {"access": ..., "viewers": [...]}
+ * (src/access.ts, planFirstPublish). `access` is null when the body states no setting. A body
+ * that states one may be longer than PUBLISH_BODY_BYTES by up to ACCESS_BODY_BYTES (a full
+ * list of addresses); every other body is held to PUBLISH_BODY_BYTES exactly as before.
+ */
+async function readPublishBody(req: Request): Promise<{ publishId: string | null; access: AccessBody | null } | Response> {
   const bad = () => apiError(400, "bad_request", 'the body must be empty or {"publish_id": "<id from the previous answer>"}');
-  const raw = await readCapped(req, PUBLISH_BODY_BYTES);
-  if (raw === "too_large") return apiError(413, "too_large", `the request is over ${PUBLISH_BODY_BYTES} bytes`);
-  if (raw.byteLength === 0) return { publishId: null };
+  const overCap = () => apiError(413, "too_large", `the request is over ${PUBLISH_BODY_BYTES} bytes`);
+  const raw = await readCapped(req, PUBLISH_BODY_BYTES + ACCESS_BODY_BYTES);
+  if (raw === "too_large") return overCap();
+  if (raw.byteLength === 0) return { publishId: null, access: null };
   let body: unknown;
   try {
     body = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw));
   } catch {
-    return bad();
+    return raw.byteLength > PUBLISH_BODY_BYTES ? overCap() : bad();
   }
+  if (raw.byteLength > PUBLISH_BODY_BYTES && !hasAccessFields(body)) return overCap();
   if (body === null || typeof body !== "object" || Array.isArray(body)) return bad();
-  const id = (body as Record<string, unknown>).publish_id;
-  if (id === undefined || id === null) return { publishId: null };
-  if (typeof id !== "string" || !PUBLISH_ID.test(id)) return bad();
-  return { publishId: id };
+  const o = body as Record<string, unknown>;
+  const id = o.publish_id;
+  let publishId: string | null = null;
+  if (id !== undefined && id !== null) {
+    if (typeof id !== "string" || !PUBLISH_ID.test(id)) return bad();
+    publishId = id;
+  }
+  const access = creationAccess(o, "a tour's");
+  if (access instanceof Response) return access;
+  if (access !== null && publishId !== null) {
+    return apiError(400, "bad_request", "access and viewers go on the call that starts a tour's first publish only, never with publish_id");
+  }
+  return { publishId, access };
 }
 
 type Started = { kind: "started"; publishId: string; total: number; steps: number; copies: Copy[] } | { kind: "joined" } | { kind: "changed" } | { kind: "answer"; res: Response };
@@ -646,9 +666,12 @@ type Started = { kind: "started"; publishId: string; total: number; steps: numbe
  * its draft changed in between (an upload's commit, or a replace of a chapter, which also
  * removes the pictures it took out), nothing is recorded or written and the answer is
  * "changed", so no publish ever starts on pictures that may be gone. The caller then
- * starts once more from the draft as it is now. Two calls: the read and the batch.
+ * starts once more from the draft as it is now. Two calls: the read and the batch. `head`
+ * is put at the start of the batch: the statements of a setting stated at a first publish,
+ * which take effect only together with the job (a guard among them that fails answers
+ * "changed" too).
  */
-async function startPublish(deps: Deps, auth: Auth, tourId: string, restricted: boolean): Promise<Started> {
+async function startPublish(deps: Deps, auth: Auth, tourId: string, restricted: boolean, head: Stmt[] = []): Promise<Started> {
   const rows = await deps.db.all<DraftRow>(DRAFT_SQL, [tourId, auth.workspaceId, MAX_PUBLISH_STEPS + 1]);
   if (rows.length === 0) return { kind: "answer", res: apiError(400, "empty_tour", "a tour with no steps cannot be published") };
   if (rows.length > MAX_PUBLISH_STEPS) return { kind: "answer", res: apiError(413, "too_large", `a tour of more than ${MAX_PUBLISH_STEPS} steps cannot be published`) };
@@ -662,6 +685,9 @@ async function startPublish(deps: Deps, auth: Auth, tourId: string, restricted: 
   const now = deps.now();
   try {
     await deps.db.batch([
+      // A setting stated at a first publish (src/access.ts, planFirstPublish) goes first, so
+      // the job below is recorded only together with it, and its condition reads it.
+      ...head,
       {
         // The tour id comes from the tour row itself, and only while its draft is still the
         // version that was read, so a tour deleted or changed since the draft was read
@@ -728,12 +754,26 @@ export function publishRoutes(app: Hono, deps: Deps): void {
     // state is read: a fresh start then begins a new publish in this same request. It only
     // ever touches the workspace's own tours, so it is safe before the tour is checked.
     await housekeeping(d, auth.workspaceId, id, PUBLISH_PAGES);
+    // A setting stated at the first publish (src/access.ts): decided now, written later at the
+    // head of the batch that records the job, so never without the publish it is for. Refused
+    // here, nothing has changed. "same" is a publish exactly as without the fields.
+    type Apply = Extract<FirstPublishPlan, { kind: "apply" }>;
+    const decide = async (): Promise<Apply | Response | null> => {
+      if (body.access === null) return null;
+      const p = await planFirstPublish(d, auth, id, body.access);
+      if (p === null) return notFound();
+      if (p.kind === "refuse") return p.res;
+      if (p.kind === "same") return null;
+      return p;
+    };
+    let plan = await decide();
+    if (plan instanceof Response) return plan;
     const tour = await tourState(d, auth, id);
     if (tour === null) return notFound();
 
     const asked = body.publishId;
     // A publish that went live answers the same however often it is asked.
-    const s = shown(tour);
+    const s = plan === null ? shown(tour) : { access: plan.access, viewers: plan.viewers };
     if (asked !== null && tour.live_id === asked) return done(tour.slug, tour.live_steps ?? 0, s);
     if (asked !== null && tour.job_id !== asked) return publishStopped();
     // A switch of the live pictures between the stores must finish first (it cancelled any
@@ -745,6 +785,9 @@ export function publishRoutes(app: Hono, deps: Deps): void {
       await stopPublish(d, tour.id, tour.job_id, []);
       tour.job_id = null;
     }
+    // A stated setting always starts afresh: its batch cancels whatever publish of the tour
+    // was in progress (of the other store, or of the same), so there is nothing to join.
+    if (plan !== null) tour.job_id = null;
 
     let publishId: string;
     let total: number;
@@ -757,21 +800,42 @@ export function publishRoutes(app: Hono, deps: Deps): void {
       steps = tour.job_steps ?? 0;
       ({ batch, left } = await nextBatch(d, tour.id, publishId, room()));
     } else {
-      let started = await startPublish(d, auth, tour.id, tour.access !== "public");
+      let started = plan === null ? await startPublish(d, auth, tour.id, tour.access !== "public") : await startPublish(d, auth, tour.id, isRestricted(plan.access), plan.stmts);
       if (started.kind === "changed") {
         // The tour is gone, or its draft moved on while the publish was starting (an upload
         // or a chapter replace committed), or its setting changed or a switch began. Nothing
         // was written. If the tour is still there, read it again and start once more, in this
         // same request and in the store its setting says now, so the client gets its publish
-        // of the newer draft; only losing a second time answers 409.
+        // of the newer draft; only losing a second time answers 409. A stated setting is
+        // decided again first, from the tour as it is now (it may have been published or set
+        // meanwhile, and is then refused).
+        if (plan !== null) {
+          plan = await decide();
+          if (plan instanceof Response) return plan;
+        }
         const again = await tourState(d, auth, tour.id);
         if (again === null) return notFound();
         if (again.switching === 1) return accessSwitching();
-        Object.assign(s, shown(again));
-        started = await startPublish(d, auth, tour.id, again.access !== "public");
+        Object.assign(s, plan === null ? shown(again) : { access: plan.access, viewers: plan.viewers });
+        started = plan === null ? await startPublish(d, auth, tour.id, again.access !== "public") : await startPublish(d, auth, tour.id, isRestricted(plan.access), plan.stmts);
         if (started.kind === "changed") return (await tourState(d, auth, tour.id)) === null ? notFound() : draftMoved();
       }
       if (started.kind === "answer") return started.res;
+      // A stated setting's batch also cancels any job before it records its own, so another
+      // start cannot have won it; should one have all the same, nothing of this request was
+      // written, and its setting is not joined to a publish that may be of another store.
+      if (started.kind === "joined" && plan !== null) return publishBusy();
+      if (started.kind === "started" && plan !== null) {
+        // The publish its batch cancelled may have written public pictures already (never
+        // live, never given out): they are due now, and go before this one copies anything,
+        // so a tour made restricted keeps nothing in the public store. Housekeeping: a failure
+        // leaves them to the clean-up after the commit.
+        try {
+          await clearDuePage(d, auth.workspaceId, tour.id, 0);
+        } catch {
+          console.error("publish: could not remove the pictures of a cancelled publish yet; will retry later");
+        }
+      }
       if (started.kind === "started") {
         ({ publishId, total, steps } = started);
         batch = started.copies.slice(0, room());

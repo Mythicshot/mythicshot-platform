@@ -276,18 +276,31 @@ type State = {
   stray: number;
   /** Retired pictures of the tour, of either store, whose time to be deleted has come. */
   due: number;
+  /** True when the tour has been published at least once (see `everPublished`). */
+  ever: boolean;
 };
+
+/**
+ * Whether a tour has been published at least once, over a tour row `t` in scope: its
+ * ever_published mark (migration 0017: set by every commit of a publish, never cleared, so it
+ * stays through an unpublish), or, for what an older build may have written, its status says
+ * published, published_at is set, or it has a snapshot or a switch. A tour unpublished before
+ * migration 0017 left nothing behind and does not count. No parameter.
+ */
+const EVER_PUBLISHED = `(t.ever_published = 1 OR t.status = 'published' OR t.published_at IS NOT NULL
+   OR EXISTS (SELECT 1 FROM snapshot e WHERE e.tour_id = t.id) OR EXISTS (SELECT 1 FROM access_switch e WHERE e.tour_id = t.id))`;
 
 /** One call. Null for a tour that is not this workspace's. */
 async function readState(deps: Deps, auth: Auth, id: string): Promise<State | null> {
-  type Row = { id: string; access: Access; live: number; viewers: string; switch_id: string | null; target: "public" | "private" | null; total: number | null; copied: number; stray: number; due: number };
+  type Row = { id: string; access: Access; live: number; viewers: string; switch_id: string | null; target: "public" | "private" | null; total: number | null; copied: number; stray: number; due: number; ever: number };
   const row = await deps.db.first<Row>(
     `SELECT t.id, t.access, s.tour_id IS NOT NULL AS live,
             (SELECT json_group_array(v.email) FROM tour_viewer v WHERE v.tour_id = t.id) AS viewers,
             w.switch_id, w.target, w.total,
             (SELECT count(*) FROM public_object o WHERE o.publish_id = w.switch_id AND o.tour_id = t.id AND o.state = 'pending' AND o.copied = 1) AS copied,
             (SELECT count(*) FROM public_object o WHERE o.tour_id = t.id AND o.state = 'retired' AND substr(o.image_key, 1, 2) = 'p/') AS stray,
-            (SELECT count(*) FROM public_object o WHERE o.tour_id = t.id AND o.state = 'retired' AND o.delete_after <= ?) AS due
+            (SELECT count(*) FROM public_object o WHERE o.tour_id = t.id AND o.state = 'retired' AND o.delete_after <= ?) AS due,
+            ${EVER_PUBLISHED} AS ever
        FROM tour t LEFT JOIN snapshot s ON s.tour_id = t.id LEFT JOIN access_switch w ON w.tour_id = t.id
       WHERE t.id = ? AND t.workspace_id = ?`,
     [deps.now(), id, auth.workspaceId],
@@ -301,6 +314,7 @@ async function readState(deps: Deps, auth: Auth, id: string): Promise<State | nu
     switch: row.switch_id === null ? null : { id: row.switch_id, target: row.target ?? "private", total: row.total ?? 0, copied: row.copied },
     stray: row.stray,
     due: row.due,
+    ever: row.ever === 1,
   };
 }
 
@@ -902,6 +916,76 @@ async function putAccess(r: Run, id: string, body: AccessBody): Promise<Response
     return settingAnswer(d, body.access, list, null);
   }
   return busy();
+}
+
+// ---- The setting stated at a tour's first publish ----
+//
+// A token may state who may view a tour on the call that starts its FIRST publish
+// (POST /api/v1/tours/:id/publish, src/publish.ts), and only then: a token never changes the
+// setting of a tour that has been published (EVER_PUBLISHED, now or before, including one
+// unpublished since), nor one whose setting or list a session has already set. Such a tour is
+// unpublished, so changing its setting moves nothing: it is the one-batch change above
+// ("Nothing moves"), with the statements putAccess writes for it: the setting, the audit row
+// as its guard (marked `at: "creation"`), a publish in progress cancelled, every retired
+// picture due now, the list. They do not run on their own: the publish puts them at the head
+// of the batch that records its job (startPublish), so the setting and the publish that
+// follows from it are written together or not at all, and the job's own condition (the store
+// its keys are for must be the one the setting says) is read after the setting changed. So a
+// restricted first publish writes only `v/` keys, from its first object on, and is served
+// only as a restricted tour, from its commit on.
+
+/** What the first publish does with a stated setting. */
+export type FirstPublishPlan =
+  /** Refused, and nothing changed. */
+  | { kind: "refuse"; res: Response }
+  /** The tour already has exactly the stated setting and list: the publish is today's. */
+  | { kind: "same" }
+  /** The statements that set it, for the head of the publish's first batch, and what the answers then show. */
+  | { kind: "apply"; stmts: Stmt[]; access: Access; viewers: number };
+
+const publishedBefore = () =>
+  apiError(409, "already_published", "this tour has been published before, so who may view it can be changed in the dashboard only; publish without access and viewers to publish it as it is set");
+const alreadySet = () =>
+  apiError(409, "access_already_set", "who may view this tour was already set in the dashboard; publish without access and viewers to publish it as it is set, or change it in the dashboard");
+
+/**
+ * Decides a setting stated at a tour's first publish, in ONE call (the state, as GET and PUT
+ * read it). Null for a tour that is not this workspace's. Refused with 409 already_published
+ * for a tour published before; "same" when the tour already has exactly that setting and list
+ * (a stated `public` with no addresses on a tour never set is that, so it equals leaving the
+ * fields out); refused with 409 access_already_set when its setting or list was set before
+ * (anything but `public` with an empty list); refused with cannot_restrict, as the PUT, when a
+ * restricted setting needs mail this site cannot send. Otherwise the statements, each guarded:
+ * the setting changes only while the tour is still unpublished, never published, `public`, with
+ * no list and no switch, and the audit row right after it undoes the batch unless it did.
+ * `viewers` left out keeps the list as it is (empty), as the PUT keeps it.
+ */
+export async function planFirstPublish(deps: Deps, auth: Auth, id: string, body: AccessBody): Promise<FirstPublishPlan | null> {
+  if (!TOUR_ID.test(id)) return null;
+  const st = await readState(deps, auth, id);
+  if (st === null) return null;
+  if (st.ever) return { kind: "refuse", res: publishedBefore() };
+  const list = body.viewers ?? st.viewers;
+  if (body.access === st.access && sameList(list, st.viewers)) return { kind: "same" };
+  if (st.access !== "public" || st.viewers.length > 0 || st.switch !== null) return { kind: "refuse", res: alreadySet() };
+  if (viewing.cannotRestrict(deps, st.access, body.access)) return { kind: "refuse", res: cannotRestrictAnswer() };
+  const ws = auth.workspaceId;
+  const now = deps.now();
+  const stmts: Stmt[] = [
+    {
+      sql: `UPDATE tour SET access = ? WHERE id = ? AND workspace_id = ? AND access = 'public' AND status = 'draft' AND published_at IS NULL AND ever_published = 0
+              AND NOT EXISTS (SELECT 1 FROM snapshot n WHERE n.tour_id = tour.id) AND NOT EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = tour.id)
+              AND NOT EXISTS (SELECT 1 FROM tour_viewer v WHERE v.tour_id = tour.id)`,
+      params: [body.access, id, ws],
+    },
+    viewing.changeAudit(deps, auth, "tour_access_changed", id, "public", body.access, 0, list.length, true, true),
+    // The publish starts afresh from the draft as it is now, in the store the setting says:
+    // whatever publish was in progress (of the public store) can never commit.
+    ...cancelPublish(id, ws, now),
+    ...(isRestricted(body.access) ? [expediteRetired(id, ws, now)] : []),
+    ...(list.length > 0 ? viewerStatements(id, ws, list, now) : []),
+  ];
+  return { kind: "apply", stmts, access: body.access, viewers: list.length };
 }
 
 export function accessRoutes(app: Hono, deps: Deps): void {

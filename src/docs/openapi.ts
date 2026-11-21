@@ -190,6 +190,18 @@ const ACCESS_FIELD: Schema = {
 };
 const VIEWERS_FIELD: Schema = whole(`How many addresses the tour's list holds (at most ${MAX_VIEWERS}). The addresses themselves are given by GET /api/v1/tours/{id}/access alone.`);
 
+/** `access` stated when something is created (a shared item's create, a tour's first publish). */
+const CREATION_ACCESS = (thing: string, when: string): Schema => ({
+  type: ["string", "null"],
+  enum: ["public", "people", "me", null],
+  description: `Optional, since version 0.1.51: who may view the ${thing}, stated ${when}, and only then (afterwards only the dashboard changes it). public (anyone with the link), people (the addresses of viewers, and the workspace's account) or me (the workspace's account alone). Left out or null: what it always was, and every answer is as without it. Restricted (people or me) needs a site that can send mail; a restricted ${thing} is never served to anyone without access, from the first moment. A server before 0.1.51 ignores this field: check the version GET /api/v1/me gives before sending it.`,
+});
+const CREATION_VIEWERS = (thing: string): Schema => ({
+  type: ["array", "null"],
+  items: { type: "string", maxLength: 254 },
+  description: `Optional, and only together with access: the addresses on the ${thing}'s list, kept whatever the setting (as the dashboard keeps them). Each must be an email address; duplicates (after trimming and lowercasing) count once; at most ${MAX_VIEWERS} different addresses. No answer to a token ever gives them back: answers carry how many there are.`,
+});
+
 /** The token or the session cookie, either one. */
 const TOKEN = [{ token: [] }, { session: [] }] as [{ token: [] }, { session: [] }];
 /** The session cookie alone: the session's own requests. */
@@ -366,7 +378,11 @@ function schemas(): Record<string, Schema> {
     RenameBody: input(["title"], { title: text(LIMITS.title, "The new title: trimmed, no control or format characters.", 1) }),
     Renamed: object(["id", "title"], { id: { type: "string" }, title: { type: "string", description: "The title as saved (trimmed)." } }),
     Deleted: object(["deleted"], { deleted: { type: "boolean", const: true } }, "Nothing of the tour is left."),
-    PublishBody: input([], { publish_id: { type: ["string", "null"], pattern: "^pub_[0-9a-f]{24}$", description: "The publish_id of the previous answer, to continue that publish." } }),
+    PublishBody: input([], {
+      publish_id: { type: ["string", "null"], pattern: "^pub_[0-9a-f]{24}$", description: "The publish_id of the previous answer, to continue that publish. Never together with access or viewers." },
+      access: CREATION_ACCESS("tour", "on the request that starts its first publish (no publish_id), of a tour never published whose setting and list were never set"),
+      viewers: CREATION_VIEWERS("tour"),
+    }),
     Published: object(
       ["slug", "url", "steps", "access", "viewers"],
       {
@@ -532,12 +548,19 @@ function schemas(): Record<string, Schema> {
         height: whole("In pixels, as width.", 1),
         duration_ms: { type: "integer", minimum: 1, maximum: CLIP_MAX_DURATION_MS, description: "How long the clip runs, in milliseconds. Required for a clip; leave it out for an image. Shown as given." },
         title: { type: ["string", "null"], maxLength: TITLE_MAX, description: `Optional: at most ${TITLE_MAX} characters after trimming, no control or format characters. Empty is no title.` },
+        access: CREATION_ACCESS("item", "in this request that creates it"),
+        viewers: CREATION_VIEWERS("item"),
       },
     ),
     MediaCreated: object(["id", "parts", "part_bytes"], {
       id: { type: "string", pattern: "^med_[0-9a-f]{24}$" },
       parts: whole("How many parts to send, numbered from 0.", 1),
       part_bytes: whole(`The length of every part but the last, which holds the rest: ${n(PART_BYTES)}.`, 1),
+      access: {
+        ...ACCESS_FIELD,
+        description: "Only when the request stated access (since version 0.1.51): the setting the item was created with. Missing although the request stated one means a server before 0.1.51, which ignored it: the item is public, so delete it before sending any part.",
+      },
+      viewers: whole(`Only when the request stated access: how many addresses the item's list holds (at most ${MAX_VIEWERS}), never the addresses.`),
     }),
     MediaCommitted: object(["id", "link_id", "kind", "path", "link"], {
       id: { type: "string", pattern: "^med_[0-9a-f]{24}$" },
@@ -1077,24 +1100,34 @@ function paths(): OpenApiDoc["paths"] {
       post: {
         tags: ["Tours"],
         summary: "Publish a tour, in steps",
-        description: `Copies the tour's draft into a public version at its link. Send it with no body to start, or to join the publish already in progress for the current draft. A small tour answers 200 at once. A large one answers 202 with a publish_id: send the request again with that id, each request copying up to ${COPY_BATCH} images, until it answers 200. Visitors see the previously published version until the last request, and a publish that did not finish never touches it. A publish works from the draft as it was when it started. A tour of more than ${n(MAX_PUBLISH_STEPS)} steps, or one whose text is over ${n(MAX_SNAPSHOT_BYTES)} bytes, answers 413 on the first request, before anything is copied. A publish with no progress for ${minutes} minutes counts as abandoned, and the next request without a publish_id starts a new one.`,
+        description: `Copies the tour's draft into a public version at its link. Send it with no body to start, or to join the publish already in progress for the current draft. A small tour answers 200 at once. A large one answers 202 with a publish_id: send the request again with that id, each request copying up to ${COPY_BATCH} images, until it answers 200. Visitors see the previously published version until the last request, and a publish that did not finish never touches it. A publish works from the draft as it was when it started. A tour of more than ${n(MAX_PUBLISH_STEPS)} steps, or one whose text is over ${n(MAX_SNAPSHOT_BYTES)} bytes, answers 413 on the first request, before anything is copied. A publish with no progress for ${minutes} minutes counts as abandoned, and the next request without a publish_id starts a new one.\n\nWho may view it (since version 0.1.51): the request that starts a tour's FIRST publish may carry access and viewers, as the dashboard's change does. The setting and the start of the publish are written together, before any picture is copied, so a tour made people or me is never public, not for a moment: its pictures go to the private store only, and from the last request on its link shows the tour only to an address it may be viewed by. A tour that has been published before (also one unpublished since) refuses the fields with 409 already_published, and one whose setting or list was set in the dashboard refuses them with 409 access_already_set unless they are exactly what it has; then nothing changes. access public with no viewers is the same as leaving them out. Making a tour restricted needs a site that can send mail: GET /api/v1/tours/{id}/access says can_restrict. The publish answers carry the setting and how many addresses, never the addresses.`,
         operationId: "publishTour",
         security: TOKEN,
         parameters: [tourId],
-        requestBody: { required: false, description: "Empty to start; the previous answer's publish_id to continue.", content: json(ref("PublishBody")) },
+        requestBody: { required: false, description: "Empty to start (or access and viewers, on a tour's first publish); the previous answer's publish_id to continue.", content: json(ref("PublishBody")) },
         responses: {
           "200": answer("The new version is live. The same answer on any repeat.", ref("Published")),
           "202": answer("Images are being copied. Send the request again with this publish_id.", ref("PublishInProgress")),
-          "400": refusal("bad_request: the body is neither empty nor a publish_id. empty_tour: a tour with no steps cannot be published.", "bad_request", "empty_tour"),
+          "400": refusal(
+            `bad_request: the body is neither empty nor a publish_id, viewers is not a list, or access or viewers came with a publish_id. empty_tour: a tour with no steps cannot be published. bad_access: access is not public, people or me, or viewers came without it. bad_viewer: an entry of viewers is not an email address; the detail gives its position. too_many_viewers: more than ${MAX_VIEWERS} different addresses. Nothing was changed.`,
+            "bad_request",
+            "empty_tour",
+            "bad_access",
+            "bad_viewer",
+            "too_many_viewers",
+          ),
           "401": UNAUTHORIZED,
           "404": noTour,
           "409": refusal(
-            "publish_cancelled: that publish was stopped before it finished (the tour was unpublished, the publish failed or was abandoned, a fresh start replaced it, or who may view the tour was changed between public and restricted); publish again to start over. publish_busy: another publish of the tour is starting at this moment, or its draft changed while this one was starting; nothing was written, try again. access_switching: the live pictures are moving because who may view the tour is being changed; finish that change (send it again until it answers 200), then publish.",
+            "publish_cancelled: that publish was stopped before it finished (the tour was unpublished, the publish failed or was abandoned, a fresh start replaced it, or who may view the tour was changed between public and restricted); publish again to start over. publish_busy: another publish of the tour is starting at this moment, or its draft changed while this one was starting; nothing was written, try again. access_switching: the live pictures are moving because who may view the tour is being changed; finish that change (send it again until it answers 200), then publish. With access or viewers, where nothing changed and nothing was published: already_published: the tour has been published before (also when it was unpublished since), so who may view it is changed in the dashboard only. access_already_set: who may view it was set in the dashboard, and differently. cannot_restrict: this site cannot send mail, so the tour cannot be made people or me.",
             "publish_cancelled",
             "publish_busy",
             "access_switching",
+            "already_published",
+            "access_already_set",
+            "cannot_restrict",
           ),
-          "413": refusal("The tour has too many steps or too much text to publish, or the request body is too long.", "too_large"),
+          "413": refusal(`The tour has too many steps or too much text to publish, or the request body is too long: over 1,024 bytes, or ${n(1024 + ACCESS_BODY_BYTES)} with access or viewers.`, "too_large"),
           "500": refusal("The tour could not be published. What was published before is unchanged.", "publish_failed"),
         },
       },
@@ -1285,16 +1318,27 @@ function paths(): OpenApiDoc["paths"] {
       post: {
         tags: ["Items"],
         summary: "Start a shared item",
-        description: `Starts sharing one image (a PNG or a JPEG) or one clip (a GIF or an MP4): say what it is, then send its parts, optionally a preview, and finish it. The answer says how many parts to send; every part but the last is ${n(PART_BYTES)} bytes. On a workspace with a storage allowance, an item that would take it over is refused here with 413 storage_full, before any part is sent; from here on its bytes count as used until it is deleted. An item that is not finished is removed after ${MEDIA_MAX_AGE_MS / 3_600_000} hours. A workspace starts at most ${LIMITS_MEDIA.create.most} items an hour.`,
+        description: `Starts sharing one image (a PNG or a JPEG) or one clip (a GIF or an MP4): say what it is, then send its parts, optionally a preview, and finish it. The answer says how many parts to send; every part but the last is ${n(PART_BYTES)} bytes. On a workspace with a storage allowance, an item that would take it over is refused here with 413 storage_full, before any part is sent; from here on its bytes count as used until it is deleted. An item that is not finished is removed after ${MEDIA_MAX_AGE_MS / 3_600_000} hours. A workspace starts at most ${LIMITS_MEDIA.create.most} items an hour.\n\nWho may view it (since version 0.1.51): this request may carry access and viewers, as the dashboard's change does, and only this one; afterwards only the dashboard changes them. The item is created with the setting, so a restricted item is never served to anyone without access, at any moment: nobody is served it until it is finished, and from then on only an address it may be viewed by. Its link (from the commit) is the one such a viewer opens. What cannot be restricted is refused here before anything exists: 409 cannot_restrict on a site that cannot send mail, 409 too_large_to_restrict for an item of more than ${n(RESTRICTED_MAX_BYTES)} bytes. The answer then says the setting and how many addresses, never the addresses. To know beforehand whether this site can restrict an item, GET /api/v1/media/{id}/access of any item says can_restrict; or send the create, which refuses without making anything.`,
         operationId: "createMedia",
         security: TOKEN,
         requestBody: { required: true, content: json(ref("MediaCreate")) },
         responses: {
           "201": answer("The item exists. Send its parts.", ref("MediaCreated")),
-          "400": refusal("The body is not a JSON object, or a field breaks its rule; the detail names it.", "bad_request"),
+          "400": refusal(
+            `bad_request: the body is not a JSON object, or a field breaks its rule (viewers that is not a list included); the detail names it. bad_access: access is not public, people or me, or viewers came without it. bad_viewer: an entry of viewers is not an email address; the detail gives its position. too_many_viewers: more than ${MAX_VIEWERS} different addresses. Nothing was made.`,
+            "bad_request",
+            "bad_access",
+            "bad_viewer",
+            "too_many_viewers",
+          ),
           "401": UNAUTHORIZED,
+          "409": refusal(
+            `Only with access people or me; nothing was made. cannot_restrict: this site cannot send mail, so an item cannot be made people or me. too_large_to_restrict: the item has more than ${n(RESTRICTED_MAX_BYTES)} bytes, the most a restricted item may have here.`,
+            "cannot_restrict",
+            "too_large_to_restrict",
+          ),
           "413": answer(
-            "too_large: the request body is too long. media_too_large: the item is larger than this server takes, and the answer carries the limits. storage_full: the item would take the workspace over its storage allowance; nothing was stored. Deleting tours or items, or a larger allowance, makes room.",
+            "too_large: the request body is too long (over 4,096 bytes, or 69,632 with access or viewers). media_too_large: the item is larger than this server takes, and the answer carries the limits. storage_full: the item would take the workspace over its storage allowance; nothing was stored. Deleting tours or items, or a larger allowance, makes room.",
             { oneOf: [refusalSchema("too_large"), ref("MediaTooLarge"), ref("StorageFull")] },
           ),
           "429": { description: `This workspace already started ${LIMITS_MEDIA.create.most} items in the last hour.`, headers: retryAfter, content: refusal("", "too_many_items").content },

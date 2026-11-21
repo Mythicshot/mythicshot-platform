@@ -192,6 +192,59 @@ async function putAccess(d: Deps, auth: Auth, id: string, body: AccessBody): Pro
   return busy();
 }
 
+// ---- The setting stated at an item's create ----
+//
+// A token may state who may view an item in the request that creates it (POST /api/v1/media,
+// src/media.ts), and only there: from then on only a signed-in session changes it (PUT above).
+// The row is written with the setting already in it, in the one batch that writes it, so a
+// restricted item is restricted from its first moment: it is uploading then, which no route
+// serves to anyone, and when its commit puts it online it is already restricted, with its link
+// id kept apart (private_link_id, and a fresh name nobody is given in link_id) exactly as a
+// change to restricted keeps it. Its list and the audit row go in the same batch. Everything
+// that could refuse a restricted setting is decided before anything is written: the same
+// refusals, with the same codes and words, as the PUT.
+
+/** What an item's create needs to write the stated setting: the row's three columns, and the statements after it. */
+export type ItemCreationAccess = {
+  access: Access;
+  /** The real link id, in link_id for a public item, in private_link_id for a restricted one. */
+  linkId: string;
+  /** link_id: the real link id for a public item; for a restricted one a fresh name nothing gives out. */
+  rowLinkId: string;
+  privateLinkId: string | null;
+  /** The number of addresses on the list it is created with. */
+  viewers: number;
+  /** After the row's insert, in its batch: the audit row (its guard: the insert must have written the row), then the list. */
+  after: (deps: Deps, auth: Auth, id: string, now: number) => Stmt[];
+};
+
+/**
+ * Decides the setting stated at an item's create, before anything is written: null when the
+ * request stated nothing, or exactly what an item is created with anyway (`public` and no
+ * addresses), so the create is today's, byte for byte. Otherwise the refusal (cannot_restrict,
+ * too_large_to_restrict, as the PUT words them), or what to write.
+ */
+export function itemCreationAccess(deps: Deps, asked: AccessBody | null, parts: number): ItemCreationAccess | null | Response {
+  if (asked === null) return null;
+  const list = asked.viewers ?? [];
+  if (asked.access === "public" && list.length === 0) return null;
+  if (cannotRestrict(deps, "public", asked.access, canRestrictItems)) return cannotRestrictAnswer();
+  if (isRestricted(asked.access) && parts > RESTRICTED_SERVED_PARTS) return tooLarge();
+  const linkId = newLinkId();
+  const restricted = isRestricted(asked.access);
+  return {
+    access: asked.access,
+    linkId,
+    rowLinkId: restricted ? newLinkId() : linkId,
+    privateLinkId: restricted ? linkId : null,
+    viewers: list.length,
+    after: (d, auth, id, now) => [
+      changeAudit(d, auth, "media_access_changed", id, "public", asked.access, 0, list.length, true, true),
+      ...(list.length > 0 ? viewerStatements(ITEM_LIST, id, auth.workspaceId, list, now) : []),
+    ],
+  };
+}
+
 export function mediaAccessRoutes(app: Hono, deps: Deps): void {
   // The setting, for the item's own workspace. A signed-in session gets the whole list of
   // addresses; a token (the desktop app) gets how many there are, `viewers_count`, in its
