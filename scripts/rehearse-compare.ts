@@ -36,7 +36,8 @@ export type Recorded = { key: string; route: string; answer: Answer };
  *   only when each side's is its own page's by the server's rule (pageEtag). Such
  *   answers are counted apart, and no file name is ever printed.
  * - from the old build to the new one only (never on the way back): in an answer of a
- *   shared item's page, file, download or preview (ITEM_ROUTES), the `cache-control` header,
+ *   shared item's page, file, download or preview (ITEM_ROUTES: GET and HEAD, so a 304 and a
+ *   206 too), the `cache-control` header,
  *   when the old value is exactly one of 0.1.46's two (ITEM_CACHE_BEFORE) and the new one is
  *   exactly `no-cache` (ITEM_CACHE_AFTER), with every other header, the status and every byte
  *   the same (itemCacheOnly). 0.1.47 stopped letting caches keep an item's answers, since an
@@ -47,8 +48,24 @@ export type Recorded = { key: string; route: string; answer: Answer };
 export const IGNORED_HEADERS: readonly string[] = ["date"];
 export const VERSION_ROUTE = "GET /api/v1/me";
 export const PAGE_ROUTE = "GET /t/:slug";
-/** A shared item's page, file, download and preview, as the route table names them. */
-export const ITEM_ROUTES: readonly string[] = ["GET /i/:name", "GET /i/:name/download", "GET /i/:name/preview", "GET /r/:name", "GET /r/:name/download", "GET /r/:name/preview"];
+/**
+ * A shared item's page, file, download and preview, as the route table names them, asked with
+ * GET (whole, with the recorded ETag, or with a Range) or with HEAD, which the same routes answer.
+ */
+export const ITEM_ROUTES: readonly string[] = [
+  "GET /i/:name",
+  "GET /i/:name/download",
+  "GET /i/:name/preview",
+  "GET /r/:name",
+  "GET /r/:name/download",
+  "GET /r/:name/preview",
+  "HEAD /i/:name",
+  "HEAD /i/:name/download",
+  "HEAD /i/:name/preview",
+  "HEAD /r/:name",
+  "HEAD /r/:name/download",
+  "HEAD /r/:name/preview",
+];
 /** What 0.1.46 and earlier sent an item's answers with (a page, then a file or preview), and what 0.1.47 sends. */
 export const ITEM_CACHE_BEFORE: readonly string[] = ["public, max-age=60", "public, max-age=3600"];
 export const ITEM_CACHE_AFTER = "no-cache";
@@ -603,6 +620,40 @@ export function usageProblems(answer: Answer, sum: UsageSum): string[] {
   if (body.counted?.pictures !== sum.pictures) out.push("counted.pictures differs from the sum of step sizes");
   if (body.counted?.logos !== sum.logos) out.push("counted.logos differs from the sum of logo sizes");
   if (body.counted?.uploads_in_progress !== sum.uploads) out.push("counted.uploads_in_progress differs from the sum of reservations");
+  return out;
+}
+
+/** A published shared item as the rehearsal asks it: the letter of its kind's addresses, its real link id and its file's one extension. */
+export type SharedItem = { letter: "i" | "r"; link: string; ext: "png" | "jpg" | "gif" | "mp4" };
+
+const ITEM_FILE: Readonly<Record<string, { letter: "i" | "r"; ext: SharedItem["ext"] }>> = {
+  "image/png": { letter: "i", ext: "png" },
+  "image/jpeg": { letter: "i", ext: "jpg" },
+  "image/gif": { letter: "r", ext: "gif" },
+  "video/mp4": { letter: "r", ext: "mp4" },
+};
+const LINK_ID = /^[a-z2-7]{20}$/;
+
+/**
+ * The published shared items of one workspace, read from the rows (never from a build), in
+ * the order they were made: every item whose state is `online`, by its real link id, which is
+ * `link_id` for a public item (and for every item before migration 0016, which has no
+ * `access` column) and `private_link_id` for a restricted one. None when the database has no
+ * `media` table (before 0010). The links are kept in memory and never printed.
+ */
+export function sharedItemsOf(db: DbSnapshot, workspaceId: string): SharedItem[] {
+  const num = (v: Cell) => (typeof v === "number" ? v : 0);
+  const rows = rowsOf(db.media)
+    .filter((m) => m.workspace_id === workspaceId && m.state === "online")
+    .sort((a, b) => num(a.created_at) - num(b.created_at) || String(a.id).localeCompare(String(b.id)));
+  const out: SharedItem[] = [];
+  for (const m of rows) {
+    const access = typeof m.access === "string" ? m.access : "public";
+    const link = access === "public" ? m.link_id : m.private_link_id;
+    const file = ITEM_FILE[String(m.content_type)];
+    if (file === undefined || typeof link !== "string" || !LINK_ID.test(link)) continue;
+    out.push({ letter: file.letter, link, ext: file.ext });
+  }
   return out;
 }
 

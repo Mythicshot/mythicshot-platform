@@ -23,6 +23,9 @@ import {
   type TourContent,
   compareStores,
   identityProblems,
+  itemCacheOnly,
+  ITEM_ROUTES,
+  sharedItemsOf,
   migrationProblems,
   playerFileProblems,
   playerFilesIn,
@@ -44,8 +47,11 @@ import {
   freePort,
   healthHosts,
   healthRoles,
+  ITEM_RANGE,
   KNOWN_ERROR_LINES,
   knowsImgRole,
+  knowsMediaApi,
+  shareRehearsalItems,
   knowsRestrictedServing,
   modeSettings,
   parseArgs,
@@ -72,6 +78,7 @@ import { NodeDb } from "../src/node/db.ts";
 import { NodeFileStore } from "../src/node/files.ts";
 import { migrate } from "../src/node/migrate.ts";
 import { createWorkspace } from "../src/workspaces.ts";
+import { serve } from "@hono/node-server";
 
 const enc = new TextEncoder();
 
@@ -1224,5 +1231,174 @@ describe("the way back with a restricted tour, when the old build can serve rest
         for (const d of dirs) rmSync(d, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe("the answers of shared items (Plan 2k, task 3)", () => {
+  type Row = Record<string, string | number | null>;
+  const table = (rows: Row[], columns: string[]) => ({ columns, rows: rows.map((r) => columns.map((c) => r[c] ?? null)) });
+  const OLD_COLUMNS = ["id", "workspace_id", "link_id", "kind", "content_type", "state", "created_at"];
+  const NEW_COLUMNS = [...OLD_COLUMNS, "access", "private_link_id"];
+  const link = (c: string) => c.repeat(20);
+
+  it("the items asked are the online ones of the token's workspace, in the order they were made, each by its real link, its letter and its one extension", () => {
+    const rows: Row[] = [
+      { id: "med_b", workspace_id: "ws_1", link_id: link("b"), kind: "clip", content_type: "image/gif", state: "online", created_at: 2 },
+      { id: "med_a", workspace_id: "ws_1", link_id: link("a"), kind: "image", content_type: "image/png", state: "online", created_at: 1 },
+      { id: "med_c", workspace_id: "ws_1", link_id: link("c"), kind: "image", content_type: "image/jpeg", state: "uploading", created_at: 3 },
+      { id: "med_d", workspace_id: "ws_2", link_id: link("d"), kind: "image", content_type: "image/png", state: "online", created_at: 0 },
+      { id: "med_e", workspace_id: "ws_1", link_id: link("e"), kind: "clip", content_type: "video/mp4", state: "online", created_at: 2 },
+      { id: "med_f", workspace_id: "ws_1", link_id: link("f"), kind: "image", content_type: "image/jpeg", state: "closing", created_at: 4 },
+    ];
+    // Before migration 0016: no access column, every item public by its link_id.
+    const before: DbSnapshot = { media: table(rows, OLD_COLUMNS) };
+    expect(sharedItemsOf(before, "ws_1")).toEqual([
+      { letter: "i", link: link("a"), ext: "png" },
+      { letter: "r", link: link("b"), ext: "gif" },
+      { letter: "r", link: link("e"), ext: "mp4" },
+    ]);
+    expect(sharedItemsOf(before, "ws_2")).toEqual([{ letter: "i", link: link("d"), ext: "png" }]);
+    expect(sharedItemsOf(before, "ws_3")).toEqual([]);
+    // From 0016: a restricted item by its real link, which is in private_link_id (its link_id is a name nobody was given).
+    const after: DbSnapshot = {
+      media: table(
+        [
+          { ...rows[1], access: "public" },
+          { id: "med_g", workspace_id: "ws_1", link_id: link("x"), private_link_id: link("g"), kind: "image", content_type: "image/jpeg", state: "online", created_at: 5, access: "me" },
+        ],
+        NEW_COLUMNS,
+      ),
+    };
+    expect(sharedItemsOf(after, "ws_1")).toEqual([
+      { letter: "i", link: link("a"), ext: "png" },
+      { letter: "i", link: link("g"), ext: "jpg" },
+    ]);
+    // A database before shared items (0010) has none.
+    expect(sharedItemsOf({ tour: table([], ["id"]) }, "ws_1")).toEqual([]);
+  });
+
+  it("the cache allowance covers HEAD, the conditional request (304) and the Range request (206) of an item, old to new only, and nothing else of them", () => {
+    for (const r of ["HEAD /i/:name", "HEAD /i/:name/download", "HEAD /i/:name/preview", "HEAD /r/:name", "HEAD /r/:name/download", "HEAD /r/:name/preview"]) expect(ITEM_ROUTES).toContain(r);
+    expect(ITEM_ROUTES.filter((r) => !r.startsWith("GET ") && !r.startsWith("HEAD "))).toEqual([]);
+    const head = (cc: string, extra: Record<string, string> = {}): Answer => ({ status: 200, headers: { "content-type": "image/png", "content-length": "1200", "cache-control": cc, etag: '"0123"', ...extra }, body: new Uint8Array() });
+    const notModified = (cc: string): Answer => ({ status: 304, headers: { "cache-control": cc, etag: '"0123"' }, body: new Uint8Array() });
+    const partial = (cc: string): Answer => ({ status: 206, headers: { "content-type": "image/png", "content-range": "bytes 1-100/1200", "cache-control": cc }, body: new Uint8Array(100).fill(7) });
+    const old: Recorded[] = [
+      rec("token 1: item 1 file (HEAD)", "HEAD /i/:name", head("public, max-age=3600")),
+      rec("token 1: item 1 page (if-none-match)", "GET /i/:name", notModified("public, max-age=60")),
+      rec("token 1: item 1 file (range)", "GET /i/:name", partial("public, max-age=3600")),
+      rec("token 1: item 2 preview (HEAD)", "HEAD /r/:name/preview", head("public, max-age=3600")),
+    ];
+    const next = old.map((r) => ({ ...r, answer: { ...r.answer, headers: { ...r.answer.headers, "cache-control": "no-cache" } } }));
+    const c = compareAnswers(old, next, { allowItemCache: true });
+    expect([c.itemCache, c.problems]).toEqual([4, []]);
+    // Never on the way back, and never with anything else changed.
+    expect(identityProblems(compareAnswers(old, next))).toHaveLength(4);
+    expect(itemCacheOnly("HEAD /i/:name", head("public, max-age=3600"), head("no-cache", { "content-length": "1201" }))).toBe(false);
+    expect(itemCacheOnly("HEAD /t/:slug", head("public, max-age=3600"), head("no-cache"))).toBe(false);
+    expect(itemCacheOnly("GET /i/:name", partial("public, max-age=3600"), { ...partial("no-cache"), body: new Uint8Array(100).fill(8) })).toBe(false);
+  });
+
+  it("whether a build can share an item through its API, from its compiled files: POST /api/v1/media in dist/media.js", () => {
+    const make = (files: Record<string, string>) => {
+      const dir = mkdtempSync(join(tmpdir(), "rehearse-build-"));
+      mkdirSync(join(dir, "dist"), { recursive: true });
+      for (const [name, js] of Object.entries(files)) writeFileSync(join(dir, "dist", name), js);
+      return dir;
+    };
+    const today = transformSync(readFileSync(new URL("../src/media.ts", import.meta.url), "utf8"), { loader: "ts", format: "esm" }).code;
+    const dirs = [make({ "media.js": today }), make({ "app.js": "export {};\n" }), make({ "media.js": 'app.get("/api/v1/media", () => null);\n' })];
+    try {
+      expect(dirs.map((d) => knowsMediaApi(d))).toEqual([true, false, false]);
+    } finally {
+      for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it("against this checkout's app: the rehearsal shares an image and a clip through the API, and records every item address with HEAD, the recorded ETag and one Range", { timeout: 60_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "rehearse-items-"));
+    const db = new NodeDb(join(root, "db.sqlite"));
+    let server: ReturnType<typeof serve> | null = null;
+    try {
+      await migrate(db, fileURLToPath(new URL("../migrations/", import.meta.url)));
+      const deps = { db, drafts: new NodeFileStore(join(root, "drafts")), pub: new NodeFileStore(join(root, "public")), config: { publicImageBase: "", setupCode: null }, now: () => Date.now() };
+      const ws = await createWorkspace(deps, "Acme", "owner@example.com");
+      const app = createApp(deps);
+      const port = await new Promise<number>((done) => {
+        server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, (info) => done(info.port));
+      });
+      expect(await shareRehearsalItems(port, "localhost", ws.token)).toEqual({ ok: true, images: 1, clips: 1 });
+      const rows = await db.all<Record<string, string | number | null>>("SELECT * FROM media");
+      const columns = Object.keys(rows[0]);
+      const items = sharedItemsOf({ media: { columns, rows: rows.map((r) => columns.map((c) => r[c])) } }, ws.workspaceId);
+      expect(items.map((i) => [i.letter, i.ext])).toEqual([["i", "png"], ["r", "gif"]]);
+      const answers = (await recordSite(port, "one", [ws.token], [items])).filter((r) => r.key.includes(": item "));
+      const by = new Map(answers.map((r) => [r.key, r.answer]));
+      for (const n of [1, 2]) {
+        const l = n === 1 ? "i" : "r";
+        const expected: [string, string, number][] = [
+          ["page", `GET /${l}/:name`, 200],
+          ["page (HEAD)", `HEAD /${l}/:name`, 200],
+          ["page (if-none-match)", `GET /${l}/:name`, 304],
+          ["file", `GET /${l}/:name`, 200],
+          ["file (HEAD)", `HEAD /${l}/:name`, 200],
+          ["file (if-none-match)", `GET /${l}/:name`, 304],
+          ["file (range)", `GET /${l}/:name`, 206],
+          ["download", `GET /${l}/:name/download`, 200],
+          ["download (HEAD)", `HEAD /${l}/:name/download`, 200],
+          ["download (if-none-match)", `GET /${l}/:name/download`, 304],
+          ["preview", `GET /${l}/:name/preview`, 200],
+          ["preview (HEAD)", `HEAD /${l}/:name/preview`, 200],
+          ["preview (if-none-match)", `GET /${l}/:name/preview`, 304],
+        ];
+        const prefix = `token 1: item ${n} `;
+        expect(answers.filter((r) => r.key.startsWith(prefix)).map((r) => [r.key.slice(prefix.length), r.route, r.answer.status])).toEqual(expected);
+        const file = by.get(`${prefix}file`)!;
+        expect(by.get(`${prefix}file (HEAD)`)!.body.length).toBe(0);
+        expect(by.get(`${prefix}file (HEAD)`)!.headers["content-length"]).toBe(String(file.body.length));
+        const range = by.get(`${prefix}file (range)`)!;
+        expect(range.headers["content-range"]).toBe(`bytes 1-100/${file.body.length}`);
+        expect(Buffer.from(range.body).equals(Buffer.from(file.body.subarray(1, 101)))).toBe(true);
+        for (const r of answers.filter((x) => x.key.startsWith(prefix))) expect(r.answer.headers["cache-control"], r.key).toBe("no-cache");
+      }
+      expect(ITEM_RANGE).toBe("bytes=1-100");
+    } finally {
+      const s = server as ReturnType<typeof serve> | null;
+      if (s !== null) await new Promise((done) => s.close(done));
+      db.close();
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  it("with two or three addresses every item address is asked on the media address, the page on the app address as well, with the same keys in both modes", async () => {
+    const seen: { method: string; path: string; host: string }[] = [];
+    const s = createServer((req, res) => {
+      seen.push({ method: req.method ?? "", path: req.url ?? "", host: req.headers.host ?? "" });
+      if (req.url?.startsWith("/i/")) {
+        res.writeHead(200, { "content-type": "text/html", etag: '"e1"' });
+        return res.end(req.method === "HEAD" ? undefined : "x");
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(req.url === "/api/v1/tours" ? '{"tours":[]}' : "{}");
+    });
+    await new Promise<void>((done) => s.listen(0, "127.0.0.1", done));
+    const a = s.address();
+    const port = typeof a === "object" && a !== null ? a.port : 0;
+    try {
+      const items = [[{ letter: "i" as const, link: link("a"), ext: "png" as const }]];
+      const keys: Record<string, string[]> = {};
+      for (const m of ["two", "three"] as Mode[]) {
+        seen.splice(0);
+        keys[m] = (await recordSite(port, m, ["dp_" + "1".repeat(40)], items)).map((r) => r.key);
+        const itemSeen = seen.filter((x) => x.path.startsWith("/i/"));
+        const media = m === "three" ? "img.example.com" : "tours.example.com";
+        expect(itemSeen.filter((x) => x.host !== media)).toEqual([{ method: "GET", path: `/i/${link("a")}`, host: "app.example.com" }]);
+        expect(itemSeen.filter((x) => x.host === media)).toHaveLength(13);
+      }
+      expect(keys.three).toEqual(keys.two);
+      expect(keys.two).toContain("token 1: item 1 page (app address)");
+    } finally {
+      s.close();
+    }
   });
 });
