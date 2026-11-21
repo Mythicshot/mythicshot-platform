@@ -2,6 +2,13 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.42 (2026-11-20)
+
+- `cpanel.sh update` checks for restricted tours before it installs any version older than 0.1.38, whatever is installed: also when the installed version cannot be read, and when the archive is the same version as the installed one. An app that never started (no database) and a first install are not checked, as before.
+- An update that was cut off now records in its marker the version that ran before it (`PREVIOUS=`). Resumed and failing again, it offers the way back to that version, and checks for restricted tours before it shows the commands; a marker without the line counts as an unknown version, and the check is made.
+- A request and the workspace's housekeeping moving the same tour at once no longer answer `409 republish_needed` by mistake: only a picture whose source is really gone counts. Send the request again and the move goes on.
+- When a picture's source is really gone in a move to restricted, the tour's remaining public pictures are removed at once, by the request or by housekeeping (within its call allowance), so nothing of the tour stays in the public store; the tour stays restricted and unavailable until it is unpublished and published again.
+
 ## 0.1.38 (2026-11-20)
 
 - Who may view a tour, through the API. Each tour has a setting, `public` (anyone with the link: every tour so far, and the default), `people` (the addresses on the tour's list, and the workspace's own account) or `me` (the workspace's own account alone), and a list of up to 200 addresses, written as sign-in writes an address (trimmed, lowercase) and kept when the setting moves away from `people`. `GET /api/v1/tours/<id>/access` answers the setting, the whole list, the limit, whether the site can mail, and the progress of a move; `PUT /api/v1/tours/<id>/access` with `{"access": …, "viewers": […]}` changes the setting and, with `viewers`, replaces the whole list. Reading takes a token or a session, and only a session reads the addresses: a token gets `viewers_count` in place of `viewers`. Changing takes a signed-in session only, on the app address, with its anti-forgery header, so a token that leaked can neither read the list nor make a restricted tour public (a token is answered `401`).

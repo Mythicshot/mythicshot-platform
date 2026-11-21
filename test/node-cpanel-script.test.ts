@@ -116,7 +116,7 @@ describe("the cPanel script's backup with a real Node.js", () => {
 });
 
 /** The test of the refusal to go back while a tour is restricted (stand-ins only; it runs here too, being one). */
-const RESTRICTED_TESTS = ["test_update_refuses_the_way_back_when_a_tour_is_restricted", "test_downgrade_below_access_is_refused_while_a_tour_is_restricted"];
+const RESTRICTED_TESTS = ["test_update_refuses_the_way_back_when_a_tour_is_restricted", "test_downgrade_below_access_is_refused_while_a_tour_is_restricted", "test_an_archive_before_access_is_checked_whatever_is_installed", "test_a_resumed_update_goes_back_to_the_version_before_the_first_try"];
 
 describe("the way back while a tour is restricted", () => {
   it("the Bash file has the test of the refusal", () => {

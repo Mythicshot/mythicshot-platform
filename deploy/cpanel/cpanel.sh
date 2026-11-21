@@ -1102,6 +1102,7 @@ write_marker() {
     {
       printf '# An update by cpanel.sh was started and has not finished. While this file is\n'
       printf '# here, dist.old and migrations.old are kept: running update again resumes.\n'
+      printf 'PREVIOUS=%s\n' "$ROLLBACK_TO"
       printf 'BACKUP=%s\n' "$ROLLBACK_BACKUP"
       printf 'RESTORE=%s\n' "$ROLLBACK_RESTORE"
       printf 'REMOVE=%s\n' "$ROLLBACK_REMOVE"
@@ -1176,15 +1177,27 @@ cmd_update() {
     die "this archive is version $new, older than the installed $old; nothing was changed. An older version may not start on a database a newer one has changed. To do it anyway add --allow-downgrade"
   fi
   require_data
-  # Going down to a version that does not know who may view a tour: only when no tour is
-  # restricted (or someone checked by hand, when the database cannot be read).
-  if [ -n "$old" ] && version_lt "$new" "$old" && version_lt "$new" "$ACCESS_SINCE"; then
+  # Any version that does not know who may view a tour, whatever is installed (an unreadable
+  # installed version and the same version included): only when no tour is restricted, or
+  # someone checked by hand when the database cannot be read. An app that never started has
+  # no database, so nothing to check.
+  if version_lt "$new" "$ACCESS_SINCE"; then
     older_version_allowed "$new" || die "nothing was changed: version $new is older than $ACCESS_SINCE and must not run on this database"
   fi
   require_node_env
   # An update is resumed when its marker is there, and also when the build exists only
   # as dist.old: something moved it aside and never put a build back.
   if [ -f "$MARKER" ] || { [ ! -f "$APP_DIR/dist/node/entry.js" ] && [ -f "$APP_DIR/dist.old/node/entry.js" ]; }; then RESUME=1; fi
+  # Resumed, VERSION already names the new version: the way back is to the version the
+  # first try recorded in its marker, and when none is recorded it is not known, so the
+  # check before the commands to go back is made all the same.
+  if [ "$RESUME" = 1 ]; then
+    ROLLBACK_TO=""
+    if [ -f "$MARKER" ]; then
+      ROLLBACK_TO="$(value_in "$MARKER" PREVIOUS)"
+      valid_version "$ROLLBACK_TO" || ROLLBACK_TO=""
+    fi
+  fi
 
   say "Update ${old:-an install of unknown version} to $new"
   if [ "$RESUME" = 1 ]; then info "An earlier update was cut off. This run finishes it; dist.old and migrations.old from before it are kept."; fi

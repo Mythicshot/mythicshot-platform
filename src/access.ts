@@ -61,9 +61,11 @@
 //    only once no `p/` key of the tour is left, else 202, and the next request deletes the
 //    rest.
 // A switch to private that makes no progress for CARRY_AFTER_MS is carried on by the
-// workspace's housekeeping (carryOnSwitch, called by every request that runs it: the tour
-// list, a new upload, publish and unpublish), CARRY_COPIES pictures per request, so it
-// finishes without its client.
+// workspace's housekeeping (carryOnSwitch), CARRY_COPIES pictures per request, so it
+// finishes without its client. Only the requests with room for it give housekeeping the
+// calls (CARRY_CALLS): the tour list and unpublish. An upload's create, publish and a delete
+// give none, so no request goes over its budget for it. A switch to public left for
+// STALE_PUBLISH_MS is cancelled the same way.
 //
 // Restricted to public (target 'public'): the same steps, except that the setting stays
 // restricted until the commit, which switches it to 'public' in the same batch, puts the
@@ -661,12 +663,10 @@ async function drive(r: Run, st: State, list: string[], sw: NonNullable<State["s
     ({ batch, left } = await nextBatch(d, st.id, sw.id, room()));
   }
   const written = batch.map((c) => c.to);
+  const missing: string[] = [];
   try {
-    await runLimited(
-      batch.map((c) => () => copyOne(d, c)),
-      COPIES_IN_FLIGHT,
-    );
-  } catch (err) {
+    await copyBatch(d, batch, missing);
+  } catch {
     // A switch that was ended meanwhile (its sources may be gone with it) is told apart from
     // a store that failed: then every key written so far is named by its pending row, and
     // the next request copies it again.
@@ -677,19 +677,23 @@ async function drive(r: Run, st: State, list: string[], sw: NonNullable<State["s
       // Cannot tell: answer as for a failure, and leave everything for the next request.
     }
     if (still === null) return ended(r, st, list, sw, written, finalAccess);
-    if (err instanceof MissingSource) {
-      // A source is gone while its copy is still to make (a source goes only after its copy
-      // is marked, so another request's work does not look like this): no request can finish
-      // this switch. The tour stays as it is, restricted; unpublishing it ends the switch and
+    if (missing.length > 0) {
+      // A source is gone while its copy is still to make. Only the copies that met a missing
+      // source are looked at: one that another request (or the carry) made meanwhile, and
+      // whose source it then deleted, is marked copied and does not count. A source goes only
+      // after its copy is marked, so what is left means that no request can finish this
+      // switch. The tour stays restricted; going private, its remaining public sources go
+      // now, so nothing of it stays in the public store; unpublishing it ends the switch and
       // removes its pictures, and publishing it again puts its draft live in the right store.
       try {
         const open = await d.db.first<{ n: number }>("SELECT count(*) AS n FROM public_object WHERE publish_id = ? AND tour_id = ? AND state = 'pending' AND copied = 0 AND image_key IN (SELECT value FROM json_each(?))", [
           sw.id,
           st.id,
-          keyList(written),
+          keyList(missing),
         ]);
         if ((open?.n ?? 0) > 0) {
           console.error("access: a picture of a published version is missing, so its switch cannot finish; the tour must be unpublished and published again");
+          if (!toPublic && (await retireSourcesOfStuck(d, st.id, sw.id, missing))) await clearTour(d, r.auth.workspaceId, st.id);
           return pictureMissing();
         }
       } catch {
@@ -736,6 +740,41 @@ async function drive(r: Run, st: State, list: string[], sw: NonNullable<State["s
 }
 
 /**
+ * Runs a batch's copies, noting in `missing` the target of each copy whose source was not in
+ * its store (MissingSource), so a caller can tell a source that is really gone from a copy
+ * another request has already made (whose source it then deleted).
+ */
+async function copyBatch(d: Deps, batch: Copy[], missing: string[]): Promise<void> {
+  await runLimited(
+    batch.map((c) => () =>
+      copyOne(d, c).catch((err: unknown) => {
+        if (err instanceof MissingSource) missing.push(c.to);
+        throw err;
+      }),
+    ),
+    COPIES_IN_FLIGHT,
+  );
+}
+
+/**
+ * A switch to private that can never finish (a picture's source is really gone): its
+ * remaining public sources are retired, due now, so the clean-up deletes them and nothing of
+ * the tour stays in the public store. Only while one of `missing` is still to copy (a copy
+ * another request made does not count). The tour stays restricted, and unavailable until it
+ * is unpublished and published again. One call; true when it retired something.
+ */
+async function retireSourcesOfStuck(d: Deps, id: string, switchId: string, missing: string[]): Promise<boolean> {
+  if (missing.length === 0) return false;
+  const r = await d.db.run(
+    `UPDATE public_object SET state = 'retired', delete_after = ? WHERE publish_id = ? AND tour_id = ? AND state = 'pending'
+       AND EXISTS (SELECT 1 FROM public_object m WHERE m.publish_id = ? AND m.tour_id = ? AND m.state = 'pending' AND m.copied = 0
+                     AND m.image_key IN (SELECT value FROM json_each(?)))`,
+    [d.now(), sourcesOf(switchId), id, switchId, id, keyList(missing)],
+  );
+  return r.changes > 0;
+}
+
+/**
  * Deletes what one run wrote that no live row names: after a copy or a commit that failed
  * when the switch is gone (unpublish or delete ended it), or a mark that found its rows gone.
  * Keys another request put live meanwhile are kept. Three calls at most.
@@ -768,7 +807,8 @@ async function dropUnnamed(d: Deps, id: string, written: string[]): Promise<void
  * The calls: the look (1); to public, the cancel (2) and the clean-up (4); to private, the
  * batch (1), 2 per picture, and at most 7 after them (marking 2 and then, when the switch
  * ended meanwhile, a read and 2 deletes; or the commit, the clean-up 4; or after a failure a
- * look, a read and 2 deletes, or a look and the heartbeat). So 9 + 2 per picture. Errors are
+ * look, a read and 2 deletes, or a look, the retiring of a stuck switch's sources, their
+ * clean-up 4 and the heartbeat). So 9 + 2 per picture. Errors are
  * logged as fixed text and never thrown: a later request tries again.
  */
 export async function carryOnSwitch(deps: Deps, workspaceId: string, allowance: number, afterMs = CARRY_AFTER_MS): Promise<void> {
@@ -792,15 +832,17 @@ export async function carryOnSwitch(deps: Deps, workspaceId: string, allowance: 
     const exists = async () => (await deps.db.first("SELECT 1 AS x FROM access_switch WHERE switch_id = ? AND tour_id = ?", [sw.switch_id, sw.tour_id])) !== null;
     const { batch, left } = await nextBatch(deps, sw.tour_id, sw.switch_id, copies);
     const written = batch.map((c) => c.to);
+    const missing: string[] = [];
     try {
-      await runLimited(
-        batch.map((c) => () => copyOne(deps, c)),
-        COPIES_IN_FLIGHT,
-      );
+      await copyBatch(deps, batch, missing);
     } catch {
       console.error("access: housekeeping could not move the pictures of a stopped switch; it waits before it tries again");
-      if (await exists()) await backOff();
-      else await dropUnnamed(deps, sw.tour_id, written);
+      if (await exists()) {
+        // A source that is really gone: the switch can never finish, so its remaining public
+        // sources go now (one call, then the clean-up's four) rather than wait forever.
+        if (await retireSourcesOfStuck(deps, sw.tour_id, sw.switch_id, missing)) await clearDuePage(deps, workspaceId, sw.tour_id, 0);
+        await backOff();
+      } else await dropUnnamed(deps, sw.tour_id, written);
       return;
     }
     if (batch.length < left) {

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
 import { CARRY_AFTER_MS, CARRY_CALLS, MAX_VIEWERS, RESTRICTED_STUB, carryOnSwitch, mayView, tourForServing } from "../src/access.ts";
 import type { Deps, FileStore } from "../src/ports.ts";
+import { metered } from "../src/budget.ts";
 import { COPY_BATCH, STALE_PUBLISH_MS, randomHex } from "../src/publish.ts";
 import { usageOf } from "../src/usage.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
@@ -797,6 +798,8 @@ describe("the second review", () => {
       expect([r.status, r.json.error], r.text).toEqual([409, "republish_needed"]);
       expect(r.json.detail).toContain("unpublish the tour, then publish it again");
     }
+    // Nothing of the tour stays in the public store: its remaining public sources went.
+    expect(await s.publicKeys()).toEqual([]);
     expect((await send(s.deps, "POST", `/api/v1/tours/${t.id}/publish`, { token: s.owner.token })).json.error).toBe("access_switching");
     expect(seen(await send(s.deps, "GET", `/t/${t.slug}`))).toEqual(seen(await send(s.deps, "GET", `/t/${UNKNOWN_SLUG}`)));
     // The carry tries once, fails, and puts the heartbeat on the switch: it waits a minute again.
@@ -876,5 +879,60 @@ describe("the second review", () => {
     expect(byToken.json).toEqual({ access: "people", viewers_count: 2, limit: MAX_VIEWERS, can_restrict: true, switching: null });
     expect(byToken.text).not.toContain("@");
     expect((await getAccess(s.deps, s.owner.token, t.id)).json).toEqual({ access: "people", viewers: ["ana@example.com", "bo@example.com"], limit: MAX_VIEWERS, can_restrict: true, switching: null });
+  });
+});
+
+describe("the third review", () => {
+  it("a request and the carry running one switch at once never answer republish_needed: the request is sent again and the move ends", SLOW, async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const s = await site();
+    const t = await tourOf(s, 2 * COPY_BATCH + 6);
+    await publishAll(s.deps, s.owner.token, t.id);
+    expect((await setAccess(s.deps, s.owner.token, t.id, { access: "people" })).status).toBe(202);
+    // The next request has read its next rows when the carry, on another request, copies the
+    // first of them and deletes their public sources; then the request's own copies run.
+    const pub = s.deps.pub;
+    s.deps.pub = {
+      ...pub,
+      get: async (key) => {
+        s.deps.pub = pub;
+        await carryOnSwitch(s.deps, s.owner.workspaceId, CARRY_CALLS, 0);
+        return pub.get(key);
+      },
+    };
+    const raced = await setAccess(s.deps, s.owner.token, t.id, { access: "people" });
+    s.deps.pub = pub;
+    expect(raced.json?.error, raced.text).not.toBe("republish_needed");
+    const answers = [raced];
+    for (let i = 0; i < 10 && answers.at(-1)!.status !== 200; i++) answers.push(await setAccess(s.deps, s.owner.token, t.id, { access: "people" }));
+    for (const a of answers) expect(a.json?.error, a.text).not.toBe("republish_needed");
+    expect(answers.at(-1)!.status).toBe(200);
+    expect(await s.publicKeys()).toEqual([]);
+    expect((await tourForServing(s.deps, { id: t.id }))!.pictures!.size).toBe(2 * COPY_BATCH + 7);
+  });
+
+  it("a picture whose source is gone, met by the carry, leaves nothing in the public store, within the carry's calls", SLOW, async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const s = await site();
+    const t = await tourOf(s, COPY_BATCH + 8);
+    await publishAll(s.deps, s.owner.token, t.id);
+    expect((await setAccess(s.deps, s.owner.token, t.id, { access: "people" })).status).toBe(202);
+    const next = (await s.deps.db.first<{ source_key: string }>("SELECT source_key FROM public_object WHERE tour_id = ? AND substr(publish_id, 1, 3) = 'sw_' AND copied = 0 ORDER BY seq LIMIT 1", [t.id]))!.source_key;
+    await s.deps.pub.delete([next]);
+    expect((await s.publicKeys()).length).toBeGreaterThan(0);
+    const meter = metered(s.deps);
+    await new Promise((r) => setTimeout(r, 2));
+    await carryOnSwitch(meter.deps, s.owner.workspaceId, CARRY_CALLS, 0);
+    expect(meter.calls()).toBeLessThanOrEqual(CARRY_CALLS);
+    // Nothing of the tour is left in the public store; its remaining sources are retired and gone.
+    expect(await s.publicKeys()).toEqual([]);
+    expect(await s.deps.db.all("SELECT image_key FROM public_object WHERE tour_id = ? AND substr(publish_id, 1, 4) = 'sws_'", [t.id])).toEqual([]);
+    // Still restricted and unavailable until it is published again.
+    expect(seen(await send(s.deps, "GET", `/t/${t.slug}`))).toEqual(seen(await send(s.deps, "GET", `/t/${UNKNOWN_SLUG}`)));
+    expect((await setAccess(s.deps, s.owner.token, t.id, { access: "people" })).json.error).toBe("republish_needed");
+    expect((await send(s.deps, "POST", `/api/v1/tours/${t.id}/unpublish`, { token: s.owner.token })).status).toBe(204);
+    await publishAll(s.deps, s.owner.token, t.id);
+    expect((await tourForServing(s.deps, { id: t.id }))!.pictures!.size).toBe(COPY_BATCH + 9);
+    expect(await s.publicKeys()).toEqual([]);
   });
 });
