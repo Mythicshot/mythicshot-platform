@@ -101,11 +101,11 @@ const TOURS_WORDING = [
   "They prove their email address with a link we send them.",
   "Only me",
   'This site cannot send mail, so only "Anyone with the link" can be chosen here.',
-  // Proposed: for a tour that is restricted already on a site that cannot mail.
-  "This site cannot send mail, so once this tour is public it cannot be restricted again here.",
   "Add",
   "You can always view your own tours. People on the list are not told they were added: send them the link yourself.",
   "Anyone who already opened this tour may still have its pictures in their browser. Restricting cannot take those back.",
+  // Proposed: for a tour that is restricted already on a site that cannot mail.
+  "This site cannot send mail, so once this tour is public it cannot be restricted again here.",
   "Cancel",
   "Save",
   "Cancel",
@@ -194,14 +194,15 @@ const TOURS_TEXT: Record<string, string> = {
   switching: "This tour's pictures are still being moved. Open Sharing again to finish that first.",
   cancelled: "The tour was unpublished or deleted while its pictures were being moved, so the change did not finish.",
   busyAgain: "The tour changed while this was being saved. Press Save again.",
+  changedMove: "This tour changed meanwhile. It is shown as it is now: choose again.",
   republish: "This tour's pictures could not be moved. Unpublish it, publish it again from Mythicshot, then set who can view it.",
   badViewerAfter: '" is not accepted as an email address. Remove it and press Save again.',
   tooManyBefore: "The list holds at most ",
   tooManyAfter: " people. Remove some and press Save again.",
 };
 
-/** The strings with a space in the scripts that are not words for a person: class names, a link's rel, and the ids an aria-describedby names. */
-const CLASS_NAMES = ["btn sm", "btn sm quiet", "tag ok", "tag warn", "n size", "n when", "noopener noreferrer", "share-ask-text share-ask-warn"];
+/** The strings with a space in the scripts that are not words for a person: class names and a link's rel. */
+const CLASS_NAMES = ["btn sm", "btn sm quiet", "tag ok", "tag warn", "n size", "n when", "noopener noreferrer"];
 
 /** A script's TEXT object, read from the script's own text. */
 function scriptText(js: string): Record<string, string> {

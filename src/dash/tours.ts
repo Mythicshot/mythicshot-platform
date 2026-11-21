@@ -92,7 +92,6 @@ const TOURS_MAIN = `  <div id="tours-page">
           <label class="opt" for="share-me"><input type="radio" name="share-access" id="share-me" value="me"><span class="opt-text"><span class="opt-name">Only me</span><span class="opt-d" id="share-me-text"></span></span></label>
         </fieldset>
         <p class="warn-box" id="share-nomail" hidden>This site cannot send mail, so only "Anyone with the link" can be chosen here.</p>
-        <p class="warn-box" id="share-nomail-kept" hidden>This site cannot send mail, so once this tour is public it cannot be restricted again here.</p>
         <div id="share-people-part" hidden>
           <label for="share-input" id="share-count"></label>
           <ul class="chips" id="share-chips"></ul>
@@ -109,6 +108,7 @@ const TOURS_MAIN = `  <div id="tours-page">
         <p class="warn-box" id="share-ask-warn" hidden>Anyone who already opened this tour may still have its pictures in their browser. Restricting cannot take those back.</p>
       </div>
       <p class="sub" id="share-resume" hidden></p>
+      <p class="warn-box" id="share-nomail-kept" hidden>This site cannot send mail, so once this tour is public it cannot be restricted again here.</p>
       <div id="share-moving" hidden>
         <progress class="progress" id="share-progress" max="1" value="0" aria-hidden="true"></progress>
         <p class="hint" id="share-moving-text"></p>
@@ -204,6 +204,7 @@ export const TOURS_JS = `(function () {
     switching: "This tour's pictures are still being moved. Open Sharing again to finish that first.",
     cancelled: "The tour was unpublished or deleted while its pictures were being moved, so the change did not finish.",
     busyAgain: "The tour changed while this was being saved. Press Save again.",
+    changedMove: "This tour changed meanwhile. It is shown as it is now: choose again.",
     republish: "This tour's pictures could not be moved. Unpublish it, publish it again from Mythicshot, then set who can view it.",
     badViewerAfter: '" is not accepted as an email address. Remove it and press Save again.',
     tooManyBefore: "The list holds at most ",
@@ -793,8 +794,13 @@ export const TOURS_JS = `(function () {
     $("share-form-buttons").hidden = !form;
     $("share-ask-buttons").hidden = s.view !== "ask";
     $("share-resume-buttons").hidden = s.view !== "resume";
-    var described = s.view === "ask" ? ($("share-ask-warn").hidden ? "share-ask-text" : "share-ask-text share-ask-warn") : s.view === "resume" ? "share-resume" : s.view === "moving" ? "share-moving-text" : "";
-    if (described !== "") $("share-box").setAttribute("aria-describedby", described);
+    // On a site that cannot mail, a restricted tour made public cannot be restricted again
+    // here: said with the options, on the question before making it public, and with a stopped move.
+    var kept = !st.canRestrict && st.access !== "public" && (form || s.view === "resume" || (s.view === "ask" && s.pending !== null && s.pending.access === "public"));
+    $("share-nomail-kept").hidden = !kept;
+    var described = s.view === "ask" ? ["share-ask-text"].concat($("share-ask-warn").hidden ? [] : ["share-ask-warn"]) : s.view === "resume" ? ["share-resume"] : s.view === "moving" ? ["share-moving-text"] : [];
+    if (kept && s.view !== "form") described.push("share-nomail-kept");
+    if (described.length > 0) $("share-box").setAttribute("aria-describedby", described.join(" "));
     else $("share-box").removeAttribute("aria-describedby");
     SETTINGS.forEach(function (a) {
       var radio = $("share-" + a);
@@ -802,7 +808,6 @@ export const TOURS_JS = `(function () {
       radio.disabled = busy || (a !== "public" && !mayRestrict(st));
     });
     $("share-nomail").hidden = st.canRestrict || st.access !== "public";
-    $("share-nomail-kept").hidden = st.canRestrict || st.access === "public";
     var people = s.choice === "people";
     $("share-people-part").hidden = !people;
     $("share-count").textContent = TEXT.countBefore + s.list.length + TEXT.of + st.limit;
@@ -1040,7 +1045,8 @@ export const TOURS_JS = `(function () {
   // then sends public (which finishes a move to public). Either with the list as it is.
   function keepRestricted() {
     var s = share;
-    if (s === null || s.view !== "resume" || shareQ.isWorking()) return;
+    // Only a restricted setting is kept: a public one here would be a change, never asked about.
+    if (s === null || s.view !== "resume" || shareQ.isWorking() || s.st.access === "public") return;
     sendShare({ access: s.st.access, viewers: s.st.viewers.slice() }, "share-restricted");
   }
 
@@ -1073,6 +1079,8 @@ export const TOURS_JS = `(function () {
     var fromResume = s.view === "resume" || (s.view === "ask" && s.from === "resume");
     var rounds = 0;
     var misses = 0;
+    // The last 202's progress, for a loop that stops while the setting cannot be read again.
+    var last = null;
     working = true;
     // Pressed by the person: a stop from leaving the page earlier is over.
     pageLeft = false;
@@ -1097,13 +1105,26 @@ export const TOURS_JS = `(function () {
         $(s.view === "resume" ? "share-restricted" : s.view === "ask" ? "share-keep" : "share-save").focus();
         return;
       }
-      // Changed: nothing is sent. A move that ended by itself just shows the tour as it is now.
-      showState(s, got.state, fromResume, fromResume && got.state.switching === null ? [] : [TEXT.busyAgain]);
+      // Changed: nothing is sent, and the box shows the tour as it is now, with the list the
+      // site has (another tab may have changed it). Only when that is exactly the setting the
+      // person chose (a move to restricted the site finished by itself) is nothing said.
+      var fresh = got.state;
+      var listChanged = !sameList(fresh.viewers, s.st.viewers);
+      if (listChanged) s.list = fresh.viewers.slice();
+      var asked = fromResume && fresh.switching === null && fresh.access === body.access && !listChanged;
+      if (fromResume && fresh.switching === null && !asked) {
+        // What was confirmed is chosen again, for the person to save once more.
+        s.choice = body.access;
+        s.list = fresh.viewers.slice();
+        showState(s, fresh, false, [TEXT.busyAgain]);
+        return;
+      }
+      showState(s, fresh, fromResume && !listChanged, asked ? [] : fresh.switching !== null ? [TEXT.changedMove] : [TEXT.busyAgain]);
     });
     function next() {
       if (share !== s) return;
       // The page was left (and may come back from the back/forward cache): nothing more is sent by itself.
-      if (pageLeft) return finishShare(s, body, button, fromResume, { kind: "stopped" });
+      if (pageLeft) return finishShare(s, body, button, fromResume, { kind: "stopped", last: last });
       rounds++;
       return Dash.api("PUT", path, body).then(step, function () { return step(null); });
     }
@@ -1112,8 +1133,9 @@ export const TOURS_JS = `(function () {
       if (share !== s) return;
       if (res !== null && res.status === 202) {
         misses = 0;
+        last = res.data;
         showMoving(s, res.data);
-        return rounds < SHARE_ROUNDS ? pause(PAUSE_MS).then(next) : finishShare(s, body, button, fromResume, { kind: "stopped" });
+        return rounds < SHARE_ROUNDS ? pause(PAUSE_MS).then(next) : finishShare(s, body, button, fromResume, { kind: "stopped", last: last });
       }
       if (res !== null && res.status === 200) {
         var st = stateOf(res.data);
@@ -1129,10 +1151,11 @@ export const TOURS_JS = `(function () {
     }
   }
 
-  // Whether the setting read now is still what the box shows: the same setting, the same site
-  // mail, and the same move (or none), whatever its progress.
+  // Whether the setting read now is still what the box shows: the same setting, the same list
+  // as the site had when the box read it, the same site mail, and the same move (or none),
+  // whatever its progress.
   function sameState(a, b) {
-    if (a.access !== b.access || a.canRestrict !== b.canRestrict || (a.switching === null) !== (b.switching === null)) return false;
+    if (a.access !== b.access || a.canRestrict !== b.canRestrict || (a.switching === null) !== (b.switching === null) || !sameList(a.viewers, b.viewers)) return false;
     return a.switching === null || a.switching.target === b.switching.target;
   }
 
@@ -1215,6 +1238,18 @@ export const TOURS_JS = `(function () {
         shareQ.close(false);
         say(o.kind === "refused" && o.res.status === 409 ? refusalParts(o.res, body, fromResume).join("") : "");
         focusTour(s.id);
+        return;
+      }
+      if (o.kind === "stopped") {
+        // Left, or at the request cap: the stopped move alone says what is going on. When the
+        // setting could not be read again, the last progress the site gave stands for it.
+        var st = now;
+        var p = o.last;
+        if (st === null && p !== null && typeof p === "object" && isCount(p.done) && isCount(p.total) && (p.target === "public" || p.target === "restricted")) {
+          st = { access: s.st.access, viewers: s.st.viewers, limit: s.st.limit, canRestrict: s.st.canRestrict, switching: { done: p.done, total: p.total, target: p.target } };
+          if (p.target === "restricted" && st.access === "public") st.access = body.access;
+        }
+        showState(s, st !== null ? st : s.st, fromResume, []);
         return;
       }
       var parts = o.kind === "refused" ? refusalParts(o.res, body, fromResume) : o.kind === "lost" && o.res !== null ? [Dash.failure(o.res)] : [Dash.TEXT.failed];

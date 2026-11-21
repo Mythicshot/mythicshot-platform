@@ -648,13 +648,12 @@ describe("a move of the pictures", () => {
     tab.pagehide();
     await drive(tab);
     expect(puts(tab)).toHaveLength(1);
-    // The box says so, and shows the stopped move as the API reports it: a move to restricted,
-    // which it offers only to finish.
-    expect(tab.$("share-message").textContent).toBe(FAILED);
+    // The stopped move alone says so, as the API reports it: a move to restricted, which it
+    // offers only to finish. No failure sentence.
+    expect(tab.$("share-message").hidden).toBe(true);
     expect(boxShows(tab)).toEqual([
       'Who can view "Timeline rehearsal walkthrough"?',
       'Moving this tour\'s pictures stopped at 1 of 3. Choose "Keep it restricted" to finish restricting it.',
-      FAILED,
       "Cancel",
       "Keep it restricted",
     ]);
@@ -669,7 +668,7 @@ describe("a move of the pictures", () => {
     expect(boxOpen(tab)).toBe(false);
   });
 
-  it("never loops for ever: after 5000 requests it stops, says so, and shows the move as stopped", async () => {
+  it("never loops for ever: after 5000 requests it stops and shows the move as stopped, with no failure sentence", async () => {
     const tab = openTours(standard({ [`GET ${path(T2)}`]: [access(), access(), access({ switching: { done: 7, total: 9, target: "public" } })], [`PUT ${path(T2)}`]: moving(7, 9) }));
     await tab.settle();
     await openSharing(tab, 1);
@@ -683,9 +682,25 @@ describe("a move of the pictures", () => {
     }
     await drive(tab);
     expect(puts(tab)).toHaveLength(5000);
-    expect(tab.$("share-message").textContent).toBe(FAILED);
+    expect(tab.$("share-message").hidden).toBe(true);
     expect(tab.$("share-resume").shown).toBe(true);
   }, 120_000);
+
+  it("a page left while the setting cannot be read again shows the move as the last answer gave it, never a failure sentence", async () => {
+    const tab = openTours(standard({ [`GET ${path(T1)}`]: [PUBLIC, PUBLIC, "network"], [`PUT ${path(T1)}`]: { status: 202, json: { status: "switching", done: 2, total: 6, target: "restricted" } } }));
+    await tab.settle();
+    await openSharing(tab, 0);
+    tab.$("share-me").click();
+    tab.$("share-save").click();
+    await arm(tab);
+    tab.$("share-go").click();
+    await tab.settle();
+    tab.pagehide();
+    await drive(tab);
+    expect(puts(tab)).toHaveLength(1);
+    expect(tab.$("share-message").hidden).toBe(true);
+    expect(tab.$("share-resume").textContent).toBe('Moving this tour\'s pictures stopped at 2 of 6. Choose "Keep it restricted" to finish restricting it.');
+  });
 });
 
 describe("a move that stopped", () => {
@@ -767,7 +782,9 @@ describe("a move that stopped", () => {
     await drive(cancelled);
     expect(puts(cancelled)).toEqual([]);
     expect(cancelled.$("share-form").shown).toBe(true);
-    expect(checkedOne(cancelled)).toBe("share-people");
+    // Public, which was confirmed, is chosen again for the person to save; the box says so.
+    expect(checkedOne(cancelled)).toBe("share-public");
+    expect(cancelled.$("share-message").textContent).toBe("The tour changed while this was being saved. Press Save again.");
 
     // A change made elsewhere while the options were open: nothing is sent, the edits stay, and the box says to press Save again.
     const elsewhere = openTours(standard({ [`GET ${path(T2)}`]: [access(), access({ access: "me" })], [`PUT ${path(T2)}`]: access() }));
@@ -809,6 +826,99 @@ describe("a move that stopped", () => {
     ]);
     tab.$("share-close").click();
     expect(boxOpen(tab)).toBe(false);
+  });
+});
+
+describe("review follow-ups", () => {
+  it("a list changed in another tab is never undone: nothing is sent, the box shows the site's list and says to save again", async () => {
+    const tab = openTours(standard({ [`GET ${path(T2)}`]: [access({ viewers: ["alice@example.com", "bob@example.com"] }), access({ viewers: ["alice@example.com"] })], [`PUT ${path(T2)}`]: access() }));
+    await tab.settle();
+    await openSharing(tab, 1);
+    type(tab, "carol@example.com");
+    tab.$("share-add").click();
+    tab.$("share-save").click();
+    await drive(tab);
+    expect(puts(tab)).toEqual([]);
+    expect(tab.$("share-message").textContent).toBe("The tour changed while this was being saved. Press Save again.");
+    expect(addresses(tab)).toEqual(["alice@example.com"]);
+    expect(checkedOne(tab)).toBe("share-people");
+    // Saved again, it sends the site's list as now shown (with what is added then).
+    type(tab, "carol@example.com");
+    tab.$("share-add").click();
+    tab.$("share-save").click();
+    await drive(tab);
+    expect(sent(tab).map((s) => s[3])).toEqual([{ access: "people", viewers: ["alice@example.com", "carol@example.com"] }]);
+  });
+
+  it("Make public that finds the move ended says so, with public chosen again for the person to save", async () => {
+    const tab = openTours(standard({ [`GET ${path(T2)}`]: [access({ switching: { done: 3, total: 9, target: "public" } }), access()] }));
+    await tab.settle();
+    await openSharing(tab, 1);
+    tab.$("share-make-public").click();
+    await arm(tab);
+    tab.$("share-go").click();
+    await drive(tab);
+    expect(puts(tab)).toEqual([]);
+    expect(tab.$("share-form").shown).toBe(true);
+    expect(tab.$("share-message").textContent).toBe("The tour changed while this was being saved. Press Save again.");
+    expect(checkedOne(tab)).toBe("share-public");
+    // A move that changed direction meanwhile is shown, and the box says to choose again (proposed).
+    const turned = openTours(standard({ [`GET ${path(T2)}`]: [access({ switching: { done: 3, total: 9, target: "public" } }), access({ switching: { done: 4, total: 9, target: "restricted" } })] }));
+    await turned.settle();
+    await openSharing(turned, 1);
+    turned.$("share-make-public").click();
+    await arm(turned);
+    turned.$("share-go").click();
+    await drive(turned);
+    expect(puts(turned)).toEqual([]);
+    expect(turned.$("share-resume").textContent).toBe('Moving this tour\'s pictures stopped at 4 of 9. Choose "Keep it restricted" to finish restricting it.');
+    expect(turned.$("share-message").textContent).toBe("This tour changed meanwhile. It is shown as it is now: choose again.");
+  });
+
+  it("on a site without mail, the warning that a public tour cannot be restricted again shows on the Make public question and with a stopped move", async () => {
+    const kept = "This site cannot send mail, so once this tour is public it cannot be restricted again here.";
+    const tab = openTours(standard({ [`GET ${path(T2)}`]: access({ can_restrict: false }) }));
+    await tab.settle();
+    await openSharing(tab, 1);
+    expect(tab.$("share-nomail-kept").shown).toBe(true);
+    tab.$("share-public").click();
+    tab.$("share-save").click();
+    expect(boxShows(tab)).toEqual([
+      'Let anyone with the link view "Loot master setup"?',
+      "Nobody will be asked to sign in any more. Anyone who has or gets the link can open it. Your list of people is kept in case you restrict it again.",
+      kept,
+      "Keep it restricted",
+      "Make public",
+    ]);
+    expect(tab.$("share-box").getAttribute("aria-describedby")).toBe("share-ask-text share-nomail-kept");
+    const stopped = openTours(standard({ [`GET ${path(T2)}`]: access({ can_restrict: false, switching: { done: 1, total: 4, target: "public" } }) }));
+    await stopped.settle();
+    await openSharing(stopped, 1);
+    expect(boxShows(stopped)).toEqual([
+      'Who can view "Loot master setup"?',
+      'Moving this tour\'s pictures stopped at 1 of 4. "Keep it restricted" leaves it as it is now; "Make public" finishes making it public.',
+      kept,
+      "Cancel",
+      "Keep it restricted",
+      "Make public",
+    ]);
+    // A public tour on such a site has the other warning only.
+    const pub = openTours(standard({ [`GET ${path(T1)}`]: access({ access: "public", can_restrict: false }) }));
+    await pub.settle();
+    await openSharing(pub, 0);
+    expect([pub.$("share-nomail").shown, pub.$("share-nomail-kept").shown]).toEqual([true, false]);
+  });
+
+  it("Keep it restricted never sends a public setting", async () => {
+    // A state the API does not give (a move with the tour public), held to the rule anyway.
+    const tab = openTours(standard({ [`GET ${path(T1)}`]: access({ access: "public", switching: { done: 1, total: 4, target: "restricted" } }) }));
+    await tab.settle();
+    await openSharing(tab, 0);
+    expect(tab.$("share-resume").shown).toBe(true);
+    tab.$("share-restricted").click();
+    await drive(tab);
+    expect(puts(tab)).toEqual([]);
+    expect(tab.fetched.filter((f) => f.path === path(T1))).toHaveLength(1);
   });
 });
 
