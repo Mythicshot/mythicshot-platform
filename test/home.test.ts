@@ -22,6 +22,7 @@ import { inviteContactFrom } from "../src/signin/invite.ts";
 import { LINK_HTML, SIGNIN_CSS, SIGNIN_HTML, signinHtml } from "../src/signin/page.ts";
 import { VIEW_DENIED_HTML, VIEW_GATE_HTML, VIEW_LINK_HTML, VIEW_SIGNOUT_HTML } from "../src/view-page.ts";
 import { send } from "./bundle.ts";
+import { isBrandMark, isBrandMarkAlt } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -112,25 +113,22 @@ const BAD: [string, unknown][] = [
 
 describe("HOME_URL", () => {
   it("good values are kept as URL writes them, up to the cap", () => {
-    for (const [written, url] of GOOD) expect(homeUrlSetting(written), written).toEqual({ ok: true, url });
+    for (const [written, url] of GOOD) expect(homeUrlSetting(written), written).toEqual({ url, problem: null });
     const longest = `https://www.example.com/${"a".repeat(HOME_URL_MAX - "https://www.example.com/".length)}`;
     expect(longest.length).toBe(HOME_URL_MAX);
-    expect(homeUrlSetting(longest)).toEqual({ ok: true, url: longest });
+    expect(homeUrlSetting(longest)).toEqual({ url: longest, problem: null });
     expect(HOME_URL_MAX).toBe(300);
   });
 
   it("unset, null or empty is no link and no problem", () => {
-    for (const v of [undefined, null, "", "   ", "\t"]) expect(homeUrlSetting(v), JSON.stringify(v)).toEqual({ ok: true, url: null });
+    for (const v of [undefined, null, "", "   ", "\t"]) expect(homeUrlSetting(v), JSON.stringify(v)).toEqual({ url: null, problem: null });
   });
 
-  it("every bad value gives the one fixed line, which names the setting and never repeats the value", () => {
-    for (const [what, value] of BAD) expect(homeUrlSetting(value), what).toEqual({ ok: false, problem: HOME_URL_UNUSABLE });
-    expect(HOME_URL_UNUSABLE).toBe(
-      "HOME_URL is not a usable address. Write it like https://www.example.com/: https:// (http:// only for localhost), no user name or password, no # part, at most 300 characters.",
-    );
+  it("every bad value switches the link off with the one fixed line, which names the setting and never repeats the value", () => {
+    for (const [what, value] of BAD) expect(homeUrlSetting(value), what).toEqual({ url: null, problem: HOME_URL_UNUSABLE });
+    expect(HOME_URL_UNUSABLE).toBe("home page: off, because HOME_URL is not a usable address. The site runs; the logo is not a link.");
     expect(HOME_URL_UNUSABLE.split("\n")).toHaveLength(1);
-    // (A bad value that is a piece of the line's own example, such as //www.example.com/, is not a repeat.)
-    for (const [, value] of BAD) if (typeof value === "string" && value.length > 6 && !"https://www.example.com/".includes(value)) expect(HOME_URL_UNUSABLE, String(value)).not.toContain(value);
+    expect(HOME_URL_UNUSABLE).not.toMatch(/https?:|example|\/\//);
   });
 });
 
@@ -320,19 +318,25 @@ describe("HOME_URL on Workers", () => {
     for (const v of [undefined, "", "  "]) expect("homeUrl" in config({ HOME_URL: v }), JSON.stringify(v)).toBe(false);
   });
 
-  it("a value that cannot be used answers 500 misconfigured on every path, as the other settings that stop the start do, and logs one fixed line", async () => {
+  it("a value that cannot be used never stops the Worker: the pages, the mark and the health check answer, the logo is no link, and the one line is logged once per isolate", async () => {
     const e = await entry();
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    // A stand-in database that answers the health check's one query, and nothing else.
+    const db = { prepare: () => ({ first: async () => ({ ok: 1 }) }) };
     for (const value of ["http://made-up.example.com/", "https://user:made-up@example.com/", "javascript:alert('made-up')", 42, { made: "up" }]) {
-      for (const url of ["https://app.example.com/signin", "https://app.example.com/healthz", "https://app.example.com/dash/mark.png"]) {
-        logged.mockClear();
-        const res = await e.default.fetch(new Request(url), { ...bindings(), HOME_URL: value }, {});
-        expect(res.status, `${JSON.stringify(value)} ${url}`).toBe(500);
-        expect(await res.text()).toBe('{"error":"misconfigured"}');
-        expect(logged.mock.calls).toEqual([[`home page: ${HOME_URL_UNUSABLE}`]]);
-        expect(String(logged.mock.calls[0][0]).toLowerCase()).not.toContain("made-up");
-      }
+      const env = { ...bindings(), HOME_URL: value };
+      const signin = await e.default.fetch(new Request("https://app.example.com/signin"), env, {});
+      expect([signin.status, await signin.text()], JSON.stringify(value)).toEqual([200, SIGNIN_HTML]);
+      const mark = await e.default.fetch(new Request("https://app.example.com/dash/mark.png"), env, {});
+      expect([mark.status, mark.headers.get("content-type")], JSON.stringify(value)).toEqual([200, "image/png"]);
+      await mark.arrayBuffer();
+      const health = await e.default.fetch(new Request("https://app.example.com/healthz"), { ...env, DB: db }, {});
+      expect([health.status, await health.text()], JSON.stringify(value)).toEqual([200, '{"ok":true}']);
+      expect("homeUrl" in e.depsFromEnv({ DB: {}, DRAFTS: {}, PUB: {}, HOME_URL: value }, null).config, JSON.stringify(value)).toBe(false);
     }
+    const lines = logged.mock.calls.map((c) => String(c[0]));
+    expect(lines.filter((l) => l.includes("HOME_URL"))).toEqual([HOME_URL_UNUSABLE]);
+    for (const l of lines) expect(l.toLowerCase()).not.toContain("made-up");
   });
 
   it("no var, or an empty one, leaves the Worker as it was", async () => {
@@ -351,5 +355,38 @@ describe("HOME_URL on Workers", () => {
     expect(rows[0]).toMatch(/^\| `HOME_URL` \| both \|/);
     expect(rows[0]).toMatch(/300 characters/);
     expect(rows[0]).toMatch(/localhost/);
+    expect(rows[0]).toContain("never stops the site");
+  });
+});
+
+describe("the test exemption for the mark", () => {
+  const page = (brand: string, extra = "") => `<!doctype html><html lang="en"><head><title>x</title></head><body><header>${brand}</header>${extra}</body></html>`;
+  const marks = (html: string) => new FakeDocument(html).root.all().filter((e) => e.tagName === "img");
+
+  it("covers the mark exactly as the pages write it, plain and linked", () => {
+    for (const brand of [PLAIN, LINKED]) {
+      const [img] = marks(page(brand));
+      expect([isBrandMark(img), isBrandMarkAlt(img, "alt"), isBrandMarkAlt(img, "title")], brand).toEqual([true, true, false]);
+    }
+  });
+
+  it("does not cover an image with another attribute, another value, another parent, or a second mark", () => {
+    const cases: [string, string][] = [
+      ["an onerror", page(PLAIN.replace('height="24">', 'height="24" onerror="x">'))],
+      ["a title", page(PLAIN.replace('alt=""', 'alt="" title="logo"'))],
+      ["words in the alt", page(PLAIN.replace('alt=""', 'alt="logo"'))],
+      ["another size", page(PLAIN.replace('width="24"', 'width="25"'))],
+      ["another file", page(PLAIN.replace("/dash/mark.png", "/dash/other.png"))],
+      ["attributes in another order", page(PLAIN.replace('src="/dash/mark.png" alt=""', 'alt="" src="/dash/mark.png"'))],
+      ["outside the brand", page("<p>Mythicshot</p>", '<p><img src="/dash/mark.png" alt="" width="24" height="24"></p>')],
+      ["inside a link that is not the brand's", page("<p>Mythicshot</p>", '<p><a href="/x"><img src="/dash/mark.png" alt="" width="24" height="24"></a></p>')],
+    ];
+    for (const [what, html] of cases) for (const img of marks(html)) expect([isBrandMark(img), isBrandMarkAlt(img, "alt")], what).toEqual([false, false]);
+    // A second mark, even a second whole brand, makes neither one the mark.
+    const two = marks(page(PLAIN, PLAIN));
+    expect(two).toHaveLength(2);
+    for (const img of two) expect(isBrandMark(img)).toBe(false);
+    const extra = marks(page(PLAIN, '<p><img src="/dash/mark.png" alt="" width="24" height="24"></p>'));
+    for (const img of extra) expect(isBrandMark(img)).toBe(false);
   });
 });
