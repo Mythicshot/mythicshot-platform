@@ -1,4 +1,4 @@
-# Browser check of the dashboard: the bar, the Images, GIFs, Tours, Storage, Connections, Admin and Account pages, invites and account actions, and changing an email address
+# Browser check of the dashboard: the bar, the Images, GIFs, Tours, Storage, Connections, Admin and Account pages, sharing a tour, invites and account actions, and changing an email address
 
 The tests run the dashboard's scripts against a stand-in document, and against the real app in the same process, but they cannot open a browser. This list is what a person goes through by hand before a dashboard page is called done: once in Chrome and once in Firefox, each with the developer tools open. Write down for each step whether it passed, and for anything that did not, what the page showed.
 
@@ -28,8 +28,9 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 - [ ] Under the heading "Tours" the line reads "3 tours in <workspace name> · <size> used", with the size written as everywhere else (at most one decimal, no trailing `.0`, 1024 to the next unit).
 - [ ] One row per tour, the most recently changed first. Each row has the title in bold and under it "<n> steps · localhost:3000/t/" and the first four characters of the slug followed by "…" for a published tour (pointing at it shows the whole link), or "<n> steps · no public link" for the other; then its tags, its size and the day it changed, such as "19 Nov".
 - [ ] The tags: "Published" in green; "Published" and "Changes waiting" in amber for the tour with a new version; "Not published" in grey.
+- [ ] The "Who can view" column, between Status and Size: "Anyone with the link" as plain text for each published tour (every tour is public until it is shared otherwise), and a dash for the unpublished one.
 - [ ] A published tour has "Copy link", "Open" and "More"; the unpublished one has "Publish" and "More".
-- [ ] Under the table: "\"Changes waiting\" means Mythicshot uploaded a newer version that visitors do not see yet. \"More\" holds: Publish changes, Unpublish, Delete."
+- [ ] Under the table: "\"Changes waiting\" means Mythicshot uploaded a newer version that visitors do not see yet. \"More\" holds: Sharing, Publish changes, Unpublish, Delete."
 - [ ] The title holding markup shows exactly as typed, angle brackets, ampersand and quotes included, never in bold.
 
 ## Copy link and Open
@@ -40,7 +41,7 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 
 ## The More menu
 
-- [ ] "More" on the tour with changes waiting opens a small menu with "Publish changes", "Unpublish" and "Delete" (in red); on the other published tour "Unpublish" and "Delete"; on the unpublished one "Delete" only.
+- [ ] "More" on the tour with changes waiting opens a small menu with "Sharing…", "Publish changes", "Unpublish" and "Delete" (in red); on the other published tour "Sharing…", "Unpublish" and "Delete"; on the unpublished one "Delete" only.
 - [ ] A click anywhere else closes the menu; opening another row's menu closes the first.
 - [ ] With the keyboard: Tab to "More", Enter opens it with the focus on the first entry, the arrow keys move, Home and End jump, Escape closes it and puts the focus back on "More", and Tab closes it and moves on.
 
@@ -58,6 +59,26 @@ Chrome and Firefox treat `http://localhost` as a secure address and keep the ses
 - [ ] Tab and Shift+Tab stay on the two buttons, and the page behind cannot be clicked or reached with Tab. "Keep it", Escape and a click on the dimmed area around the question each close it and put the focus back on that row's "More", with no request sent.
 - [ ] "Delete tour" reads "Deleting…", sends `DELETE /api/v1/tours/tour_…` (again while it answers 202) with an `X-Csrf-Token` header, closes the question, and the row is gone, the line under the heading counts one tour fewer, and the focus is on the heading. While it runs, Tab and Shift+Tab keep the focus on the question's title, never on a greyed-out button.
 - [ ] Delete every tour: the page shows "No tours yet" and "Record a tour in Mythicshot and choose Publish. It shows up here with a link to share." with no table and no hint.
+
+## Sharing a tour
+
+Who can view a tour is chosen in the Sharing box. On the scratch site mail is off, so only the first part can be done there; the rest needs a test site whose mail works, as for "Invites" below; otherwise write down that it was not checked by hand (the tests restrict a tour and make it public again against the real app with a stand-in mailer, and hold every refusal, the progress, a move that stopped and a page left in the middle).
+
+- [ ] On the scratch site, "More" › "Sharing…" on a published tour sends one `GET /api/v1/tours/tour_…/access`, then opens the box in the page: "Who can view \"<title>\"?", the three options "Anyone with the link" (selected, "No sign-in. Fastest for viewers."), "Only people I choose" ("They prove their email address with a link we send them.") and "Only me" ("You prove your own address, <your address>, the same way."), the last two greyed out, the amber "This site cannot send mail, so only \"Anyone with the link\" can be chosen here.", and "Cancel" and "Save". The focus is on "Anyone with the link"; clicking a greyed-out option does nothing. "Save" sends one `PUT …/access` with `{"access":"public","viewers":[]}` and closes the box.
+
+On the test site with mail, with a published tour:
+
+- [ ] Choose "Only people I choose": "People who can view · 0 of 200", a field showing `name@example.com` in grey, "Add", and "You can always view your own tours. People on the list are not told they were added: send them the link yourself." Paste `Ana@Example.com, bo@example.com; bo@example.com` and a second line `cy@example.org`, and press Enter in the field (not Save): three chips in lower case, once each, "· 3 of 200", the field empty, nothing sent. Each chip's ✕ is read as "Remove <address>" by a screen reader; pressing one takes the chip away and leaves the focus on the next.
+- [ ] Paste `mara@example, new@example.com` and press "Add": in red, "\"mara@example\" does not look like an email address. Nothing was added.", and no chip is added. A very long entry is shown cut, with "…".
+- [ ] Press "Save": the question "Restrict \"<title>\"?", "From now on only the people you chose can open the link. The link itself stays the same.", the amber "Anyone who already opened this tour may still have its pictures in their browser. Restricting cannot take those back.", and "Keep it public" (with the focus) and "Restrict tour". Double-click "Save" from the box again: the second click presses nothing, and "Restrict tour" works only after a moment. In that moment Tab still reaches it, a screen reader reads it as unavailable (dimmed), and Enter on it does nothing; nothing is announced when it starts to work, and the focus stays where it is. "Keep it public", Escape and the dimmed area go back to the options with the chips still there, and send nothing.
+- [ ] "Restrict tour" reads "Saving…"; while the pictures move the box shows "Moving the pictures, <done> of <total>. Keep this page open." over a bar that fills, and Escape does nothing. The requests are `PUT /api/v1/tours/tour_…/access`, each with the same body `{"access":"people","viewers":[…]}` and an `X-Csrf-Token` header; no address is in any request's address. Then the box closes, the row shows the amber "3 people", and under the table "Opening a restricted tour asks you for your email address too: the dashboard's sign-in does not carry over to the tour's address." "Open" on the row opens the tour's link, which asks for an email address.
+- [ ] "Sharing…" again, remove a chip and choose "Only me": "Save" sends at once, without a question; the row shows "Only me". Choose "Only people I choose" with an empty list and save: the row shows "Nobody yet".
+- [ ] "Sharing…" again, choose "Anyone with the link" and "Save": "Let anyone with the link view \"<title>\"?", "Nobody will be asked to sign in any more. Anyone who has or gets the link can open it. Your list of people is kept in case you restrict it again.", "Keep it restricted" and "Make public". "Make public" moves the pictures as before, and the row shows "Anyone with the link"; "Sharing…" shows the list kept.
+- [ ] Restrict a tour with many steps and close the tab while the bar fills. Open the Tours page again at once and "Sharing…" on it: "Moving this tour's pictures stopped at <done> of <total>. Choose \"Keep it restricted\" to finish restricting it." with "Cancel" and "Keep it restricted", which finishes it. (Wait a minute or two and the site finishes it by itself: "Sharing…" then shows the options.) Do the same while making a tour public: "… \"Keep it restricted\" leaves it as it is now; \"Make public\" finishes making it public." with "Cancel", "Keep it restricted" (which cancels the move; the tour stays restricted) and "Make public" (which asks, then finishes it). Left for 15 minutes, the site cancels a move to public by itself and the box shows the tour restricted.
+- [ ] Open "Sharing…" in two tabs on the same tour; remove an address in one and save, then add another in the second and press "Save": it sends nothing and says "The tour changed while this was being saved. Press Save again.", showing the list as the first tab left it (the removed address stays removed). Close the box or stop the server while the bar fills: the box shows the stopped move alone, without "Something went wrong".
+- [ ] On a site whose mail is off (stop its mail settings, or use the scratch site with a tour restricted earlier on the test site's copy if you have one; else note it as held by the tests), a restricted tour's box, its "Make public" question and its stopped-move view each show the amber "This site cannot send mail, so once this tour is public it cannot be restricted again here."
+- [ ] A title and an address holding markup, quotes or right-to-left letters show as typed in the box, its question and its messages, never in bold, and a very long address wraps inside its chip.
+- [ ] At 380 pixels wide and at 320, the row's details line ends with " · <who can view>", the column itself is gone, and the box fits the screen and scrolls inside itself; in dark mode the selected option, the chips, the amber warnings and the bar are readable. With the keyboard alone: Tab reaches the selected option, the arrow keys change it, then the chips' ✕, the field, "Add", "Cancel" and "Save", and the focus never leaves the box.
 
 ## The Images page
 

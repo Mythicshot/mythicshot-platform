@@ -1,7 +1,7 @@
 // What the dashboard's scripts do when they run: the Tours page's document, the shared
 // /dash/dash.js and the page's /dash/tours.js are run in one fresh Node `vm` context
 // against a stand-in document built from the page's own HTML (test/pages-dom.ts), with a
-// stand-in address, clipboard, timer and fetch. The fetch either answers from the test or
+// stand-in address, clipboard, timer and fetch (the harness is test/node-tours-page.ts). The fetch either answers from the test or
 // is handed to the real app, as a browser on the app address would send it. Node only: the
 // Workers runtime runs no code from a string.
 //
@@ -10,220 +10,14 @@
 import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
-import { createApp } from "../src/app.ts";
 import { DASH_JS } from "../src/dash/script.ts";
-import { TOURS_HTML, TOURS_JS } from "../src/dash/tours.ts";
-import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
 import { fixtures, send, uploadTour, type Json } from "./bundle.ts";
-import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
+import { FakeElement } from "./pages-dom.ts";
+import { APP, CSRF, FIREFOX, NOW, day, MONTHS, shown, FAILED, TOO_MANY, EMPTY_TOUR, PUBLISH_BUSY, NOT_RELOADED, type Answer, checkTabs, openTours, answers, SIGNED_OUT, session, ME_ONE, meTwo, usage, T1, T2, T3, tour, MOCKUP_TOURS, toursAnswer, USED, standard, rows, controlsOf, byText, menuOf, menuItems, key, rowButtons, holding, browser } from "./node-tours-page.ts";
 import { SIZE_TABLE } from "./sizes.ts";
 
-const APP = "https://app.example.com";
-const CSRF = "c".repeat(64);
-const FIREFOX = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
-/** "Now" for the page: 19 November 2026, noon UTC. */
-const NOW = Date.UTC(2026, 10, 19, 12);
-const day = (y: number, m: number, d: number) => Date.UTC(y, m - 1, d, 12);
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-/** A date as the page writes it, in this process's time zone, with the page's "now" in 2026. */
-const shown = (ms: number) => {
-  const d = new Date(ms);
-  return `${d.getDate()} ${MONTHS[d.getMonth()]}${d.getFullYear() === 2026 ? "" : " " + d.getFullYear()}`;
-};
-
-const FAILED = "Something went wrong. Try again in a moment.";
-const TOO_MANY = "Too many requests. Wait a few minutes and try again.";
-// Proposed for the owner's approval (review follow-ups L4 and M1).
-const EMPTY_TOUR = "This tour has no steps, so it cannot be published.";
-const PUBLISH_BUSY = "This tour is being published. Try again when that is done.";
-const NOT_RELOADED = "The change was made, but the list could not be loaded again. Reload the page to see it.";
-
-type Answer = { status: number; json?: unknown } | "network";
-type Fetched = { method: string; path: string; headers: Record<string, string>; body: string | undefined; init: Record<string, unknown> };
-type Responder = (req: Fetched) => Answer | Promise<Answer>;
-type Clipboard = { writes: string[]; answer: "ok" | "refuse" | "throw" | "none" };
-
-type Tab = {
-  doc: FakeDocument;
-  fetched: Fetched[];
-  left: () => string | null;
-  $: (id: string) => FakeElement;
-  shows: () => string[];
-  settle: () => Promise<void>;
-  /** Runs every timer the script set, as if their time had passed. */
-  tick: () => void;
-  clipboard: Clipboard;
-  violations: string[];
-};
-
-const open: Tab[] = [];
-afterEach(() => {
-  for (const tab of open.splice(0)) expect(tab.violations, "the script used something it must not").toEqual([]);
-});
-
-/** Opens the Tours page at `origin` and runs its two scripts in order, as a browser does with two deferred scripts. */
-function openTours(respond: Responder, opts: { origin?: string; clipboard?: Clipboard["answer"] } = {}): Tab {
-  const doc = new FakeDocument(TOURS_HTML);
-  const origin = opts.origin ?? APP;
-  let left: string | null = null;
-  const fetched: Fetched[] = [];
-  const pending: Promise<unknown>[] = [];
-  const violations: string[] = [];
-  const timers: (() => void)[] = [];
-  const clipboard: Clipboard = { writes: [], answer: opts.clipboard ?? "ok" };
-
-  const location = {
-    get origin() {
-      return origin;
-    },
-    replace(path: string) {
-      left = path;
-    },
-  };
-  const fetch = (path: string, init: Record<string, unknown> = {}) => {
-    const req: Fetched = { method: String(init.method ?? "GET"), path, headers: { ...(init.headers as Record<string, string>) }, body: init.body as string | undefined, init };
-    fetched.push(req);
-    const p = Promise.resolve(respond(req)).then((a) => {
-      if (a === "network") throw new TypeError("Failed to fetch");
-      const body = a.json === undefined ? null : JSON.stringify(a.json);
-      return new Response(a.status === 204 ? null : body, { status: a.status, headers: { "content-type": "application/json" } });
-    });
-    pending.push(p.catch(() => {}));
-    return p;
-  };
-  const navigator = {
-    get clipboard() {
-      if (clipboard.answer === "none") return undefined;
-      return {
-        writeText(text: string) {
-          clipboard.writes.push(text);
-          if (clipboard.answer === "throw") throw new Error("not allowed");
-          return clipboard.answer === "ok" ? Promise.resolve() : Promise.reject(new Error("refused"));
-        },
-      };
-    },
-  };
-  const setTimeout = (fn: () => void) => {
-    timers.push(fn);
-    return timers.length;
-  };
-
-  const context: Record<string, unknown> = { document: doc, location, fetch, navigator, setTimeout };
-  for (const name of ["localStorage", "sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "window", "self", "top", "parent", "opener", "open", "postMessage", "setInterval", "console", "alert", "confirm", "prompt", "history"]) {
-    Object.defineProperty(context, name, {
-      get() {
-        violations.push(name);
-        throw new Error(`${name} is not for the dashboard's scripts`);
-      },
-    });
-  }
-  const ctx = vm.createContext(context);
-  vm.runInContext(`(function () { var Real = Date; Date = function (v) { return arguments.length === 0 ? new Real(${NOW}) : new Real(v); }; Date.now = function () { return ${NOW}; }; Date.prototype = Real.prototype; })();`, ctx);
-  vm.runInContext(DASH_JS, ctx, { filename: "dash.js" });
-  vm.runInContext(TOURS_JS, ctx, { filename: "tours.js" });
-
-  const tab: Tab = {
-    doc,
-    fetched,
-    left: () => left,
-    $: (id) => {
-      const el = doc.root.all().find((e) => e.id === id);
-      if (!el) throw new Error(`no #${id}`);
-      return el;
-    },
-    shows: () => visibleText(doc),
-    async settle() {
-      for (let i = 0; i < 30; i++) {
-        await Promise.race([Promise.all(pending), new Promise((r) => globalThis.setTimeout(r, 1))]);
-        await new Promise((r) => setImmediate(r));
-      }
-    },
-    tick: () => {
-      for (const fn of timers.splice(0)) fn();
-    },
-    clipboard,
-    violations,
-  };
-  open.push(tab);
-  return tab;
-}
-
-/** A responder from a table of "<METHOD> <path>" to answers (a list is answered in order, its last one repeated); anything else fails the test. */
-function answers(table: Record<string, Answer | Answer[]>): Responder {
-  const queues = new Map(Object.entries(table).map(([k, v]) => [k, Array.isArray(v) ? [...v] : [v]]));
-  return (req) => {
-    const q = queues.get(`${req.method} ${req.path}`);
-    if (!q || q.length === 0) throw new Error(`unexpected request ${req.method} ${req.path}`);
-    return q.length > 1 ? q.shift()! : q[0];
-  };
-}
-
-const SIGNED_OUT: Answer = { status: 401, json: { error: "unauthorized" } };
-const session = (account: Record<string, unknown> = {}, workspace = "Cowfee Raid Tools"): Answer => ({
-  status: 200,
-  json: { account: { id: "usr_1", username: "solex", email: "solex@example.com", admin: false, ...account }, workspace: { id: "ws_1", name: workspace }, session: { id: "ses_1", created_at: NOW, expires_at: NOW }, csrf: CSRF },
-});
-const ME_ONE: Answer = { status: 200, json: { workspace: "Cowfee Raid Tools", version: "0.1.12" } };
-const meTwo = (tours: string): Answer => ({ status: 200, json: { workspace: "Cowfee Raid Tools", version: "0.1.12", addresses: { tours, app: "app.example.com" } } });
-const usage = (used: number): Answer => ({ status: 200, json: { used_bytes: used, allowance_bytes: null, over: false, tours: 3, counted: { pictures: used, logos: 0, uploads_in_progress: 0 } } });
-
-const T1 = "tour_" + "1".repeat(24);
-const T2 = "tour_" + "2".repeat(24);
-const T3 = "tour_" + "3".repeat(24);
-const tour = (id: string, over: Record<string, unknown>) => ({
-  id,
-  title: "A tour",
-  status: "published",
-  slug: "k3f9abcdef",
-  url: "/t/k3f9abcdef",
-  chapters: 1,
-  steps: 14,
-  bytes: 6_396_313,
-  updated_at: day(2026, 11, 19),
-  published_at: day(2026, 11, 19),
-  unpublished_changes: false,
-  ...over,
-});
-/** The three tours of mockup 1. */
-const MOCKUP_TOURS = [
-  tour(T1, { title: "Timeline rehearsal walkthrough", slug: "k3f9abcdef", url: "/t/k3f9abcdef", steps: 14, bytes: 6_396_313, updated_at: day(2026, 11, 19) }),
-  tour(T2, { title: "Loot master setup", slug: "p71cabcdef", url: "/t/p71cabcdef", steps: 9, bytes: 2_726_298, updated_at: day(2026, 11, 18), unpublished_changes: true }),
-  tour(T3, { title: "Note send rehearsal", status: "draft", slug: "q2zzabcdef", url: null, steps: 6, bytes: 1_992_294, updated_at: day(2026, 11, 17), published_at: null }),
-];
-const toursAnswer = (tours: unknown[]): Answer => ({ status: 200, json: { tours } });
-const USED = 9_122_611; // 8.7 MB
-
-/** The standard page: signed in, the mockup's tours, one-address mode. */
-function standard(extra: Record<string, Answer | Answer[]> = {}): Responder {
-  return answers({ "GET /api/v1/session": session(), "GET /api/v1/me": ME_ONE, "GET /api/v1/tours": toursAnswer(MOCKUP_TOURS), "GET /api/v1/usage": usage(USED), ...extra });
-}
-
-/** The rows of the list. */
-const rows = (tab: Tab) => tab.$("tours-rows").children.filter((c): c is FakeElement => c instanceof FakeElement);
-/** The controls a person can use in a row, by their words: buttons and links shown. */
-const controlsOf = (row: FakeElement) => row.all().filter((e) => (e.tagName === "button" || e.tagName === "a") && e.shown && e.getAttribute("role") !== "menuitem");
-const byText = (row: FakeElement, text: string) => {
-  const found = row.all().find((e) => (e.tagName === "button" || e.tagName === "a") && e.textContent === text);
-  if (!found) throw new Error(`no "${text}" in the row`);
-  return found;
-};
-const menuOf = (row: FakeElement) => row.all().find((e) => e.getAttribute("role") === "menu")!;
-const menuItems = (row: FakeElement) => menuOf(row).all().filter((e) => e.getAttribute("role") === "menuitem");
-const key = (el: FakeElement, k: string, shiftKey = false) => el.dispatch("keydown", { key: k, shiftKey });
-/** Every button of every row, menus included. */
-const rowButtons = (tab: Tab) => rows(tab).flatMap((row) => row.all().filter((e) => e.tagName === "button"));
-
-/** A responder whose answers to requests matching `held` wait until the test hands them over; the rest go to `rest`. */
-function holding(held: (req: Fetched) => boolean, rest: Responder): { respond: Responder; answer: (a: Answer) => void } {
-  const waiting: ((a: Answer) => void)[] = [];
-  return {
-    respond: (req) => (held(req) ? new Promise<Answer>((r) => waiting.push(r)) : rest(req)),
-    answer: (a) => {
-      for (const r of waiting.splice(0)) r(a);
-    },
-  };
-}
+afterEach(checkTabs);
 
 describe("the shared script", () => {
   it("sends a visitor who is not signed in to /signin and asks nothing else", async () => {
@@ -328,28 +122,30 @@ describe("the Tours page", () => {
     expect(r.map((row) => row.all().find((e) => e.className === "t")!.textContent)).toEqual(["Timeline rehearsal walkthrough", "Loot master setup", "Note send rehearsal"]);
     const cells = (row: FakeElement) => row.children.filter((c): c is FakeElement => c instanceof FakeElement);
     const summary = (row: FakeElement) => {
-      const [what, status, size, when] = cells(row);
+      const [what, status, view, size, when] = cells(row);
       const d = what.all().find((e) => e.className === "d")!;
       return {
         wide: d.children.filter((c): c is FakeElement => c instanceof FakeElement && c.className !== "narrow-only").map((c) => c.textContent).join(""),
         narrow: d.children.filter((c): c is FakeElement => c instanceof FakeElement && c.className !== "wide-only").map((c) => c.textContent).join(""),
         tags: status.all().map((t) => [t.className, t.textContent]),
+        view: view.all().map((t) => [t.className, t.textContent]),
         size: size.textContent,
         when: when.textContent,
         controls: controlsOf(row).map((c) => c.textContent),
       };
     };
     expect(r.map(summary)).toEqual([
-      { wide: "14 steps · app.example.com/t/k3f9…", narrow: `14 steps · 6.1 MB · ${shown(day(2026, 11, 19))}`, tags: [["tag ok", "Published"]], size: "6.1 MB", when: shown(day(2026, 11, 19)), controls: ["Copy link", "Open", "More"] },
+      { wide: "14 steps · app.example.com/t/k3f9…", narrow: `14 steps · 6.1 MB · ${shown(day(2026, 11, 19))} · Anyone with the link`, tags: [["tag ok", "Published"]], view: [["", "Anyone with the link"]], size: "6.1 MB", when: shown(day(2026, 11, 19)), controls: ["Copy link", "Open", "More"] },
       {
         wide: "9 steps · app.example.com/t/p71c…",
-        narrow: `9 steps · 2.6 MB · ${shown(day(2026, 11, 18))}`,
+        narrow: `9 steps · 2.6 MB · ${shown(day(2026, 11, 18))} · 4 people`,
         tags: [["tag ok", "Published"], ["tag warn", "Changes waiting"]],
+        view: [["tag warn", "4 people"]],
         size: "2.6 MB",
         when: shown(day(2026, 11, 18)),
         controls: ["Copy link", "Open", "More"],
       },
-      { wide: "6 steps · no public link", narrow: `6 steps · 1.9 MB · ${shown(day(2026, 11, 17))}`, tags: [["tag", "Not published"]], size: "1.9 MB", when: shown(day(2026, 11, 17)), controls: ["Publish", "More"] },
+      { wide: "6 steps · no public link", narrow: `6 steps · 1.9 MB · ${shown(day(2026, 11, 17))}`, tags: [["tag", "Not published"]], view: [["", "—"]], size: "1.9 MB", when: shown(day(2026, 11, 17)), controls: ["Publish", "More"] },
     ]);
     expect(shown(day(2026, 11, 19))).toBe("19 Nov");
     // The full link is in the shortened text's title; a tour without a link has none.
@@ -470,7 +266,7 @@ describe("the Tours page", () => {
     const tab = openTours(standard());
     await tab.settle();
     const r = rows(tab);
-    expect(r.map((row) => menuItems(row).map((m) => m.textContent))).toEqual([["Unpublish", "Delete"], ["Publish changes", "Unpublish", "Delete"], ["Delete"]]);
+    expect(r.map((row) => menuItems(row).map((m) => m.textContent))).toEqual([["Sharing…", "Unpublish", "Delete"], ["Sharing…", "Publish changes", "Unpublish", "Delete"], ["Delete"]]);
     const row = r[1];
     const more = byText(row, "More");
     expect([more.getAttribute("aria-haspopup"), more.getAttribute("aria-expanded"), more.getAttribute("aria-controls")]).toEqual(["true", "false", "menu-1"]);
@@ -487,21 +283,21 @@ describe("the Tours page", () => {
     expect(tab.doc.activeElement).toBe(items[1]);
     key(items[1], "ArrowUp");
     key(items[0], "ArrowUp");
-    expect(tab.doc.activeElement).toBe(items[2]);
-    key(items[2], "Home");
+    expect(tab.doc.activeElement).toBe(items[3]);
+    key(items[3], "Home");
     expect(tab.doc.activeElement).toBe(items[0]);
     key(items[0], "End");
-    expect(tab.doc.activeElement).toBe(items[2]);
+    expect(tab.doc.activeElement).toBe(items[3]);
     // Escape closes it and gives the focus back to More.
-    key(items[2], "Escape");
+    key(items[3], "Escape");
     expect(menuOf(row).hidden).toBe(true);
     expect(more.getAttribute("aria-expanded")).toBe("false");
     expect(tab.doc.activeElement).toBe(more);
     // ArrowDown on More opens it too, ArrowUp at the last entry.
     key(more, "ArrowUp");
-    expect(tab.doc.activeElement).toBe(items[2]);
+    expect(tab.doc.activeElement).toBe(items[3]);
     // Tab leaves it closed.
-    key(items[2], "Tab");
+    key(items[3], "Tab");
     expect(menuOf(row).hidden).toBe(true);
     key(more, "ArrowDown");
     expect(tab.doc.activeElement).toBe(items[0]);
@@ -529,7 +325,7 @@ describe("the Tours page", () => {
     await tab.settle();
     const more = byText(rows(tab)[0], "More");
     more.click();
-    menuItems(rows(tab)[0])[0].click();
+    menuItems(rows(tab)[0])[1].click();
     expect(tab.$("delete-dialog").hidden).toBe(true);
     expect(more.textContent).toBe("Unpublishing…");
     expect(more.disabled).toBe(true);
@@ -574,7 +370,7 @@ describe("the Tours page", () => {
     expect(tab.doc.activeElement).toBe(byText(rows(tab)[2], "Copy link"));
 
     byText(rows(tab)[1], "More").click();
-    menuItems(rows(tab)[1])[0].click();
+    menuItems(rows(tab)[1])[1].click();
     await tab.settle();
     expect(tab.fetched.filter((f) => f.method === "POST").at(-1)!.path).toBe(`/api/v1/tours/${T2}/publish`);
   });
@@ -611,7 +407,7 @@ describe("the Tours page", () => {
     const out = openTours(standard({ ["POST /api/v1/tours/" + T1 + "/unpublish"]: SIGNED_OUT }));
     await out.settle();
     byText(rows(out)[0], "More").click();
-    menuItems(rows(out)[0])[0].click();
+    menuItems(rows(out)[0])[1].click();
     await out.settle();
     expect(out.left()).toBe("/signin");
   });
@@ -629,7 +425,7 @@ describe("the Tours page", () => {
       const tab = openTours(standard({ [`POST /api/v1/tours/${T1}/unpublish`]: answer, "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), toursAnswer(after)] }));
       await tab.settle();
       byText(rows(tab)[0], "More").click();
-      menuItems(rows(tab)[0])[0].click();
+      menuItems(rows(tab)[0])[1].click();
       await tab.settle();
       expect(tab.$("tours-message").textContent, what).toBe(text);
       expect(tab.$("tours-message").hidden, what).toBe(text === "");
@@ -647,7 +443,7 @@ describe("the Tours page", () => {
       await tab.settle();
       const more = byText(rows(tab)[0], "More");
       more.click();
-      menuItems(rows(tab)[0])[0].click();
+      menuItems(rows(tab)[0])[1].click();
       await tab.settle();
       expect(tab.$("tours-message").textContent, what).toBe(NOT_RELOADED);
       expect(tab.$("tours-message").hidden, what).toBe(false);
@@ -660,7 +456,7 @@ describe("the Tours page", () => {
     const del = openTours(standard({ [`DELETE /api/v1/tours/${T2}`]: { status: 200, json: { deleted: true } }, "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), { status: 500, json: { error: "internal" } }] }));
     await del.settle();
     byText(rows(del)[1], "More").click();
-    menuItems(rows(del)[1])[2].click();
+    menuItems(rows(del)[1])[3].click();
     del.$("delete-go").click();
     await del.settle();
     expect(del.$("delete-dialog").hidden).toBe(true);
@@ -675,7 +471,7 @@ describe("the Tours page", () => {
     const tab = openTours(held.respond);
     await tab.settle();
     byText(rows(tab)[0], "More").click();
-    menuItems(rows(tab)[0])[0].click();
+    menuItems(rows(tab)[0])[1].click();
     await tab.settle();
     const buttons = rowButtons(tab).filter((b) => b.getAttribute("role") !== "menuitem");
     expect(buttons.map((b) => [b.textContent, b.disabled])).toEqual([
@@ -702,7 +498,7 @@ describe("the Tours page", () => {
     const tab = openTours(held.respond);
     await tab.settle();
     byText(rows(tab)[0], "More").click();
-    menuItems(rows(tab)[0])[1].click();
+    menuItems(rows(tab)[0])[2].click();
     tab.$("delete-go").click();
     tab.$("delete-go").click();
     tab.$("delete-go").dispatch("click");
@@ -722,7 +518,7 @@ describe("the Tours page", () => {
     const row = rows(tab)[1];
     const more = byText(row, "More");
     more.click();
-    menuItems(row)[2].click();
+    menuItems(row)[3].click();
     const dialog = tab.$("delete-dialog");
     expect(dialog.hidden).toBe(false);
     expect(tab.$("delete-title").textContent).toBe('Delete "Loot master setup"?');
@@ -746,7 +542,7 @@ describe("the Tours page", () => {
     expect(tab.doc.activeElement).toBe(more);
     // So does Escape.
     more.click();
-    menuItems(row)[2].click();
+    menuItems(row)[3].click();
     expect(dialog.hidden).toBe(false);
     key(tab.$("delete-keep"), "Escape");
     expect(dialog.hidden).toBe(true);
@@ -765,7 +561,7 @@ describe("the Tours page", () => {
     );
     await tab.settle();
     byText(rows(tab)[1], "More").click();
-    menuItems(rows(tab)[1])[2].click();
+    menuItems(rows(tab)[1])[3].click();
     const go = tab.$("delete-go");
     go.click();
     expect([go.textContent, go.disabled, tab.$("delete-keep").disabled]).toEqual(["Deleting…", true, true]);
@@ -793,7 +589,7 @@ describe("the Tours page", () => {
     const tab = openTours(standard({ [`DELETE /api/v1/tours/${T1}`]: { status: 500, json: { error: "cleanup_pending" } }, "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), toursAnswer(MOCKUP_TOURS.slice(1))] }));
     await tab.settle();
     byText(rows(tab)[0], "More").click();
-    menuItems(rows(tab)[0])[1].click();
+    menuItems(rows(tab)[0])[2].click();
     tab.$("delete-go").click();
     await tab.settle();
     expect(tab.$("delete-dialog").hidden).toBe(true);
@@ -814,7 +610,7 @@ describe("the Tours page", () => {
       const tab = openTours(standard({ [`DELETE /api/v1/tours/${T1}`]: [answer, { status: 404, json: { error: "not_found" } }], "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), toursAnswer(MOCKUP_TOURS), toursAnswer(MOCKUP_TOURS.slice(1))] }));
       await tab.settle();
       byText(rows(tab)[0], "More").click();
-      menuItems(rows(tab)[0])[1].click();
+      menuItems(rows(tab)[0])[2].click();
       tab.$("delete-go").click();
       await tab.settle();
       expect(tab.$("delete-dialog").hidden, what).toBe(false);
@@ -834,7 +630,7 @@ describe("the Tours page", () => {
     const kept = openTours(standard({ [`DELETE /api/v1/tours/${T1}`]: { status: 500, json: { error: "internal" } } }));
     await kept.settle();
     byText(rows(kept)[0], "More").click();
-    menuItems(rows(kept)[0])[1].click();
+    menuItems(rows(kept)[0])[2].click();
     kept.$("delete-go").click();
     await kept.settle();
     kept.$("delete-keep").click();
@@ -849,7 +645,7 @@ describe("the Tours page", () => {
     for (const id of behind) expect([tab.$(id).hasAttribute("inert"), tab.$(id).hasAttribute("aria-hidden")], id).toEqual([false, false]);
     const openIt = () => {
       byText(rows(tab)[1], "More").click();
-      menuItems(rows(tab)[1])[2].click();
+      menuItems(rows(tab)[1])[3].click();
       expect(tab.$("delete-dialog").hidden).toBe(false);
     };
     openIt();
@@ -907,18 +703,6 @@ describe("the Tours page", () => {
 
 // ---- Against the real app ----
 
-/** A tab whose fetch goes to the real app on the app address, as a browser sends it there, with a session cookie. */
-function browser(deps: Deps, cookie: string) {
-  const app = createApp(deps);
-  return async (req: Fetched): Promise<Answer> => {
-    const headers: Record<string, string> = { ...req.headers, "user-agent": FIREFOX, cookie };
-    if (req.method !== "GET" && req.method !== "HEAD") Object.assign(headers, { origin: APP, "sec-fetch-site": "same-origin" });
-    const res = await app.fetch(new Request(APP + req.path, { method: req.method, headers, body: req.body }));
-    const text = await res.text();
-    return { status: res.status, json: text === "" ? undefined : JSON.parse(text) };
-  };
-}
-
 describe("the Tours page against the real app", () => {
   it("lists a published tour with its link on the tours address, unpublishes, publishes and deletes it through the API", async () => {
     const { deps } = await makeDeps({ hosts: { tours: "tours.example.com", app: "app.example.com" }, retiredGraceMs: 0 });
@@ -949,7 +733,7 @@ describe("the Tours page against the real app", () => {
 
     // Unpublish, through the real API with the real anti-forgery check.
     byText(row, "More").click();
-    menuItems(row)[0].click();
+    menuItems(row)[1].click();
     await tab.settle();
     expect(tab.$("tours-message").textContent).toBe("");
     expect(controlsOf(rows(tab)[0]).map((c) => c.textContent)).toEqual(["Publish", "More"]);

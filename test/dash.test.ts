@@ -81,15 +81,36 @@ const TOURS_WORDING = [
   "Tours",
   "Tour",
   "Status",
+  "Who can view",
   "Size",
   "Changed",
   "Actions",
   "No tours yet",
   "Record a tour in Mythicshot and choose Publish. It shows up here with a link to share.",
-  '"Changes waiting" means Mythicshot uploaded a newer version that visitors do not see yet. "More" holds: Publish changes, Unpublish, Delete.',
+  '"Changes waiting" means Mythicshot uploaded a newer version that visitors do not see yet. "More" holds: Sharing, Publish changes, Unpublish, Delete.',
+  // Proposed for the owner's approval (Plan 2h, task 4): the line under the table when a tour is restricted.
+  "Opening a restricted tour asks you for your email address too: the dashboard's sign-in does not carry over to the tour's address.",
   "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.",
   "Keep it",
   "Delete tour",
+  // The Sharing box, the restricted tours set's mockups 2 and 3.
+  "Who can view",
+  "Anyone with the link",
+  "No sign-in. Fastest for viewers.",
+  "Only people I choose",
+  "They prove their email address with a link we send them.",
+  "Only me",
+  'This site cannot send mail, so only "Anyone with the link" can be chosen here.',
+  "Add",
+  "You can always view your own tours. People on the list are not told they were added: send them the link yourself.",
+  "Anyone who already opened this tour may still have its pictures in their browser. Restricting cannot take those back.",
+  // Proposed: for a tour that is restricted already on a site that cannot mail.
+  "This site cannot send mail, so once this tour is public it cannot be restricted again here.",
+  "Cancel",
+  "Save",
+  "Cancel",
+  "Keep it restricted",
+  "Make public",
 ];
 
 /** Every text the shared script puts on a page. */
@@ -131,6 +152,53 @@ const TOURS_TEXT: Record<string, string> = {
   emptyTour: "This tour has no steps, so it cannot be published.",
   publishBusy: "This tour is being published. Try again when that is done.",
   notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
+  // Who can view a tour: the mockups' words, and (marked) those proposed for the owner's approval.
+  anyone: "Anyone with the link",
+  onePerson: "1 person",
+  people: " people",
+  nobody: "Nobody yet", // proposed
+  onlyMe: "Only me",
+  noSetting: "—",
+  sharing: "Sharing…",
+  shareBefore: 'Who can view "',
+  meBefore: "You prove your own address, ",
+  meAfter: ", the same way.",
+  countBefore: "People who can view · ",
+  of: " of ",
+  removeBefore: "Remove ",
+  removeMark: "✕",
+  quote: '"',
+  notEmailAfter: '" does not look like an email address. Nothing was added.',
+  fullBefore: "The list is full at ",
+  fullAfter: " people. Remove someone first.",
+  wouldBefore: "That would make ", // proposed, with the next two
+  wouldMiddle: " people, and the list holds ",
+  wouldAfter: ". Nothing was added.",
+  saving: "Saving…",
+  restrictBefore: 'Restrict "',
+  restrictPeople: "From now on only the people you chose can open the link. The link itself stays the same.",
+  restrictMe: "From now on only you can open the link. The link itself stays the same.", // proposed
+  keepPublic: "Keep it public",
+  restrictTour: "Restrict tour",
+  publicBefore: 'Let anyone with the link view "',
+  publicText: "Nobody will be asked to sign in any more. Anyone who has or gets the link can open it. Your list of people is kept in case you restrict it again.",
+  keepRestricted: "Keep it restricted",
+  makePublic: "Make public",
+  movingBefore: "Moving the pictures, ",
+  movingAfter: ". Keep this page open.",
+  // Proposed, to the end: a move that stopped, and each refusal in plain words.
+  stoppedBefore: "Moving this tour's pictures stopped at ",
+  resumeBoth: '. "Keep it restricted" leaves it as it is now; "Make public" finishes making it public.',
+  resumeRestrict: '. Choose "Keep it restricted" to finish restricting it.',
+  cannotRestrict: "This site cannot send mail, so this tour cannot be restricted. Nothing was changed.",
+  switching: "This tour's pictures are still being moved. Open Sharing again to finish that first.",
+  cancelled: "The tour was unpublished or deleted while its pictures were being moved, so the change did not finish.",
+  busyAgain: "The tour changed while this was being saved. Press Save again.",
+  changedMove: "This tour changed meanwhile. It is shown as it is now: choose again.",
+  republish: "This tour's pictures could not be moved. Unpublish it, publish it again from Mythicshot, then set who can view it.",
+  badViewerAfter: '" is not accepted as an email address. Remove it and press Save again.',
+  tooManyBefore: "The list holds at most ",
+  tooManyAfter: " people. Remove some and press Save again.",
 };
 
 /** The strings with a space in the scripts that are not words for a person: class names and a link's rel. */
@@ -285,8 +353,15 @@ describe("the dashboard's pages and files", () => {
     const doc = new FakeDocument(TOURS_HTML);
     expect(textNodes(doc.body)).toEqual(TOURS_WORDING);
     expect(textNodes(doc.head)).toEqual(["Tours"]);
-    // No other words hide in attributes a person can meet.
-    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt", "placeholder"]) expect(e.hasAttribute(name), `<${e.tagName} ${name}>`).toBe(false);
+    // No other words hide in attributes a person can meet. The one exception is the Sharing
+    // box's address field, whose placeholder is mockup 2's example address, exactly.
+    for (const e of doc.body.all()) {
+      for (const name of ["aria-label", "title", "alt", "placeholder"]) {
+        const allowed = e.id === "share-input" && name === "placeholder" && e.getAttribute(name) === "name@example.com";
+        expect(e.hasAttribute(name) && !allowed, `<${e.tagName} ${name}>`).toBe(false);
+      }
+    }
+    expect(doc.getElementById("share-input")!.getAttribute("placeholder")).toBe("name@example.com");
     // The scripts' own words are exactly these, and they have no other sentence.
     expect(scriptText(DASH_JS)).toEqual(DASH_TEXT);
     expect(scriptText(TOURS_JS)).toEqual(TOURS_TEXT);
@@ -405,6 +480,11 @@ describe("the dashboard's pages and files", () => {
     expect(requests.sort()).toEqual(['GET "/api/v1/me"', 'GET "/api/v1/session"', 'GET "/api/v1/tours"', 'GET "/api/v1/usage"'].sort());
     expect(TOURS_JS).toContain('var path = "/api/v1/tours/" + encodeURIComponent(id) + (kind === "delete" ? "" : "/" + kind);');
     expect(TOURS_JS).toContain("return Dash.api(method, path, body)");
+    // Who can view: one path, built only from an id of the API's shape, escaped; read with GET and
+    // changed with PUT and a JSON body, never with anything in the address.
+    expect(TOURS_JS).toContain('if (typeof id !== "string" || !TOUR_ID.test(id)) throw new TypeError("id");\n    return "/api/v1/tours/" + encodeURIComponent(id) + "/access";');
+    expect([...TOURS_JS.matchAll(/Dash\.api\(([^)]*)\)/g)].map((m) => m[1]).sort()).toEqual(['"GET", "/api/v1/me"', '"GET", "/api/v1/tours"', '"GET", "/api/v1/usage"', '"GET", accessPath(id', '"PUT", path, body', "method, path, body"].sort());
+    expect(TOURS_JS.match(/accessPath\(/g)).toHaveLength(3);
     // Nothing is stored, no cookie is touched, and leaving a page goes only to /signin.
     const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location.href", "location.hash", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer"];
     for (const js of SCRIPTS) for (const api of forbidden) expect(js, api).not.toContain(api);
@@ -413,8 +493,11 @@ describe("the dashboard's pages and files", () => {
     expect(DASH_JS + TOURS_JS).not.toMatch(/\blocation\s*=(?!=)/);
     const uses = [...(DASH_JS + TOURS_JS).matchAll(/\blocation\b\s*(\.\s*[a-zA-Z]+)?/g)].map((m) => (m[1] ?? "").replace(/\s/g, ""));
     expect(new Set(uses)).toEqual(new Set([".replace", ".origin"]));
-    // The one timer is the moment "Copied" shows; the one browser API beyond the page is the clipboard.
-    expect(TOURS_JS.match(/setTimeout\(/g)).toHaveLength(1);
+    // The timers are the moment "Copied" shows and the Sharing box's pauses (between the sends
+    // of a move, and before its warning's button works); the one browser API beyond the page is
+    // the clipboard, and the one window event the page listens to is pagehide.
+    expect(TOURS_JS.match(/setTimeout\(/g)).toHaveLength(2);
+    expect([...TOURS_JS.matchAll(/(?<![.\w])addEventListener\("([a-z]+)"/g)].map((m) => m[1])).toEqual(["pagehide"]);
     expect(DASH_JS).not.toContain("setTimeout(");
     expect([...TOURS_JS.matchAll(/navigator\.[a-zA-Z]+/g)].map((m) => m[0])).toEqual(["navigator.clipboard", "navigator.clipboard", "navigator.clipboard"]);
   });
@@ -464,7 +547,7 @@ describe("the dashboard's pages and files", () => {
       for (const m of messages.filter((e) => e.id !== "dash-load")) expect(m.hidden, `${s.path} #${m.id}`).toBe(true);
       for (const h of all.filter((e) => e.tagName === "h1" || e.tagName === "h2")) expect(h.getAttribute("tabindex"), `${s.path} #${h.id}`).toBe("-1");
     }
-    expect(new FakeDocument(TOURS_HTML).root.all().filter((e) => /\bmessage\b/.test(e.className) && e.parent?.tagName !== "noscript").map((m) => m.id).sort()).toEqual(["delete-message", "tours-message"]);
+    expect(new FakeDocument(TOURS_HTML).root.all().filter((e) => /\bmessage\b/.test(e.className) && e.parent?.tagName !== "noscript").map((m) => m.id).sort()).toEqual(["delete-message", "share-add-message", "share-message", "tours-message"]);
     expect(DASH_CSS).not.toMatch(/\.message \{[^}]*min-height/);
     // The last column's header has a name a screen reader reads and the eye does not see.
     expect(DASH_CSS).toMatch(/\.vh \{[^}]*position: absolute;[^}]*clip: rect\(0 0 0 0\);/);
