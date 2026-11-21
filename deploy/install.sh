@@ -1517,11 +1517,19 @@ install_stack_files() {
 check_rendered_addresses() {
   local staged="$1" only="${2:-}" want="|" got
   [ -z "$APP_DOMAIN" ] || want="$DOMAIN|$APP_DOMAIN"
-  # update asks without a word, so that it prints what it printed before 0.1.50.
-  [ "$only" = img-only ]     || info "asking Docker Compose how it fills in the new stack file's two address settings (what it prints is read here and not shown)"
-  got="$(with_trial_token docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged" config 2>/dev/null | rendered_app_hosts img)" || got=""
-  if [ -z "$got" ] || { [ "$only" != img-only ] && [ "${got%|*}" != "$want" ]; }; then
-    die "This version of Docker Compose does not read the two-address settings in the stack file the way this script expects, so nothing was changed. Update Docker Compose and run install again."
+  if [ "$only" = img-only ]; then
+    # update asks without a word, and needs only the app's IMG_HOST from the rendering:
+    # a stack file from before two addresses has no TOURS_HOST or APP_HOST. pipefail
+    # makes a failed rendering fail the whole pipe, so got is empty only then.
+    got="$(docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged" config 2>/dev/null | rendered_app_hosts img-only)" || got=""
+    [ -n "$got" ] \
+      || die "Docker Compose could not be asked which IMG_HOST it gives the app (docker compose config failed), so update did not start anything. See why with: ${DC[*]} config --quiet"
+  else
+    info "asking Docker Compose how it fills in the new stack file's two address settings (what it prints is read here and not shown)"
+    got="$(with_trial_token docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged" config 2>/dev/null | rendered_app_hosts img)" || got=""
+    if [ -z "$got" ] || [ "${got%|*}" != "$want" ]; then
+      die "This version of Docker Compose does not read the two-address settings in the stack file the way this script expects, so nothing was changed. Update Docker Compose and run install again."
+    fi
   fi
   [ "${got##*|}" = "$IMG_HOST" ] \
     || die "Docker Compose hands the app another IMG_HOST than install.sh reads in .env, so nothing was changed. Write the line exactly as IMG_HOST=<name>, at the start of the line, without export, spaces or quotes (or remove it), and run install again."
@@ -1532,7 +1540,8 @@ check_rendered_addresses() {
 # each is under services, app, environment exactly once. A setting without a value is
 # not an empty one. No other part of what is read is passed on. With "img" it adds the
 # app's IMG_HOST as a third field, "<TOURS_HOST>|<APP_HOST>|<IMG_HOST>": empty when it is
-# absent or empty, "(no value)" or "(twice)" when it cannot be a name.
+# absent or empty, "(no value)" or "(twice)" when it cannot be a name. With "img-only" it
+# prints "|<IMG_HOST>" alone, whether the two others are there or not.
 rendered_app_hosts() {
   awk -v sq="'" -v img="${1:-}" '
     { sub(/\r$/, "") }
@@ -1548,11 +1557,12 @@ rendered_app_hosts() {
       seen[key]++; value[key] = val
     }
     END {
-      if (seen["TOURS_HOST"] != 1 || seen["APP_HOST"] != 1) exit
-      if (img != "img") { printf "%s|%s\n", value["TOURS_HOST"], value["APP_HOST"]; exit }
       i = ""
       if (seen["IMG_HOST"] > 1) i = "(twice)"
       else if (seen["IMG_HOST"] == 1) i = value["IMG_HOST"]
+      if (img == "img-only") { printf "|%s\n", i; exit }
+      if (seen["TOURS_HOST"] != 1 || seen["APP_HOST"] != 1) exit
+      if (img != "img") { printf "%s|%s\n", value["TOURS_HOST"], value["APP_HOST"]; exit }
       printf "%s|%s|%s\n", value["TOURS_HOST"], value["APP_HOST"], i
     }
   '
@@ -1970,21 +1980,25 @@ cmd_update() {
   fi
   local found_img
   found_img="$(caddyfile_img_name)"
-  if [ "$found_img" != "$IMG_HOST" ]; then
-    if [ -n "$IMG_HOST" ]; then
-      die "$ENV_FILE holds IMG_HOST=$IMG_HOST, but the Caddyfile here does not answer for that name, and update does not rewrite it. Nothing was changed. Run: sudo bash $SELF install"
-    fi
-    # Also a name the owner added to the Caddyfile by hand: install would replace that
-    # edit, so the message says so before anyone runs it.
-    die "$ENV_FILE holds no IMG_HOST, but the Caddyfile here answers for a third name, $found_img, and update does not rewrite it. Nothing was changed. If that name was added to the Caddyfile by hand, install writes the Caddyfile for the addresses in .env and so replaces that edit (it keeps the edited file as a .bak copy); to keep the name as the img address, add IMG_HOST=$found_img to .env first. Then run: sudo bash $SELF install"
+  if [ "$found_img" != "$IMG_HOST" ] && [ -n "$IMG_HOST" ]; then
+    die "$ENV_FILE holds IMG_HOST=$IMG_HOST, but the Caddyfile here does not answer for that name, and update does not rewrite it. Nothing was changed. Run: sudo bash $SELF install"
+  elif [ "$found_img" != "$IMG_HOST" ]; then
+    # A third name without IMG_HOST (added by hand, or left after the line was removed)
+    # does no harm: the app answers 421 for a name it does not serve. Said, and update
+    # goes on, as it did before 0.1.50.
+    warn "the Caddyfile here answers for a third name, $found_img, that $LOGICAL_INSTALL_DIR/.env does not hold as IMG_HOST. Run: sudo bash $SELF install"
   fi
   refuse_snap
   check_docker_ready
   # A hand-written IMG_HOST line that read_env_file does not take but Compose does would
   # give the app a third address the Caddyfile does not answer for: checked here too,
   # since update writes no file and starts the stack as it is.
-  # A dry run asks nothing, as install's does not.
-  [ "$DRY_RUN" = 1 ] || check_rendered_addresses "$COMPOSE_FILE" img-only
+  # Only when .env has anything to do with IMG_HOST, so that an install without a word
+  # of it updates exactly as before 0.1.50, without asking Compose. A dry run asks
+  # nothing, as install's does not.
+  if [ "$DRY_RUN" = 0 ] && { [ -n "$IMG_HOST" ] || grep -q 'IMG_HOST' "$ENV_FILE"; }; then
+    check_rendered_addresses "$COMPOSE_FILE" img-only
+  fi
   take_lock
   local digests
   digests="$(docker image inspect --format '{{len .RepoDigests}}' "$IMAGE" 2>/dev/null || true)"
