@@ -279,7 +279,9 @@ export function tourRoutes(app: Hono, deps: Deps): void {
     // A snapshot that is not JSON (the page answers 404 for it) is left as it is.
     await deps.db.batch([
       { sql: "UPDATE tour SET title = ?, updated_at = ? WHERE id = ? AND workspace_id = ?", params: [parsed.title, deps.now(), id, ws] },
-      { sql: `UPDATE snapshot SET data = json_set(data, '$.title', ?) WHERE tour_id IN (${owned}) AND json_valid(data)`, params: [parsed.title, id, ws] },
+      // A restricted tour's text is in private_data; its data is the stub, which holds no title and keeps none.
+      { sql: `UPDATE snapshot SET data = json_set(data, '$.title', ?) WHERE tour_id IN (${owned}) AND private_data IS NULL AND json_valid(data)`, params: [parsed.title, id, ws] },
+      { sql: `UPDATE snapshot SET private_data = json_set(private_data, '$.title', ?) WHERE tour_id IN (${owned}) AND json_valid(private_data)`, params: [parsed.title, id, ws] },
       { sql: `UPDATE publish_job SET data = json_set(data, '$.title', ?) WHERE tour_id IN (${owned}) AND json_valid(data)`, params: [parsed.title, id, ws] },
     ]);
     const row = await deps.db.first<{ id: string; title: string }>("SELECT id, title FROM tour WHERE id = ? AND workspace_id = ?", [id, ws]);

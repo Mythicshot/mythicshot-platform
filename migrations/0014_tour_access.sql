@@ -4,9 +4,14 @@
 -- this migration stay valid and every existing tour stays exactly as it was, public.
 -- Nothing is dropped, renamed or rebuilt.
 --
--- A build older than this one does not know the setting: run against a database where a
--- tour has been made restricted, it would show that tour's page to anyone. Do not go back
--- to an older build once a tour is restricted (CHANGELOG.md, 0.1.36).
+-- A build older than this one does not know the setting. So that it serves nothing of a
+-- restricted tour even so, a restricted tour's snapshot keeps its real text in
+-- snapshot.private_data, which no older build reads, and holds in snapshot.data only a stub
+-- that every older build's page answers as not found (RESTRICTED_STUB in src/access.ts);
+-- its live pictures are under `v/` keys, which no older build's picture route serves, and
+-- from the first step of a move to restricted its public pictures are no live snapshot's
+-- any more. Still, do not go back to an older build once a tour is restricted: restore the
+-- backup taken before the update (CHANGELOG.md, 0.1.38; deploy/cpanel/cpanel.sh refuses).
 --
 -- length() and GLOB read a text only up to its first NUL character, so every CHECK here
 -- that uses them also compares the length in bytes, length(CAST(x AS BLOB)), as in 0008.
@@ -36,10 +41,19 @@ CREATE TABLE tour_viewer (
 -- told by the first letter of its key alone, in snapshot_object and public_object alike.
 ALTER TABLE tour ADD COLUMN access TEXT NOT NULL DEFAULT 'public' CHECK (access IN ('public', 'people', 'me'));
 
+-- The real snapshot text of a restricted tour, or of one whose move to restricted has begun;
+-- null for a public tour, whose text is in data as before. While it is set, data holds the
+-- stub. Only this build and later ones read it.
+ALTER TABLE snapshot ADD COLUMN private_data TEXT;
+
 -- A move of a published tour's live pictures from one store to the other, in bounded
 -- steps (src/access.ts). One per tour at most. Its new objects are public_object rows in
 -- state 'pending' whose publish_id is switch_id, recorded before they are written, exactly
--- as a publish records its own; housekeeping never takes them for an abandoned publish.
+-- as a publish records its own. Going to private, the old public pictures are moved out of
+-- snapshot_object at the first step into public_object rows in state 'pending' whose
+-- publish_id is 'sws_' and the switch_id's hex (the sources): each is deleted, object then
+-- row, as soon as its copy is marked. Housekeeping never takes either kind for an abandoned
+-- publish; it carries on a switch to private that has stopped (src/access.ts).
 -- target is the store the pictures go to. data is the live snapshot text with every
 -- picture renamed to its new key; the step that copies the last picture puts it live, in
 -- one batch with the object rows, and only while the snapshot is still the publish named

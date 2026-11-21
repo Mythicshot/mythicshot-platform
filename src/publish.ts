@@ -64,6 +64,7 @@
 // access_switching); unpublish cancels the switch. The public page and the picture route
 // serve a tour only while its setting is 'public'.
 import type { Hono } from "hono";
+import { RESTRICTED_STUB, carryOnSwitch } from "./access.ts";
 import { beforeAccountsToo, noDisabledAccount } from "./accounts.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
@@ -430,13 +431,14 @@ export async function clearDuePage(deps: Deps, workspaceId: string, tourId: stri
  * Retires the pending rows of a workspace's abandoned publishes. Parameters: now, the
  * workspace, the stale moment twice. Reached through the workspace's tours and the
  * public_object_tour_pending index, so it never scans other workspaces' rows. The pending
- * rows of an access switch (src/access.ts) belong to no publish and are never taken for an
+ * rows of an access switch (src/access.ts), its new pictures and, going private, its sources
+ * (publish_id 'sws_' and the switch's hex), belong to no publish and are never taken for an
  * abandoned one: a switch stays until it is finished, or cancelled by unpublish or delete.
  */
 export const RETIRE_ABANDONED_SQL = `UPDATE public_object SET state = 'retired', delete_after = ?
    WHERE tour_id IN (${WORKSPACE_TOURS}) AND state = 'pending' AND created_at < ?
      AND NOT EXISTS (SELECT 1 FROM publish_job j WHERE j.publish_id = public_object.publish_id AND j.touched_at >= ?)
-     AND NOT EXISTS (SELECT 1 FROM access_switch w WHERE w.switch_id = public_object.publish_id)`;
+     AND NOT EXISTS (SELECT 1 FROM access_switch w WHERE public_object.publish_id IN (w.switch_id, 'sws_' || substr(w.switch_id, 4)))`;
 /** Drops a workspace's jobs that are stale or have no pending rows left. Parameters: the workspace, the stale moment. */
 export const DROP_ABANDONED_JOBS_SQL = `DELETE FROM publish_job WHERE tour_id IN (${WORKSPACE_TOURS})
     AND (touched_at < ? OR NOT EXISTS (SELECT 1 FROM public_object o WHERE o.publish_id = publish_job.publish_id AND o.state = 'pending'))`;
@@ -460,11 +462,18 @@ export async function housekeeping(deps: Deps, workspaceId: string, tourId: stri
       { sql: RETIRE_ABANDONED_SQL, params: [now, workspaceId, stale, stale] },
       { sql: DROP_ABANDONED_JOBS_SQL, params: [workspaceId, stale] },
     ]);
+    let result: "clean" | "more" = "more";
     for (let page = 0; page < pages; page++) {
       const r = await clearDuePage(deps, workspaceId, tourId, SWEEP_TOURS);
-      if (!r.more) return "clean";
+      if (!r.more) {
+        result = "clean";
+        break;
+      }
     }
-    return "more";
+    // A switch of a tour to restricted that its client left is moved on a few pictures
+    // (src/access.ts; at most 15 calls, and it never throws), so it finishes without it.
+    await carryOnSwitch(deps, workspaceId);
+    return result;
   } catch {
     console.error("publish: could not remove old public images; will retry later");
     return "failed";
@@ -519,8 +528,12 @@ function commitStatements(auth: Auth, tourId: string, publishId: string, justCop
     {
       // draft_version is the draft the job's snapshot was built from, so a later replace of a
       // chapter can tell whether the draft holds other changes that were never published.
-      sql: `INSERT INTO snapshot (tour_id, data, published_at, publish_id, steps, draft_version)
-            VALUES (?, (SELECT j.data FROM publish_job j
+      // A restricted tour's text goes to private_data, and data holds the stub, which no build
+      // serves (src/access.ts, RESTRICTED_STUB); a public tour's goes to data, as always.
+      sql: `INSERT INTO snapshot (tour_id, data, private_data, published_at, publish_id, steps, draft_version)
+            SELECT ?, CASE WHEN g.x IS NULL THEN NULL WHEN g.pub = 1 THEN g.x ELSE ? END, CASE WHEN g.pub = 1 THEN NULL ELSE g.x END, ?, ?,
+                   (SELECT steps FROM publish_job WHERE publish_id = ?), (SELECT draft_version FROM publish_job WHERE publish_id = ?)
+              FROM (SELECT (SELECT j.data FROM publish_job j
                          WHERE j.publish_id = ? AND j.tour_id = ?
                            AND (SELECT count(*) FROM public_object o
                                  WHERE o.publish_id = ? AND o.state = 'pending' AND o.tour_id = ?
@@ -529,11 +542,12 @@ function commitStatements(auth: Auth, tourId: string, publishId: string, justCop
                            AND NOT EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = j.tour_id)
                            AND NOT EXISTS (SELECT 1 FROM public_object o JOIN tour t ON t.id = o.tour_id
                                             WHERE o.publish_id = j.publish_id AND o.state = 'pending'
-                                              AND (substr(o.image_key, 1, 2) = 'p/') <> (t.access = 'public'))),
-                    ?, ?, (SELECT steps FROM publish_job WHERE publish_id = ?), (SELECT draft_version FROM publish_job WHERE publish_id = ?))
-            ON CONFLICT (tour_id) DO UPDATE SET data = excluded.data, published_at = excluded.published_at, publish_id = excluded.publish_id, steps = excluded.steps,
-                                                draft_version = excluded.draft_version`,
-      params: [tourId, publishId, tourId, publishId, tourId, keyList(justCopied), tourId, auth.workspaceId, now, publishId, publishId, publishId],
+                                              AND (substr(o.image_key, 1, 2) = 'p/') <> (t.access = 'public'))) AS x,
+                           (SELECT access = 'public' FROM tour WHERE id = ?) AS pub) g
+             WHERE true
+            ON CONFLICT (tour_id) DO UPDATE SET data = excluded.data, private_data = excluded.private_data, published_at = excluded.published_at, publish_id = excluded.publish_id,
+                                                steps = excluded.steps, draft_version = excluded.draft_version`,
+      params: [tourId, RESTRICTED_STUB, now, publishId, publishId, publishId, publishId, tourId, publishId, tourId, keyList(justCopied), tourId, auth.workspaceId, tourId],
     },
     {
       sql: "INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, delete_after) SELECT image_key, tour_id, ?, 'retired', ?, ? FROM snapshot_object WHERE tour_id = ?",

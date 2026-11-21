@@ -298,7 +298,9 @@ async function smallWorld(): Promise<{ deps: Deps; keys: { draftKeys: () => Prom
   // (live and retired private pictures), and a public one whose switch to restricted is
   // half done (live public pictures, and private ones already copied).
   const restricted = await uploadTour(deps, token, manifestOf([307, 308], "Restricted", true), { kind: "new" }, 1);
-  const access = (tourId: string, body: Json) => send(deps, "PUT", `/api/v1/tours/${tourId}/access`, { token, headers: JSON_HEADERS, body: JSON.stringify(body) });
+  // Only a session may change who views a tour.
+  const memberSession = await signInAs(deps, member.userId);
+  const access = (tourId: string, body: Json) => send(deps, "PUT", `/api/v1/tours/${tourId}/access`, { headers: { ...page(memberSession), ...JSON_HEADERS }, body: JSON.stringify(body) });
   if ((await access(restricted.tour_id, { access: "people", viewers: ["ana@example.com", "bo@example.com"] })).status !== 200) throw new Error("restrict");
   for (let i = 0; i < 2; i++) if ((await send(deps, "POST", `/api/v1/tours/${restricted.tour_id}/publish`, { token })).status !== 200) throw new Error("restricted publish");
   const switching = await uploadTour(deps, token, manifestOf(Array.from({ length: 13 }, (_, i) => 320 + i), "Switching", false), { kind: "new" }, 1);

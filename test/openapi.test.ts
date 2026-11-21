@@ -48,7 +48,7 @@ const PUBLIC = [
 /** The one operation that takes the viewer cookie alone (src/viewers.ts): which address the browser proved. */
 const VIEWER_ONLY = ["GET /api/v1/view/session"];
 /** The operations that take a session and no token. */
-const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "POST /api/v1/connect/lookup", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id"];
+const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "POST /api/v1/connect/lookup", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id", "PUT /api/v1/tours/:id/access"];
 /** The site admin's operations: an admin's session alone, and a 404 (never a 401) to everyone else. */
 const ADMIN_ONLY = [
   "GET /api/v1/admin/summary",

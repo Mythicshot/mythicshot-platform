@@ -1000,9 +1000,9 @@ function paths(): OpenApiDoc["paths"] {
       put: {
         tags: ["Tours"],
         summary: "Change who may view a tour",
-        description: `Sets public, people or me, and with viewers replaces the whole list (up to ${MAX_VIEWERS} addresses; you, the workspace's account, are always let in and need not be on it). Between people and me, for a change of the list, and for a tour that is not published, the change is made at once (a publish in progress is cancelled when the change is between public and the others; publish again). For a published tour between public and people or me, the pictures of the version that is live move to the other store: the answer is 202 while they move, and the same request is sent again until it answers 200. That never publishes the draft and keeps the link. Made restricted, the tour stops being public at the first request; made public, it becomes public only at the last. Nothing is mailed to anyone.`,
+        description: `Sets public, people or me, and with viewers replaces the whole list (up to ${MAX_VIEWERS} addresses; you, the workspace's account, are always let in and need not be on it). Only a signed-in session may send it, with the anti-forgery header: a token is answered 401, so a token that leaked cannot make a restricted tour public. ${NOT_FROM_THE_PAGE} Making a public tour restricted needs a site that can send mail; between people and me it never does. Between people and me, for a change of the list, and for a tour that is not published, the change is made at once (a publish in progress is cancelled when the change is between public and the others; publish again). For a published tour between public and people or me, the pictures of the version that is live move to the other store: the answer is 202 while they move, and the same request is sent again until it answers 200. That never publishes the draft and keeps the link. Made restricted, the tour stops being public at the first request, and its public pictures are deleted as they move; a move left unfinished is finished by later requests of the workspace. Made public, it becomes public only at the last request; until then, asking for the setting it still has cancels the move. Nothing is mailed to anyone.`,
         operationId: "setTourAccess",
-        security: TOKEN,
+        security: SESSION,
         parameters: [tourId],
         requestBody: { required: true, content: json(ref("AccessBody")) },
         responses: {
@@ -1016,13 +1016,15 @@ function paths(): OpenApiDoc["paths"] {
             "too_many_viewers",
           ),
           "401": UNAUTHORIZED,
+          "403": SESSION_CHANGE_REFUSED,
           "404": noTour,
           "409": refusal(
-            "cannot_restrict: this site cannot send mail, so the tour cannot be made people or me. access_switching: a change to another setting is still moving the pictures; send that one again until it is done. switch_cancelled: the tour was unpublished or deleted while its pictures moved; send the request again. access_busy: the tour changed while the request was decided; send it again.",
+            "cannot_restrict: this site cannot send mail, so a public tour cannot be made people or me. access_switching: a change to another setting is still moving the pictures; send that one again until it is done. switch_cancelled: the tour was unpublished or deleted while its pictures moved; send the request again. access_busy: the tour changed while the request was decided; send it again. republish_needed: the published version cannot be moved as it is; publish the tour again, then send the change again.",
             "cannot_restrict",
             "access_switching",
             "switch_cancelled",
             "access_busy",
+            "republish_needed",
           ),
           "413": refusal(`The request body is over ${n(ACCESS_BODY_BYTES)} bytes.`, "too_large"),
           "500": refusal("The move could not go on just now. Send the same request again to continue it.", "access_failed"),

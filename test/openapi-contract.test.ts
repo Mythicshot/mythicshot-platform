@@ -33,7 +33,7 @@ import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS } from "../src/uploads.ts";
 import { VERSION } from "../src/version.ts";
 import { useViewerGate } from "../src/viewers.ts";
-import { clone, fixtures, gif, jpeg, logoPng, mp4, png, send, sha256Hex, stepImage, type Call, type Json } from "./bundle.ts";
+import { ORIGIN, clone, fixtures, gif, jpeg, logoPng, mp4, png, send, sha256Hex, stepImage, type Call, type Json } from "./bundle.ts";
 import { check, deref, KEYWORDS, keywordsOf } from "./openapi-schema.ts";
 
 /**
@@ -233,7 +233,12 @@ function client(deps: Deps) {
     publish: (token: string | null, tourId: string, body?: unknown) => call("POST", `/api/v1/tours/${tourId}/publish`, body === undefined ? { token } : withJson(token, body)),
     unpublish: (token: string | null, tourId: string) => call("POST", `/api/v1/tours/${tourId}/unpublish`, { token }),
     access: (token: string | null, tourId: string) => call("GET", `/api/v1/tours/${tourId}/access`, { token }),
-    setAccess: (token: string | null, tourId: string, body: unknown) => call("PUT", `/api/v1/tours/${tourId}/access`, withJson(token, body)),
+    /** Sent with a session (only a session may change who views a tour): its Cookie, anti-forgery value and this address as Origin. */
+    setAccess: (session: { cookie: string; csrf: string }, tourId: string, body: unknown) =>
+      call("PUT", `/api/v1/tours/${tourId}/access`, {
+        body: typeof body === "string" ? body : JSON.stringify(body),
+        headers: { ...JSON_HEADERS, cookie: session.cookie, "x-csrf-token": session.csrf, origin: ORIGIN, "sec-fetch-site": "same-origin" },
+      }),
     image: (token: string | null, tourId: string, stepId: string) => call("GET", `/api/v1/tours/${tourId}/steps/${stepId}/image`, { token }),
     create: (token: string | null, manifest: unknown, target: unknown = NEW, sha256?: string[]) =>
       call("POST", "/api/v1/uploads", withJson(token, sha256 === undefined ? { manifest, target } : { manifest, target, sha256 })),
@@ -628,48 +633,57 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
   it("every answer of who may view a tour is as documented", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     // A site that can mail links, which restricting a tour needs.
-    const { deps, a, b } = await setup({ siteHost: "tours.example.com" });
+    const { deps, a: aSide, b: bSide } = await setup({ siteHost: "tours.example.com" });
     const api = client(deps);
+    // Only a session may change who views a tour: each workspace's owner signs in (the first is the site's admin, which signing in needs).
+    const sessionOf = async (workspaceId: string) => {
+      const user = (await deps.db.first<{ user_id: string }>("SELECT user_id FROM membership WHERE workspace_id = ?", [workspaceId]))!.user_id;
+      await deps.db.run("UPDATE user SET is_admin = 1 WHERE id = ? AND NOT EXISTS (SELECT 1 FROM user WHERE is_admin = 1)", [user]);
+      const made = (await redeemSignInCode(deps, await createSignInCode(deps, user), null, null))!;
+      return { cookie: `${SESSION_COOKIE}=${made.secret}`, csrf: await csrfFor(made.secret) };
+    };
+    const a = { ...aSide, session: await sessionOf(aSide.workspaceId) };
+    const b = { ...bSide, session: await sessionOf(bSide.workspaceId) };
     const draft = await api.upload(a.token, small(1, "Draft"));
     expect((await api.access(a.token, draft.tour_id)).json).toEqual({ access: "public", viewers: [], limit: 200, can_restrict: true, switching: null });
     refused(await api.access(b.token, draft.tour_id), 404, "not_found");
     refused(await api.access(a.token, NO_TOUR), 404, "not_found");
-    refused(await api.setAccess(b.token, draft.tour_id, { access: "me" }), 404, "not_found");
+    refused(await api.setAccess(b.session, draft.tour_id, { access: "me" }), 404, "not_found");
 
     // The refusals of the body, which change nothing.
-    refused(await api.setAccess(a.token, draft.tour_id, "[]"), 400, "bad_request");
-    refused(await api.setAccess(a.token, draft.tour_id, { access: "people", viewers: "ana@example.com" }), 400, "bad_request");
-    refused(await api.setAccess(a.token, draft.tour_id, { access: "friends" }), 400, "bad_access");
-    const bad = await api.setAccess(a.token, draft.tour_id, { access: "people", viewers: ["ana@example.com", "not an address"] });
+    refused(await api.setAccess(a.session, draft.tour_id, "[]"), 400, "bad_request");
+    refused(await api.setAccess(a.session, draft.tour_id, { access: "people", viewers: "ana@example.com" }), 400, "bad_request");
+    refused(await api.setAccess(a.session, draft.tour_id, { access: "friends" }), 400, "bad_access");
+    const bad = await api.setAccess(a.session, draft.tour_id, { access: "people", viewers: ["ana@example.com", "not an address"] });
     refused(bad, 400, "bad_viewer");
     expect(bad.json.detail).toContain("viewers[1]");
     expect(bad.text).not.toContain("ana@example.com");
-    refused(await api.setAccess(a.token, draft.tour_id, { access: "people", viewers: Array.from({ length: 201 }, (_, i) => `v${i}@example.com`) }), 400, "too_many_viewers");
-    refused(await api.setAccess(a.token, draft.tour_id, `{"access":"people","viewers":["${"a".repeat(70_000)}"]}`), 413, "too_large");
+    refused(await api.setAccess(a.session, draft.tour_id, { access: "people", viewers: Array.from({ length: 201 }, (_, i) => `v${i}@example.com`) }), 400, "too_many_viewers");
+    refused(await api.setAccess(a.session, draft.tour_id, `{"access":"people","viewers":["${"a".repeat(70_000)}"]}`), 413, "too_large");
     expect((await api.access(a.token, draft.tour_id)).json.viewers).toEqual([]);
 
     // A draft changes at once.
-    const set = await api.setAccess(a.token, draft.tour_id, { access: "people", viewers: ["Ana@Example.com ", "bo@example.com", "ana@example.com"] });
+    const set = await api.setAccess(a.session, draft.tour_id, { access: "people", viewers: ["Ana@Example.com ", "bo@example.com", "ana@example.com"] });
     expect(set.json).toEqual({ access: "people", viewers: ["ana@example.com", "bo@example.com"], limit: 200, can_restrict: true, switching: null });
 
     // A published tour of more pictures than one request moves: 202, then 200.
     const big = await api.upload(a.token, small(COPY_BATCH + 1, "Big"));
     await api.publishAll(a.token, big.tour_id);
-    const moving = await api.setAccess(a.token, big.tour_id, { access: "me" });
+    const moving = await api.setAccess(a.session, big.tour_id, { access: "me" });
     expect([moving.status, moving.json]).toEqual([202, { status: "switching", done: COPY_BATCH, total: COPY_BATCH + 1 }]);
     expect((await api.access(a.token, big.tour_id)).json.switching).toEqual({ done: COPY_BATCH, total: COPY_BATCH + 1 });
-    refused(await api.setAccess(a.token, big.tour_id, { access: "public" }), 409, "access_switching");
+    refused(await api.setAccess(a.session, big.tour_id, { access: "public" }), 409, "access_switching");
     refused(await api.publish(a.token, big.tour_id), 409, "access_switching");
-    const moved = await api.setAccess(a.token, big.tour_id, { access: "me" });
+    const moved = await api.setAccess(a.session, big.tour_id, { access: "me" });
     expect([moved.status, moved.json.access, moved.json.switching]).toEqual([200, "me", null]);
 
     // A move that cannot go on just now: the request is sent again.
     const store = deps.pub;
     deps.pub = { ...store, put: () => Promise.reject(new Error("the store is down")) };
-    refused(await api.setAccess(a.token, big.tour_id, { access: "public" }), 500, "access_failed");
+    refused(await api.setAccess(a.session, big.tour_id, { access: "public" }), 500, "access_failed");
     deps.pub = store;
-    let again = await api.setAccess(a.token, big.tour_id, { access: "public" });
-    for (let i = 0; again.status === 202 && i < 5; i++) again = await api.setAccess(a.token, big.tour_id, { access: "public" });
+    let again = await api.setAccess(a.session, big.tour_id, { access: "public" });
+    for (let i = 0; again.status === 202 && i < 5; i++) again = await api.setAccess(a.session, big.tour_id, { access: "public" });
     expect([again.status, again.json.access]).toEqual([200, "public"]);
 
     // A move whose tour is unpublished while a request of it copies: that request answers switch_cancelled.
@@ -682,7 +696,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
         return drafts.put(key, body, meta);
       },
     };
-    refused(await api.setAccess(a.token, big.tour_id, { access: "people" }), 409, "switch_cancelled");
+    refused(await api.setAccess(a.session, big.tour_id, { access: "people" }), 409, "switch_cancelled");
     deps.drafts = drafts;
 
     // A tour that changes under the request twice: one batch and then the next fail as if a publish had landed.
@@ -698,12 +712,19 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
         return db.batch(stmts);
       },
     };
-    refused(await api.setAccess(a.token, draft.tour_id, { access: "me" }), 409, "access_busy");
+    refused(await api.setAccess(a.session, draft.tour_id, { access: "me" }), 409, "access_busy");
     deps.db = db;
 
-    // A site that cannot mail refuses to restrict, and keeps a restricted tour as it is.
+    // A published version that cannot be moved: publish again.
+    const odd = await api.upload(a.token, small(1, "Odd"));
+    await api.publishAll(a.token, odd.tour_id);
+    await deps.db.run(`UPDATE snapshot SET data = '{"title":"odd"}' WHERE tour_id = ?`, [odd.tour_id]);
+    refused(await api.setAccess(a.session, odd.tour_id, { access: "me" }), 409, "republish_needed");
+
+    // A site that cannot mail refuses to make a public tour restricted, and keeps a restricted tour as it is.
     deps.config = { ...deps.config, siteHost: null };
-    refused(await api.setAccess(a.token, draft.tour_id, { access: "me" }), 409, "cannot_restrict");
+    const plain = await api.upload(a.token, small(1, "Plain"));
+    refused(await api.setAccess(a.session, plain.tour_id, { access: "me" }), 409, "cannot_restrict");
     const kept = await api.access(a.token, draft.tour_id);
     expect([kept.json.access, kept.json.can_restrict]).toEqual(["people", false]);
   });
@@ -1402,6 +1423,7 @@ describe("the two 403s of a change made with a session, on each route that takes
       ["POST", "/api/v1/connect/refuse", { user_code: "ABCD-EFGH" }],
       ["PATCH", `/api/v1/tokens/${TOKEN}`, { name: "Laptop" }],
       ["DELETE", `/api/v1/tokens/${TOKEN}`, undefined],
+      ["PUT", `/api/v1/tours/tour_${"0".repeat(24)}/access`, { access: "me" }],
     ];
     for (const [method, path, body] of routes) {
       const withBody = body === undefined ? {} : { body: JSON.stringify(body) };
@@ -1661,6 +1683,7 @@ describe("the error codes in the code", () => {
         "POST /api/v1/connect/refuse",
         "PATCH /api/v1/tokens/{id}",
         "DELETE /api/v1/tokens/{id}",
+        "PUT /api/v1/tours/{id}/access",
       ].sort(),
     );
     for (const o of sessionChanges) {

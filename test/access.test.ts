@@ -4,12 +4,14 @@
 // call, a site without mail, and the call budget with a tour of 60 steps.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
-import { MAX_VIEWERS, mayView, tourForServing } from "../src/access.ts";
+import { CARRY_AFTER_MS, MAX_VIEWERS, RESTRICTED_STUB, mayView, tourForServing } from "../src/access.ts";
 import type { Deps, FileStore } from "../src/ports.ts";
 import { COPY_BATCH } from "../src/publish.ts";
 import { usageOf } from "../src/usage.ts";
-import { send, uploadTour, type Call, type Json } from "./bundle.ts";
+import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
+import { ORIGIN, send, uploadTour, type Call, type Json } from "./bundle.ts";
 import { manifestOf } from "./isolation-world.ts";
+import { oldPage, oldPicture } from "./old-build-0.1.35.ts";
 
 const SLOW = { timeout: 300_000 };
 const VERY_SLOW = { timeout: 1_800_000 };
@@ -26,16 +28,32 @@ const seen = (c: Call) => ({ status: c.status, headers: [...c.headers.entries()]
 
 type Site = Awaited<ReturnType<typeof makeDeps>> & { owner: Awaited<ReturnType<typeof seedAccount>>; other: Awaited<ReturnType<typeof seedAccount>> };
 
+/**
+ * The signed-in browser of each account, by its token: only a session may change who views a
+ * tour, so setAccess sends the session of the account whose token it is given.
+ */
+const sessionsByToken = new Map<string, Record<string, string>>();
+
+async function signIn(deps: Deps, userId: string, token: string): Promise<void> {
+  const made = await redeemSignInCode(deps, await createSignInCode(deps, userId), null, null);
+  if (made === null) throw new Error("the sign-in was refused");
+  sessionsByToken.set(token, { cookie: `${SESSION_COOKIE}=${made.secret}`, "x-csrf-token": await csrfFor(made.secret), origin: ORIGIN, "sec-fetch-site": "same-origin" });
+}
+
 async function site(config: Parameters<typeof makeDeps>[0] = {}): Promise<Site> {
   const ctx = await makeDeps({ ...MAILS, ...config });
-  const owner = await seedAccount(ctx.deps);
+  // Signing in needs a site with an admin: the owner is the site's admin.
+  const owner = await seedAccount(ctx.deps, { admin: true });
   const other = await seedAccount(ctx.deps);
+  await signIn(ctx.deps, owner.userId, owner.token);
+  await signIn(ctx.deps, other.userId, other.token);
   return { ...ctx, owner, other };
 }
 
 const getAccess = (deps: Deps, token: string, tourId: string) => send(deps, "GET", `/api/v1/tours/${tourId}/access`, { token });
+/** The change, sent with the signed-in session of the account whose token this is. */
 const setAccess = (deps: Deps, token: string, tourId: string, body: unknown) =>
-  send(deps, "PUT", `/api/v1/tours/${tourId}/access`, { token, headers: JSON_HEADERS, body: JSON.stringify(body) });
+  send(deps, "PUT", `/api/v1/tours/${tourId}/access`, { headers: { ...JSON_HEADERS, ...sessionsByToken.get(token)! }, body: JSON.stringify(body) });
 
 /** Sends the same change until it is done, as the client does. */
 async function untilDone(deps: Deps, token: string, tourId: string, body: unknown): Promise<Call[]> {
@@ -82,7 +100,7 @@ async function draftOf(s: Site, tourId: string): Promise<Json> {
 
 /** The live snapshot with every picture name taken out, and its publish. */
 async function shapeOf(s: Site, tourId: string): Promise<Json> {
-  const row = await s.deps.db.first<{ data: string; publish_id: string }>("SELECT data, publish_id FROM snapshot WHERE tour_id = ?", [tourId]);
+  const row = await s.deps.db.first<{ data: string; publish_id: string }>("SELECT coalesce(private_data, data) AS data, publish_id FROM snapshot WHERE tour_id = ?", [tourId]);
   if (row === null) return { none: true };
   return { publish: row.publish_id, data: row.data.replace(/"[pv]\/[0-9a-f]{32}\.(png|jpg)"/g, '"PICTURE"') };
 }
@@ -95,16 +113,17 @@ async function namedKeys(deps: Deps, tourId: string): Promise<string[]> {
 }
 
 /**
- * Deps whose `n`-th call (counted over every port, from now on) fails once: before it is
- * made, or after it took effect, as an answer lost on the way back. As in
- * test/account-removal.test.ts.
+ * Deps whose `n`-th call (counted over every port, from now on) fails: once before it is
+ * made, once after it took effect (an answer lost on the way back), or before it is made
+ * and again on the call after it ("twice", a failure that does not go away at once). As in
+ * test/account-removal.test.ts, with the third way added.
  */
-function failingAt(deps: Deps, n: number, when: "before" | "after"): { deps: Deps; hit: () => boolean } {
+function failingAt(deps: Deps, n: number, when: "before" | "after" | "twice"): { deps: Deps; hit: () => boolean } {
   let count = 0;
   let hit = false;
   const gate = async <T>(run: () => Promise<T>): Promise<T> => {
     count += 1;
-    if (count !== n) return run();
+    if (count !== n && !(when === "twice" && count === n + 1)) return run();
     hit = true;
     if (when === "after") await run();
     throw new Error("injected failure");
@@ -200,9 +219,9 @@ describe("the setting and its list", () => {
     await untilDone(s.deps, s.owner.token, t.id, { access: "public" });
     const rows = await s.deps.db.all<{ event: string; subject: string; detail: string }>("SELECT event, subject, detail FROM audit WHERE event = 'tour_access_changed' ORDER BY at, id");
     expect(rows.map((r) => [r.subject, JSON.parse(r.detail)])).toEqual([
-      [t.id, { from: "public", to: "people", viewers_before: 0, viewers: 2, by: "token" }],
-      [t.id, { from: "people", to: "people", viewers_before: 2, viewers: 1, by: "token" }],
-      [t.id, { from: "people", to: "public", viewers_before: 1, viewers: 1, by: "token" }],
+      [t.id, { from: "public", to: "people", viewers_before: 0, viewers: 2, by: "session" }],
+      [t.id, { from: "people", to: "people", viewers_before: 2, viewers: 1, by: "session" }],
+      [t.id, { from: "people", to: "public", viewers_before: 1, viewers: 1, by: "session" }],
     ]);
     expect(JSON.stringify(await s.deps.db.all("SELECT * FROM audit"))).not.toContain("@");
     expect(lines.join("\n")).not.toContain("@");
@@ -342,7 +361,7 @@ describe("the switch", () => {
     it(`made ${direction} at a failure at every call, before or after it takes effect: never served while restricted, nothing orphaned, usage never lower, the draft and the link untouched`, VERY_SLOW, async () => {
       vi.spyOn(console, "error").mockImplementation(() => {});
       const target = direction === "restricted" ? { access: "people", viewers: ["ana@example.com"] } : { access: "public" };
-      for (const when of ["before", "after"] as const) {
+      for (const when of ["before", "after", "twice"] as const) {
         for (let n = 1; ; n++) {
           const label = `${direction}, failure ${when} call ${n}`;
           const s = await site();
@@ -364,6 +383,10 @@ describe("the switch", () => {
             if (row!.access !== "public") {
               expect(seen(await send(s.deps, "GET", `/t/${t.slug}`)), at).toEqual(unknownPage);
               for (const k of ever) if (k.startsWith("p/")) expect(seen(await send(s.deps, "GET", `/${k}`)), `${at}: ${k}`).toEqual(unknownPicture);
+              // Nor would the build before this feature, gone back to on this database.
+              expect(await oldPage(s.deps, t.slug), `${at}: 0.1.35's page`).toBeNull();
+              for (const k of ever) expect(await oldPicture(s.deps, k), `${at}: 0.1.35's picture ${k}`).toBe(false);
+              expect((await s.deps.db.first<{ data: string }>("SELECT data FROM snapshot WHERE tour_id = ?", [t.id]))?.data ?? RESTRICTED_STUB, at).toBe(RESTRICTED_STUB);
             } else {
               // Public: every live picture is in the public store.
               const live = await s.deps.db.all<{ image_key: string }>("SELECT image_key FROM snapshot_object WHERE tour_id = ?", [t.id]);
@@ -510,7 +533,7 @@ describe("mayView and tourForServing", () => {
 });
 
 describe("a site that cannot mail", () => {
-  it("refuses to make a tour restricted, keeps a restricted tour so, and still takes a change of its list or making it public", SLOW, async () => {
+  it("refuses to make a public tour restricted, keeps a restricted tour so, and still takes a change between people and me, of its list, or making it public", SLOW, async () => {
     const s = await site();
     const t = await tourOf(s, 1);
     const kept = await tourOf(s, 1, "Kept");
@@ -520,13 +543,151 @@ describe("a site that cannot mail", () => {
     expect([refused.status, refused.json.error]).toEqual([409, "cannot_restrict"]);
     expect((await getAccess(s.deps, s.owner.token, t.id)).json).toMatchObject({ access: "public", can_restrict: false });
     expect((await getAccess(s.deps, s.owner.token, kept.id)).json).toMatchObject({ access: "people", can_restrict: false });
-    expect((await setAccess(s.deps, s.owner.token, kept.id, { access: "me" })).json.error).toBe("cannot_restrict");
+    // Between the two restricted settings nothing is loosened: allowed.
+    expect((await setAccess(s.deps, s.owner.token, kept.id, { access: "me" })).json.access).toBe("me");
     expect((await setAccess(s.deps, s.owner.token, kept.id, { access: "people", viewers: ["bo@example.com"] })).json).toMatchObject({ access: "people", viewers: ["bo@example.com"] });
     expect((await setAccess(s.deps, s.owner.token, kept.id, { access: "public" })).json.access).toBe("public");
     // A site with no mailer at all is the same.
     const bare = await makeDeps(MAILS, { mail: false });
-    const acc = await seedAccount(bare.deps);
+    const acc = await seedAccount(bare.deps, { admin: true });
+    await signIn(bare.deps, acc.userId, acc.token);
     const one = await uploadTour(bare.deps, acc.token, manifestOf([200], "Bare"), { kind: "new" }, 3);
     expect((await setAccess(bare.deps, acc.token, one.tour_id, { access: "me" })).json.error).toBe("cannot_restrict");
+  });
+});
+
+describe("the review's follow-ups", () => {
+  it("only a session may change who views a tour; a token may read it", SLOW, async () => {
+    const s = await site();
+    const t = await tourOf(s, 1);
+    const byToken = await send(s.deps, "PUT", `/api/v1/tours/${t.id}/access`, { token: s.owner.token, headers: JSON_HEADERS, body: JSON.stringify({ access: "me" }) });
+    expect([byToken.status, byToken.json]).toEqual([401, { error: "unauthorized" }]);
+    expect((await getAccess(s.deps, s.owner.token, t.id)).json.access).toBe("public");
+    expect((await setAccess(s.deps, s.owner.token, t.id, { access: "me" })).json.access).toBe("me");
+  });
+
+  it("the build before this one, gone back to, serves nothing of a restricted tour or one moving either way; made public, the text is back", SLOW, async () => {
+    const s = await site();
+    const t = await tourOf(s, COPY_BATCH + 2);
+    await publishAll(s.deps, s.owner.token, t.id);
+    const before = (await oldPage(s.deps, t.slug)) as Json;
+    expect(before).not.toBeNull(); // public: 0.1.35 serves it, as it always did
+    const nothing = async (what: string, also: string[] = []) => {
+      expect(await oldPage(s.deps, t.slug), what).toBeNull();
+      for (const k of [...(await namedKeys(s.deps, t.id)), ...also]) expect(await oldPicture(s.deps, k), `${what}: ${k}`).toBe(false);
+      expect((await s.deps.db.first<{ data: string }>("SELECT data FROM snapshot WHERE tour_id = ?", [t.id]))!.data, what).toBe(RESTRICTED_STUB);
+    };
+    const publicKeys = (await namedKeys(s.deps, t.id)).filter((k) => k.startsWith("p/"));
+    expect((await setAccess(s.deps, s.owner.token, t.id, { access: "people" })).status).toBe(202);
+    await nothing("a move to restricted under way", publicKeys);
+    await untilDone(s.deps, s.owner.token, t.id, { access: "people" });
+    await nothing("restricted", publicKeys);
+    // An older build's rename writes the title into data; the stub stays no tour.
+    await s.deps.db.run("UPDATE snapshot SET data = json_set(data, '$.title', 'Renamed by 0.1.35') WHERE tour_id = ? AND json_valid(data)", [t.id]);
+    expect(await oldPage(s.deps, t.slug)).toBeNull();
+    await s.deps.db.run("UPDATE snapshot SET data = ? WHERE tour_id = ?", [RESTRICTED_STUB, t.id]);
+    expect((await setAccess(s.deps, s.owner.token, t.id, { access: "public" })).status).toBe(202);
+    await nothing("a move to public under way");
+    await untilDone(s.deps, s.owner.token, t.id, { access: "public" });
+    const after = (await oldPage(s.deps, t.slug)) as Json;
+    expect(after.title).toBe(before.title);
+    expect(after.chapters.length).toBe(before.chapters.length);
+    expect(await s.deps.db.first("SELECT private_data FROM snapshot WHERE tour_id = ?", [t.id])).toEqual({ private_data: null });
+    // tourForServing gives a restricted tour's text only with its pictures.
+    await setAccess(s.deps, s.owner.token, t.id, { access: "me" });
+    const moving = await tourForServing(s.deps, { id: t.id });
+    expect([moving!.switching, moving!.pictures, moving!.data]).toEqual([true, null, null]);
+  });
+
+  it("a move to restricted its client left is finished by the workspace's housekeeping, and the public store empties as it goes", SLOW, async () => {
+    const s = await site();
+    let now = Date.now();
+    s.deps.now = () => now;
+    const t = await tourOf(s, 3 * COPY_BATCH);
+    await publishAll(s.deps, s.owner.token, t.id);
+    const total = 3 * COPY_BATCH + 1;
+    expect(await s.publicKeys()).toHaveLength(total);
+    const first = await setAccess(s.deps, s.owner.token, t.id, { access: "people" });
+    expect(first.status).toBe(202);
+    // The pictures that request moved are already gone from the public store.
+    expect(await s.publicKeys()).toHaveLength(total - first.json.done);
+    // No access request any more; within the minute housekeeping leaves it to its client.
+    await send(s.deps, "GET", "/api/v1/tours", { token: s.owner.token });
+    expect(await s.publicKeys()).toHaveLength(total - first.json.done);
+    now += CARRY_AFTER_MS + 1;
+    let lists = 0;
+    while ((await s.deps.db.first("SELECT 1 AS x FROM access_switch")) !== null) {
+      expect(++lists, "housekeeping finishes it").toBeLessThan(40);
+      const shown = await send(s.deps, "GET", "/api/v1/tours", { token: s.owner.token });
+      expect(shown.text).not.toContain("@");
+      now += 1000;
+    }
+    expect(await s.publicKeys()).toEqual([]);
+    expect(await s.deps.db.all("SELECT image_key FROM public_object")).toEqual([]);
+    const served = await tourForServing(s.deps, { id: t.id });
+    expect(served!.pictures!.size).toBe(total);
+    expect((await getAccess(s.deps, s.owner.token, t.id)).json).toMatchObject({ access: "people", switching: null });
+  });
+
+  it("a move to public is cancelled by asking for the setting the tour still has, also when that request is interrupted at any call", VERY_SLOW, async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const when of ["before", "after", "twice"] as const) {
+      for (let n = 1; ; n++) {
+        const label = `cancel, failure ${when} call ${n}`;
+        const s = await site();
+        let now = Date.now();
+        s.deps.now = () => now;
+        const t = await tourOf(s, COPY_BATCH + 4);
+        await setAccess(s.deps, s.owner.token, t.id, { access: "me" });
+        await publishAll(s.deps, s.owner.token, t.id);
+        const live = await namedKeys(s.deps, t.id);
+        expect((await setAccess(s.deps, s.owner.token, t.id, { access: "public" })).status, label).toBe(202);
+        expect((await s.publicKeys()).length, label).toBe(COPY_BATCH);
+        const faulty = failingAt(s.deps, n, when);
+        let r = await setAccess(faulty.deps, s.owner.token, t.id, { access: "me" });
+        const met = faulty.hit();
+        expect(seen(await send(s.deps, "GET", `/t/${t.slug}`)), label).toEqual(seen(await send(s.deps, "GET", `/t/${UNKNOWN_SLUG}`)));
+        for (let i = 0; i < 5 && r.status !== 200; i++) r = await setAccess(s.deps, s.owner.token, t.id, { access: "me" });
+        expect([r.status, r.json.access, r.json.switching], `${label}: ${r.text}`).toEqual([200, "me", null]);
+        // Housekeeping retires what a cut-off cancel left pending, after the stale period.
+        now += 16 * 60_000;
+        await send(s.deps, "GET", "/api/v1/tours", { token: s.owner.token });
+        await send(s.deps, "GET", "/api/v1/tours", { token: s.owner.token });
+        expect(await s.publicKeys(), label).toEqual([]);
+        expect(await s.deps.db.all("SELECT * FROM access_switch"), label).toEqual([]);
+        expect((await namedKeys(s.deps, t.id)).sort(), label).toEqual([...live].sort());
+        expect((await tourForServing(s.deps, { id: t.id }))!.pictures!.size, label).toBe(COPY_BATCH + 5);
+        if (!met) {
+          expect(n, "the failure was met").toBeGreaterThan(3);
+          break;
+        }
+      }
+    }
+  });
+
+  it("a published version that cannot be moved asks to publish again; a request that only cleans up answers the final state", SLOW, async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const s = await site();
+    const t = await tourOf(s, 1);
+    await publishAll(s.deps, s.owner.token, t.id);
+    const good = (await s.deps.db.first<{ data: string }>("SELECT data FROM snapshot WHERE tour_id = ?", [t.id]))!.data;
+    await s.deps.db.run(`UPDATE snapshot SET data = '{"title":"broken"}' WHERE tour_id = ?`, [t.id]);
+    for (let i = 0; i < 2; i++) {
+      const r = await setAccess(s.deps, s.owner.token, t.id, { access: "people" });
+      expect([r.status, r.json.error]).toEqual([409, "republish_needed"]);
+    }
+    expect((await getAccess(s.deps, s.owner.token, t.id)).json.access).toBe("public");
+    await s.deps.db.run("UPDATE snapshot SET data = ? WHERE tour_id = ?", [good, t.id]);
+    await untilDone(s.deps, s.owner.token, t.id, { access: "me" });
+    // Made public, with the old private pictures' removal failing: the state is final, so 200.
+    const drafts = s.deps.drafts;
+    s.deps.drafts = { ...drafts, delete: () => Promise.reject(new Error("down")) };
+    const done = await setAccess(s.deps, s.owner.token, t.id, { access: "public" });
+    expect([done.status, done.json.access]).toEqual([200, "public"]);
+    const again = await setAccess(s.deps, s.owner.token, t.id, { access: "public" });
+    expect([again.status, again.json.access, again.json.switching]).toEqual([200, "public", null]);
+    s.deps.drafts = drafts;
+    await setAccess(s.deps, s.owner.token, t.id, { access: "public" });
+    expect((await s.draftKeys()).filter((k) => k.startsWith("v/"))).toEqual([]);
   });
 });

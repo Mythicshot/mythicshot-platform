@@ -66,7 +66,7 @@ export type Ids = {
   deleting: { tour: string };
   /** Restricted and published: `privateName` is a live picture's name in the private store (after `v/`), `viewer` an address on its list. */
   restricted: TourIds & { privateName: string; viewer: string };
-  /** Published publicly, with a switch to 'me' in progress: `publicName` is a live picture still in the public store, `movedName` one already copied to the private store. */
+  /** Published publicly, with a switch to 'me' in progress: `publicName` is a picture not moved yet, still in the public store (a source row of the switch), `movedName` one already copied to the private store. */
   switching: TourIds & { publicName: string; movedName: string };
   /** An open upload for a new tour: step 1 sent, step 2 and the logo not. */
   upload: string;
@@ -322,7 +322,15 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
   // Restricting needs a site that can mail a link: an address for links is lent for these requests.
   const config = deps.config;
   deps.config = { ...config, siteHost: config.siteHost ?? "tours.example.com" };
-  const access = (tourId: string, body: Json) => send(deps, "PUT", `/api/v1/tours/${tourId}/access`, { token, body: JSON.stringify(body), headers: JSON_HEADERS });
+  // Only a session may change who views a tour: the account's own, on the app address.
+  const session = await signIn(deps, account.userId);
+  const appAddress = deps.config.hosts ? originOf(deps.config.hosts.app) : ORIGIN;
+  const access = (tourId: string, body: Json) =>
+    send(deps, "PUT", `/api/v1/tours/${tourId}/access`, {
+      origin: appAddress,
+      body: JSON.stringify(body),
+      headers: { cookie: session.cookie, origin: appAddress, "x-csrf-token": session.csrf, "sec-fetch-site": "same-origin", ...JSON_HEADERS },
+    });
   must(await access(restricted.tour_id, { access: "people", viewers: [viewer, `${name.toLowerCase()}-second@example.com`] }), 200, "restricting a draft");
   must(await publishOf(restricted.tour_id), 200, "the restricted publish");
   // A public tour of 15 pictures whose switch to 'me' has moved 12.
@@ -372,7 +380,8 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
     },
     switching: {
       ...withoutHashes(await tourIds(switching)),
-      publicName: await nameOf("SELECT image_key FROM snapshot_object WHERE tour_id = ? ORDER BY image_key LIMIT 1", switching.tour_id, "live public picture of the switching tour"),
+      // Its public pictures are no live snapshot's since the switch began: those not moved yet are its source rows.
+      publicName: await nameOf("SELECT image_key FROM public_object WHERE tour_id = ? AND publish_id LIKE 'sws_%' ORDER BY image_key LIMIT 1", switching.tour_id, "public picture of the switching tour not moved yet"),
       movedName: await nameOf("SELECT image_key FROM public_object WHERE tour_id = ? AND state = 'pending' AND copied = 1 ORDER BY image_key LIMIT 1", switching.tour_id, "moved picture of the switch"),
     },
     upload,
@@ -385,7 +394,6 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
     tokens: { live: tokenId, revoked: revokedTokenId, connected: "" },
     connect: { confirmed: "", collected: "", refused: "" },
   };
-  const session = await signIn(deps, account.userId);
   ids.session = session.id;
   ids.otherSession = (await signIn(deps, account.userId)).id;
 

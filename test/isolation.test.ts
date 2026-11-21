@@ -181,9 +181,9 @@ const CASES: Record<string, Entry> = {
   "GET /api/v1/tours/:id/access": (t) => theirTours(t).map(([what, id]) => ({ what, method: "GET", path: tourPath(id, "/access"), expect: NO_TOUR })),
   "PUT /api/v1/tours/:id/access": (t) =>
     theirTours(t).flatMap(([what, id]) => [
-      { what: `${what}, made public with an empty list`, method: "PUT", path: tourPath(id, "/access"), json: { access: "public", viewers: [] }, expect: NO_TOUR },
-      { what: `${what}, made restricted to the caller's address`, method: "PUT", path: tourPath(id, "/access"), json: { access: "people", viewers: ["intruder@example.com"] }, expect: NO_TOUR },
-      { what: `${what}, its switch continued`, method: "PUT", path: tourPath(id, "/access"), json: { access: "me" }, expect: NO_TOUR },
+      { what: `${what}, made public with an empty list`, method: "PUT", path: tourPath(id, "/access"), json: { access: "public", viewers: [] }, only: "session" as const, expect: NO_TOUR },
+      { what: `${what}, made restricted to the caller's address`, method: "PUT", path: tourPath(id, "/access"), json: { access: "people", viewers: ["intruder@example.com"] }, only: "session" as const, expect: NO_TOUR },
+      { what: `${what}, its switch continued`, method: "PUT", path: tourPath(id, "/access"), json: { access: "me" }, only: "session" as const, expect: NO_TOUR },
     ]),
   "DELETE /api/v1/sessions/:id": (t) => [
     { what: "the session they are signed in with", method: "DELETE", path: `/api/v1/sessions/${t.session}`, only: "session", expect: NO_SESSION },
@@ -787,7 +787,7 @@ describe("one workspace against another", () => {
       }
       // Every file a row names is there, but the one picture the publish in progress has not
       // copied yet, and the three the switch in progress has not moved yet.
-      const notCopied = s.rows.public_object.filter((o) => o.state === "pending" && o.copied === 0).map((o) => o.image_key);
+      const notCopied = s.rows.public_object.filter((o) => o.state === "pending" && o.copied === 0 && !String(o.publish_id).startsWith("sws_")).map((o) => o.image_key);
       expect(notCopied).toHaveLength(4);
       expect(Object.keys(s.files).filter((key) => s.files[key] === "missing")).toEqual(notCopied);
       expect(Object.keys(s.files).length).toBeGreaterThan(20);
@@ -910,11 +910,10 @@ describe("one workspace against another", () => {
     expect(after.rows.upload.map((u) => u.id)).not.toContain(w.b.ids.upload);
     expect(after.rows.tour_deletion).toEqual([]);
     expect(after.rows.replaced_object).toEqual([]);
-    // All but the rows of its switch in progress, which no housekeeping takes for abandoned:
-    // a switch stays until it is finished, unpublished or deleted.
-    expect(after.rows.public_object.filter((o) => !String(o.publish_id).startsWith("sw_"))).toEqual([]);
-    expect(after.rows.public_object.every((o) => o.state === "pending" && o.tour_id === w.b.ids.switching.tour)).toBe(true);
-    expect(after.rows.access_switch).toHaveLength(1);
+    // Its switch to restricted, left for a day, was finished by that same housekeeping.
+    expect(after.rows.public_object).toEqual([]);
+    expect(after.rows.access_switch).toEqual([]);
+    expect(before.rows.access_switch).toHaveLength(1);
     expect(after.rows.media.map((m) => m.id)).not.toContain(w.b.ids.media.uploading);
     expect(before.rows.media.map((m) => m.id)).toContain(w.a.ids.media.uploading);
   });
