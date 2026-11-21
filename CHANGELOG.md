@@ -2,6 +2,17 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.50 (2026-11-21)
+
+This version changes no answer of the site: only `install.sh`, its tests and the guides change.
+
+- Docker on Debian: `install.sh` can now set up the optional third address, for shared images and clips. On a first install give `--img-domain=img.example.com` beside `--app-domain`; on an install with two addresses add one line, `IMG_HOST=img.example.com`, to `/opt/demo-platform/.env` by hand and run `sudo bash install.sh install`. The script adds the name to the Caddyfile (Caddy then gets a certificate for it on the direct route, or answers it behind a tunnel, where it needs a third published application), and after the start asks all three addresses for `/healthz`; the run fails when one answers in a wrong role (the img address must say `"img"`), while an address that does not resolve to the server or does not answer yet is only a warning.
+- It is refused, with nothing changed, without an app address, with a name that is not a lowercase host name, and with the same name as the tours or app address. `update` refuses to start while the Caddyfile does not answer for exactly the `IMG_HOST` in `.env`, and says to run `install`. An `IMG_HOST` line that the script does not read as one but Docker Compose may (with `export` in front, blanks before it or around the `=`) stops `install` and `update` with nothing changed, so the app never gets a third address that Caddy does not answer for. When a start fails after the line was added or removed, the message says how to put `.env` and the Caddyfile back in step, and `status` warns when they disagree.
+- A two-address install whose Caddyfile was given a third name by hand (such as `{$DOMAIN}, {$APP_DOMAIN}, www.example.com {`), or still has one after the `IMG_HOST` line was removed, now gets a warning from `update` and `status` that names it; `update` goes on as before. `update` asks Docker Compose for the app's `IMG_HOST` only when `.env` mentions `IMG_HOST`, so an install without it updates exactly as before.
+- To go back, remove the `IMG_HOST` line and run `sudo bash install.sh install`: the two-address Caddyfile comes back byte for byte, and images and clips answer on the tours address again.
+- An install with one or two addresses is not affected: without `IMG_HOST` the script writes its stack file, Caddyfile and `.env` exactly as 0.1.49 did, and running it again changes no file.
+- The Docker runbook's section "A third address for images and clips" and the README now give these steps instead of saying it is not available on Docker yet.
+
 ## 0.1.49 (2026-11-21)
 
 This version changes no answer of the site: only the upgrade rehearsal, tests and guides change.
