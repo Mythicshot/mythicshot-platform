@@ -3,7 +3,7 @@
 // email-change link opens, which is served apart in DASH_LINK_PAGES), so the lists cannot
 // drift apart.
 import { expect } from "vitest";
-import { FakeDocument, textNodes } from "./pages-dom.ts";
+import { FakeDocument, textNodes, type FakeElement } from "./pages-dom.ts";
 
 /**
  * What no page script may use: anything that parses markup, a browser dialog, or the
@@ -30,4 +30,16 @@ export function expectPageShape(html: string, what: string, allowText: readonly 
   expect(all.some((e) => e.tagName === "meta" && e.getAttribute("name") === "viewport" && e.getAttribute("content") === "width=device-width, initial-scale=1"), what).toBe(true);
   for (const e of all) expect(["div", "span", "p", "li", "td"].includes(e.tagName) && (e.hasAttribute("tabindex") || e.getAttribute("role") === "button"), `${what} <${e.tagName}> as a control`).toBe(false);
   expect(textNodes(doc.body).filter((t) => t.includes("Account") && t !== "Account" && !allowText.includes(t)), what).toEqual([]);
+}
+
+/**
+ * Whether `name` on `e` is the brand mark's empty alt (src/brand.ts): the image beside the
+ * name, inside the brand or the brand's link, whose alt is empty because the name beside it
+ * is the label. That alt is no words, so the checks for words hidden in attributes skip it,
+ * and only it.
+ */
+export function isBrandMarkAlt(e: FakeElement, name: string): boolean {
+  if (name !== "alt" || e.tagName !== "img" || e.getAttribute("alt") !== "" || e.getAttribute("src") !== "/dash/mark.png") return false;
+  const p = e.parent;
+  return p !== null && (p.className === "brand" || (p.tagName === "a" && p.parent?.className === "brand"));
 }

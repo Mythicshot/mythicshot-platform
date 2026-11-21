@@ -16,6 +16,7 @@ import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { send, type Call } from "./bundle.ts";
+import { isBrandMarkAlt } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -321,7 +322,7 @@ describe("the Admin page and its script", () => {
     expect(textNodes(doc.body)).toEqual(ADMIN_WORDING);
     expect(textNodes(doc.head)).toEqual(["Admin"]);
     // The one placeholder is the invite field's, mockup 1's example address.
-    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt"]) expect(e.hasAttribute(name), `<${e.tagName} ${name}>`).toBe(false);
+    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt"]) expect(e.hasAttribute(name) && !isBrandMarkAlt(e, name), `<${e.tagName} ${name}>`).toBe(false);
     expect(doc.body.all().filter((e) => e.hasAttribute("placeholder")).map((e) => [e.id, e.getAttribute("placeholder")])).toEqual([["invite-email", "name@example.com"]]);
     expect(scriptText(ADMIN_JS)).toEqual(ADMIN_TEXT);
     const words = new Set(Object.values(ADMIN_TEXT));

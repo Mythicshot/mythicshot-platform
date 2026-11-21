@@ -16,6 +16,7 @@ import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { send, type Call } from "./bundle.ts";
+import { isBrandMarkAlt } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -207,7 +208,7 @@ describe("the Storage page", () => {
     const doc = new FakeDocument(STORAGE_HTML);
     expect(textNodes(doc.body)).toEqual(STORAGE_WORDING);
     expect(textNodes(doc.head)).toEqual(["Storage"]);
-    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt", "placeholder"]) expect(e.hasAttribute(name), `<${e.tagName} ${name}>`).toBe(false);
+    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt", "placeholder"]) expect(e.hasAttribute(name) && !isBrandMarkAlt(e, name), `<${e.tagName} ${name}>`).toBe(false);
     // The Storage tab is the current one.
     const current = doc.body.all().filter((e) => e.tagName === "a" && e.getAttribute("aria-current") === "page");
     expect(current.map((a) => [a.textContent, a.getAttribute("href")])).toEqual([["Storage", "/storage"]]);

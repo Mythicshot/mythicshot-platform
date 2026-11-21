@@ -16,7 +16,7 @@ import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { send, type Call } from "./bundle.ts";
-import { expectNoForbiddenApis, expectPageShape } from "./dash-checks.ts";
+import { expectNoForbiddenApis, expectPageShape, isBrandMarkAlt } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -224,7 +224,7 @@ describe("the Connections page", () => {
     const current = doc.body.all().filter((e) => e.tagName === "a" && e.getAttribute("aria-current") === "page");
     expect(current.map((a) => [a.textContent, a.getAttribute("href")])).toEqual([["Connections", "/connections"]]);
     // The only attribute words: the code field's placeholder, as in the mockup.
-    const words = doc.body.all().flatMap((e) => ["aria-label", "title", "alt", "placeholder"].filter((n) => e.hasAttribute(n)).map((n) => [e.id, n, e.getAttribute(n)]));
+    const words = doc.body.all().flatMap((e) => ["aria-label", "title", "alt", "placeholder"].filter((n) => e.hasAttribute(n) && !isBrandMarkAlt(e, n)).map((n) => [e.id, n, e.getAttribute(n)]));
     expect(words).toEqual([["connect-code", "placeholder", "XXXX-XXXX"]]);
     expect(scriptText(CONNECTIONS_JS)).toEqual(TEXT);
     const all = new Set(Object.values(TEXT));
