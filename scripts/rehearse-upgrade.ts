@@ -1204,7 +1204,9 @@ export async function sharedItemsFor(oldBuild: BuildInfo, copy: string, snapshot
   const before20 = versionBelow(v, "0.1.20");
   if (before20 === false && !regexPages) report.check(false, `shared items: the old build ${v} is 0.1.20 or later, which serves item pages, but its dist/app.js does not call sharePageRoutes; the detection disagrees with the version, so the build is taken as having pages`);
   if (before20 === true && regexPages) report.check(false, `shared items: the old build ${v} is older than 0.1.20, which had no item pages, but its dist/app.js calls sharePageRoutes; the detection disagrees with the version, so the build is taken as having pages`);
-  const pages = regexPages || before20 === false;
+  if (before20 === null && !regexPages) report.check(false, `shared items: the old build's version (${v}) cannot be read and its dist/app.js does not call sharePageRoutes; the detection cannot be trusted alone, so the build is taken as having pages`);
+  // Only a version read as older than 0.1.20 can lead to "no pages": an unknown one is taken as having them.
+  const pages = regexPages || before20 !== true;
   const mediaApi = knowsMediaApi(oldBuild.dir);
   const noPagesSkip = `SKIP  shared item answers: ${holds}${skippedText}, and the old build ${v} has no pages for shared items (dist/app.js does not call sharePageRoutes, and its version does not say otherwise)`;
   if (!pages && total === 0 && !mediaApi) {

@@ -1622,6 +1622,13 @@ createServer((req, res) => {
       expect(lines.filter((l) => l.ok === false || l.text.startsWith("SKIP"))).toEqual([]);
     });
 
+    it("an unknown version with no pages by the detection cannot be trusted: a FAIL line, and the items are still compared even when none is served", SLOW_STANDIN, async () => {
+      const { got, lines } = await run("unknown", 403, false);
+      expect(got?.items).toEqual([[{ letter: "i", link: LINK, ext: "png" }]]);
+      expect(lines.filter((l) => l.ok === false).map((l) => l.text)).toEqual([expect.stringMatching(/cannot be read/)]);
+      expect(lines.some((l) => l.text.startsWith("SKIP  shared item answers"))).toBe(false);
+    });
+
     it("only an old build that truly serves no item file and cannot share one is a SKIP", SLOW_STANDIN, async () => {
       const { got, lines } = await run("0.1.18", 404, false);
       expect(got?.items).toEqual([[]]);
