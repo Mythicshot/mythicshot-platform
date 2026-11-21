@@ -147,6 +147,10 @@ NODE_MAJOR=""
 ASSUME_YES=0
 DRY_RUN=0
 ALLOW_DOWNGRADE=0
+# With update: the database could not be checked for restricted tours, and someone checked by hand.
+NO_RESTRICTED_CHECKED_BY_HAND=0
+# The version the commands to go back would put back: the one installed when the update began.
+ROLLBACK_TO=""
 # admin: the arguments for the admin command, as they were given.
 ADMIN_ARGS=()
 
@@ -209,6 +213,11 @@ Options:
   --yes               Do not ask "continue?" questions.
   --dry-run           Print what would be done and change nothing.
   --allow-downgrade   With update: accept an archive older than the installed version.
+                      Refused for a version before 0.1.38 while a tour is restricted.
+  --no-restricted-tours-checked-by-hand
+                      With update: you checked by hand that no tour is restricted to
+                      people or to its owner and none is being changed to or from that.
+                      Used only when the database cannot be read to check it.
 USAGE
 }
 
@@ -261,6 +270,7 @@ parse_args() {
       --yes | -y) ASSUME_YES=1 ;;
       --dry-run) DRY_RUN=1 ;;
       --allow-downgrade) ALLOW_DOWNGRADE=1 ;;
+      --no-restricted-tours-checked-by-hand) NO_RESTRICTED_CHECKED_BY_HAND=1 ;;
       -h | --help) usage; exit 0 ;;
       *) usage_error "unknown argument: $a" ;;
     esac
@@ -283,6 +293,7 @@ parse_args() {
   fi
   [ -z "$NODE_MAJOR" ] || [[ "$NODE_MAJOR" =~ ^[1-9][0-9]?$ ]] || usage_error "--node must be a major version number, such as 24"
   if [ "$ALLOW_DOWNGRADE" = 1 ] && [ "$COMMAND" != update ]; then usage_error "--allow-downgrade goes only with update"; fi
+  if [ "$NO_RESTRICTED_CHECKED_BY_HAND" = 1 ] && [ "$COMMAND" != update ]; then usage_error "--no-restricted-tours-checked-by-hand goes only with update"; fi
   if [ "$COMMAND" = install ] && [ -z "$DOMAIN" ]; then usage_error "install needs --domain <name>"; fi
 }
 
@@ -995,11 +1006,85 @@ cmd_install() {
   return "$rc"
 }
 
+# Tours an earlier version must never run on: tours restricted to people or to their owner,
+# and tours whose move between public and restricted is under way. Who may view a tour came
+# in ACCESS_SINCE; a version before it knows nothing of the setting. check_restricted counts
+# them, read only, with the app's Node.js, else with a sqlite3 tool new enough for the
+# database, and sets RESTRICTED_COUNT, or RESTRICTED_PROBLEM (why it could not tell) and a
+# non-zero status. A database the new version has not migrated yet holds no such tour (0),
+# and so does an app that never started (no database at all).
+ACCESS_SINCE=0.1.38
+ACCESS_COLUMN_SQL="SELECT count(*) AS n FROM pragma_table_info('tour') WHERE name = 'access'"
+RESTRICTED_SQL="SELECT (SELECT count(*) FROM tour WHERE access <> 'public') + (SELECT count(*) FROM access_switch) AS n"
+check_restricted() {
+  local db out
+  RESTRICTED_COUNT=""
+  RESTRICTED_PROBLEM=""
+  if [ -z "${DATA_DIR:-}" ] && ! read_data_dir >/dev/null 2>&1; then
+    RESTRICTED_PROBLEM="the data folder is not known: ${DATA_PROBLEM:-the settings file has no DATA_DIR line}"
+    return 1
+  fi
+  db="$DATA_DIR/db.sqlite"
+  if [ ! -f "$db" ]; then RESTRICTED_COUNT=0; return 0; fi
+  if node_env_has_node; then
+    if ! out="$(
+      set +eu
+      # shellcheck source=/dev/null
+      . "$ACTIVATE" >/dev/null 2>&1 || exit 1
+      node -e 'const { DatabaseSync } = require("node:sqlite"); const [file, , hasSql, countSql] = process.argv.slice(1); const db = new DatabaseSync(file, { readOnly: true, timeout: 5000 }); try { const n = db.prepare(hasSql).get().n > 0 ? db.prepare(countSql).get().n : 0; process.stdout.write(String(n)); } finally { db.close(); }' "$db" restricted-check "$ACCESS_COLUMN_SQL" "$RESTRICTED_SQL" 2>/dev/null
+    )"; then
+      RESTRICTED_PROBLEM="the app's Node.js could not read the database $db"
+      return 1
+    fi
+  elif command -v sqlite3 >/dev/null 2>&1 && sqlite3_reads_strict_tables; then
+    if ! out="$(sqlite3 -readonly "$db" "$ACCESS_COLUMN_SQL;" 2>/dev/null)"; then RESTRICTED_PROBLEM="the sqlite3 tool could not read the database $db"; return 1; fi
+    if [ "$out" != 0 ]; then
+      if ! out="$(sqlite3 -readonly "$db" "$RESTRICTED_SQL;" 2>/dev/null)"; then RESTRICTED_PROBLEM="the sqlite3 tool could not read the database $db"; return 1; fi
+    fi
+  else
+    RESTRICTED_PROBLEM="neither the app's Node.js (looked for at $ACTIVATE) nor a sqlite3 tool new enough for the database is there to read it"
+    return 1
+  fi
+  if ! [[ "$out" =~ ^[0-9]+$ ]]; then RESTRICTED_PROBLEM="reading the database $db gave no count"; return 1; fi
+  RESTRICTED_COUNT="$out"
+}
+
+# Whether the site may run version $1 (empty: not known) on its database. A version from
+# ACCESS_SINCE on always may. An older one may only when the database holds no restricted
+# tour, or, when it cannot be read, when --no-restricted-tours-checked-by-hand says that
+# someone checked by hand. Otherwise it says why not and what to do instead, and fails: it
+# fails closed, never open.
+older_version_allowed() {
+  local target="$1" which
+  if [ -n "$target" ] && ! version_lt "$target" "$ACCESS_SINCE"; then return 0; fi
+  which="the version that ran before"
+  [ -z "$target" ] || which="version $target"
+  if check_restricted; then
+    [ "$RESTRICTED_COUNT" -gt 0 ] || return 0
+    say "Do not go back to $which"
+    info "$RESTRICTED_COUNT tour(s) here are restricted to people or to their owner, or are being changed to or from that. Versions before $ACCESS_SINCE do not know this setting and could show them to anyone."
+  else
+    if [ "$NO_RESTRICTED_CHECKED_BY_HAND" = 1 ]; then
+      warn "the database could not be checked for restricted tours ($RESTRICTED_PROBLEM). Going on, because --no-restricted-tours-checked-by-hand says that you checked by hand that no tour is restricted to people or to its owner and that no change of one is under way"
+      return 0
+    fi
+    say "Not going back to $which: the database could not be checked for restricted tours"
+    info "Why: $RESTRICTED_PROBLEM."
+    info "Versions before $ACCESS_SINCE do not know who may view a tour and could show a restricted tour to anyone."
+    info "If you have checked by hand that no tour is restricted to people or to its owner and that no change of one is under way, give --no-restricted-tours-checked-by-hand to the same command."
+  fi
+  info "To go back, restore the backup taken before the update instead: ${ROLLBACK_BACKUP:-look in $BACKUP_ROOT for the one from before the update}. Follow the guide's restore steps."
+  info "Restoring it loses everything done on the site since that backup was taken: tours uploaded, published, changed or deleted, who may view them, accounts, sign-ins and settings changed in the dashboard."
+  return 1
+}
+
 # The commands that bring the previous version back. Each line stands alone, changes
 # into the app folder itself and does nothing when its work is already done, so the
-# lines can be pasted one by one, and pasted again.
+# lines can be pasted one by one, and pasted again. For a previous version before
+# ACCESS_SINCE they are shown only when older_version_allowed says so.
 print_rollback() {
   local cd="cd '$APP_DIR' &&"
+  older_version_allowed "${ROLLBACK_TO:-}" || return 0
   say "To go back to the version that ran before, run these commands"
   info "$cd [ -d dist.old ] && rm -rf dist && mv dist.old dist"
   info "$cd [ -d migrations.old ] && rm -rf migrations && mv migrations.old migrations"
@@ -1017,6 +1102,7 @@ write_marker() {
     {
       printf '# An update by cpanel.sh was started and has not finished. While this file is\n'
       printf '# here, dist.old and migrations.old are kept: running update again resumes.\n'
+      printf 'PREVIOUS=%s\n' "$ROLLBACK_TO"
       printf 'BACKUP=%s\n' "$ROLLBACK_BACKUP"
       printf 'RESTORE=%s\n' "$ROLLBACK_RESTORE"
       printf 'REMOVE=%s\n' "$ROLLBACK_REMOVE"
@@ -1086,14 +1172,32 @@ cmd_update() {
   check_addresses
   new="$(version_in "$SRC_DIR")"
   old="$(version_in "$APP_DIR" || true)"
+  ROLLBACK_TO="$old"
   if [ -n "$old" ] && version_lt "$new" "$old" && [ "$ALLOW_DOWNGRADE" != 1 ]; then
     die "this archive is version $new, older than the installed $old; nothing was changed. An older version may not start on a database a newer one has changed. To do it anyway add --allow-downgrade"
   fi
   require_data
+  # Any version that does not know who may view a tour, whatever is installed (an unreadable
+  # installed version and the same version included): only when no tour is restricted, or
+  # someone checked by hand when the database cannot be read. An app that never started has
+  # no database, so nothing to check.
+  if version_lt "$new" "$ACCESS_SINCE"; then
+    older_version_allowed "$new" || die "nothing was changed: version $new is older than $ACCESS_SINCE and must not run on this database"
+  fi
   require_node_env
   # An update is resumed when its marker is there, and also when the build exists only
   # as dist.old: something moved it aside and never put a build back.
   if [ -f "$MARKER" ] || { [ ! -f "$APP_DIR/dist/node/entry.js" ] && [ -f "$APP_DIR/dist.old/node/entry.js" ]; }; then RESUME=1; fi
+  # Resumed, VERSION already names the new version: the way back is to the version the
+  # first try recorded in its marker, and when none is recorded it is not known, so the
+  # check before the commands to go back is made all the same.
+  if [ "$RESUME" = 1 ]; then
+    ROLLBACK_TO=""
+    if [ -f "$MARKER" ]; then
+      ROLLBACK_TO="$(value_in "$MARKER" PREVIOUS)"
+      valid_version "$ROLLBACK_TO" || ROLLBACK_TO=""
+    fi
+  fi
 
   say "Update ${old:-an install of unknown version} to $new"
   if [ "$RESUME" = 1 ]; then info "An earlier update was cut off. This run finishes it; dist.old and migrations.old from before it are kept."; fi

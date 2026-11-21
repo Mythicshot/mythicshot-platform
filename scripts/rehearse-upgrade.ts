@@ -34,8 +34,10 @@
 // migrations as it starts; every answer byte for byte (scripts/rehearse-compare.ts holds
 // the short allow-list), both stores file for file, every row of the old tables in the
 // columns they had, the accounts tables and their backfill, SQLite's own checks, and the
-// list of applied migrations; the old build again on the migrated copy; then two new
-// builds started at the same moment on a fresh copy. The report is one line per check,
+// list of applied migrations; the old build again on the migrated copy; then, on a fresh
+// copy, one tour restricted through the new build's API (restrictedWayBack) and the old
+// build started on it, which must serve nothing of that tour; then two new builds started at
+// the same moment on a fresh copy. The report is one line per check,
 // PASS or FAIL, with counts; the exit status is 1 when any check failed.
 //
 // The full rehearsal starts servers, so it is not part of npm test. The comparisons are
@@ -68,6 +70,7 @@ import {
   type Recorded,
   type StoreListing,
 } from "./rehearse-compare.ts";
+import { SESSION_COOKIE, csrfFor } from "../src/sessions.ts";
 
 export type Mode = "one" | "two" | "three";
 export const MODES: readonly Mode[] = ["one", "two", "three"];
@@ -638,6 +641,127 @@ export function resultLine(failed: number, addedFields: number): string {
   return addedFields === 0 ? "RESULT: PASS" : `RESULT: PASS, with ${plural(addedFields, "added field")} to read above`;
 }
 
+/**
+ * The settings the new build runs with to restrict a tour on the scratch copy: one address
+ * (a session counts only from a page of its own address, which the rehearsal's plain-HTTP
+ * requests can be only on a local name), an address for links, and a mail setting whose
+ * server is never contacted (restricting needs a site that can mail; nothing is mailed by it).
+ */
+export const RESTRICT_SETTINGS: Readonly<Record<string, string>> = { SITE_HOST: "localhost", MAIL_MODE: "smtp", MAIL_FROM: "rehearsal@example.com", SMTP_HOST: "127.0.0.1", SMTP_PORT: "9" };
+
+/** A session for the account of the token's workspace, written into the scratch copy only (made the site's admin there when the copy has none, which signing in needs). Null when the workspace has no account. */
+export async function scratchSession(dbPath: string, token: string): Promise<{ cookie: string; csrf: string } | null> {
+  const db = new DatabaseSync(dbPath, { timeout: 5000 });
+  try {
+    const row = db.prepare("SELECT m.user_id AS user_id FROM api_token k JOIN membership m ON m.workspace_id = k.workspace_id WHERE k.hash = ? LIMIT 1").get(tokenHash(token)) as { user_id: string } | undefined;
+    if (row === undefined) return null;
+    db.prepare("UPDATE user SET is_admin = 1 WHERE id = ? AND NOT EXISTS (SELECT 1 FROM user WHERE is_admin = 1)").run(row.user_id);
+    db.prepare("UPDATE user SET status = 'active' WHERE id = ?").run(row.user_id);
+    const secret = "dps_" + createHash("sha256").update(String(Math.random()) + Date.now()).digest("hex");
+    const now = Date.now();
+    db.prepare("INSERT INTO session (id, user_id, hash, label, created_at, last_used_at, expires_at) VALUES (?, ?, ?, 'rehearsal', ?, ?, ?)").run(
+      "ses_" + createHash("sha256").update(secret).digest("hex").slice(0, 24),
+      row.user_id,
+      createHash("sha256").update(secret, "utf8").digest("hex"),
+      now,
+      now,
+      now + 86_400_000,
+    );
+    return { cookie: `${SESSION_COOKIE}=${secret}`, csrf: await csrfFor(secret) };
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * The way back with a restricted tour, on a fresh scratch copy: the new build (it migrates)
+ * restricts one of the first token's tours through its own API (publishing one first when
+ * none is published), then the old build is started on that copy and must serve nothing of
+ * that tour: its page answers as for a tour that does not exist, and so does every picture
+ * the tour's page named while it was public. One report line for the restriction, one for
+ * the way back. With an old build from before restricted tours this is the case that
+ * matters: it knows nothing of the setting.
+ */
+async function restrictedWayBack(args: Args, oldBuild: BuildInfo, newBuild: BuildInfo, oldMode: Mode, work: string, tokens: string[], report: Report): Promise<void> {
+  const what = "way back with a restricted tour";
+  const copy = join(work, "restricted");
+  copyData(args.data, copy);
+  const host = HOSTS.one.app;
+  const port = await freePort();
+  const r = spawnBuild(newBuild.dir, copy, "one", work, port, RESTRICT_SETTINGS);
+  let slug: string | null = null;
+  let pictures: string[] = [];
+  try {
+    try {
+      await waitReady(r, healthHosts("one"), healthRoles("one"));
+    } catch {
+      report.check(false, `${what}: the new build starts on a fresh copy to restrict a tour`, r.err.slice(-3).map((l) => l.split(work).join("<scratch>")));
+      return;
+    }
+    const token = tokens[0];
+    const list = jsonOf(await fetchAnswer(port, "GET", "/api/v1/tours", host, { token }))?.tours as { id: string; slug: string; status: string }[] | undefined;
+    const tour = list?.find((t) => t.status === "published") ?? list?.[0];
+    if (tour === undefined) {
+      report.check(false, `${what}: token 1's workspace has a tour to restrict`, ["it has none, so the way back with a restricted tour could not be tried; rehearse with data that holds a tour"]);
+      return;
+    }
+    if (tour.status !== "published") {
+      let p = await fetchAnswer(port, "POST", `/api/v1/tours/${tour.id}/publish`, host, { token });
+      for (let i = 0; p.status === 202 && i < 60; i++) {
+        p = await fetchAnswer(port, "POST", `/api/v1/tours/${tour.id}/publish`, host, { token, body: JSON.stringify({ publish_id: jsonOf(p)?.publish_id }), headers: { "content-type": "application/json" } });
+      }
+      if (p.status !== 200) {
+        report.check(false, `${what}: the tour to restrict is published first`, [`publish answered ${p.status}`]);
+        return;
+      }
+    }
+    slug = tour.slug;
+    pictures = pictureAddresses(decoder.decode((await fetchAnswer(port, "GET", `/t/${slug}`, host)).body)) ?? [];
+    // Without the page's pictures the way back could pass for want of anything to ask: fail.
+    if (!report.check(pictures.length > 0, `${what}: the tour's public page names its pictures (${pictures.length})`, ["the tour's page named no picture, or could not be read, so the way back could not be checked"])) return;
+    const session = await scratchSession(join(copy, "db.sqlite"), token);
+    if (session === null) {
+      report.check(false, `${what}: token 1's workspace has an account to sign in with`, ["it has none, so no session could change the tour"]);
+      return;
+    }
+    const headers = { cookie: session.cookie, "x-csrf-token": session.csrf, origin: `http://${host}`, "sec-fetch-site": "same-origin", "content-type": "application/json" };
+    let a = await fetchAnswer(port, "PUT", `/api/v1/tours/${tour.id}/access`, host, { body: JSON.stringify({ access: "me" }), headers });
+    for (let i = 0; a.status === 202 && i < 100; i++) a = await fetchAnswer(port, "PUT", `/api/v1/tours/${tour.id}/access`, host, { body: JSON.stringify({ access: "me" }), headers });
+    if (!report.check(a.status === 200 && jsonOf(a)?.access === "me", `${what}: the new build restricted one tour of token 1 (${pictures.length} pictures) through its API`, [`the change answered ${a.status}`])) return;
+  } finally {
+    await stopBuild(r);
+  }
+
+  const oldPort = await freePort();
+  const old = spawnBuild(oldBuild.dir, copy, oldMode, work, oldPort);
+  try {
+    try {
+      await waitReady(old, healthHosts(oldMode), healthRoles(oldMode));
+    } catch {
+      report.check(false, `${what}: the old build ${oldBuild.version} starts on that copy`, old.err.slice(-3).map((l) => l.split(work).join("<scratch>")));
+      return;
+    }
+    const tours = HOSTS[oldMode].tours;
+    const same = (x: Answer, y: Answer) => x.status === y.status && Buffer.from(x.body).equals(Buffer.from(y.body));
+    const problems: string[] = [];
+    const page = await fetchAnswer(oldPort, "GET", `/t/${slug}`, tours);
+    const unknownPage = await fetchAnswer(oldPort, "GET", "/t/aaaaaaaaaa", tours);
+    if (!same(page, unknownPage)) problems.push(`the tour's page answered ${page.status}, not as a tour that does not exist`);
+    const unknownPicture = await fetchAnswer(oldPort, "GET", `/p/${"0".repeat(32)}.png`, tours);
+    let served = 0;
+    for (const [i, address] of pictures.entries()) {
+      const pic = await fetchAnswer(oldPort, "GET", address, tours);
+      if (!same(pic, unknownPicture)) {
+        served++;
+        problems.push(`picture ${i + 1} answered ${pic.status}`);
+      }
+    }
+    report.check(problems.length === 0, `${what}: old build ${oldBuild.version} serves nothing of it (page as unknown, ${pictures.length - served} of ${pictures.length} pictures as unknown)`, problems);
+  } finally {
+    await stopBuild(old);
+  }
+}
+
 /** Runs the whole rehearsal and returns the exit status. */
 export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (line: string) => void): Promise<number> {
   const args = parseArgs(argv, env);
@@ -731,6 +855,9 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
         ...(back.endDb.foreignKeyProblems === 0 ? [] : [`${back.endDb.foreignKeyProblems} foreign key problems`]),
       ]);
     }
+
+    // --- the way back once a tour is restricted, on a fresh copy of the old data
+    await restrictedWayBack(args, oldBuild, newBuild, modes.old, work, tokens, report);
 
     // --- two new builds at the same moment on a fresh copy of the old data
     const race = join(work, "race");

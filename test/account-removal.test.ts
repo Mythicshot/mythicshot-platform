@@ -199,7 +199,7 @@ describe("disabling an account", () => {
     expect(await deps.db.all("SELECT id FROM signin_code WHERE user_id = ?", [b.userId])).toEqual(codes);
     // The removal counts are still there for the admin.
     const counts = await asAdmin(w, "GET", account(b.userId, "/removal"));
-    expect(counts.json).toEqual({ username: null, email: b.email, tours: 3, items: 2, connections: 2, used_bytes: expect.any(Number) });
+    expect(counts.json).toEqual({ username: null, email: b.email, tours: 5, items: 2, connections: 2, used_bytes: expect.any(Number) });
 
     // Enabled: 204, only the status changes, and everything public and by token is byte for byte what it was.
     await deps.db.run("UPDATE session SET revoked_at = ? WHERE id = ?", [deps.now(), b.session.id]);
@@ -281,7 +281,8 @@ describe("refusals", () => {
 
 /** A small workspace of each kind of thing a delete removes, made through the API, and its account disabled by the admin. */
 async function smallWorld(): Promise<{ deps: Deps; keys: { draftKeys: () => Promise<string[]>; publicKeys: () => Promise<string[]> }; admin: { userId: string; session: { cookie: string; csrf: string } }; member: { userId: string; workspaceId: string; email: string } }> {
-  const ctx = await makeDeps();
+  // A site that can mail links, so a tour can be made restricted.
+  const ctx = await makeDeps({ siteHost: "tours.example.com" });
   const { deps } = ctx;
   let now = 1_800_000_000_000;
   deps.now = () => now;
@@ -293,6 +294,19 @@ async function smallWorld(): Promise<{ deps: Deps; keys: { draftKeys: () => Prom
   const published = await uploadTour(deps, token, manifestOf([301, 302], "Published", true), { kind: "new" }, 1);
   for (let i = 0; i < 2; i++) if ((await send(deps, "POST", `/api/v1/tours/${published.tour_id}/publish`, { token })).status !== 200) throw new Error("publish");
   await uploadTour(deps, other.token, manifestOf([401], "Other's"), { kind: "new" }, 2);
+  // A restricted tour with two addresses on its list, published twice to the private store
+  // (live and retired private pictures), and a public one whose switch to restricted is
+  // half done (live public pictures, and private ones already copied).
+  const restricted = await uploadTour(deps, token, manifestOf([307, 308], "Restricted", true), { kind: "new" }, 1);
+  // Only a session may change who views a tour.
+  const memberSession = await signInAs(deps, member.userId);
+  const access = (tourId: string, body: Json) => send(deps, "PUT", `/api/v1/tours/${tourId}/access`, { headers: { ...page(memberSession), ...JSON_HEADERS }, body: JSON.stringify(body) });
+  if ((await access(restricted.tour_id, { access: "people", viewers: ["ana@example.com", "bo@example.com"] })).status !== 200) throw new Error("restrict");
+  for (let i = 0; i < 2; i++) if ((await send(deps, "POST", `/api/v1/tours/${restricted.tour_id}/publish`, { token })).status !== 200) throw new Error("restricted publish");
+  const switching = await uploadTour(deps, token, manifestOf(Array.from({ length: 13 }, (_, i) => 320 + i), "Switching", false), { kind: "new" }, 1);
+  let pub = await send(deps, "POST", `/api/v1/tours/${switching.tour_id}/publish`, { token });
+  while (pub.status === 202) pub = await send(deps, "POST", `/api/v1/tours/${switching.tour_id}/publish`, { token, headers: JSON_HEADERS, body: JSON.stringify({ publish_id: pub.json.publish_id }) });
+  if ((await access(switching.tour_id, { access: "me" })).status !== 202) throw new Error("switch");
   // An open upload with one step sent.
   const m = manifestOf([303, 304], "Open");
   const up = (await createUpload(deps, token, m)).json.upload_id as string;
@@ -399,6 +413,7 @@ describe("a delete interrupted at any call", () => {
         }
         expect([200, 404], label).toContain(r.status);
         expect(await deps.db.first("SELECT id FROM user WHERE id = ?", [member.userId]), label).toBeNull();
+        expect(await deps.db.all("SELECT tour_id FROM tour_viewer UNION ALL SELECT tour_id FROM access_switch"), `${label}: rows of who may view a tour left`).toEqual([]);
         const stored = new Set([...(await keys.draftKeys()), ...(await keys.publicKeys())]);
         expect(memberKeys.filter((k) => stored.has(k)), `${label}: files left`).toEqual([]);
         expect(await snapshotOf(deps, { workspaceId: other!.id }, keys), label).toEqual(otherBefore);

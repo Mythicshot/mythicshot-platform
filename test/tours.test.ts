@@ -39,8 +39,8 @@ describe("tour list", () => {
     const slug = async (id: string) => (await deps.db.first<{ slug: string }>("SELECT slug FROM tour WHERE id = ?", [id]))!.slug;
     expect(r.json).toEqual({
       tours: [
-        { id: older.tour_id, title: "Send an invoice", status: "draft", slug: await slug(older.tour_id), url: null, chapters: 2, steps: 4, bytes: bytesOf(v2) + bytesOf(short), updated_at: 1_800_000_003_000, published_at: null, unpublished_changes: false },
-        { id: newer.tour_id, title: "Short one", status: "draft", slug: await slug(newer.tour_id), url: null, chapters: 1, steps: 1, bytes: bytesOf(short), updated_at: 1_800_000_001_000, published_at: null, unpublished_changes: false },
+        { id: older.tour_id, title: "Send an invoice", status: "draft", slug: await slug(older.tour_id), url: null, chapters: 2, steps: 4, bytes: bytesOf(v2) + bytesOf(short), updated_at: 1_800_000_003_000, published_at: null, unpublished_changes: false, access: "public", viewers: 0 },
+        { id: newer.tour_id, title: "Short one", status: "draft", slug: await slug(newer.tour_id), url: null, chapters: 1, steps: 1, bytes: bytesOf(short), updated_at: 1_800_000_001_000, published_at: null, unpublished_changes: false, access: "public", viewers: 0 },
       ],
     });
     // The fields the desktop app's picker has always read are all still there.

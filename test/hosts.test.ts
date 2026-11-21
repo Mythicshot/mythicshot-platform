@@ -100,6 +100,8 @@ const ROWS: Record<string, Row> = {
   "DELETE /api/v1/tours/:id": api("DELETE", `/api/v1/tours/${TOUR}`),
   "GET /api/v1/tours/:id/steps/:step_id/image": api("GET", `/api/v1/tours/${TOUR}/steps/${STEP}/image`),
   "POST /api/v1/tours/:id/publish": api("POST", `/api/v1/tours/${TOUR}/publish`),
+  "GET /api/v1/tours/:id/access": api("GET", `/api/v1/tours/${TOUR}/access`),
+  "PUT /api/v1/tours/:id/access": session("PUT", `/api/v1/tours/${TOUR}/access`, 401),
   "POST /api/v1/tours/:id/unpublish": api("POST", `/api/v1/tours/${TOUR}/unpublish`),
   // Signing in and the session: on the app address only. Asking for a link answers 200
   // for any well-formed address; a code nobody was given is the one refusal; the rest
@@ -202,7 +204,8 @@ const ROWS: Record<string, Row> = {
 const KEYS = Object.keys(ROWS);
 const DESCRIPTION_KEYS = KEYS.filter((k) => k.includes(" /api/v1/openapi."));
 /** Signing in, the session, looking up and accepting an invite, typing a short code and the workspace's tokens: the app address's own part of the API. */
-const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account|invite|connect\/(?:lookup|confirm|refuse)|tokens)(?:\/|$)/.test(k));
+// The change of who may view a tour takes a session alone, so it is one of these too.
+const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account|invite|connect\/(?:lookup|confirm|refuse)|tokens)(?:\/|$)/.test(k) || k === "PUT /api/v1/tours/:id/access");
 /** The app's two requests while it connects: no credential, on both addresses. */
 const CONNECT_KEYS = ["POST /api/v1/connect/start", "POST /api/v1/connect/token"];
 /** The site admin's routes. */
@@ -336,12 +339,12 @@ describe("the host-routing matrix", () => {
     for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES]) for (const key of [`GET ${p.path}`, `GET ${p.script.path}`]) expect([PAGE_KEYS.includes(key), DASH_KEYS.includes(key)].filter(Boolean), key).toEqual([true]);
     for (const key of ["GET /dash/dash.css", "GET /dash/dash.js"]) expect(DASH_KEYS, key).toContain(key);
     // 9, the two requests of an invite, the three requests that take a short code and the three of the token list.
-    expect(SESSION_KEYS.length).toBe(17);
+    expect(SESSION_KEYS.length).toBe(18);
     expect(ADMIN_KEYS.length).toBe(11);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
     // 15, and the eight routes of shared items.
-    expect(API_KEYS.length).toBe(23);
+    expect(API_KEYS.length).toBe(24);
     expect(WIZARD_KEYS.length).toBe(5);
     // The shared items' routes are the media routes, and the img address has them and health alone.
     expect(MEDIA_KEYS.length).toBe(8);

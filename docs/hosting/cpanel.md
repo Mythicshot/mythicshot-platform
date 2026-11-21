@@ -251,6 +251,8 @@ The data folder and the settings file are not touched. The update must be run fr
 
 The script refuses an archive that is older than the installed version, because an older version may not start on a database a newer one has changed. `--allow-downgrade` overrides that; make sure you know why you need it.
 
+Going back to a version before 0.1.38 is refused once a tour is restricted to people or to its owner, or is being changed to or from that: such a version does not know who may view a tour and could show it to anyone. The script reads the database before it goes down to such a version with `--allow-downgrade`, and before it shows the commands to go back after a failed update, and refuses both while such a tour exists; restore the backup taken before the update instead, which loses everything done on the site since it was taken. When the script cannot read the database it refuses too, unless you give `--no-restricted-tours-checked-by-hand`: with it you state that you checked by hand that no tour is restricted and none is being changed, and it is used only when the database cannot be read. Going back to 0.1.38 or later is always allowed.
+
 The update refuses to start when it does not know the address, because it could not check the result. That is the case once, when the platform was first installed by hand, without this script: add `--domain tours.example.com`. The script remembers it afterwards.
 
 **If an update is cut off,** by Ctrl-C or a dropped SSH connection, the script prints the commands to go back, when it still can. Either way, run the same update again: it notices the unfinished one, keeps `dist.old` and `migrations.old` from before it as the way back, and finishes. Until then, `./cpanel.sh status` says that an update was cut off.

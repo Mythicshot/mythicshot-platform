@@ -418,7 +418,7 @@ describe("parts", () => {
     refused(await putPreview(deps, token, id, png(10, 10, 100)), 409, "already_online");
     expect(await served(deps, id, 2)).toEqual(partOf(other, 2));
     expect(await objectsOf(draftKeys, id)).toHaveLength(3);
-  });
+  }, 60_000); // Several clip parts of 2 MB each: under the full Workers suite this takes longer than the default five seconds.
 
   it("parts whose stored sizes do not add up to the declared bytes are not committed", async () => {
     const { deps } = await makeDeps();

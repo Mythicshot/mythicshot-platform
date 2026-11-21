@@ -50,6 +50,12 @@ import {
   type Running,
 } from "../scripts/rehearse-upgrade.ts";
 import { PROXY_HINT } from "../src/node/config.ts";
+import { RESTRICT_SETTINGS, scratchSession } from "../scripts/rehearse-upgrade.ts";
+import { createApp } from "../src/app.ts";
+import { NodeDb } from "../src/node/db.ts";
+import { NodeFileStore } from "../src/node/files.ts";
+import { migrate } from "../src/node/migrate.ts";
+import { createWorkspace } from "../src/workspaces.ts";
 
 const enc = new TextEncoder();
 
@@ -765,5 +771,41 @@ createServer((req, res) => {
     const source = (dir: string): string => readdirSync(dir, { withFileTypes: true }).map((e) => (e.isDirectory() ? source(join(dir, e.name)) : e.name.endsWith(".ts") && !e.name.endsWith("-assets.ts") ? readFileSync(join(dir, e.name), "utf8") : "")).join(" ");
     const src = source(fileURLToPath(new URL("../src", import.meta.url)));
     for (const line of KNOWN_ERROR_LINES) expect(src.includes(JSON.stringify(line)) || src.includes(`"${line}"`), line).toBe(true);
+  });
+});
+
+describe("the way back with a restricted tour", () => {
+  it("the session written into the scratch copy is one the new build takes for a change of who views a tour, and the token's own account's", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rehearse-session-"));
+    const file = join(root, "db.sqlite");
+    const db = new NodeDb(file);
+    try {
+      await migrate(db, fileURLToPath(new URL("../migrations/", import.meta.url)));
+      const deps = { db, drafts: new NodeFileStore(join(root, "drafts")), pub: new NodeFileStore(join(root, "public")), config: { publicImageBase: "", setupCode: null, siteHost: "localhost" }, now: () => Date.now() };
+      const a = await createWorkspace(deps, "Acme", "owner@example.com");
+      await createWorkspace(deps, "Other", "other@example.com");
+      expect(await scratchSession(file, "dp_" + "0".repeat(40))).toBeNull(); // a token nobody has: no session
+      const session = await scratchSession(file, a.token);
+      expect(session).not.toBeNull();
+      const tour = "tour_" + "1".repeat(24);
+      await db.run("INSERT INTO tour (id, workspace_id, title, slug, status, created_at, updated_at) VALUES (?, ?, 'T', 'abcdefghij', 'draft', 1, 1)", [tour, a.workspaceId]);
+      const put = await createApp(deps).fetch(
+        new Request(`http://localhost/api/v1/tours/${tour}/access`, {
+          method: "PUT",
+          headers: { cookie: session!.cookie, "x-csrf-token": session!.csrf, origin: "http://localhost", "sec-fetch-site": "same-origin", "content-type": "application/json" },
+          body: JSON.stringify({ access: "me" }),
+        }),
+      );
+      // This deps object has no mailer, so the change is refused for want of mail, after the session was taken.
+      expect([put.status, ((await put.json()) as { error: string }).error]).toEqual([409, "cannot_restrict"]);
+      expect((await db.first<{ n: number }>("SELECT count(*) AS n FROM session"))!.n).toBe(1);
+    } finally {
+      db.close();
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  it("the new build restricts with one address, an address for links and a mail setting whose server is never contacted", () => {
+    expect(RESTRICT_SETTINGS).toEqual({ SITE_HOST: "localhost", MAIL_MODE: "smtp", MAIL_FROM: "rehearsal@example.com", SMTP_HOST: "127.0.0.1", SMTP_PORT: "9" });
   });
 });

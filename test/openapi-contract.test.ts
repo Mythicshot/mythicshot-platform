@@ -33,7 +33,7 @@ import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS } from "../src/uploads.ts";
 import { VERSION } from "../src/version.ts";
 import { useViewerGate } from "../src/viewers.ts";
-import { clone, fixtures, gif, jpeg, logoPng, mp4, png, send, sha256Hex, stepImage, type Call, type Json } from "./bundle.ts";
+import { ORIGIN, clone, fixtures, gif, jpeg, logoPng, mp4, png, send, sha256Hex, stepImage, type Call, type Json } from "./bundle.ts";
 import { check, deref, KEYWORDS, keywordsOf } from "./openapi-schema.ts";
 
 /**
@@ -232,6 +232,14 @@ function client(deps: Deps) {
     del: (token: string | null, tourId: string) => call("DELETE", `/api/v1/tours/${tourId}`, { token }),
     publish: (token: string | null, tourId: string, body?: unknown) => call("POST", `/api/v1/tours/${tourId}/publish`, body === undefined ? { token } : withJson(token, body)),
     unpublish: (token: string | null, tourId: string) => call("POST", `/api/v1/tours/${tourId}/unpublish`, { token }),
+    access: (token: string | null, tourId: string) => call("GET", `/api/v1/tours/${tourId}/access`, { token }),
+    accessBySession: (session: { cookie: string; csrf: string }, tourId: string) => call("GET", `/api/v1/tours/${tourId}/access`, { headers: { cookie: session.cookie } }),
+    /** Sent with a session (only a session may change who views a tour): its Cookie, anti-forgery value and this address as Origin. */
+    setAccess: (session: { cookie: string; csrf: string }, tourId: string, body: unknown) =>
+      call("PUT", `/api/v1/tours/${tourId}/access`, {
+        body: typeof body === "string" ? body : JSON.stringify(body),
+        headers: { ...JSON_HEADERS, cookie: session.cookie, "x-csrf-token": session.csrf, origin: ORIGIN, "sec-fetch-site": "same-origin" },
+      }),
     image: (token: string | null, tourId: string, stepId: string) => call("GET", `/api/v1/tours/${tourId}/steps/${stepId}/image`, { token }),
     create: (token: string | null, manifest: unknown, target: unknown = NEW, sha256?: string[]) =>
       call("POST", "/api/v1/uploads", withJson(token, sha256 === undefined ? { manifest, target } : { manifest, target, sha256 })),
@@ -307,7 +315,7 @@ function refused(r: Call, status: number, code: string): void {
   expect([r.status, r.json?.error], r.text).toEqual([status, code]);
 }
 
-const TOUR_FIELDS = ["id", "title", "status", "slug", "url", "chapters", "steps", "bytes", "updated_at", "published_at", "unpublished_changes"];
+const TOUR_FIELDS = ["id", "title", "status", "slug", "url", "chapters", "steps", "bytes", "updated_at", "published_at", "unpublished_changes", "access", "viewers"];
 const NO_TOUR = "tour_" + "0".repeat(24);
 const NO_UPLOAD = "up_" + "0".repeat(24);
 const NO_STEP = "st_" + "0".repeat(24);
@@ -377,7 +385,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
 
     const live = await api.publish(a.token, t.tour_id);
     expect(live.status).toBe(200);
-    expect(live.json).toEqual({ slug: draft[0].slug, url: `/t/${draft[0].slug}`, steps: 2 });
+    expect(live.json).toEqual({ slug: draft[0].slug, url: `/t/${draft[0].slug}`, steps: 2, access: "public", viewers: 0 });
     const published = (await api.list(a.token)).json.tours as Json[];
     expect(Object.keys(published[0])).toEqual(TOUR_FIELDS);
     expect(published[0]).toMatchObject({ status: "published", url: live.json.url, unpublished_changes: false });
@@ -428,7 +436,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
 
     const started = await api.publish(a.token, t.tour_id);
     expect(started.status).toBe(202);
-    expect(started.json).toEqual({ status: "in_progress", publish_id: started.json.publish_id, done: COPY_BATCH, total });
+    expect(started.json).toEqual({ status: "in_progress", publish_id: started.json.publish_id, done: COPY_BATCH, total, access: "public", viewers: 0 });
     // A publish in progress stops a delete.
     refused(await api.del(a.token, t.tour_id), 409, "publish_busy");
     const finished = await api.publish(a.token, t.tour_id, { publish_id: started.json.publish_id });
@@ -621,6 +629,107 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const orphan = await api.me(a.token);
     deps.db.first = realFirst;
     refused(orphan, 404, "not_found");
+  });
+
+  it("every answer of who may view a tour is as documented", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // A site that can mail links, which restricting a tour needs.
+    const { deps, a: aSide, b: bSide } = await setup({ siteHost: "tours.example.com" });
+    const api = client(deps);
+    // Only a session may change who views a tour: each workspace's owner signs in (the first is the site's admin, which signing in needs).
+    const sessionOf = async (workspaceId: string) => {
+      const user = (await deps.db.first<{ user_id: string }>("SELECT user_id FROM membership WHERE workspace_id = ?", [workspaceId]))!.user_id;
+      await deps.db.run("UPDATE user SET is_admin = 1 WHERE id = ? AND NOT EXISTS (SELECT 1 FROM user WHERE is_admin = 1)", [user]);
+      const made = (await redeemSignInCode(deps, await createSignInCode(deps, user), null, null))!;
+      return { cookie: `${SESSION_COOKIE}=${made.secret}`, csrf: await csrfFor(made.secret) };
+    };
+    const a = { ...aSide, session: await sessionOf(aSide.workspaceId) };
+    const b = { ...bSide, session: await sessionOf(bSide.workspaceId) };
+    const draft = await api.upload(a.token, small(1, "Draft"));
+    // A token reads the setting and how many addresses the list holds; a session reads the list itself.
+    expect((await api.access(a.token, draft.tour_id)).json).toEqual({ access: "public", viewers_count: 0, limit: 200, can_restrict: true, switching: null });
+    expect((await api.accessBySession(a.session, draft.tour_id)).json).toEqual({ access: "public", viewers: [], limit: 200, can_restrict: true, switching: null });
+    refused(await api.access(b.token, draft.tour_id), 404, "not_found");
+    refused(await api.access(a.token, NO_TOUR), 404, "not_found");
+    refused(await api.setAccess(b.session, draft.tour_id, { access: "me" }), 404, "not_found");
+
+    // The refusals of the body, which change nothing.
+    refused(await api.setAccess(a.session, draft.tour_id, "[]"), 400, "bad_request");
+    refused(await api.setAccess(a.session, draft.tour_id, { access: "people", viewers: "ana@example.com" }), 400, "bad_request");
+    refused(await api.setAccess(a.session, draft.tour_id, { access: "friends" }), 400, "bad_access");
+    const bad = await api.setAccess(a.session, draft.tour_id, { access: "people", viewers: ["ana@example.com", "not an address"] });
+    refused(bad, 400, "bad_viewer");
+    expect(bad.json.detail).toContain("viewers[1]");
+    expect(bad.text).not.toContain("ana@example.com");
+    refused(await api.setAccess(a.session, draft.tour_id, { access: "people", viewers: Array.from({ length: 201 }, (_, i) => `v${i}@example.com`) }), 400, "too_many_viewers");
+    refused(await api.setAccess(a.session, draft.tour_id, `{"access":"people","viewers":["${"a".repeat(70_000)}"]}`), 413, "too_large");
+    expect((await api.accessBySession(a.session, draft.tour_id)).json.viewers).toEqual([]);
+
+    // A draft changes at once.
+    const set = await api.setAccess(a.session, draft.tour_id, { access: "people", viewers: ["Ana@Example.com ", "bo@example.com", "ana@example.com"] });
+    expect(set.json).toEqual({ access: "people", viewers: ["ana@example.com", "bo@example.com"], limit: 200, can_restrict: true, switching: null });
+
+    // A published tour of more pictures than one request moves: 202, then 200.
+    const big = await api.upload(a.token, small(COPY_BATCH + 1, "Big"));
+    await api.publishAll(a.token, big.tour_id);
+    const moving = await api.setAccess(a.session, big.tour_id, { access: "me" });
+    expect([moving.status, moving.json]).toEqual([202, { status: "switching", done: COPY_BATCH, total: COPY_BATCH + 1, target: "restricted" }]);
+    expect((await api.access(a.token, big.tour_id)).json.switching).toEqual({ done: COPY_BATCH, total: COPY_BATCH + 1, target: "restricted" });
+    refused(await api.setAccess(a.session, big.tour_id, { access: "public" }), 409, "access_switching");
+    refused(await api.publish(a.token, big.tour_id), 409, "access_switching");
+    const moved = await api.setAccess(a.session, big.tour_id, { access: "me" });
+    expect([moved.status, moved.json.access, moved.json.switching]).toEqual([200, "me", null]);
+
+    // A move that cannot go on just now: the request is sent again.
+    const store = deps.pub;
+    deps.pub = { ...store, put: () => Promise.reject(new Error("the store is down")) };
+    refused(await api.setAccess(a.session, big.tour_id, { access: "public" }), 500, "access_failed");
+    deps.pub = store;
+    let again = await api.setAccess(a.session, big.tour_id, { access: "public" });
+    for (let i = 0; again.status === 202 && i < 5; i++) again = await api.setAccess(a.session, big.tour_id, { access: "public" });
+    expect([again.status, again.json.access]).toEqual([200, "public"]);
+
+    // A move whose tour is unpublished while a request of it copies: that request answers switch_cancelled.
+    const drafts = deps.drafts;
+    deps.drafts = {
+      ...drafts,
+      put: async (key, body, meta) => {
+        deps.drafts = drafts;
+        await send(deps, "POST", `/api/v1/tours/${big.tour_id}/unpublish`, { token: a.token });
+        return drafts.put(key, body, meta);
+      },
+    };
+    refused(await api.setAccess(a.session, big.tour_id, { access: "people" }), 409, "switch_cancelled");
+    deps.drafts = drafts;
+
+    // A tour that changes under the request twice: one batch and then the next fail as if a publish had landed.
+    const db = deps.db;
+    let failures = 0;
+    deps.db = {
+      ...db,
+      batch: async (stmts) => {
+        if (failures < 2 && stmts.some((s) => s.sql.includes("UPDATE tour SET access"))) {
+          failures++;
+          throw new Error("NOT NULL constraint failed: audit.at");
+        }
+        return db.batch(stmts);
+      },
+    };
+    refused(await api.setAccess(a.session, draft.tour_id, { access: "me" }), 409, "access_busy");
+    deps.db = db;
+
+    // A published version that cannot be moved: publish again.
+    const odd = await api.upload(a.token, small(1, "Odd"));
+    await api.publishAll(a.token, odd.tour_id);
+    await deps.db.run(`UPDATE snapshot SET data = '{"title":"odd"}' WHERE tour_id = ?`, [odd.tour_id]);
+    refused(await api.setAccess(a.session, odd.tour_id, { access: "me" }), 409, "republish_needed");
+
+    // A site that cannot mail refuses to make a public tour restricted, and keeps a restricted tour as it is.
+    deps.config = { ...deps.config, siteHost: null };
+    const plain = await api.upload(a.token, small(1, "Plain"));
+    refused(await api.setAccess(a.session, plain.tour_id, { access: "me" }), 409, "cannot_restrict");
+    const kept = await api.access(a.token, draft.tour_id);
+    expect([kept.json.access, kept.json.can_restrict]).toEqual(["people", false]);
   });
 
   it("me has addresses only with two addresses, and health names the address it was asked on", async () => {
@@ -1325,6 +1434,7 @@ describe("the two 403s of a change made with a session, on each route that takes
       ["POST", "/api/v1/connect/refuse", { user_code: "ABCD-EFGH" }],
       ["PATCH", `/api/v1/tokens/${TOKEN}`, { name: "Laptop" }],
       ["DELETE", `/api/v1/tokens/${TOKEN}`, undefined],
+      ["PUT", `/api/v1/tours/tour_${"0".repeat(24)}/access`, { access: "me" }],
     ];
     for (const [method, path, body] of routes) {
       const withBody = body === undefined ? {} : { body: JSON.stringify(body) };
@@ -1379,7 +1489,7 @@ describe("the description is checked in full", () => {
 
   it("the schema checker itself refuses a missing field, an extra field and a wrong type, and a keyword it does not know", () => {
     const tour = { $ref: "#/components/schemas/Tour" };
-    const good: Json = { id: NO_TOUR, title: "A tour", status: "draft", slug: "abcdefghij", url: null, chapters: 1, steps: 3, bytes: 0, updated_at: 1, published_at: null, unpublished_changes: false };
+    const good: Json = { id: NO_TOUR, title: "A tour", status: "draft", slug: "abcdefghij", url: null, chapters: 1, steps: 3, bytes: 0, updated_at: 1, published_at: null, unpublished_changes: false, access: "public", viewers: 0 };
     expect(check(DOC, tour, good)).toEqual([]);
     const { unpublished_changes: _gone, ...lacking } = good;
     expect(check(DOC, tour, lacking)).toEqual(['$: the required field "unpublished_changes" is missing']);
@@ -1458,7 +1568,7 @@ describe("the error codes in the code", () => {
     };
     const inCode = new Set<string>();
     let calls = 0;
-    for (const file of ["tours.ts", "uploads.ts", "publish.ts"]) {
+    for (const file of ["tours.ts", "uploads.ts", "publish.ts", "access.ts"]) {
       const literal = [...source(file).matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
       // Every call names its status and code in place, so none escapes this reading.
       expect(literal.length, `${file}: an apiError call without a literal status and code`).toBe([...source(file).matchAll(/\bapiError\(/g)].length);
@@ -1538,9 +1648,9 @@ describe("the error codes in the code", () => {
     expect(viewersPlain.length, "viewers.ts: an error answer not built in place").toBe([...viewers.matchAll(/\berror: "/g)].length);
     for (const m of viewersPlain) inCode.add(`${m[1]} ${m[2]}`);
     expect([...inCode]).toEqual(expect.arrayContaining(["404 view_link_invalid", "401 unauthorized", "403 bad_origin"]));
-    // These thirteen are the only modules that answer with apiError (src/http.ts defines it).
+    // These fourteen are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/account-removal.ts", "../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts"]);
+    expect(callers).toEqual(["../src/access.ts", "../src/account-removal.ts", "../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.
@@ -1584,6 +1694,7 @@ describe("the error codes in the code", () => {
         "POST /api/v1/connect/refuse",
         "PATCH /api/v1/tokens/{id}",
         "DELETE /api/v1/tokens/{id}",
+        "PUT /api/v1/tours/{id}/access",
       ].sort(),
     );
     for (const o of sessionChanges) {

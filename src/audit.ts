@@ -35,6 +35,7 @@ export const AUDIT_EVENTS = [
   "account_disabled",
   "account_enabled",
   "account_deleted",
+  "tour_access_changed",
   "viewer_link_sent",
   "viewer_signin",
 ] as const;

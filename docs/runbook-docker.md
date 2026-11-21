@@ -399,6 +399,21 @@ Keeping Debian and Docker patched is yours to do, for example with `apt-get upda
 
 **How to tell it worked:** the run ends with `==> Updated`, and `sudo bash install.sh status` shows the app `healthy`.
 
+### Going back to an earlier version
+
+Going back to a version before 0.1.38 is refused once a tour is restricted: on cPanel, `cpanel.sh` refuses it (unless `--no-restricted-tours-checked-by-hand` states that someone checked by hand, and only when it cannot read the database). On this route nothing checks it for you before you start an earlier image: only the database stands in the way, whose triggers make an earlier version's publish or rename of a restricted tour fail instead of making it public. Version 0.1.38 brings who may view a tour. A version before it does not know that setting, so once any tour has been made `people` or `me`, or is being changed to or from that, never start an earlier image on the same data: it could show that tour to anyone.
+
+> [!WARNING]
+> Do not go back to an earlier version once a tour is restricted; restore the backup taken before the update instead, which loses everything done on the site since it was taken.
+
+That backup is the one `install.sh update` wrote before the update (see [step 9](#9-back-up-and-restore)). Restoring it brings back the tours, links, accounts and settings as they were at that moment; tours uploaded, published, changed or deleted since, who may view them, sign-ins and dashboard changes since are lost. Find out first whether any tour is restricted, from a root shell in `/opt/demo-platform`:
+
+```sh
+docker compose exec -T app node -e 'const { DatabaseSync } = process.getBuiltinModule("node:sqlite"); const db = new DatabaseSync("/data/db.sqlite", { readOnly: true }); console.log(db.prepare("SELECT (SELECT count(*) FROM tour WHERE access <> ?) + (SELECT count(*) FROM access_switch) AS n").get("public").n); db.close();'
+```
+
+It prints a number: anything but `0` means restore, not go back.
+
 ### Make yourself the admin
 
 The version with accounts brings sign-in with a link sent instead of a password, and the dashboard behind it. An updated site keeps working exactly as before, its tours, links and tokens unchanged, and nobody can sign in until the site has an admin. The admin is made once, by a command run in the app container, with the settings the app itself runs with; there is no web page for it, and the setup code plays no part in it.
@@ -1158,6 +1173,7 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `account_disabled` | The admin disabled an account; the account is the admin, the subject the disabled account |
 | `account_enabled` | The admin enabled a disabled account again; the account is the admin, the subject the enabled account |
 | `account_deleted` | The admin's delete of a disabled account finished: the account, its workspace and everything in it are gone. The account is the admin who sent the last delete request, the workspace and the subject are the deleted workspace's and account's ids. Nothing else of the person is recorded, and the rows recorded about the account before stay |
+| `tour_access_changed` | Who may view a tour changed, or its list of addresses did; the subject is the tour, the account is the one signed in (none when a token made the change), and the detail holds the settings and the list's sizes, such as `{"from":"public","to":"people","viewers_before":0,"viewers":3,"by":"session"}`. Made public from a published tour, it is written when the move of its pictures finishes. No address is recorded |
 | `viewer_link_sent` | A link for a visitor to view a tour shared with their address was made to be mailed; the mail itself may still have failed. Only the subject is set, the link's own id: no account, workspace, tour or address is recorded |
 | `viewer_signin` | A visitor used such a link and this browser now views tours as that address; the subject is the viewer session. No account, workspace or address is recorded |
 

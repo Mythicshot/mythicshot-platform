@@ -76,6 +76,10 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /api/v1/tours/:id/steps/:step_id/image": "both",
   "POST /api/v1/tours/:id/publish": "both",
   "POST /api/v1/tours/:id/unpublish": "both",
+  // Who may view a tour: read with a token or a session, like the tour list; changed with a
+  // session alone, which counts on the app address only, so the change answers there only.
+  "GET /api/v1/tours/:id/access": "both",
+  "PUT /api/v1/tours/:id/access": "app",
 
   // Signing in and the session. The session cookie belongs to the app address alone, so
   // none of these answers on the tours address, which holds what users publish.

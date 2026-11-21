@@ -146,6 +146,10 @@ if [ "${1:-}" != "-e" ]; then
   for a in "$@"; do printf 'arg[%s]\n' "$a"; done
   exit "${STUB_ADMIN_EXIT:-0}"
 fi
+# Called as: node -e <program> <database> restricted-check <sql> <sql>, by the check made
+# before the commands to go back are shown: answers STUB_RESTRICTED (0 unless set), the
+# number of restricted tours, and records nothing.
+if [ "${4:-}" = restricted-check ]; then printf '%s' "${STUB_RESTRICTED:-0}"; exit 0; fi
 # Called as: node -e <program> <database> <copy>. The program text is not recorded.
 printf 'node[venv=%s umask=%s] %s <program> %s %s\n' "${STUB_VENV:-none}" "$(umask)" "$1" "$3" "$4" >>"$STUB_LOG"
 [ "${STUB_NODE_FAIL:-0}" != 1 ] || { echo "Error: database is locked" >&2; exit 1; }
@@ -806,6 +810,142 @@ cd '$APP' && rm -f .cpanel-update && touch tmp/restart.txt"
   # And the install is an ordinary one again: the next update works.
   cpanel_in "$T/new" "" update --yes
   expect "an update after the rollback succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+}
+
+test_update_refuses_the_way_back_when_a_tour_is_restricted() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  : >"$LOG"
+  STUB_RESTRICTED=2 STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "exit code non-zero" test "$RC" != 0
+  expect "says the check failed" has "$OUT" "Version 0.2.0 is in place, but the health check did not pass"
+  expect "says plainly not to go back" has "$OUT" "Do not go back to version 0.1.1"
+  expect "says why: the restricted tours" has "$OUT" "2 tour(s) here are restricted to people or to their owner"
+  local b; b="$(only_backup)"
+  expect "names the backup to restore instead" has "$OUT" "restore the backup taken before the update instead: $b"
+  expect "says what restoring it loses" has "$OUT" "Restoring it loses everything done on the site since that backup was taken"
+  expect "shows no command to go back" hasnt "$OUT" "To go back to the version that ran before"
+  expect "shows no rollback command" hasnt "$OUT" "mv dist.old dist"
+  expect "the check records nothing, the call order is unchanged" hasnt "$LOG" "restricted-check"
+
+  # The database cannot be read: no command either (it fails closed), with the reason and the override.
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  STUB_RESTRICTED=unreadable STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "unreadable: says it could not check" has "$OUT" "Not going back to version 0.1.1: the database could not be checked for restricted tours"
+  expect "unreadable: gives the reason" has "$OUT" "Why: reading the database"
+  expect "unreadable: names the override" has "$OUT" "--no-restricted-tours-checked-by-hand"
+  expect "unreadable: shows no command to go back" hasnt "$OUT" "To go back to the version that ran before"
+  # With the override the commands are shown, and the warning says what it asserted. (On a
+  # fresh install: after the run above the installed version is 0.2.0, which knows the setting.)
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  STUB_RESTRICTED=unreadable STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes --no-restricted-tours-checked-by-hand
+  expect "override: the commands are shown" has "$OUT" "To go back to the version that ran before"
+  expect "override: the warning says what was asserted" has "$ERR" "says that you checked by hand that no tour is restricted"
+  cpanel "" backup --no-restricted-tours-checked-by-hand
+  expect "the override goes with update only" test "$RC" = 2
+
+  # With no restricted tour the commands are shown as before.
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  STUB_RESTRICTED=0 STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "no restricted tour: the commands are shown" has "$OUT" "To go back to the version that ran before"
+  expect "no restricted tour: no refusal" hasnt "$OUT" "Do not go back"
+}
+
+test_downgrade_below_access_is_refused_while_a_tour_is_restricted() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  cpanel_in "$T/new" "" update --yes
+  expect "the update to 0.2.0 works (stderr: $(cat "$ERR"))" test "$RC" = 0
+  # Down to a version before 0.1.38 with a restricted tour: refused, nothing changed.
+  make_release "$T/older" 0.1.1
+  local before; before="$(snapshot)"
+  STUB_RESTRICTED=1 cpanel_in "$T/older" "" update --yes --allow-downgrade
+  expect "below 0.1.38: refused" test "$RC" != 0
+  expect "below 0.1.38: says not to go back" has "$OUT" "Do not go back to version 0.1.1"
+  expect "below 0.1.38: says nothing was changed" has "$ERR" "nothing was changed: version 0.1.1 is older than 0.1.38"
+  expect "below 0.1.38: nothing was changed" test "$(snapshot)" = "$before"
+  # The same when the database cannot be read and nobody checked by hand.
+  STUB_RESTRICTED=unreadable cpanel_in "$T/older" "" update --yes --allow-downgrade
+  expect "below 0.1.38, unreadable: refused" test "$RC" != 0
+  expect "below 0.1.38, unreadable: nothing was changed" test "$(snapshot)" = "$before"
+  # Down to 0.1.38 or newer, which knows the setting: allowed whatever the count.
+  make_release "$T/knows" 0.1.40
+  STUB_RESTRICTED=3 cpanel_in "$T/knows" "" update --yes --allow-downgrade
+  expect "to 0.1.40: allowed (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "to 0.1.40: in place" test "$(cat "$APP/VERSION")" = 0.1.40
+  # And with no restricted tour, an older version is allowed as before.
+  STUB_RESTRICTED=0 cpanel_in "$T/older" "" update --yes --allow-downgrade
+  expect "below 0.1.38, no restricted tour: allowed (stderr: $(cat "$ERR"))" test "$RC" = 0
+}
+
+test_an_archive_before_access_is_checked_whatever_is_installed() {
+  # The installed version cannot be read: an archive before 0.1.38 is still checked.
+  new_sandbox
+  fresh_install
+  app_has_run
+  rm -f "$APP/VERSION" "$APP/package.json"
+  make_release "$T/older" 0.1.1
+  local before; before="$(snapshot)"
+  STUB_RESTRICTED=1 cpanel_in "$T/older" "" update --yes
+  expect "no installed version: refused" test "$RC" != 0
+  expect "no installed version: says not to go back" has "$OUT" "Do not go back to version 0.1.1"
+  expect "no installed version: nothing was changed" test "$(snapshot)" = "$before"
+  # The same version as installed, both before 0.1.38: checked too.
+  new_sandbox
+  fresh_install
+  app_has_run
+  before="$(snapshot)"
+  STUB_RESTRICTED=1 cpanel "" update --yes
+  expect "same version before 0.1.38: refused" test "$RC" != 0
+  expect "same version before 0.1.38: nothing was changed" test "$(snapshot)" = "$before"
+  # With no restricted tour it goes as before.
+  STUB_RESTRICTED=0 cpanel "" update --yes
+  expect "no restricted tour: the update works (stderr: $(cat "$ERR"))" test "$RC" = 0
+  # An app that never started (an empty data folder) has no database, so nothing to check: not blocked.
+  new_sandbox
+  hand_install
+  rm -rf "$DATA"; mkdir "$DATA"
+  STUB_RESTRICTED=unreadable cpanel "" update --yes --domain "$DOMAIN"
+  expect "never started: not blocked (stderr: $(cat "$ERR"))" test "$RC" = 0
+  # And a first install is never checked.
+  new_sandbox
+  STUB_RESTRICTED=unreadable cpanel "" install --domain "$DOMAIN" --yes
+  expect "first install: not blocked (stderr: $(cat "$ERR"))" test "$RC" = 0
+}
+
+test_a_resumed_update_goes_back_to_the_version_before_the_first_try() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  # The first try stops after the new files are in place: VERSION says 0.2.0 from then on.
+  STUB_NPM_FAIL=1 STUB_RESTRICTED=0 cpanel_in "$T/new" "" update --yes
+  expect "first try: fails" test "$RC" != 0
+  expect "first try: the marker says what ran before" grep -qxF "PREVIOUS=0.1.1" "$APP/.cpanel-update"
+  expect "first try: VERSION says the new version" test "$(cat "$APP/VERSION")" = 0.2.0
+  # Resumed, and failing again, with a restricted tour: the way back is to 0.1.1, so it is checked and refused.
+  STUB_NPM_FAIL=1 STUB_RESTRICTED=2 cpanel_in "$T/new" "" update --yes
+  expect "resumed: fails" test "$RC" != 0
+  expect "resumed: refuses the way back to the version before the first try" has "$OUT" "Do not go back to version 0.1.1"
+  expect "resumed: shows no command to go back" hasnt "$OUT" "mv dist.old dist"
+  # A marker without the line: the version to go back to is not known, so the check is made all the same.
+  sed -i '/^PREVIOUS=/d' "$APP/.cpanel-update"
+  STUB_NPM_FAIL=1 STUB_RESTRICTED=2 cpanel_in "$T/new" "" update --yes
+  expect "no PREVIOUS: refuses" has "$OUT" "Do not go back to the version that ran before"
+  expect "no PREVIOUS: shows no command to go back" hasnt "$OUT" "mv dist.old dist"
 }
 
 test_update_reports_failed_packages_with_rollback_commands() {

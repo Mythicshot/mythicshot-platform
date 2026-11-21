@@ -3,8 +3,8 @@
 // the page needs no inline script or style at all).
 //
 // Only the snapshot is ever read here, never the draft. An unknown slug, a draft tour, an
-// unpublished tour, a tour of a workspace with a disabled account and a broken snapshot
-// row all run the same single query and answer the same 404 page, so the answer says
+// unpublished tour, a tour of a workspace with a disabled account, a tour whose viewing
+// setting is not 'public' (src/access.ts) and a broken snapshot row all run the same single query and answer the same 404 page, so the answer says
 // nothing about which it was. The page is cached for a minute (PAGE_CACHE), so a page
 // fetched just before its account was disabled can still be shown from a cache that long.
 //
@@ -178,7 +178,9 @@ const SLUG = /^[a-z2-7]{10}$/;
  * in this same statement, so it costs no call more and answers exactly as an unknown slug.
  */
 const PAGE_SQL_BEFORE_ACCOUNTS = "SELECT s.data FROM snapshot s JOIN tour t ON t.id = s.tour_id WHERE t.slug = ? AND t.status = 'published'";
-const PAGE_SQL = `${PAGE_SQL_BEFORE_ACCOUNTS} AND ${noDisabledAccount("t.workspace_id")}`;
+// A tour whose setting is not 'public' (src/access.ts) is not found here either, from the
+// moment its setting changes: its page is served only by the route that checks the viewer.
+const PAGE_SQL = `${PAGE_SQL_BEFORE_ACCOUNTS} AND t.access = 'public' AND ${noDisabledAccount("t.workspace_id")}`;
 
 const HTML_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 

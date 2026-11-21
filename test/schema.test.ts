@@ -6,7 +6,24 @@ import { parseUsername } from "../src/usernames.ts";
 /** The tables migration 0008 adds. */
 const ACCOUNT_TABLES = ["audit", "membership", "rate_counter", "session", "signin_code", "signin_method"];
 
+/**
+ * The triggers of the schema: only migration 0014's four guards, which refuse a public
+ * picture or a published text for a restricted tour (an older build's publish or rename) and
+ * do nothing else: each body is one RAISE(ABORT, ...) and no statement that writes.
+ */
+const GUARD_TRIGGERS = ["restricted_tour_no_public_picture", "restricted_tour_no_public_picture_update", "restricted_tour_stub_insert", "restricted_tour_stub_update"];
+async function guardTriggers(deps: Deps): Promise<string[]> {
+  const rows = await deps.db.all<{ name: string; sql: string }>("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name");
+  for (const r of rows) {
+    const body = r.sql.slice(r.sql.toUpperCase().indexOf("BEGIN"));
+    expect(body, r.name).toMatch(/^BEGIN\s+SELECT RAISE\(ABORT, '[^;]*'\);\s+END$/);
+    expect(body, r.name).not.toMatch(/(INSERT|UPDATE|DELETE)/i);
+  }
+  return rows.map((r) => r.name);
+}
+
 const TABLES = [
+  "access_switch",
   "account_removal",
   "api_token",
   "audit",
@@ -32,6 +49,7 @@ const TABLES = [
   "step",
   "tour",
   "tour_deletion",
+  "tour_viewer",
   "upload",
   "upload_step",
   "user",
@@ -128,8 +146,8 @@ describe("schema", () => {
   it("deleting is never cascaded by the schema", async () => {
     const { deps } = await makeDeps();
     for (const t of await appTables(deps)) expect(t.sql).not.toMatch(/cascade/i);
-    const triggers = await deps.db.all("SELECT name FROM sqlite_master WHERE type = 'trigger'");
-    expect(triggers).toEqual([]);
+    // The only triggers are migration 0014's guards, which refuse a write and change nothing.
+    expect(await guardTriggers(deps)).toEqual(GUARD_TRIGGERS);
   });
 
   it("a row cannot point at a workspace or tour that does not exist", async () => {
@@ -487,7 +505,7 @@ describe("schema", () => {
       expect(t, name).toBeDefined();
       expect(t!.sql, name).not.toMatch(/cascade|set null|set default/i);
     }
-    expect(await deps.db.all("SELECT name FROM sqlite_master WHERE type = 'trigger'")).toEqual([]);
+    expect(await guardTriggers(deps)).toEqual(GUARD_TRIGGERS);
 
     // An account cannot be deleted out from under any row that names it: each kind of
     // row alone holds it, and nothing of them goes with a refused delete.

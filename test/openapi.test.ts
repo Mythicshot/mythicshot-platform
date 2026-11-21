@@ -48,7 +48,7 @@ const PUBLIC = [
 /** The one operation that takes the viewer cookie alone (src/viewers.ts): which address the browser proved. */
 const VIEWER_ONLY = ["GET /api/v1/view/session"];
 /** The operations that take a session and no token. */
-const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "POST /api/v1/connect/lookup", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id"];
+const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "POST /api/v1/connect/lookup", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id", "PUT /api/v1/tours/:id/access"];
 /** The site admin's operations: an admin's session alone, and a 404 (never a 401) to everyone else. */
 const ADMIN_ONLY = [
   "GET /api/v1/admin/summary",
@@ -257,6 +257,8 @@ describe("the API description", () => {
       "Rename a tour",
       "Delete a tour, in steps",
       "Publish a tour, in steps",
+      "Who may view a tour",
+      "Change who may view a tour",
       "Unpublish a tour",
       "Get a draft step's image",
       "Start an upload",
@@ -443,7 +445,7 @@ describe("the API description", () => {
 
   it("the tour list's items carry the fields the list answers, unpublished_changes included", () => {
     const tour = (openapi().components.schemas as Json).Tour;
-    const fields = ["id", "title", "status", "slug", "url", "chapters", "steps", "bytes", "updated_at", "published_at", "unpublished_changes"];
+    const fields = ["id", "title", "status", "slug", "url", "chapters", "steps", "bytes", "updated_at", "published_at", "unpublished_changes", "access", "viewers"];
     expect(Object.keys(tour.properties)).toEqual(fields);
     expect(tour.required).toEqual(fields);
     expect(tour.additionalProperties).toBe(false);

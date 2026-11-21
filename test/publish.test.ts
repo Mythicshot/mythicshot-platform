@@ -124,7 +124,7 @@ describe("publish", () => {
     const r = await publish(deps, a.token, t.tour_id);
     expect(r.status).toBe(200);
     const tour = await tourRow(deps, t.tour_id);
-    expect(r.json).toEqual({ slug: tour.slug, url: `/t/${tour.slug}`, steps: 3 });
+    expect(r.json).toEqual({ slug: tour.slug, url: `/t/${tour.slug}`, steps: 3, access: "public", viewers: 0 });
     expect(tour.slug).toMatch(/^[a-z2-7]{10}$/);
     expect(tour.status).toBe("published");
     expect(typeof tour.published_at).toBe("number");
@@ -260,7 +260,7 @@ describe("publish", () => {
 
     const { last } = await publishAll(deps, a.token, t.tour_id);
     expect(last.status).toBe(200);
-    expect(last.json).toEqual({ slug: first.json.slug, url: first.json.url, steps: 6 });
+    expect(last.json).toEqual({ slug: first.json.slug, url: first.json.url, steps: 6, access: "public", viewers: 0 });
     expect((await tourRow(deps, t.tour_id)).slug).toBe(first.json.slug);
     const live = (await pageData(first.json.slug)).tour;
     expect(live.chapters.map((c: Json) => c.title)).toEqual(["Send an invoice", "Second chapter"]);
@@ -931,7 +931,7 @@ describe("publishing in bounded steps", () => {
     const tourId = await bigTour(deps, a.token, 60);
     const first = await publish(deps, a.token, tourId);
     expect(first.status).toBe(202);
-    expect(first.json).toEqual({ status: "in_progress", publish_id: expect.stringMatching(/^pub_[0-9a-f]{24}$/), done: COPY_BATCH, total: 60 });
+    expect(first.json).toEqual({ status: "in_progress", publish_id: expect.stringMatching(/^pub_[0-9a-f]{24}$/), done: COPY_BATCH, total: 60, access: "public", viewers: 0 });
     expect(COPY_BATCH).toBe(12);
     // Nothing is live yet: no snapshot, no served image, the tour is still a draft.
     expect(await snapshotRow(deps, tourId)).toBeNull();
@@ -946,7 +946,7 @@ describe("publishing in bounded steps", () => {
     expect(seen.map((x) => x.json.done ?? "done")).toEqual([12, 24, 36, 48, "done"]);
     const tour = await tourRow(deps, tourId);
     expect(r.status).toBe(200);
-    expect(r.json).toEqual({ slug: tour.slug, url: `/t/${tour.slug}`, steps: 60 });
+    expect(r.json).toEqual({ slug: tour.slug, url: `/t/${tour.slug}`, steps: 60, access: "public", viewers: 0 });
     expect(tour.status).toBe("published");
     expect(await publicKeys()).toHaveLength(60);
     expect(await count(deps, "publish_job")).toBe(0);

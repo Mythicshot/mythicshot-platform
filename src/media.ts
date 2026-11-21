@@ -59,7 +59,9 @@
 // store, and nothing is copied at commit. Their keys are under `m/`; everything else in
 // the private store is under `u/` (src/uploads.ts writes every draft key there, and the
 // upload abort and sweep, the tour delete and the replaced-picture clean-up delete only
-// keys taken from step, upload and replaced rows, which are those `u/` keys), so no other
+// keys taken from step, upload and replaced rows, which are those `u/` keys) or `v/` (a
+// restricted tour's live pictures, src/access.ts, deleted only by keys taken from
+// snapshot_object and public_object rows, which are those `v/` keys), so no other
 // clean-up can reach an item's object, and an item's delete names only its own claims.
 import type { Hono } from "hono";
 import { newId, newLinkId, requireAuth, type Auth } from "./auth.ts";

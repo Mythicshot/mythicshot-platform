@@ -42,6 +42,13 @@ async function siteAt0118(): Promise<{ db: NodeDb; deps: Deps; upTo10: string; f
   for (const f of files.slice(0, 10)) await copyFile(join(MIGRATIONS_DIR, f), join(upTo10, f));
   const db = new NodeDb(join(root, "db.sqlite"));
   expect(await migrate(db, upTo9)).toEqual(files.slice(0, 9));
+  // Today's tour routes read who may view a tour (migration 0014), which only adds a column
+  // with a default and two empty tables, so it is applied beside these, as a real install
+  // runs today's build only after every migration.
+  const access = join(root, "access");
+  await mkdir(access);
+  await copyFile(join(MIGRATIONS_DIR, "0014_tour_access.sql"), join(access, "0014_tour_access.sql"));
+  expect(await migrate(db, access)).toEqual(["0014_tour_access.sql"]);
   const deps: Deps = { db, drafts: new NodeFileStore(join(root, "drafts")), pub: new NodeFileStore(join(root, "public")), config: { publicImageBase: "", setupCode: null }, now: () => NOW };
   return { db, deps, upTo10, files };
 }

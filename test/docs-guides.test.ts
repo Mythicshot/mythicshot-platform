@@ -187,7 +187,7 @@ describe("the guides of the documentation page", () => {
     const published = await next(first, 4);
     // "The answer's url is the tour's link, as a path to put after your site's address."
     slug = published.json.slug;
-    expect(published.json).toEqual({ slug, url: `/t/${slug}`, steps: 1 });
+    expect(published.json).toEqual({ slug, url: `/t/${slug}`, steps: 1, access: "public", viewers: 0 });
     expect(await tourPage()).toBe(200);
     await next(first, 5);
     expect(await tourPage()).toBe(404); // "To take the tour down again, unpublish it."
@@ -208,7 +208,7 @@ describe("the guides of the documentation page", () => {
     expect((await send(deps, "GET", `/t/${slug}`)).text).toBe(before);
     const again = await next(second, 3);
     // "The link and the title stay the same"
-    expect(again.json).toEqual({ slug, url: `/t/${slug}`, steps: 2 });
+    expect(again.json).toEqual({ slug, url: `/t/${slug}`, steps: 2, access: "public", viewers: 0 });
     expect((await send(deps, "GET", `/t/${slug}`)).text).not.toBe(before);
     const list = await send(deps, "GET", "/api/v1/tours", { token: a.token });
     expect(list.json.tours.map((t: Json) => [t.id, t.title, t.slug])).toEqual([[tourId, "My first tour", slug]]);
