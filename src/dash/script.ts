@@ -100,7 +100,11 @@ export const DASH_JS = `var Dash = (function () {
   // runs), message (its message line, optional), behind (what is made inert and hidden from
   // screen readers while it is open; a part no longer in the page is left out), fields and
   // buttons (its controls, in Tab order), and lock ("readonly" or "disabled": what a field
-  // becomes while a request runs). It answers:
+  // becomes while a request runs). Two optional functions serve a question whose controls
+  // change while it is open (the Tours page's Sharing box): order() gives the controls to go
+  // round with Tab now, in order, in place of fields then buttons; beforeDismiss() is asked
+  // before Escape, a click on the backdrop or dismiss() closes it, and false keeps it open
+  // (the page went back a step instead). It answers:
   //   open({ title, focus, back, fallback, onClose }): shows it, with the title's text when
   //     given and the focus on \`focus\` (else the first control); false when it is open
   //     already or its backdrop is not in the page. back() is asked, when it closes, for the
@@ -186,7 +190,9 @@ export const DASH_JS = `var Dash = (function () {
     }
 
     function dismiss() {
-      if (!working) close(true);
+      if (working) return;
+      if (typeof o.beforeDismiss === "function" && o.beforeDismiss() === false) return;
+      close(true);
     }
 
     function busy(on, button, label) {
@@ -230,7 +236,8 @@ export const DASH_JS = `var Dash = (function () {
       ev.preventDefault();
       var title = $(o.title);
       var list = [];
-      if (!working) each(fields.concat(buttons), function (e) { if (!e.disabled) list.push(e); });
+      if (!working && typeof o.order === "function") o.order().forEach(function (e) { if (e && !e.disabled) list.push(e); });
+      else if (!working) each(fields.concat(buttons), function (e) { if (!e.disabled) list.push(e); });
       if (list.length === 0) {
         if (title !== null) title.focus();
         return;

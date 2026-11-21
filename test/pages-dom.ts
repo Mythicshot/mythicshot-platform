@@ -44,6 +44,9 @@ export class FakeElement {
   readonly style: Record<string, string> = {};
   private readonly listeners = new Map<string, Listener[]>();
   private currentValue: string | null = null;
+  private currentChecked: boolean | null = null;
+  /** A progress bar's `max`, as the script sets the property. */
+  max = 1;
 
   constructor(
     public readonly tagName: string,
@@ -84,6 +87,16 @@ export class FakeElement {
   }
   set value(v: string) {
     this.currentValue = String(v);
+  }
+  /** A checkbox's or radio button's state; setting a radio button checked unchecks the others of its name, as a browser does. */
+  get checked(): boolean {
+    return this.currentChecked ?? this.attrs.has("checked");
+  }
+  set checked(v: boolean) {
+    this.currentChecked = v === true;
+    const name = this.getAttribute("name");
+    if (v !== true || this.type !== "radio" || name === null) return;
+    for (const e of this.doc.root.all()) if (e !== this && e.tagName === "input" && e.type === "radio" && e.getAttribute("name") === name) e.currentChecked = false;
   }
   get textContent(): string {
     return this.children.map((c) => (c instanceof FakeText ? c.text : c.textContent)).join("");
@@ -153,10 +166,13 @@ export class FakeElement {
     this.doc.focusLog.push(this.id || this.tagName);
   }
   select(): void {}
-  /** What a person's click does: nothing on a disabled button; a submit button submits its form. */
+  /** What a person's click does: nothing on a disabled control; a radio button is checked (then "change"); a submit button submits its form. */
   click(): FakeEvent | null {
     if (this.disabled) return null;
+    const turnsOn = this.tagName === "input" && this.type === "radio" && !this.checked;
+    if (turnsOn) this.checked = true;
     const event = this.dispatch("click");
+    if (turnsOn) this.dispatch("change");
     if (!event.defaultPrevented && this.tagName === "button" && this.type === "submit") {
       const form = this.closest("form");
       if (form) form.dispatch("submit");
