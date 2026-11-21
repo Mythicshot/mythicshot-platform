@@ -137,7 +137,10 @@ function boot(): void {
     .map((c) => ({ ...c, steps: (Array.isArray(c.steps) ? c.steps : []).filter((s) => obj(s) !== null) }))
     .filter((c) => c.steps.length > 0);
   const tour: PageTour = { ...data.tour, chapters };
-  const base = data.base === "" || /^https:\/\/[^\s"'<>\\]+$/.test(data.base) ? data.base : null;
+  // The base is written by the server alone, never from customer data: the public image base
+  // from the configuration (or "" for this origin's /p/), or a restricted tour's own path
+  // from its slug (src/restricted.ts). Anything else is no base, and no picture is asked for.
+  const base = data.base === "" || /^https:\/\/[^\s"'<>\\]+$/.test(data.base) || RESTRICTED_BASE.test(data.base) ? data.base : null;
   player(root, tour, base);
 }
 
