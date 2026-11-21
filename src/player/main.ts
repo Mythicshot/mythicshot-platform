@@ -25,6 +25,14 @@ type Via = "" | "back" | "next" | "hotspot" | "key" | "auto" | "menu" | "open";
 
 const SVG = "http://www.w3.org/2000/svg";
 const IMAGE_KEY = /^p\/[0-9a-f]{32}\.(png|jpg)$/;
+/**
+ * A restricted tour's page (src/restricted.ts) gives as its base the tour's own path on this
+ * same origin, and its pictures as `v/` names, which only the route that checks the viewer
+ * serves (/t/<slug>/v/<name>). A `v/` name is taken only with such a base, never with "" or a
+ * public image base, so a public page can never ask for one.
+ */
+const RESTRICTED_BASE = /^\/t\/[a-z2-7]{10}$/;
+const RESTRICTED_KEY = /^v\/[0-9a-f]{32}\.(png|jpg)$/;
 const ZOOM_MS = 550;
 const FADE_MS = 400;
 const ENTER_MS = 280;
@@ -175,7 +183,8 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
   const chapterTitle = (c: number) => line(chapters[c]?.title, 200) || `Chapter ${c + 1}`;
 
   function imageUrl(key: unknown): string | null {
-    return base !== null && typeof key === "string" && IMAGE_KEY.test(key) ? base + "/" + key : null;
+    if (base === null || typeof key !== "string") return null;
+    return (RESTRICTED_BASE.test(base) ? RESTRICTED_KEY : IMAGE_KEY).test(key) ? base + "/" + key : null;
   }
 
   // ---- Theme ----
