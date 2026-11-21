@@ -1121,7 +1121,11 @@ describe("the Account page and the link page against the real app", () => {
     const stored = await deps.db.all<{ id: string; created_at: number; last_used_at: number }>("SELECT id, created_at, last_used_at FROM session WHERE user_id = ? AND revoked_at IS NULL", [owner.userId]);
     const mine = stored.find((r) => r.id === mineMade.sessionId)!;
     const theirs = stored.find((r) => r.id === elsewhere!.sessionId)!;
-    expect(page.shows().filter((l) => l.includes(" | "))).toEqual([`This browser | Firefox on Linux | since ${shown(mine.created_at)}`, `Chrome on Windows | last used ${shown(theirs.last_used_at)}`]);
+    // Each session also says when it ends however much it is used (SESSION_MAX_DAYS, 90 days by default).
+    expect(page.shows().filter((l) => l.includes(" | "))).toEqual([
+      `This browser | Firefox on Linux | since ${shown(mine.created_at)} | Ends ${shown(mine.created_at + 90 * 86_400_000)}`,
+      `Chrome on Windows | last used ${shown(theirs.last_used_at)} | Ends ${shown(theirs.created_at + 90 * 86_400_000)}`,
+    ]);
 
     page.$("sessions").all().filter((e) => e.tagName === "button")[0].click();
     await page.settle();
@@ -1155,5 +1159,22 @@ describe("the Account page and the link page against the real app", () => {
     const rows = await deps.db.all<{ id: string; revoked_at: number | null }>("SELECT id, revoked_at FROM session WHERE user_id = ? ORDER BY created_at", [owner.userId]);
     expect(rows.find((r) => r.id === elsewhere!.sessionId)!.revoked_at).toBeNull();
     expect(rows.filter((r) => r.revoked_at !== null)).toHaveLength(1);
+  });
+});
+
+describe("the Account page: when a session ends (Plan 2j)", () => {
+  it("says Ends <date> beside each session with an end, and nothing for one without", async () => {
+    const rows = [
+      { ...ROWS[0], ends_at: day(2027, 1, 31) },
+      { ...ROWS[1], ends_at: day(2026, 12, 5) },
+      { ...ROWS[2], ends_at: null },
+    ];
+    const tab = account({}, { sessions: sessionsAnswer(rows as SessionRow[]) });
+    await tab.settle();
+    expect(tab.shows().filter((l) => l.includes(" | "))).toEqual([
+      "This browser | Firefox on Linux | since 2 Nov | Ends 31 Jan 2027",
+      "Chrome on Windows | last used 18 Nov | Ends 5 Dec",
+      "Safari on iOS | last used 3 Mar 2025",
+    ]);
   });
 });

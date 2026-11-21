@@ -10,13 +10,16 @@
 // address, this session's id, and whether the address can be changed here), and for the
 // Admin page { accountId } (the account's own id, to know its own row), and for every
 // page { download } (whether the session named a usable address of the app's download
-// page, which Dash.downloadLink then links to). A page that
+// page, which Dash.downloadLink then links to) and { limits } (the site's three sign-in
+// lifetimes in days from the session's limits, each a whole number or null when off or not
+// given: sessionMaxDays, connectionIdleDays, connectionMaxDays). A page that
 // has something to say to a visitor who is not signed in passes a second function, which is
 // called instead of sending the visitor to /signin. Every request goes
 // through Dash.api: to this site only, with the browser's session for this address, no
 // referrer, and the X-Csrf-Token header on every change, as the account page sends it.
 // Nothing here writes to storage, to a cookie or to an address.
 import { DOWNLOAD_URL_MAX } from "../https-address.ts";
+import { MAX_LIMIT_DAYS } from "../lifetimes.ts";
 
 export const DASH_JS = `var Dash = (function () {
   "use strict";
@@ -35,6 +38,8 @@ export const DASH_JS = `var Dash = (function () {
   var DOWNLOAD_URL = /^https:\\/\\/(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)*(?![0-9]+(?::|\\/))[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?::[0-9]{1,5})?\\/[A-Za-z0-9._~!$&'()*+,;=:@%\\/?-]*$/;
   var DOWNLOAD_URL_MAX = ${DOWNLOAD_URL_MAX};
   var download = "";
+  // The longest a sign-in lifetime may be set to, in days (MAX_LIMIT_DAYS, src/lifetimes.ts).
+  var MAX_LIMIT_DAYS = ${MAX_LIMIT_DAYS};
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -95,6 +100,11 @@ export const DASH_JS = `var Dash = (function () {
     var d = new Date(ms);
     var text = d.getDate() + " " + MONTHS[d.getMonth()];
     return withYear !== true && d.getFullYear() === new Date().getFullYear() ? text : text + " " + d.getFullYear();
+  }
+
+  // One sign-in lifetime from the session answer: whole days within the setting's range, else null.
+  function limitDays(v) {
+    return typeof v === "number" && Math.floor(v) === v && v >= 1 && v <= MAX_LIMIT_DAYS ? v : null;
   }
 
   function signedOut() {
@@ -324,6 +334,11 @@ export const DASH_JS = `var Dash = (function () {
         accountId: typeof who.id === "string" ? who.id : "",
         emailChange: d.email_change === true,
         download: download !== "",
+        limits: {
+          sessionMaxDays: limitDays(d.limits !== null && typeof d.limits === "object" ? d.limits.session_max_days : null),
+          connectionIdleDays: limitDays(d.limits !== null && typeof d.limits === "object" ? d.limits.connection_idle_days : null),
+          connectionMaxDays: limitDays(d.limits !== null && typeof d.limits === "object" ? d.limits.connection_max_days : null),
+        },
       });
     }).then(null, function () {
       load.textContent = TEXT.failed;

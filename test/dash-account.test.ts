@@ -115,6 +115,8 @@ const ACCOUNT_TEXT: Record<string, string> = {
   sending: "Sending…",
   checkBefore: "Check ",
   openDownload: "Open the download page",
+  // Proposed (Plan 2j): when a session ends however much it is used, beside it in the list.
+  ends: "Ends ",
 };
 
 /** Every text of the page a link opens, in order, hidden parts included. Proposed: all but mockup 8's third box. */

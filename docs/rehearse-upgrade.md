@@ -43,6 +43,13 @@ A tour's page (`/t/<slug>`, an HTML answer) names the player's script and styles
 
 The restriction step (the way back with a restricted tour) runs the new build with placeholder mail settings: a mail server on `127.0.0.1` port 9 with the user `rehearsal` and the password `not-a-real-password`, none of them real. Restricting a tour needs a site that can mail, but nothing is mailed by it and no connection is made. When the new build refuses the change, the report names the refusal's error code, such as `cannot_restrict`, and nothing else of the answer.
 
+What the old build must then answer depends on whether it can serve restricted tours, which came in 0.1.44. The command reads this from the build's own compiled files and does not start the build to find out, nor look at the data or the version number: its app (`dist/app.js`) must import `restrictedAnswer` from `./restricted.js` and hand it to the page routes, and `dist/restricted.js` must have the route `/t/:slug/v/:name`.
+
+- An old build that cannot serve them knows nothing of the setting: the tour's page and every picture its public page named must answer exactly as for a tour that does not exist.
+- An old build that can serve them answers the tour's page, to a visitor who proved no address, with its gate. That answer must be a `403` whose `cache-control` says `no-store`, which no cache may keep, with no `etag`, that forbids framing (`X-Frame-Options: DENY` or `frame-ancestors 'none'`), and whose body holds nothing of the tour: not its title, no text of its data of 4 characters or more (the cover, the call to action, the end card, chapter titles and descriptions, and each step's id, caption, notes and card), no picture address or name, and not its id, each looked for as written and HTML-escaped. That content comes from the tour's public page as the new build served it before the restriction; it is kept in memory and never printed. Every picture address from that page, and `/t/<slug>/v/<name>` for each picture name, must answer exactly as an unknown picture does on the same route, and never with picture bytes.
+
+Either way the report gives one line with labels and counts, and a failure says only which kind of content it found, never the content.
+
 The report is one line per check, PASS or FAIL with counts, and ends with `RESULT: PASS`, `RESULT: PASS, with N added fields to read above` or `RESULT: FAIL`. It never holds a token, an email address or a name from the data. The command exits with status 1 when a check fails, and with 0 for both kinds of pass.
 
 > [!WARNING]

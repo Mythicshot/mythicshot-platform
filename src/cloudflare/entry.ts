@@ -3,6 +3,7 @@ import { mediaLimitsProblem } from "../limits.ts";
 import { withBudget } from "../budget.ts";
 import { setClientAddress } from "../client.ts";
 import { downloadUrlSetting } from "../https-address.ts";
+import { DEFAULT_LIFETIMES, LIFETIME_SETTINGS, lifetimesSetting, sameLifetimes, type LifetimeSetting } from "../lifetimes.ts";
 import { HOST_ROLES, hostSettingsFrom, normaliseHost, resolveHosts, settingOf, type Hosts, type HostsResult } from "../hosts.ts";
 import { DEFER_FAILED, type Deps } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
@@ -15,9 +16,11 @@ import { R2FileStore } from "./files.ts";
  * STORAGE_ALLOWANCE_BYTES, a var only an install that wants a limit adds to its own file,
  * or SITE_HOST, a var only a one-address install that wants sign-in links adds, or
  * IMG_HOST, the optional third address an install with two addresses may add, or
- * DOWNLOAD_URL, the address of the desktop app's download page an install may add.
+ * DOWNLOAD_URL, the address of the desktop app's download page an install may add, or
+ * the three sign-in lifetimes, SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and
+ * CONNECTION_MAX_DAYS (src/lifetimes.ts), which an install may add to change a default.
  */
-type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown; IMG_HOST?: unknown; DOWNLOAD_URL?: unknown };
+type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown; IMG_HOST?: unknown; DOWNLOAD_URL?: unknown } & Partial<Record<LifetimeSetting, unknown>>;
 
 /**
  * Who to ask for an invite, from the Worker's var INVITE_CONTACT, trimmed, or null when it
@@ -94,6 +97,8 @@ export function depsFromEnv(
   const inviteContact = inviteContactFromWorkerEnv(env);
   // A var that is not text, or not a usable address, is left out (downloadUrlSetting).
   const downloadUrl = downloadUrlSetting(env.DOWNLOAD_URL).url;
+  // The sign-in lifetimes: a var that cannot be used is its default (lifetimesSetting).
+  const { lifetimes } = lifetimesSetting(lifetimeVars(env));
   return {
     db: new D1Db(env.DB),
     drafts: new R2FileStore(env.DRAFTS),
@@ -111,6 +116,7 @@ export function depsFromEnv(
       ...(siteHost === null ? {} : { siteHost }),
       ...(inviteContact === null ? {} : { inviteContact }),
       ...(downloadUrl === null ? {} : { downloadUrl }),
+      ...(sameLifetimes(lifetimes, DEFAULT_LIFETIMES) ? {} : { lifetimes }),
     },
     now: () => Date.now(),
     ...(ctx === undefined
@@ -126,6 +132,13 @@ export function depsFromEnv(
 
 /** Whether this isolate has said the line for a DOWNLOAD_URL that cannot be used. */
 let downloadSaid = false;
+/** Whether this isolate has said the lines for the sign-in lifetimes that cannot be used. */
+let lifetimesSaid = false;
+
+/** The three sign-in lifetime vars of the env, by name. */
+function lifetimeVars(env: Partial<Record<LifetimeSetting, unknown>>): Partial<Record<LifetimeSetting, unknown>> {
+  return Object.fromEntries(LIFETIME_SETTINGS.map((name) => [name, env[name]]));
+}
 
 /** The answer to every request while a setting cannot be used. */
 function misconfigured(): Response {
@@ -162,6 +175,12 @@ export default {
         downloadSaid = true;
         console.error(download.problem);
       }
+    }
+    // Nor do sign-in lifetimes that cannot be used: each is its default, and its one fixed
+    // line, which holds no value, is written once for the life of the isolate.
+    if (!lifetimesSaid) {
+      lifetimesSaid = true;
+      for (const line of lifetimesSetting(lifetimeVars(env)).problems) console.error(line);
     }
     // Each request gets its own metered ports, so one that goes over the call budget is logged.
     const defers = typeof (ctx as { waitUntil?: unknown } | undefined)?.waitUntil === "function" ? ctx : undefined;

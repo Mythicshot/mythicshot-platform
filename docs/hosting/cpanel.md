@@ -263,7 +263,7 @@ The update refuses to start when it does not know the address, because it could 
 
 Before an update that changes the database, you can try it first on a copy of your own data, on your own computer.
 
-The rehearsal starts the version you run today and the new version on that computer only, one after the other, on a copy of your backup. It checks that the new version shows your token the same tours, pages and pictures, keeps every file and every row, and that the version you run today still works on the changed database, which is your way back. Between the two versions only a few things may differ: the time an answer was made, the version number, fields the new version adds to an answer (which the report lists for you to read), and, in a tour's page, the names of the player's own script and stylesheet when the new version changed them (the rehearsal then checks that the new version serves the files those names point to). On the way back nothing may differ but the time. [The command's reference](../rehearse-upgrade.md) lists every check and setting.
+The rehearsal starts the version you run today and the new version on that computer only, one after the other, on a copy of your backup. It checks that the new version shows your token the same tours, pages and pictures, keeps every file and every row, and that the version you run today still works on the changed database, which is your way back. Between the two versions only a few things may differ: the time an answer was made, the version number, fields the new version adds to an answer (which the report lists for you to read), and, in a tour's page, the names of the player's own script and stylesheet when the new version changed them (the rehearsal then checks that the new version serves the files those names point to). On the way back nothing may differ but the time. It also restricts one of your tours on the copy and checks that the version you run today shows nothing of it: a version from 0.1.44 on, which can serve restricted tours, must answer with its fixed "shared with specific people" page and no picture, and an older one as if the tour did not exist. [The command's reference](../rehearse-upgrade.md) lists every check and setting.
 
 > [!WARNING]
 > The backup folder holds real data: the owner's email, the token hashes, every image, and the settings file with the setup code and any mailbox password. Keep the copy on your computer as private as the backup itself, and delete it when you are done. The rehearsal copies only `db.sqlite`, `drafts` and `public` into a scratch folder, removes that folder at the end, and never reads the settings file.
@@ -717,6 +717,30 @@ touch ~/apps/tours/tmp/restart.txt
 ```
 
 **How to tell it worked:** the Account page shows the card "Mythicshot for Windows" with "Open the download page". A value that cannot be used never stops the app: the card is not shown, and the app's log has the line `download page: off, because DOWNLOAD_URL is not a usable https address. The site runs; the dashboard shows no download link.` To take the link away, remove the line and restart.
+
+### Change how long sign-ins last
+
+A browser session ends 90 days after its sign-in however active it is, and a computer connected by signing in from Mythicshot stops working after 90 days without use; each then signs in again, and nothing is lost. A third limit, off unless set, ends a connection a number of days after it was made. What each setting means is in [Settings](../../README.md#settings) in the README.
+
+1. Add a line for each limit to change to the settings file, a whole number of days from 1 to 3650, or `off` to switch that limit off, and save.
+
+```sh
+nano ~/apps/tours-config.env
+```
+
+```text
+SESSION_MAX_DAYS=30
+CONNECTION_IDLE_DAYS=off
+CONNECTION_MAX_DAYS=365
+```
+
+2. Restart the app, so that it reads the new lines.
+
+```sh
+touch ~/apps/tours/tmp/restart.txt
+```
+
+**How to tell it worked:** the Connections page says under each connection from Mythicshot when it expires, and the Account page says when each session ends. A smaller number applies at once to sessions and connections that already exist. A value that cannot be used never stops the app: the default applies, and the app's log has one line naming the setting, such as `sign-in lifetimes: SESSION_MAX_DAYS is not a whole number of days from 1 to 3650, 0 or off, so the default of 90 days applies. The site runs.` To go back to the defaults, remove the lines and restart.
 
 ## What has been run where
 

@@ -6,6 +6,7 @@
 import { isBeforeAccounts } from "./accounts.ts";
 import { onRole, type HostRole } from "./hosts.ts";
 import { json } from "./http.ts";
+import { tokenLifeSql, tokenParams } from "./lifetimes.ts";
 import type { Deps } from "./ports.ts";
 import { csrfFor, readSessionCookie, resolveSession, sameOriginChange, sessionCookiePresent, sessionHost } from "./sessions.ts";
 
@@ -127,8 +128,10 @@ function notFound(): Response {
  *    well-formed or not) is 400 `mixed_credentials`. Nothing is looked up.
  * 3. With an Authorization header: `Bearer <token>` resolves to the token's workspace
  *    and, unless `touch` is false, records when the token was last used. A token is
- *    refused when it is malformed, unknown or revoked, and when an account of its
- *    workspace is disabled. `only: "session"` refuses every token, with no lookup.
+ *    refused when it is malformed, unknown or revoked, when an account of its
+ *    workspace is disabled, and, for a token of kind `sign_in`, when it has lapsed by
+ *    CONNECTION_IDLE_DAYS or CONNECTION_MAX_DAYS (src/lifetimes.ts). A refused token's
+ *    request never records a use. `only: "session"` refuses every token, with no lookup.
  * 4. With a session cookie: with addresses configured it counts only on the app address. For
  *    any method but GET and HEAD the request must come from a page of this host
  *    (`sameOriginChange`, else 403 `bad_origin`) and carry the session's anti-forgery
@@ -189,16 +192,35 @@ async function sessionAuth(req: Request, deps: Deps): Promise<Auth | Response> {
 }
 
 /**
- * The token path of `requireAuth`, as it has always been, with one more condition in the
- * lookup: no account of the token's workspace is disabled. An account belongs to a
+ * The token path of `requireAuth`, as it has always been, with two more conditions in the
+ * lookup: no account of the token's workspace is disabled, and a token of kind `sign_in` has
+ * not lapsed (tokenLifeSql, src/lifetimes.ts: unused for CONNECTION_IDLE_DAYS, or older than
+ * CONNECTION_MAX_DAYS), judged from its own times and the request's clock, so a smaller
+ * setting applies to every token at once. A lapsed token gets the one 401 a revoked one gets.
+ * Every request that resolves records its use (no interval), with the time its lookup was
+ * judged at, so a connection in regular use is never judged idle by a coarse record, and a
+ * refused request writes nothing, so a lapsed token cannot bring itself back. An account belongs to a
  * workspace by its membership or, for a row an older build wrote without one, by the
  * workspace its own row names. A workspace with no account at all still resolves.
  */
 const TOKEN_LOOKUP_BEFORE_ACCOUNTS = "SELECT id, workspace_id, hash FROM api_token WHERE hash = ? AND revoked_at IS NULL";
-const TOKEN_LOOKUP =
+const TOKEN_LOOKUP_BEFORE_LIFETIMES =
   TOKEN_LOOKUP_BEFORE_ACCOUNTS +
   " AND NOT EXISTS (SELECT 1 FROM user u WHERE u.status = 'disabled'" +
   " AND (u.workspace_id = api_token.workspace_id OR u.id IN (SELECT m.user_id FROM membership m WHERE m.workspace_id = api_token.workspace_id)))";
+const TOKEN_LOOKUP = TOKEN_LOOKUP_BEFORE_LIFETIMES + " AND " + tokenLifeSql("api_token");
+
+/**
+ * True for the error of a database the connections migration (0011) has not reached yet,
+ * which has no `kind` column and so no token of kind `sign_in`: the lookup without the
+ * lifetimes is then the whole rule.
+ */
+function isBeforeKinds(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
+    if (/(?:^|: )no such column: (?:api_token\.)?kind(?:$|:| at offset )/.test(e.message)) return true;
+  }
+  return false;
+}
 
 async function tokenAuth(header: string, deps: Deps, touch: boolean): Promise<Auth | Response> {
   const sp = header.indexOf(" ");
@@ -210,25 +232,32 @@ async function tokenAuth(header: string, deps: Deps, touch: boolean): Promise<Au
   // nothing useful about any stored token; the row's hash is compared again in
   // constant time before it is trusted.
   const hash = await hashToken(token);
+  // One reading of the clock: the lifetimes are judged at it, and the use is recorded at it.
+  const now = deps.now();
   type Row = { id: string; workspace_id: string; hash: string };
   let row: Row | null;
   try {
-    row = await deps.db.first<Row>(TOKEN_LOOKUP, [hash]);
+    row = await deps.db.first<Row>(TOKEN_LOOKUP, [hash, ...tokenParams(deps.config, now)]);
   } catch (err) {
+    if (isBeforeKinds(err) && !isBeforeAccounts(err)) {
+      row = await deps.db.first<Row>(TOKEN_LOOKUP_BEFORE_LIFETIMES, [hash]);
+      return finish(row);
+    }
     // A database the accounts migration has not reached yet (a build started before its
     // migration ran) has no account that could be disabled, so the lookup of the version
     // before accounts is the whole rule there. Any other failure is a failure.
     if (!isBeforeAccounts(err)) throw err;
     row = await deps.db.first<Row>(TOKEN_LOOKUP_BEFORE_ACCOUNTS, [hash]);
   }
-  if (row === null || !constantTimeEqual(row.hash, hash)) return unauthorized();
+  return finish(row);
 
-  if (touch) {
-    await deps.db.run("UPDATE api_token SET last_used_at = ? WHERE id = ? AND workspace_id = ?", [
-      deps.now(),
-      row.id,
-      row.workspace_id,
-    ]);
+  async function finish(row: Row | null): Promise<Auth | Response> {
+    if (row === null || !constantTimeEqual(row.hash, hash)) return unauthorized();
+    if (touch) {
+      // Never backwards: a request whose lookup read the clock a moment before another's may
+      // write after it, and the later use is the one kept.
+      await deps.db.run("UPDATE api_token SET last_used_at = max(coalesce(last_used_at, 0), ?) WHERE id = ? AND workspace_id = ?", [now, row.id, row.workspace_id]);
+    }
+    return { workspaceId: row.workspace_id, tokenId: row.id };
   }
-  return { workspaceId: row.workspace_id, tokenId: row.id };
 }

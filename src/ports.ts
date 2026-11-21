@@ -2,6 +2,7 @@
 // share. Nothing in this file, or in any file outside src/cloudflare/ and src/node/,
 // may import a platform API.
 import type { Hosts } from "./hosts.ts";
+import type { Lifetimes } from "./lifetimes.ts";
 import { NO_MAIL, linkOrigin, type Mailer } from "./mail.ts";
 
 /**
@@ -143,6 +144,12 @@ export type Config = {
    * or null: no link is shown.
    */
   downloadUrl?: string | null;
+  /**
+   * The sign-in lifetimes in whole days, from SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and
+   * CONNECTION_MAX_DAYS (lifetimesSetting, src/lifetimes.ts). A key that is absent is its
+   * default (90, 90 and off); null is off. Read it through lifetimesOf.
+   */
+  lifetimes?: Partial<Lifetimes> | null;
 };
 
 export type Deps = {

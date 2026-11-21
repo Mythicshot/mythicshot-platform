@@ -15,7 +15,12 @@ import { describe, expect, it } from "vitest";
 import {
   checkAccountsBackfill,
   compareAnswers,
+  onlyAddedFields,
   compareRows,
+  gateProblems,
+  servesNoPicture,
+  tourContentOf,
+  type TourContent,
   compareStores,
   identityProblems,
   migrationProblems,
@@ -41,6 +46,7 @@ import {
   healthRoles,
   KNOWN_ERROR_LINES,
   knowsImgRole,
+  knowsRestrictedServing,
   modeSettings,
   parseArgs,
   pictureAddresses,
@@ -1049,5 +1055,148 @@ describe("the new build's player files", () => {
     } finally {
       server.close();
     }
+  });
+});
+
+describe("the added-fields rule and the sign-in lifetimes (Plan 2j)", () => {
+  const answer = (value: unknown): Answer => ({ status: 200, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(value)) });
+  it("lets through the fields the tokens, sessions and session answers gain, by their paths, and nothing else", () => {
+    const tok = { id: "tok_" + "1".repeat(24), name: "Laptop", created_at: 1, last_used_at: null, kind: "sign_in" };
+    expect(onlyAddedFields(answer({ tokens: [tok] }), answer({ tokens: [{ ...tok, expires_at: 7776000001, expired: false }] }))).toEqual({ ok: true, paths: ["tokens[].expired", "tokens[].expires_at"] });
+    const ses = { id: "ses_" + "1".repeat(24), label: "Firefox on Linux", created_at: 1, last_used_at: 1, expires_at: 2, current: true };
+    expect(onlyAddedFields(answer({ sessions: [ses] }), answer({ sessions: [{ ...ses, ends_at: 3 }] }))).toEqual({ ok: true, paths: ["sessions[].ends_at"] });
+    const who = { session: { id: ses.id, created_at: 1, expires_at: 2 }, csrf: "c" };
+    expect(onlyAddedFields(answer(who), answer({ session: { ...who.session, ends_at: null }, csrf: "c", limits: { session_max_days: 90, connection_idle_days: 90, connection_max_days: null } }))).toEqual({
+      ok: true,
+      paths: ["limits", "session.ends_at"],
+    });
+    // A changed value is not an added field.
+    expect(onlyAddedFields(answer({ tokens: [tok] }), answer({ tokens: [{ ...tok, last_used_at: 5, expired: true }] })).ok).toBe(false);
+  });
+});
+
+describe("the way back with a restricted tour, when the old build can serve restricted tours", () => {
+  const enc = (s: string) => new TextEncoder().encode(s);
+  const N1 = "1".repeat(32) + ".png";
+  const N2 = "2".repeat(32) + ".jpg";
+  const LOGO = "3".repeat(32) + ".png";
+  const TOUR_ID = "tour_" + "4".repeat(24);
+  const step = (image: string, caption: string, card: string) => ({
+    id: "st_" + image.slice(0, 24),
+    image,
+    width: 10,
+    height: 10,
+    click: null,
+    caption,
+    spotlight: null,
+    notes: [{ kind: "text", x: 0, y: 0, text: "Look at the quarterly numbers here", size: 1, color: "#fff" }],
+    card: { title: "Revenue panel", body: card, next_label: "Onwards", anchor: "none", point: null, placement: "auto" },
+    advance: "anywhere",
+    zoom: null,
+  });
+  const tour = {
+    title: "Acme <Secret> Roadmap",
+    cover: { title: "Welcome aboard", body: "The private plan", button: "Begin", logo: LOGO },
+    cta: { label: "Book a call", url: "https://acme.example.com/call" },
+    end: { text: "Thanks for watching", primary: null, secondary: null, replay: true },
+    chapters: [{ title: "Chapter about margins", description: null, steps: [step(N1, "Click the margins tab", "Margins went up"), step(N2, "Open settings", "Hidden settings live here")] }],
+  };
+  const publicPage = (base = "/p") =>
+    `<!doctype html><html><head><title>Acme &lt;Secret&gt; Roadmap</title></head><body><main id="player"><h1>Acme &lt;Secret&gt; Roadmap</h1></main><script type="application/json" id="tour">${JSON.stringify({ base, tour })}</script></body></html>`;
+  const GATE_BODY = '<!doctype html><html><head><title>Shared with specific people</title></head><body><h1>This tour is shared with specific people</h1><p>Enter your email address to get a link.</p><script src="/view.js"></script></body></html>';
+  const GATE_HEADERS: Record<string, string> = { "content-type": "text/html; charset=utf-8", "cache-control": "private, no-store", "x-frame-options": "DENY", "content-security-policy": "default-src 'none'; frame-ancestors 'none'" };
+  const gate = (body = GATE_BODY, status = 403, headers: Record<string, string> = GATE_HEADERS): Answer => ({ status, headers, body: enc(body) });
+  const content = () => tourContentOf(publicPage(), TOUR_ID) as TourContent;
+
+  it("reads the tour's own content from its public page: title, texts, picture addresses and names, and the id", () => {
+    const c = content();
+    expect(c.tourId).toBe(TOUR_ID);
+    expect(c.title).toBe("Acme <Secret> Roadmap");
+    expect(c.names).toEqual([N1, N2, LOGO]);
+    expect(c.addresses).toEqual([`/p/${N1}`, `/p/${N2}`, `/p/${LOGO}`]);
+    for (const t of ["Welcome aboard", "The private plan", "Begin", "Book a call", "https://acme.example.com/call", "Thanks for watching", "Chapter about margins", "Click the margins tab", "Margins went up", "Revenue panel", "Onwards", "Look at the quarterly numbers here", "Open settings", "Hidden settings live here"]) {
+      expect(c.texts, t).toContain(t);
+    }
+    expect(tourContentOf("<html>no data</html>", TOUR_ID)).toBeNull();
+  });
+
+  it("a fixed 403 gate that no cache may store, without an etag, that forbids framing and holds nothing of the tour, passes", () => {
+    expect(gateProblems(gate(), content())).toEqual([]);
+    // What the gate of 0.1.44 and later sends: no-store alone, which no cache, shared or private, may keep.
+    expect(gateProblems(gate(GATE_BODY, 403, { ...GATE_HEADERS, "cache-control": "no-store" }), content())).toEqual([]);
+    // Framing forbidden by either header alone is enough.
+    expect(gateProblems(gate(GATE_BODY, 403, { ...GATE_HEADERS, "x-frame-options": "SAMEORIGIN" }), content())).toEqual([]);
+  });
+
+  it("a gate body holding the title (raw or escaped), a text, a picture name or address, or the tour's id fails, and says only which", () => {
+    const cases: [string, string][] = [
+      ["<p>Acme &lt;Secret&gt; Roadmap</p>", "the page holds the tour's title"],
+      ["<p>Acme <Secret> Roadmap</p>", "the page holds the tour's title"],
+      ["<p>Margins went up</p>", "the page holds a text of the tour"],
+      ["<p>Look at the quarterly numbers here</p>", "the page holds a text of the tour"],
+      [`<img src="x/${N2}">`, "the page holds a picture name of the tour"],
+      [`<a href="/p/${LOGO}">`, "the page holds a picture name of the tour"],
+      [`<p>${TOUR_ID}</p>`, "the page holds the tour's id"],
+    ];
+    for (const [extra, problem] of cases) {
+      const problems = gateProblems(gate(GATE_BODY.replace("</body>", extra + "</body>")), content());
+      expect(problems, extra).toContain(problem);
+      for (const p of problems) for (const secret of ["Acme", "Margins", "quarterly", N2, LOGO, TOUR_ID]) expect(p).not.toContain(secret);
+    }
+  });
+
+  it("a 200, a cacheable 403, a 403 with an etag and one that may be framed each fail", () => {
+    const c = content();
+    expect(gateProblems(gate(GATE_BODY, 200), c)).toEqual(["the page answered 200, not 403"]);
+    expect(gateProblems(gate(GATE_BODY, 404), c)).toEqual(["the page answered 404, not 403"]);
+    const cacheable = ["the page may be kept by a cache: its cache-control does not say no-store"];
+    for (const cc of ["public, max-age=60", "private", "private, max-age=60", "max-age=0", "no-cache"]) expect(gateProblems(gate(GATE_BODY, 403, { ...GATE_HEADERS, "cache-control": cc }), c), cc).toEqual(cacheable);
+    const noCache = { ...GATE_HEADERS };
+    delete noCache["cache-control"];
+    expect(gateProblems(gate(GATE_BODY, 403, noCache), c)).toEqual(cacheable);
+    expect(gateProblems(gate(GATE_BODY, 403, { ...GATE_HEADERS, etag: '"abc"' }), c)).toEqual(["the page carries an etag"]);
+    const framable = { ...GATE_HEADERS, "x-frame-options": "SAMEORIGIN", "content-security-policy": "default-src 'none'" };
+    expect(gateProblems(gate(GATE_BODY, 403, framable), c)).toEqual(["the page may be framed by another site"]);
+  });
+
+  it("a picture route serves nothing only when it answers exactly as an unknown one, without picture bytes", () => {
+    const unknown: Answer = { status: 404, headers: { "content-type": "application/json" }, body: enc('{"error":"not_found"}') };
+    expect(servesNoPicture({ ...unknown }, unknown)).toBe(true);
+    expect(servesNoPicture({ status: 200, headers: { "content-type": "image/png" }, body: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2]) }, unknown)).toBe(false);
+    expect(servesNoPicture({ status: 404, headers: {}, body: enc('{"error":"gone"}') }, unknown)).toBe(false);
+    // An "unknown" answer that is itself picture bytes proves nothing.
+    const png: Answer = { status: 404, headers: {}, body: new Uint8Array([0x89, 0x50, 0x4e, 0x47]) };
+    expect(servesNoPicture(png, png)).toBe(false);
+    const jpg: Answer = { status: 404, headers: {}, body: new Uint8Array([0xff, 0xd8, 0xff, 0xe0]) };
+    expect(servesNoPicture(jpg, jpg)).toBe(false);
+  });
+
+  describe("whether a build can serve restricted tours, from its compiled files", () => {
+    function buildWith(files: Record<string, string>): string {
+      const dir = mkdtempSync(join(tmpdir(), "rehearse-build-"));
+      mkdirSync(join(dir, "dist"), { recursive: true });
+      for (const [name, ts] of Object.entries(files)) writeFileSync(join(dir, "dist", name), transformSync(ts, { loader: "ts", format: "esm" }).code);
+      return dir;
+    }
+    const src = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8").replace(/\.ts"/g, '.js"');
+    const today = { "app.js": src("../src/app.ts"), "restricted.js": src("../src/restricted.ts") };
+    // What 0.1.35 had: no restricted.js, and the page routes without a restricted answer.
+    const before = { "app.js": 'import { pageRoutes } from "./page.js";\nexport function createApp(app: any, deps: any) {\n  pageRoutes(app, deps);\n}\n' };
+
+    it("this checkout's build can; one shaped like 0.1.35 cannot; a missing file or a part alone means it cannot", () => {
+      const dirs = [
+        buildWith(today),
+        buildWith(before),
+        buildWith({ "app.js": today["app.js"] }),
+        buildWith({ ...before, "restricted.js": today["restricted.js"] }),
+        buildWith({ "app.js": today["app.js"], "restricted.js": "export const restrictedAnswer = () => null;\nexport function restrictedRoutes() {}\n" }),
+      ];
+      try {
+        expect(dirs.map((d) => knowsRestrictedServing(d))).toEqual([true, false, false, false, false]);
+        expect(knowsRestrictedServing(join(tmpdir(), "no-such-build-folder-for-the-rehearsal"))).toBe(false);
+      } finally {
+        for (const d of dirs) rmSync(d, { recursive: true, force: true });
+      }
+    });
   });
 });

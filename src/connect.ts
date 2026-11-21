@@ -47,6 +47,7 @@ import { hashToken, newId, newToken, requireAuth } from "./auth.ts";
 import { clientAddressOf } from "./client.ts";
 import { mailConnection } from "./connect-mail.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
+import { SESSION_AGE_SQL, sessionParams } from "./lifetimes.ts";
 import { linkOrigin } from "./mail.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps } from "./ports.ts";
 import { LIMITS_CONNECT, accountKey, hitLimit, hitLimitRefundable, networkKey, refundStatement, sweepCounters, type CountedHit, type Limit } from "./rate.ts";
@@ -356,8 +357,8 @@ export function connectRoutes(app: Hono, deps: Deps): void {
     //    while the request is confirmed, uncollected, not refused and not expired, its
     //    confirming account is active and a member of that workspace, no account of the
     //    workspace is disabled (the rule a token's lookup has), and the session it was
-    //    confirmed from is still the account's, not revoked and not expired (the rule a
-    //    session's lookup has);
+    //    confirmed from is still the account's, not revoked, not expired and not older than
+    //    SESSION_MAX_DAYS (the rule a session's lookup has);
     // 2. the record, which is also the guard: unless 1 made exactly one row, it fails and the
     //    whole batch is undone;
     // 3. the request is marked collected.
@@ -374,11 +375,11 @@ export function connectRoutes(app: Hono, deps: Deps): void {
                   JOIN membership m ON m.user_id = u.id AND m.workspace_id = r.workspace_id
                   JOIN session s ON s.id = r.confirmed_session AND s.user_id = r.confirmed_by
                  WHERE r.id = ? AND r.confirmed_at IS NOT NULL AND r.refused_at IS NULL AND r.collected_at IS NULL AND r.expires_at > ?
-                   AND s.revoked_at IS NULL AND s.expires_at > ?
+                   AND s.revoked_at IS NULL AND s.expires_at > ? AND ${SESSION_AGE_SQL}
                    AND u.status = 'active'
                    AND NOT EXISTS (SELECT 1 FROM user d WHERE d.status = 'disabled'
                                      AND (d.workspace_id = r.workspace_id OR d.id IN (SELECT m2.user_id FROM membership m2 WHERE m2.workspace_id = r.workspace_id)))`,
-          params: [await hashToken(token), now, row.id, now, now],
+          params: [await hashToken(token), now, row.id, now, now, ...sessionParams(deps.config, now)],
         },
         auditStatement(deps, { event: "connection_collected", userId: row.confirmed_by, workspaceId: row.workspace_id, subject: row.token_id, detail: { request: row.id } }, { onlyAfterOneChange: true }),
         { sql: "UPDATE connect_request SET collected_at = ?, last_poll_at = ? WHERE id = ? AND collected_at IS NULL", params: [now, now, row.id] },

@@ -5,6 +5,7 @@ import { createApp } from "../app.ts";
 import { withBudget } from "../budget.ts";
 import { setClientAddress } from "../client.ts";
 import { downloadUrlSetting } from "../https-address.ts";
+import { lifetimesSetting } from "../lifetimes.ts";
 import { DEFER_FAILED, deferTracker, type Deps } from "../ports.ts";
 import { clientAddressReader, configFromEnv, guardTarget, mailFromEnv, proxyHint, type Incoming } from "./config.ts";
 import { APP_UID, prepareDataDir } from "./datadir.ts";
@@ -54,6 +55,9 @@ async function main(): Promise<void> {
   // and said in its one fixed line.
   const download = downloadUrlSetting(process.env.DOWNLOAD_URL);
   if (download.problem !== null) console.error(download.problem);
+  // Nor do the sign-in lifetimes: one that cannot be used is its default (configFromEnv),
+  // and each such setting is said in its one fixed line.
+  for (const line of lifetimesSetting(process.env).problems) console.error(line);
   // Without the setting, a request from a private or local address is the sign of a proxy
   // whose visitors all look like one: one line says which setting to set, once.
   const hint = proxyHint(process.env.CLIENT_ADDRESS_HEADER, (line) => console.error(line));

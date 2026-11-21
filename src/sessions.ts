@@ -16,11 +16,15 @@ import { workspaceOf } from "./accounts.ts";
 import { auditStatement } from "./audit.ts";
 import { newId } from "./auth.ts";
 import { onRole, type HostRole } from "./hosts.ts";
+import { SESSION_AGE_SQL, sessionEndsAt, sessionParams } from "./lifetimes.ts";
 import { isNotNullViolation, type Deps, type Stmt } from "./ports.ts";
 
 /** The cookie's name. The `__Host-` prefix makes browsers refuse it unless it is Secure, has the path / and no Domain: it belongs to one host and no other host can set it. */
 export const SESSION_COOKIE = "__Host-dp_session";
-/** A session ends 30 days after its last use. */
+/**
+ * A session ends 30 days after its last use, and never later than SESSION_MAX_DAYS after it
+ * was made (src/lifetimes.ts): its stored expires_at is capped there when it is written.
+ */
 export const SESSION_MS = 2_592_000_000;
 /** A session's last use and its end are written at most once in this long. */
 export const SESSION_TOUCH_MS = 3_600_000;
@@ -230,6 +234,15 @@ export function sessionLabel(userAgent: string | null): string {
 }
 
 /**
+ * The end a new session made at `now` is stored with: 30 days on (SESSION_MS), or
+ * SESSION_MAX_DAYS on when that is sooner. src/invites.ts makes its session with it too.
+ */
+export function firstEnd(deps: Deps, now: number): number {
+  const max = sessionEndsAt(deps.config, now);
+  return max === null ? now + SESSION_MS : Math.min(now + SESSION_MS, max);
+}
+
+/**
  * Makes a sign-in code for the account and returns it; only its digest is stored. The
  * code works once, until SIGNIN_CODE_MS from now. One call. Whether the account may sign
  * in at all is decided when the code is redeemed, not here. Throws when there is no such
@@ -332,7 +345,7 @@ export async function redeemSignInCode(
                         AND u.status = 'active'
                         AND EXISTS (SELECT 1 FROM user WHERE is_admin = 1)),
                     ?, ?, ?, ?, ?)`,
-      params: [sessionId, codeHash, sessionId, found.user_id, found.workspace_id, await sha256Hex(secret), label, now, now, now + SESSION_MS],
+      params: [sessionId, codeHash, sessionId, found.user_id, found.workspace_id, await sha256Hex(secret), label, now, now, firstEnd(deps, now)],
     },
   ];
   if (typeof replaces === "string" && SECRET_PATTERN.test(replaces)) {
@@ -357,7 +370,9 @@ export async function redeemSignInCode(
 /**
  * The session the request's cookie names, with the account's one workspace, or null:
  * for no cookie, two session cookies, a malformed one, a secret nobody has, a revoked or
- * expired session, a disabled account, an account that is a member of no workspace, and
+ * expired session, one made longer ago than SESSION_MAX_DAYS (checked here, in the one
+ * lookup, from its created_at and the request's clock, so a smaller setting applies to it at
+ * once; such a session is refused exactly as a revoked one), a disabled account, an account that is a member of no workspace, and
  * in two-address mode for every address but the app address. At most two calls: one read,
  * and one write when the session's last use was written an hour ago or longer.
  *
@@ -383,15 +398,20 @@ export async function resolveSession(
        FROM session s
        JOIN user u ON u.id = s.user_id
        JOIN membership m ON m.user_id = u.id
-      WHERE s.hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.status = 'active'
+      WHERE s.hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND ${SESSION_AGE_SQL} AND u.status = 'active'
       LIMIT 2`,
-    [await sha256Hex(secret), now],
+    [await sha256Hex(secret), now, ...sessionParams(deps.config, now)],
   );
   if (rows.length !== 1) return null;
   const row = rows[0];
   if (now - row.last_used_at >= SESSION_TOUCH_MS) {
-    await deps.db.run("UPDATE session SET last_used_at = ?, expires_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL AND last_used_at <= ?", [
+    // The new end is 30 days on, capped at created_at + SESSION_MAX_DAYS (no cap when that is
+    // off: created_at + NULL is NULL), so the stored end stays truthful.
+    const max = sessionEndsAt(deps.config, 0);
+    await deps.db.run("UPDATE session SET last_used_at = ?, expires_at = min(?, coalesce(created_at + ?, ?)) WHERE id = ? AND user_id = ? AND revoked_at IS NULL AND last_used_at <= ?", [
       now,
+      now + SESSION_MS,
+      max,
       now + SESSION_MS,
       row.id,
       row.user_id,
@@ -450,7 +470,8 @@ export async function revokeAll(deps: Deps, userId: string): Promise<void> {
 }
 
 /**
- * Removes rows nothing can use any more: sessions that expired, sessions revoked longer
+ * Removes rows nothing can use any more: sessions that expired or are older than
+ * SESSION_MAX_DAYS (src/lifetimes.ts), sessions revoked longer
  * ago than REVOKED_KEPT_MS, and sign-in codes that expired longer ago than CODE_KEPT_MS.
  * At most SWEEP_PAGE rows of each table per call, in one batch, so it can ride on a
  * request. A live session, a recently revoked one and an unexpired code are never
@@ -460,8 +481,8 @@ export async function sweepSessions(deps: Deps): Promise<void> {
   const now = deps.now();
   await deps.db.batch([
     {
-      sql: "DELETE FROM session WHERE id IN (SELECT id FROM session WHERE expires_at <= ? OR (revoked_at IS NOT NULL AND revoked_at <= ?) LIMIT ?)",
-      params: [now, now - REVOKED_KEPT_MS, SWEEP_PAGE],
+      sql: "DELETE FROM session WHERE id IN (SELECT id FROM session s WHERE s.expires_at <= ? OR NOT " + SESSION_AGE_SQL + " OR (s.revoked_at IS NOT NULL AND s.revoked_at <= ?) LIMIT ?)",
+      params: [now, ...sessionParams(deps.config, now), now - REVOKED_KEPT_MS, SWEEP_PAGE],
     },
     {
       sql: "DELETE FROM signin_code WHERE id IN (SELECT id FROM signin_code WHERE expires_at <= ? LIMIT ?)",

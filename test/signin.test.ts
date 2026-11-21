@@ -792,12 +792,13 @@ describe("the session", () => {
     expect(r.json).toEqual({
       account: { id: a.userId, username: "alice", email: a.email, admin: false },
       workspace: { id: a.workspaceId, name: "Account" },
-      session: { id: s.sessionId, created_at: NOW, expires_at: NOW + 2_592_000_000 },
+      session: { id: s.sessionId, created_at: NOW, expires_at: NOW + 2_592_000_000, ends_at: NOW + 90 * 86_400_000 },
       csrf: s.csrf,
       email_change: true,
       download_url: null,
+      limits: { session_max_days: 90, connection_idle_days: 90, connection_max_days: null },
     });
-    expect(Object.keys(r.json)).toEqual(["account", "workspace", "session", "csrf", "email_change", "download_url"]);
+    expect(Object.keys(r.json)).toEqual(["account", "workspace", "session", "csrf", "email_change", "download_url", "limits"]);
     expect(Object.keys(r.json.account)).toEqual(["id", "username", "email", "admin"]);
     expect(r.json.csrf).toMatch(/^[0-9a-f]{64}$/);
     expect(r.text).not.toMatch(SECRET);
@@ -909,11 +910,11 @@ describe("the session", () => {
     // The current one first, then the others, and nothing of a session that is over or of another account.
     expect(r.json).toEqual({
       sessions: [
-        { id: second.sessionId, label: "Chrome on Windows", created_at: NOW + 60_000, last_used_at: NOW + 60_000, expires_at: NOW + 60_000 + 2_592_000_000, current: true },
-        { id: first.sessionId, label: "Firefox on Linux", created_at: NOW, last_used_at: NOW, expires_at: NOW + 2_592_000_000, current: false },
+        { id: second.sessionId, label: "Chrome on Windows", created_at: NOW + 60_000, last_used_at: NOW + 60_000, expires_at: NOW + 60_000 + 2_592_000_000, ends_at: NOW + 60_000 + 90 * 86_400_000, current: true },
+        { id: first.sessionId, label: "Firefox on Linux", created_at: NOW, last_used_at: NOW, expires_at: NOW + 2_592_000_000, ends_at: NOW + 90 * 86_400_000, current: false },
       ],
     });
-    expect(Object.keys(r.json.sessions[0])).toEqual(["id", "label", "created_at", "last_used_at", "expires_at", "current"]);
+    expect(Object.keys(r.json.sessions[0])).toEqual(["id", "label", "created_at", "last_used_at", "expires_at", "ends_at", "current"]);
     for (const text of [theirs.sessionId, b.userId, b.email, gone.sessionId, expired.sessionId]) expect(r.text.includes(text)).toBe(false);
     // No secret, no digest and no anti-forgery value is in a list, and listing sets no cookie.
     expect(r.text).not.toMatch(/dps_|[0-9a-f]{32}/);

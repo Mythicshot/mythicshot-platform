@@ -576,3 +576,98 @@ export function usageProblems(answer: Answer, sum: UsageSum): string[] {
   if (body.counted?.uploads_in_progress !== sum.uploads) out.push("counted.uploads_in_progress differs from the sum of reservations");
   return out;
 }
+
+/**
+ * What a tour showed of itself on its public page, for the way back with a restricted tour
+ * when the old build can serve restricted tours: its title, every text of its data (the
+ * cover, the call to action, the end card, each chapter's title and description, and each
+ * step's id, caption, notes and card), every picture address and name, and the tour's id.
+ * Kept in memory only, never printed: the report names which kind of content it found, never
+ * the content. Null when the page holds no tour data.
+ */
+export type TourContent = { tourId: string; title: string; texts: string[]; addresses: string[]; names: string[] };
+
+/** A text shorter than this is not looked for in the gate's fixed text: a word such as "Go" or "Next" could be in it by chance. */
+export const MIN_CONTENT_CHARS = 4;
+
+export function tourContentOf(html: string, tourId: string): TourContent | null {
+  const m = /<script type="application\/json" id="tour">([\s\S]*?)<\/script>/.exec(html);
+  if (m === null) return null;
+  let data: any;
+  try {
+    data = JSON.parse(m[1]);
+  } catch {
+    return null;
+  }
+  const tour = data?.tour;
+  if (tour === null || typeof tour !== "object") return null;
+  const texts: string[] = [];
+  const add = (...vs: unknown[]) => {
+    for (const v of vs) if (typeof v === "string" && v !== "") texts.push(v);
+  };
+  const link = (l: any) => add(l?.label, l?.url);
+  add(tour.cover?.title, tour.cover?.body, tour.cover?.button);
+  link(tour.cta);
+  add(tour.end?.text);
+  link(tour.end?.primary);
+  link(tour.end?.secondary);
+  const names: string[] = [];
+  for (const ch of Array.isArray(tour.chapters) ? tour.chapters : []) {
+    add(ch?.title, ch?.description);
+    for (const st of Array.isArray(ch?.steps) ? ch.steps : []) {
+      add(st?.id, st?.caption, st?.card?.title, st?.card?.body, st?.card?.next_label);
+      for (const n of Array.isArray(st?.notes) ? st.notes : []) add(n?.text);
+      if (typeof st?.image === "string") names.push(st.image);
+    }
+  }
+  if (typeof tour.cover?.logo === "string") names.push(tour.cover.logo);
+  const base = typeof data?.base === "string" ? data.base : "";
+  return { tourId, title: typeof tour.title === "string" ? tour.title : "", texts, addresses: names.map((n) => `${base}/${n}`), names };
+}
+
+const escapedHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+/** A name such as `<32 hex>.png` without its directory: the part a page could show on its own. */
+const bareName = (n: string) => n.slice(n.lastIndexOf("/") + 1);
+
+/**
+ * What is wrong with the old build's page for a restricted tour, asked with no viewer cookie,
+ * when that build can serve restricted tours (from 0.1.44): it must be the gate, which is
+ * fixed text. So: status 403; `cache-control` with `no-store`, which no cache, shared or private, may keep
+ * (the gate sends exactly that; `private` alone would let the browser keep it); no `etag`;
+ * framing forbidden (`X-Frame-Options: DENY`, or `frame-ancestors 'none'` in its policy);
+ * and nothing of the tour in its body, as written or HTML-escaped: not its title, no text of
+ * at least MIN_CONTENT_CHARS characters, no picture address or name, not its id. Each problem
+ * is a fixed label: it never holds the content it found.
+ */
+export function gateProblems(page: Answer, content: TourContent): string[] {
+  const out: string[] = [];
+  if (page.status !== 403) out.push(`the page answered ${page.status}, not 403`);
+  const h = Object.fromEntries(Object.entries(page.headers).map(([k, v]) => [k.toLowerCase(), v]));
+  const cache = (h["cache-control"] ?? "").toLowerCase().split(",").map((d) => d.trim());
+  if (!cache.includes("no-store")) out.push("the page may be kept by a cache: its cache-control does not say no-store");
+  if ("etag" in h) out.push("the page carries an etag");
+  const xfo = (h["x-frame-options"] ?? "").trim().toUpperCase() === "DENY";
+  const fa = /(?:^|;)\s*frame-ancestors\s+'none'\s*(?:;|$)/i.test(h["content-security-policy"] ?? "");
+  if (!xfo && !fa) out.push("the page may be framed by another site");
+  const body = new TextDecoder().decode(page.body);
+  const holds = (s: string) => s.length >= MIN_CONTENT_CHARS && (body.includes(s) || body.includes(escapedHtml(s)));
+  if (content.title !== "" && holds(content.title)) out.push("the page holds the tour's title");
+  if (content.texts.some(holds)) out.push("the page holds a text of the tour");
+  if (content.addresses.some(holds) || content.names.some((n) => holds(bareName(n)))) out.push("the page holds a picture name of the tour");
+  if (holds(content.tourId)) out.push("the page holds the tour's id");
+  return out;
+}
+
+const PICTURE_MAGIC: readonly number[][] = [
+  [0x89, 0x50, 0x4e, 0x47],
+  [0xff, 0xd8, 0xff],
+  [0x47, 0x49, 0x46, 0x38],
+  [0x52, 0x49, 0x46, 0x46],
+];
+const startsWithPicture = (b: Uint8Array) => PICTURE_MAGIC.some((m) => m.every((x, i) => b[i] === x));
+
+/** True when a picture request answered exactly as one for a picture that does not exist (status and body), and neither is picture bytes. */
+export function servesNoPicture(answer: Answer, unknown: Answer): boolean {
+  if (startsWithPicture(answer.body) || startsWithPicture(unknown.body)) return false;
+  return answer.status === unknown.status && answer.status >= 400 && Buffer.from(answer.body).equals(Buffer.from(unknown.body));
+}

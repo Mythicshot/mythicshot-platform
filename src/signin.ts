@@ -26,6 +26,7 @@ import { requireAuth } from "./auth.ts";
 import { clientAddressOf } from "./client.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
 import { downloadUrlSetting } from "./https-address.ts";
+import { SESSION_AGE_SQL, lifetimesOf, sessionEndsAt, sessionParams } from "./lifetimes.ts";
 import { NO_MAIL, linkOrigin, signInLink, signInMail } from "./mail.ts";
 import { canMailLinks, deferOf, mailOf, type Deps, type Stmt } from "./ports.ts";
 import { LIMITS_SIGNIN, SITE_KEY, SITE_QUIET_KEY, hitLimit, networkKey, recipientKey, sweepCounters, type Limit } from "./rate.ts";
@@ -196,6 +197,12 @@ async function linkJob(deps: Deps, job: LinkJob): Promise<void> {
   }
 }
 
+/** The site's three sign-in lifetimes, in days, null where a limit is off, as the session answer gives them. */
+function limitsAnswer(deps: Deps): { session_max_days: number | null; connection_idle_days: number | null; connection_max_days: number | null } {
+  const l = lifetimesOf(deps.config);
+  return { session_max_days: l.sessionMaxDays, connection_idle_days: l.connectionIdleDays, connection_max_days: l.connectionMaxDays };
+}
+
 export function signinRoutes(app: Hono, deps: Deps): void {
   /**
    * Asks for a sign-in link. A well-formed address always answers 200 `{"ok":true}`; a
@@ -296,7 +303,7 @@ export function signinRoutes(app: Hono, deps: Deps): void {
     const answer = json(200, {
       account: { id: auth.session.userId, username: row.username, email: row.email, admin: row.is_admin === 1 },
       workspace: { id: auth.workspaceId, name: row.name },
-      session: { id: auth.session.id, created_at: row.created_at, expires_at: row.expires_at },
+      session: { id: auth.session.id, created_at: row.created_at, expires_at: row.expires_at, ends_at: sessionEndsAt(deps.config, row.created_at) },
       csrf: await csrfFor(secret),
       // Whether the account page may offer to change the email address: only a site that
       // can mail the link to the new address can.
@@ -304,6 +311,9 @@ export function signinRoutes(app: Hono, deps: Deps): void {
       // Where the desktop app is downloaded from, for the dashboard's link: the configured
       // address, checked again here as the setting is, or null.
       download_url: downloadUrlSetting(deps.config.downloadUrl ?? undefined).url,
+      // The site's sign-in lifetimes in days (null: off), so the dashboard can say when a
+      // connection ends without a request more.
+      limits: limitsAnswer(deps),
     });
     return withHeader(answer, "set-cookie", sessionCookie(secret));
   });
@@ -314,16 +324,17 @@ export function signinRoutes(app: Hono, deps: Deps): void {
     if (auth instanceof Response) return auth;
     if (auth.session === undefined) return unauthorized();
     const current = auth.session.id;
+    const now = deps.now();
     const rows = await deps.db.all<{ id: string; label: string; created_at: number; last_used_at: number; expires_at: number }>(
       `SELECT id, label, created_at, last_used_at, expires_at
-         FROM session
-        WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?
+         FROM session s
+        WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ? AND ${SESSION_AGE_SQL}
         ORDER BY (id = ?) DESC, last_used_at DESC, id
         LIMIT ?`,
-      [auth.session.userId, deps.now(), current, MAX_SESSIONS_LISTED],
+      [auth.session.userId, now, ...sessionParams(deps.config, now), current, MAX_SESSIONS_LISTED],
     );
     return json(200, {
-      sessions: rows.map((r) => ({ id: r.id, label: r.label, created_at: r.created_at, last_used_at: r.last_used_at, expires_at: r.expires_at, current: r.id === current })),
+      sessions: rows.map((r) => ({ id: r.id, label: r.label, created_at: r.created_at, last_used_at: r.last_used_at, expires_at: r.expires_at, ends_at: sessionEndsAt(deps.config, r.created_at), current: r.id === current })),
     });
   });
 
