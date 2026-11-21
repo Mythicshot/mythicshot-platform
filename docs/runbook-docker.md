@@ -1226,10 +1226,9 @@ The mark and the name "Mythicshot" at the top of the dashboard, the sign-in page
 HOME_URL=https://www.example.com/
 ```
 
-> [!WARNING]
-> A `HOME_URL` the app cannot use stops the app from starting, so the site cannot be reached until the line is corrected or removed and the container recreated.
+A tunnel install set up before 0.1.52 runs `sudo bash install.sh install` once before `HOME_URL` takes effect: `update` does not rewrite the stack file, and `install` does (it keeps the old one as a `.bak` copy).
 
-**How to tell it worked:** clicking the mark or the name at the top of the dashboard opens your home page in the same tab. If the site does not come back, `docker compose logs app` has the line `HOME_URL is not a usable address.` followed by the rule. To take the link away, remove the line and recreate the container.
+**How to tell it worked:** clicking the mark or the name at the top of the dashboard opens your home page in the same tab. A value the app cannot use never stops the app: the mark and the name are then no link, and `docker compose logs app` has the line `home page: off, because HOME_URL is not a usable address. The site runs; the logo is not a link.` To take the link away, remove the line and recreate the container.
 
 ### Change how long sign-ins last
 

@@ -745,7 +745,7 @@ HOME_URL=<your home page's address>
 touch ~/apps/tours/tmp/restart.txt
 ```
 
-**How to tell it worked:** clicking the mark or the name at the top of the dashboard opens your home page in the same tab. A value the app cannot use stops it from starting, so the site cannot be reached: then the app's log has the line `HOME_URL is not a usable address.` followed by the rule: fix or remove the line and restart. To take the link away, remove the line and restart.
+**How to tell it worked:** clicking the mark or the name at the top of the dashboard opens your home page in the same tab. A value the app cannot use never stops the app: the mark and the name are then no link, and the app's log has the line `home page: off, because HOME_URL is not a usable address. The site runs; the logo is not a link.` Fix the line and restart. To take the link away, remove the line and restart.
 
 ### Change how long sign-ins last
 
