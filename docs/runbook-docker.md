@@ -414,13 +414,13 @@ docker compose exec -T app node -e 'const { DatabaseSync } = process.getBuiltinM
 
 It prints a number: anything but `0` means restore, not go back.
 
-The same holds for a version before 0.1.47 once a shared image or clip is restricted to people or to its owner: such a version does not know who may view an item. It answers a restricted item's link as one that does not exist, but it could show the item to anyone through another link it would give its owner. Check before you go back below 0.1.47:
+The same holds for a version before 0.1.47 once a shared image or clip is restricted to people or to its owner: such a version does not know who may view an item. It answers a restricted item's link as one that does not exist, but it could show the item to anyone through another link it would give its owner. Nothing on this route checks it for you: before you go back below 0.1.47, count the shared items whose setting is not `public`:
 
 ```sh
 docker compose exec -T app node -e 'const { DatabaseSync } = process.getBuiltinModule("node:sqlite"); const db = new DatabaseSync("/data/db.sqlite", { readOnly: true }); console.log(db.prepare("SELECT count(*) AS n FROM media WHERE access <> ?").get("public").n); db.close();'
 ```
 
-Anything but `0` means restore, not go back.
+Anything but `0` means restore, not go back. An older version also cannot fully delete an item whose list of addresses holds one, whether the item is restricted now or was before (the list is kept when an item goes back to public): its delete stops serving the item and removes its files, but answers `500 cleanup_pending` every time and leaves the item's row, which 0.1.47 or later removes at the workspace's next share or when the delete is sent again.
 
 ### Make yourself the admin
 
@@ -636,7 +636,10 @@ Use this route when the server cannot take connections from the internet: a serv
 | Containers | app, caddy | app, caddy, cloudflared |
 | Secrets in `.env` | the setup code | the setup code and the tunnel token |
 
-Shared images and clips: from 0.1.47 their pages and files are sent with `Cache-Control: no-cache`, so a cache in front of the site (a tunnel's or a CDN's edge, a proxy) asks the site before it serves one again and a restricted, deleted or disabled item is not served from it. A copy such a cache stored under 0.1.46 or earlier can still be served for up to an hour after the update (a page for up to a minute); purge the cache after the update if an item must stop being seen at once. A browser that already loaded a file keeps it.
+Shared images and clips: from 0.1.47 their pages and files are sent with `Cache-Control: no-cache`, so a cache in front of the site (a tunnel's or a CDN's edge, a proxy) asks the site before it serves one again, and restricting, deleting or disabling an item takes effect at the next request on the site. A copy such a cache stored under 0.1.46 or earlier can still be served for up to an hour after the update (a page for up to a minute); purge the cache after the update if an item must stop being seen at once. A browser that already loaded a file keeps it.
+
+> [!WARNING]
+> A CDN or proxy rule in front of the site that overrides its cache headers, such as a "cache everything" rule with a lifetime of its own, would go on serving an image or clip after it is restricted. No such rule may cover `/i/` and `/r/`.
 
 ### What to have ready for the tunnel
 

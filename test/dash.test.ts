@@ -383,6 +383,14 @@ describe("the dashboard's pages and files", () => {
     expect(SCRIPTS.length).toBe(DASH_PAGES.length + 1);
   });
 
+  it("the Tours page holds nothing of the item-only parts of the Sharing box: no copies warning, no too-large sentence, no too_large_to_restrict", () => {
+    // The Sharing box is one source for tours and items (src/dash/sharing.ts); these three belong to an item alone.
+    for (const id of ["share-copies", "tooLarge", "too_large_to_restrict"]) {
+      expect(TOURS_JS, id).not.toContain(id);
+      expect(TOURS_HTML, id).not.toContain(id);
+    }
+  });
+
   it("the bar holds the brand, the seven tabs in order, and a place for the username", () => {
     const doc = new FakeDocument(TOURS_HTML);
     const nav = doc.body.all().find((e) => e.tagName === "nav")!;

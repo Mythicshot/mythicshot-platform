@@ -23,6 +23,10 @@ import {
   type TourContent,
   compareStores,
   identityProblems,
+  itemCacheOnly,
+  ITEM_ROUTES,
+  sharedItemsOf,
+  sharedItemRows,
   migrationProblems,
   playerFileProblems,
   playerFilesIn,
@@ -44,8 +48,22 @@ import {
   freePort,
   healthHosts,
   healthRoles,
+  ITEM_RANGE,
   KNOWN_ERROR_LINES,
   knowsImgRole,
+  knowsMediaApi,
+  shareRehearsalItems,
+  allowItemCacheFor,
+  itemCacheVerdict,
+  itemAnswerSummary,
+  itemCoverageLines,
+  seedDecision,
+  rehearse,
+  versionBelow,
+  itemCachePolicy,
+  sharedItemsFor,
+  buildInfo,
+  runMain,
   knowsRestrictedServing,
   modeSettings,
   parseArgs,
@@ -72,6 +90,7 @@ import { NodeDb } from "../src/node/db.ts";
 import { NodeFileStore } from "../src/node/files.ts";
 import { migrate } from "../src/node/migrate.ts";
 import { createWorkspace } from "../src/workspaces.ts";
+import { serve } from "@hono/node-server";
 
 const enc = new TextEncoder();
 
@@ -1223,6 +1242,407 @@ describe("the way back with a restricted tour, when the old build can serve rest
       } finally {
         for (const d of dirs) rmSync(d, { recursive: true, force: true });
       }
+    });
+  });
+});
+
+describe("the answers of shared items (Plan 2k, task 3)", () => {
+  type Row = Record<string, string | number | null>;
+  const table = (rows: Row[], columns: string[]) => ({ columns, rows: rows.map((r) => columns.map((c) => r[c] ?? null)) });
+  const OLD_COLUMNS = ["id", "workspace_id", "link_id", "kind", "content_type", "state", "created_at"];
+  const NEW_COLUMNS = [...OLD_COLUMNS, "access", "private_link_id"];
+  const link = (c: string) => c.repeat(20);
+
+  it("the items asked are the online ones of the token's workspace, in the order they were made, each by its real link, its letter and its one extension", () => {
+    const rows: Row[] = [
+      { id: "med_b", workspace_id: "ws_1", link_id: link("b"), kind: "clip", content_type: "image/gif", state: "online", created_at: 2 },
+      { id: "med_a", workspace_id: "ws_1", link_id: link("a"), kind: "image", content_type: "image/png", state: "online", created_at: 1 },
+      { id: "med_c", workspace_id: "ws_1", link_id: link("c"), kind: "image", content_type: "image/jpeg", state: "uploading", created_at: 3 },
+      { id: "med_d", workspace_id: "ws_2", link_id: link("d"), kind: "image", content_type: "image/png", state: "online", created_at: 0 },
+      { id: "med_e", workspace_id: "ws_1", link_id: link("e"), kind: "clip", content_type: "video/mp4", state: "online", created_at: 2 },
+      { id: "med_f", workspace_id: "ws_1", link_id: link("f"), kind: "image", content_type: "image/jpeg", state: "closing", created_at: 4 },
+    ];
+    // Before migration 0016: no access column, every item public by its link_id.
+    const before: DbSnapshot = { media: table(rows, OLD_COLUMNS) };
+    expect(sharedItemsOf(before, "ws_1")).toEqual([
+      { letter: "i", link: link("a"), ext: "png" },
+      { letter: "r", link: link("b"), ext: "gif" },
+      { letter: "r", link: link("e"), ext: "mp4" },
+    ]);
+    expect(sharedItemsOf(before, "ws_2")).toEqual([{ letter: "i", link: link("d"), ext: "png" }]);
+    expect(sharedItemsOf(before, "ws_3")).toEqual([]);
+    // From 0016: a restricted item by its real link, which is in private_link_id (its link_id is a name nobody was given).
+    const after: DbSnapshot = {
+      media: table(
+        [
+          { ...rows[1], access: "public" },
+          { id: "med_g", workspace_id: "ws_1", link_id: link("x"), private_link_id: link("g"), kind: "image", content_type: "image/jpeg", state: "online", created_at: 5, access: "me" },
+        ],
+        NEW_COLUMNS,
+      ),
+    };
+    expect(sharedItemsOf(after, "ws_1")).toEqual([
+      { letter: "i", link: link("a"), ext: "png" },
+      { letter: "i", link: link("g"), ext: "jpg" },
+    ]);
+    // A database before shared items (0010) has none.
+    expect(sharedItemsOf({ tour: table([], ["id"]) }, "ws_1")).toEqual([]);
+  });
+
+  it("the cache allowance covers HEAD, the conditional request (304) and the Range request (206) of an item, old to new only, and nothing else of them", () => {
+    for (const r of ["HEAD /i/:name", "HEAD /i/:name/download", "HEAD /i/:name/preview", "HEAD /r/:name", "HEAD /r/:name/download", "HEAD /r/:name/preview"]) expect(ITEM_ROUTES).toContain(r);
+    expect(ITEM_ROUTES.filter((r) => !r.startsWith("GET ") && !r.startsWith("HEAD "))).toEqual([]);
+    const head = (cc: string, extra: Record<string, string> = {}): Answer => ({ status: 200, headers: { "content-type": "image/png", "content-length": "1200", "cache-control": cc, etag: '"0123"', ...extra }, body: new Uint8Array() });
+    const notModified = (cc: string): Answer => ({ status: 304, headers: { "cache-control": cc, etag: '"0123"' }, body: new Uint8Array() });
+    const partial = (cc: string): Answer => ({ status: 206, headers: { "content-type": "image/png", "content-range": "bytes 1-100/1200", "cache-control": cc }, body: new Uint8Array(100).fill(7) });
+    const old: Recorded[] = [
+      rec("token 1: item 1 file (HEAD)", "HEAD /i/:name", head("public, max-age=3600")),
+      rec("token 1: item 1 page (if-none-match)", "GET /i/:name", notModified("public, max-age=60")),
+      rec("token 1: item 1 file (range)", "GET /i/:name", partial("public, max-age=3600")),
+      rec("token 1: item 2 preview (HEAD)", "HEAD /r/:name/preview", head("public, max-age=3600")),
+    ];
+    const next = old.map((r) => ({ ...r, answer: { ...r.answer, headers: { ...r.answer.headers, "cache-control": "no-cache" } } }));
+    const c = compareAnswers(old, next, { allowItemCache: true });
+    expect([c.itemCache, c.problems]).toEqual([4, []]);
+    // Never on the way back, and never with anything else changed.
+    expect(identityProblems(compareAnswers(old, next))).toHaveLength(4);
+    expect(itemCacheOnly("HEAD /i/:name", head("public, max-age=3600"), head("no-cache", { "content-length": "1201" }))).toBe(false);
+    expect(itemCacheOnly("HEAD /t/:slug", head("public, max-age=3600"), head("no-cache"))).toBe(false);
+    expect(itemCacheOnly("GET /i/:name", partial("public, max-age=3600"), { ...partial("no-cache"), body: new Uint8Array(100).fill(8) })).toBe(false);
+  });
+
+  it("whether a build can share an item through its API, from its compiled files: POST /api/v1/media in dist/media.js", () => {
+    const make = (files: Record<string, string>) => {
+      const dir = mkdtempSync(join(tmpdir(), "rehearse-build-"));
+      mkdirSync(join(dir, "dist"), { recursive: true });
+      for (const [name, js] of Object.entries(files)) writeFileSync(join(dir, "dist", name), js);
+      return dir;
+    };
+    const today = transformSync(readFileSync(new URL("../src/media.ts", import.meta.url), "utf8"), { loader: "ts", format: "esm" }).code;
+    const dirs = [make({ "media.js": today }), make({ "app.js": "export {};\n" }), make({ "media.js": 'app.get("/api/v1/media", () => null);\n' })];
+    try {
+      expect(dirs.map((d) => knowsMediaApi(d))).toEqual([true, false, false]);
+    } finally {
+      for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it("against this checkout's app: the rehearsal shares an image and a clip through the API, and records every item address with HEAD, the recorded ETag and one Range", { timeout: 60_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "rehearse-items-"));
+    const db = new NodeDb(join(root, "db.sqlite"));
+    let server: ReturnType<typeof serve> | null = null;
+    try {
+      await migrate(db, fileURLToPath(new URL("../migrations/", import.meta.url)));
+      const deps = { db, drafts: new NodeFileStore(join(root, "drafts")), pub: new NodeFileStore(join(root, "public")), config: { publicImageBase: "", setupCode: null }, now: () => Date.now() };
+      const ws = await createWorkspace(deps, "Acme", "owner@example.com");
+      const app = createApp(deps);
+      const port = await new Promise<number>((done) => {
+        server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, (info) => done(info.port));
+      });
+      expect(await shareRehearsalItems(port, "localhost", ws.token)).toEqual({ ok: true, images: 1, clips: 1 });
+      const rows = await db.all<Record<string, string | number | null>>("SELECT * FROM media");
+      const columns = Object.keys(rows[0]);
+      const items = sharedItemsOf({ media: { columns, rows: rows.map((r) => columns.map((c) => r[c])) } }, ws.workspaceId);
+      expect(items.map((i) => [i.letter, i.ext])).toEqual([["i", "png"], ["r", "gif"]]);
+      const answers = (await recordSite(port, "one", [ws.token], [items])).filter((r) => r.key.includes(": item "));
+      const by = new Map(answers.map((r) => [r.key, r.answer]));
+      for (const n of [1, 2]) {
+        const l = n === 1 ? "i" : "r";
+        const expected: [string, string, number][] = [
+          ["page", `GET /${l}/:name`, 200],
+          ["page (HEAD)", `HEAD /${l}/:name`, 200],
+          ["page (if-none-match)", `GET /${l}/:name`, 304],
+          ["file", `GET /${l}/:name`, 200],
+          ["file (HEAD)", `HEAD /${l}/:name`, 200],
+          ["file (if-none-match)", `GET /${l}/:name`, 304],
+          ["file (range)", `GET /${l}/:name`, 206],
+          ["download", `GET /${l}/:name/download`, 200],
+          ["download (HEAD)", `HEAD /${l}/:name/download`, 200],
+          ["download (if-none-match)", `GET /${l}/:name/download`, 304],
+          ["preview", `GET /${l}/:name/preview`, 200],
+          ["preview (HEAD)", `HEAD /${l}/:name/preview`, 200],
+          ["preview (if-none-match)", `GET /${l}/:name/preview`, 304],
+        ];
+        const prefix = `token 1: item ${n} `;
+        expect(answers.filter((r) => r.key.startsWith(prefix)).map((r) => [r.key.slice(prefix.length), r.route, r.answer.status])).toEqual(expected);
+        const file = by.get(`${prefix}file`)!;
+        expect(by.get(`${prefix}file (HEAD)`)!.body.length).toBe(0);
+        expect(by.get(`${prefix}file (HEAD)`)!.headers["content-length"]).toBe(String(file.body.length));
+        const range = by.get(`${prefix}file (range)`)!;
+        expect(range.headers["content-range"]).toBe(`bytes 1-100/${file.body.length}`);
+        expect(Buffer.from(range.body).equals(Buffer.from(file.body.subarray(1, 101)))).toBe(true);
+        for (const r of answers.filter((x) => x.key.startsWith(prefix))) expect(r.answer.headers["cache-control"], r.key).toBe("no-cache");
+      }
+      expect(ITEM_RANGE).toBe("bytes=1-100");
+    } finally {
+      const s = server as ReturnType<typeof serve> | null;
+      if (s !== null) await new Promise((done) => s.close(done));
+      db.close();
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  it("with two or three addresses every item address is asked on the media address, the page on the app address as well, with the same keys in both modes", async () => {
+    const seen: { method: string; path: string; host: string }[] = [];
+    const s = createServer((req, res) => {
+      seen.push({ method: req.method ?? "", path: req.url ?? "", host: req.headers.host ?? "" });
+      if (req.url?.startsWith("/i/")) {
+        res.writeHead(200, { "content-type": "text/html", etag: '"e1"' });
+        return res.end(req.method === "HEAD" ? undefined : "x");
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(req.url === "/api/v1/tours" ? '{"tours":[]}' : "{}");
+    });
+    await new Promise<void>((done) => s.listen(0, "127.0.0.1", done));
+    const a = s.address();
+    const port = typeof a === "object" && a !== null ? a.port : 0;
+    try {
+      const items = [[{ letter: "i" as const, link: link("a"), ext: "png" as const }]];
+      const keys: Record<string, string[]> = {};
+      for (const m of ["two", "three"] as Mode[]) {
+        seen.splice(0);
+        keys[m] = (await recordSite(port, m, ["dp_" + "1".repeat(40)], items)).map((r) => r.key);
+        const itemSeen = seen.filter((x) => x.path.startsWith("/i/"));
+        const media = m === "three" ? "img.example.com" : "tours.example.com";
+        expect(itemSeen.filter((x) => x.host !== media)).toEqual([{ method: "GET", path: `/i/${link("a")}`, host: "app.example.com" }]);
+        expect(itemSeen.filter((x) => x.host === media)).toHaveLength(13);
+      }
+      expect(keys.three).toEqual(keys.two);
+      expect(keys.two).toContain("token 1: item 1 page (app address)");
+    } finally {
+      s.close();
+    }
+  });
+});
+
+describe("the item checks after review (Plan 2k, task 3)", () => {
+  const ans = (status: number, cc?: string): Answer => ({ status, headers: cc === undefined ? {} : { "cache-control": cc }, body: new Uint8Array() });
+  /** The old build's item answers of one item: page, file and its range, each with the given cache rule. */
+  const itemAnswers = (cc: string, fileStatus = 200, rangeStatus = 206): Recorded[] => [
+    rec("token 1: item 1 page", "GET /i/:name", ans(200, cc)),
+    rec("token 1: item 1 file", "GET /i/:name", ans(fileStatus, cc)),
+    rec("token 1: item 1 file (HEAD)", "HEAD /i/:name", ans(fileStatus, cc)),
+    rec("token 1: item 1 file (range)", "GET /i/:name", ans(rangeStatus, cc)),
+  ];
+  const tour = [rec("token 1: tour 1 page", "GET /t/:slug", ans(200, "public, max-age=60"))];
+
+  it("the cache allowance is used only when the old build does not know who may view an item", () => {
+    expect(allowItemCacheFor(false)).toBe(true);
+    expect(allowItemCacheFor(true)).toBe(false);
+  });
+
+  it("before 0.1.47: every answer with 0.1.46's rule must differ only in it; none with it is a skip", () => {
+    const old = [...tour, ...itemAnswers("public, max-age=3600")];
+    const ok = itemCacheVerdict(old, 4, false, "0.1.46");
+    expect([ok.kind, ok.kind === "check" && ok.ok]).toEqual(["check", true]);
+    const short = itemCacheVerdict(old, 3, false, "0.1.46");
+    expect([short.kind, short.kind === "check" && short.ok]).toEqual(["check", false]);
+    expect(itemCacheVerdict([...tour, ...itemAnswers("no-store", 404, 404)], 0, false, "0.1.46").kind).toBe("skip");
+    expect(itemCacheVerdict(tour, 0, false, "0.1.46").kind).toBe("none");
+  });
+
+  it("from 0.1.47: a real check, which fails when an old item answer carries 0.1.46's rule or the allowance was used", () => {
+    const fine = itemCacheVerdict([...tour, ...itemAnswers("no-cache")], 0, true, "0.1.48");
+    expect([fine.kind, fine.kind === "check" && fine.ok]).toEqual(["check", true]);
+    // 0.1.48 regressing to an hour in caches, the new build sending no-cache: the comparison
+    // itself fails (the allowance is off), and so does this check.
+    const regressed = itemAnswers("public, max-age=3600");
+    const next = regressed.map((r) => ({ ...r, answer: { ...r.answer, headers: { "cache-control": "no-cache" } } }));
+    const cmp = compareAnswers(regressed, next, { allowItemCache: allowItemCacheFor(true) });
+    expect([cmp.itemCache, cmp.problems.length]).toEqual([0, 4]);
+    const bad = itemCacheVerdict(regressed, cmp.itemCache, true, "0.1.48");
+    expect([bad.kind, bad.kind === "check" && bad.ok]).toEqual(["check", false]);
+    // And an allowance counted anyway fails it too.
+    const used = itemCacheVerdict([...tour, ...itemAnswers("no-cache")], 1, true, "0.1.48");
+    expect([used.kind, used.kind === "check" && used.ok]).toEqual(["check", false]);
+  });
+
+  it("the old build's item answers are counted by status, and a run where no file answer served the file says so in a SKIP line", () => {
+    const served = itemAnswerSummary([...tour, ...itemAnswers("no-cache")]);
+    expect(served).toEqual({ total: 4, byStatus: { 200: 3, 206: 1 }, filesServed: 2 });
+    expect(itemCoverageLines(served)).toEqual(["      shared item answers of the old build: 4 (200: 3, 206: 1); 2 of its file and range answers served the file"]);
+    const gated = itemAnswerSummary([...tour, ...itemAnswers("no-store", 403, 403)].map((r) => (r.key.endsWith("page") ? { ...r, answer: ans(403) } : r)));
+    expect(gated).toEqual({ total: 4, byStatus: { 403: 4 }, filesServed: 0 });
+    const lines = itemCoverageLines(gated);
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatch(/^SKIP {2}shared item files: /);
+    expect(itemCoverageLines(itemAnswerSummary(tour))).toEqual([]);
+  });
+
+  it("what is done about items before recording: use the data's when one serves its file; else share through the old build's API; else a SKIP with the reason", () => {
+    expect(seedDecision({ found: 2, served: 1, pages: true, mediaApi: true })).toBe("use");
+    expect(seedDecision({ found: 0, served: 0, pages: true, mediaApi: true })).toBe("share");
+    // Every item restricted (the gate) or gone (404): one public image and one clip are shared too.
+    expect(seedDecision({ found: 3, served: 0, pages: true, mediaApi: true })).toBe("share");
+    expect(seedDecision({ found: 3, served: 0, pages: true, mediaApi: false })).toBe("skip-cannot-share");
+    expect(seedDecision({ found: 0, served: 0, pages: true, mediaApi: false })).toBe("skip-cannot-share");
+    expect(seedDecision({ found: 0, served: 0, pages: false, mediaApi: true })).toBe("skip-no-pages");
+  });
+
+  it("an old API that refuses the share is named by its statuses, for the SKIP line", async () => {
+    const s = createServer((req, res) => {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end('{"error":"bad_request","detail":"owner@example.com"}');
+    });
+    await new Promise<void>((done) => s.listen(0, "127.0.0.1", done));
+    const a = s.address();
+    try {
+      const r = await shareRehearsalItems(typeof a === "object" && a !== null ? a.port : 0, "localhost", "dp_" + "1".repeat(40));
+      expect(r).toEqual({ ok: false, problem: "sharing the image: the create answered 400, the part -, the preview -, the commit -" });
+    } finally {
+      s.close();
+    }
+  });
+
+  it("items with an unknown type or a malformed link are counted as skipped", () => {
+    const columns = ["id", "workspace_id", "link_id", "kind", "content_type", "state", "created_at"];
+    const rows = [
+      ["med_a", "ws_1", "a".repeat(20), "image", "image/png", "online", 1],
+      ["med_b", "ws_1", "B".repeat(20), "image", "image/png", "online", 2],
+      ["med_c", "ws_1", "c".repeat(20), "image", "image/webp", "online", 3],
+    ];
+    expect(sharedItemRows({ media: { columns, rows } }, "ws_1")).toEqual({ items: [{ letter: "i", link: "a".repeat(20), ext: "png" }], skipped: 2 });
+  });
+
+  it("a run that ends with an exception prints RESULT: FAIL, never a pass", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rehearse-throw-"));
+    try {
+      const data = join(root, "data");
+      mkdirSync(data);
+      writeFileSync(join(data, "db.sqlite"), "this is not a database");
+      const builds = ["old", "new"].map((n) => {
+        const dir = join(root, n);
+        mkdirSync(join(dir, "dist", "node"), { recursive: true });
+        mkdirSync(join(dir, "migrations"));
+        writeFileSync(join(dir, "dist", "node", "entry.js"), "");
+        writeFileSync(join(dir, "package.json"), '{"version":"0.0.1"}');
+        return dir;
+      });
+      const lines: string[] = [];
+      await expect(rehearse([data, builds[0], builds[1]], { REHEARSE_TOKENS: "dp_" + "1".repeat(40) }, (l) => lines.push(l))).rejects.toThrow();
+      expect(lines.at(-1)).toMatch(/^RESULT: FAIL/);
+      expect(lines.some((l) => l.startsWith("FAIL  the rehearsal stopped on an error"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+});
+
+const SLOW_STANDIN = { timeout: 60_000 };
+
+describe("compiled-file detection may only make the rehearsal stricter (Plan 2k, task 3, second review)", () => {
+  it("parses a version, and tells whether it is below another; an unknown one is neither", () => {
+    expect(versionBelow("0.1.46", "0.1.47")).toBe(true);
+    expect(versionBelow("0.1.47", "0.1.47")).toBe(false);
+    expect(versionBelow("0.2.0", "0.1.47")).toBe(false);
+    expect(versionBelow("0.1.100", "0.1.47")).toBe(false);
+    for (const v of ["unknown", "", "0.1", "0.1.47-beta", "v0.1.46"]) expect(versionBelow(v, "0.1.47"), v).toBeNull();
+  });
+
+  it("the cache allowance needs both: detection that the old build does not know item access, and a version below 0.1.47", () => {
+    expect(itemCachePolicy(false, "0.1.46")).toEqual({ allow: true, disagreement: null });
+    expect(itemCachePolicy(true, "0.1.48")).toEqual({ allow: false, disagreement: null });
+    // A 0.1.48 whose detection failed (a renamed file): no allowance, the strict verdict, and a FAIL for the disagreement.
+    const missed = itemCachePolicy(false, "0.1.48");
+    expect(missed.allow).toBe(false);
+    expect(missed.disagreement).toMatch(/0\.1\.48/);
+    const regressed: Recorded[] = [rec("token 1: item 1 file", "GET /i/:name", { status: 200, headers: { "cache-control": "public, max-age=3600" }, body: new Uint8Array() })];
+    const next = regressed.map((r) => ({ ...r, answer: { ...r.answer, headers: { "cache-control": "no-cache" } } }));
+    const cmp = compareAnswers(regressed, next, { allowItemCache: missed.allow });
+    expect([cmp.itemCache, cmp.problems.length]).toEqual([0, 1]);
+    const v = itemCacheVerdict(regressed, cmp.itemCache, !missed.allow, "0.1.48");
+    expect([v.kind, v.kind === "check" && v.ok]).toEqual(["check", false]);
+    // Detection says it knows, the version says it is older: no allowance, and a FAIL.
+    const odd = itemCachePolicy(true, "0.1.40");
+    expect(odd.allow).toBe(false);
+    expect(odd.disagreement).not.toBeNull();
+    // An unknown version: no allowance, whatever the detection.
+    for (const knows of [false, true]) expect(itemCachePolicy(knows, "unknown").allow).toBe(false);
+  });
+
+  describe("item pages: a build that serves an item's file is never skipped", () => {
+    const TOKEN = "dp_" + "2".repeat(40);
+    const LINK = "q".repeat(20);
+    /** A snapshot whose token 1 has one online PNG item. */
+    const snapshot: DbSnapshot = {
+      api_token: { columns: ["hash", "workspace_id"], rows: [[createHash("sha256").update(TOKEN, "utf8").digest("hex"), "ws_1"]] },
+      media: { columns: ["id", "workspace_id", "link_id", "kind", "content_type", "state", "created_at"], rows: [["med_a", "ws_1", LINK, "image", "image/png", "online", 1]] },
+    };
+    /** A stand-in old build of `version` that answers health, and an item's file with `fileStatus`; with or without the app's call of sharePageRoutes. */
+    function oldBuild(version: string, fileStatus: number, pagesInApp: boolean): string {
+      const dir = mkdtempSync(join(tmpdir(), "rehearse-pages-"));
+      mkdirSync(join(dir, "dist", "node"), { recursive: true });
+      mkdirSync(join(dir, "migrations"));
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ version, type: "module" }));
+      writeFileSync(join(dir, "dist", "app.js"), pagesInApp ? 'import { sharePageRoutes } from "./media-page.js";\nexport function createApp(app, deps) {\n  sharePageRoutes(app, deps);\n}\n' : "export function createApp() {}\n");
+      writeFileSync(
+        join(dir, "dist", "node", "entry.js"),
+        `import { createServer } from "node:http";
+createServer((req, res) => {
+  if (req.url === "/healthz") { res.writeHead(200, { "content-type": "application/json" }); return res.end('{"ok":true}'); }
+  if (req.url === "/i/${LINK}.png") { res.writeHead(${fileStatus}, { "content-type": "image/png" }); return res.end("x"); }
+  res.writeHead(404); res.end();
+}).listen(Number(process.env.PORT));
+`,
+      );
+      return dir;
+    }
+    type Line = { ok: boolean | null; text: string };
+    async function run(version: string, fileStatus: number, pagesInApp: boolean, snap: DbSnapshot = snapshot) {
+      const build = oldBuild(version, fileStatus, pagesInApp);
+      const work = mkdtempSync(join(tmpdir(), "rehearse-pages-work-"));
+      const lines: Line[] = [];
+      const report = { line: (text: string) => void lines.push({ ok: null, text }), check: (ok: boolean, text: string) => (lines.push({ ok, text }), ok) };
+      try {
+        const got = await sharedItemsFor(buildInfo(build), join(work, "copy"), snap, [TOKEN], work, report);
+        return { got, lines };
+      } finally {
+        rmSync(build, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    }
+
+    it("detection says no pages, but the old build serves the item's file: the items are used, with a FAIL for the detection", SLOW_STANDIN, async () => {
+      const { got, lines } = await run("0.1.18", 200, false);
+      expect(got?.items).toEqual([[{ letter: "i", link: LINK, ext: "png" }]]);
+      expect(lines.filter((l) => l.ok === false).map((l) => l.text)).toEqual([expect.stringMatching(/detection .*wrong/)]);
+      expect(lines.some((l) => l.text.startsWith("SKIP"))).toBe(false);
+    });
+
+    it("a version from 0.1.20 counts as having pages whatever the detection: a FAIL for the disagreement, and the items used", SLOW_STANDIN, async () => {
+      const { got, lines } = await run("0.1.48", 200, false);
+      expect(got?.items).toEqual([[{ letter: "i", link: LINK, ext: "png" }]]);
+      expect(lines.filter((l) => l.ok === false)).toHaveLength(1);
+      expect(lines.find((l) => l.ok === false)!.text).toMatch(/0\.1\.48/);
+    });
+
+    it("detection and version agree on pages and the file is served: no FAIL, no SKIP", SLOW_STANDIN, async () => {
+      const { got, lines } = await run("0.1.48", 200, true);
+      expect(got?.items).toEqual([[{ letter: "i", link: LINK, ext: "png" }]]);
+      expect(lines.filter((l) => l.ok === false || l.text.startsWith("SKIP"))).toEqual([]);
+    });
+
+    it("an unknown version with no pages by the detection cannot be trusted: a FAIL line, and the items are still compared even when none is served", SLOW_STANDIN, async () => {
+      const { got, lines } = await run("unknown", 403, false);
+      expect(got?.items).toEqual([[{ letter: "i", link: LINK, ext: "png" }]]);
+      expect(lines.filter((l) => l.ok === false).map((l) => l.text)).toEqual([expect.stringMatching(/cannot be read/)]);
+      expect(lines.some((l) => l.text.startsWith("SKIP  shared item answers"))).toBe(false);
+    });
+
+    it("only an old build that truly serves no item file and cannot share one is a SKIP", SLOW_STANDIN, async () => {
+      const { got, lines } = await run("0.1.18", 404, false);
+      expect(got?.items).toEqual([[]]);
+      expect(lines.filter((l) => l.ok === false)).toEqual([]);
+      expect(lines.filter((l) => l.text.startsWith("SKIP"))).toHaveLength(1);
+    });
+  });
+
+  it("an error before the rehearsal's own work (a bad build folder) still ends with RESULT: FAIL", () => {
+    const lines: string[] = [];
+    const code = runMain(["/no/such/data", join(tmpdir(), "no-such-old-build"), join(tmpdir(), "no-such-new-build")], { REHEARSE_TOKENS: "dp_" + "1".repeat(40) }, (l) => lines.push(l), () => {});
+    return code.then((c) => {
+      expect(c).toBe(1);
+      expect(lines.at(-1)).toBe("RESULT: FAIL (the rehearsal could not start)");
     });
   });
 });
