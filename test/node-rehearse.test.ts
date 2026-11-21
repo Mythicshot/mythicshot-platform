@@ -26,6 +26,7 @@ import {
   itemCacheOnly,
   ITEM_ROUTES,
   sharedItemsOf,
+  sharedItemRows,
   migrationProblems,
   playerFileProblems,
   playerFilesIn,
@@ -52,6 +53,12 @@ import {
   knowsImgRole,
   knowsMediaApi,
   shareRehearsalItems,
+  allowItemCacheFor,
+  itemCacheVerdict,
+  itemAnswerSummary,
+  itemCoverageLines,
+  seedDecision,
+  rehearse,
   knowsRestrictedServing,
   modeSettings,
   parseArgs,
@@ -1399,6 +1406,119 @@ describe("the answers of shared items (Plan 2k, task 3)", () => {
       expect(keys.two).toContain("token 1: item 1 page (app address)");
     } finally {
       s.close();
+    }
+  });
+});
+
+describe("the item checks after review (Plan 2k, task 3)", () => {
+  const ans = (status: number, cc?: string): Answer => ({ status, headers: cc === undefined ? {} : { "cache-control": cc }, body: new Uint8Array() });
+  /** The old build's item answers of one item: page, file and its range, each with the given cache rule. */
+  const itemAnswers = (cc: string, fileStatus = 200, rangeStatus = 206): Recorded[] => [
+    rec("token 1: item 1 page", "GET /i/:name", ans(200, cc)),
+    rec("token 1: item 1 file", "GET /i/:name", ans(fileStatus, cc)),
+    rec("token 1: item 1 file (HEAD)", "HEAD /i/:name", ans(fileStatus, cc)),
+    rec("token 1: item 1 file (range)", "GET /i/:name", ans(rangeStatus, cc)),
+  ];
+  const tour = [rec("token 1: tour 1 page", "GET /t/:slug", ans(200, "public, max-age=60"))];
+
+  it("the cache allowance is used only when the old build does not know who may view an item", () => {
+    expect(allowItemCacheFor(false)).toBe(true);
+    expect(allowItemCacheFor(true)).toBe(false);
+  });
+
+  it("before 0.1.47: every answer with 0.1.46's rule must differ only in it; none with it is a skip", () => {
+    const old = [...tour, ...itemAnswers("public, max-age=3600")];
+    const ok = itemCacheVerdict(old, 4, false, "0.1.46");
+    expect([ok.kind, ok.kind === "check" && ok.ok]).toEqual(["check", true]);
+    const short = itemCacheVerdict(old, 3, false, "0.1.46");
+    expect([short.kind, short.kind === "check" && short.ok]).toEqual(["check", false]);
+    expect(itemCacheVerdict([...tour, ...itemAnswers("no-store", 404, 404)], 0, false, "0.1.46").kind).toBe("skip");
+    expect(itemCacheVerdict(tour, 0, false, "0.1.46").kind).toBe("none");
+  });
+
+  it("from 0.1.47: a real check, which fails when an old item answer carries 0.1.46's rule or the allowance was used", () => {
+    const fine = itemCacheVerdict([...tour, ...itemAnswers("no-cache")], 0, true, "0.1.48");
+    expect([fine.kind, fine.kind === "check" && fine.ok]).toEqual(["check", true]);
+    // 0.1.48 regressing to an hour in caches, the new build sending no-cache: the comparison
+    // itself fails (the allowance is off), and so does this check.
+    const regressed = itemAnswers("public, max-age=3600");
+    const next = regressed.map((r) => ({ ...r, answer: { ...r.answer, headers: { "cache-control": "no-cache" } } }));
+    const cmp = compareAnswers(regressed, next, { allowItemCache: allowItemCacheFor(true) });
+    expect([cmp.itemCache, cmp.problems.length]).toEqual([0, 4]);
+    const bad = itemCacheVerdict(regressed, cmp.itemCache, true, "0.1.48");
+    expect([bad.kind, bad.kind === "check" && bad.ok]).toEqual(["check", false]);
+    // And an allowance counted anyway fails it too.
+    const used = itemCacheVerdict([...tour, ...itemAnswers("no-cache")], 1, true, "0.1.48");
+    expect([used.kind, used.kind === "check" && used.ok]).toEqual(["check", false]);
+  });
+
+  it("the old build's item answers are counted by status, and a run where no file answer served the file says so in a SKIP line", () => {
+    const served = itemAnswerSummary([...tour, ...itemAnswers("no-cache")]);
+    expect(served).toEqual({ total: 4, byStatus: { 200: 3, 206: 1 }, filesServed: 2 });
+    expect(itemCoverageLines(served)).toEqual(["      shared item answers of the old build: 4 (200: 3, 206: 1); 2 of its file and range answers served the file"]);
+    const gated = itemAnswerSummary([...tour, ...itemAnswers("no-store", 403, 403)].map((r) => (r.key.endsWith("page") ? { ...r, answer: ans(403) } : r)));
+    expect(gated).toEqual({ total: 4, byStatus: { 403: 4 }, filesServed: 0 });
+    const lines = itemCoverageLines(gated);
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatch(/^SKIP {2}shared item files: /);
+    expect(itemCoverageLines(itemAnswerSummary(tour))).toEqual([]);
+  });
+
+  it("what is done about items before recording: use the data's when one serves its file; else share through the old build's API; else a SKIP with the reason", () => {
+    expect(seedDecision({ found: 2, served: 1, pages: true, mediaApi: true })).toBe("use");
+    expect(seedDecision({ found: 0, served: 0, pages: true, mediaApi: true })).toBe("share");
+    // Every item restricted (the gate) or gone (404): one public image and one clip are shared too.
+    expect(seedDecision({ found: 3, served: 0, pages: true, mediaApi: true })).toBe("share");
+    expect(seedDecision({ found: 3, served: 0, pages: true, mediaApi: false })).toBe("skip-cannot-share");
+    expect(seedDecision({ found: 0, served: 0, pages: true, mediaApi: false })).toBe("skip-cannot-share");
+    expect(seedDecision({ found: 0, served: 0, pages: false, mediaApi: true })).toBe("skip-no-pages");
+  });
+
+  it("an old API that refuses the share is named by its statuses, for the SKIP line", async () => {
+    const s = createServer((req, res) => {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end('{"error":"bad_request","detail":"owner@example.com"}');
+    });
+    await new Promise<void>((done) => s.listen(0, "127.0.0.1", done));
+    const a = s.address();
+    try {
+      const r = await shareRehearsalItems(typeof a === "object" && a !== null ? a.port : 0, "localhost", "dp_" + "1".repeat(40));
+      expect(r).toEqual({ ok: false, problem: "sharing the image: the create answered 400, the part -, the preview -, the commit -" });
+    } finally {
+      s.close();
+    }
+  });
+
+  it("items with an unknown type or a malformed link are counted as skipped", () => {
+    const columns = ["id", "workspace_id", "link_id", "kind", "content_type", "state", "created_at"];
+    const rows = [
+      ["med_a", "ws_1", "a".repeat(20), "image", "image/png", "online", 1],
+      ["med_b", "ws_1", "B".repeat(20), "image", "image/png", "online", 2],
+      ["med_c", "ws_1", "c".repeat(20), "image", "image/webp", "online", 3],
+    ];
+    expect(sharedItemRows({ media: { columns, rows } }, "ws_1")).toEqual({ items: [{ letter: "i", link: "a".repeat(20), ext: "png" }], skipped: 2 });
+  });
+
+  it("a run that ends with an exception prints RESULT: FAIL, never a pass", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rehearse-throw-"));
+    try {
+      const data = join(root, "data");
+      mkdirSync(data);
+      writeFileSync(join(data, "db.sqlite"), "this is not a database");
+      const builds = ["old", "new"].map((n) => {
+        const dir = join(root, n);
+        mkdirSync(join(dir, "dist", "node"), { recursive: true });
+        mkdirSync(join(dir, "migrations"));
+        writeFileSync(join(dir, "dist", "node", "entry.js"), "");
+        writeFileSync(join(dir, "package.json"), '{"version":"0.0.1"}');
+        return dir;
+      });
+      const lines: string[] = [];
+      await expect(rehearse([data, builds[0], builds[1]], { REHEARSE_TOKENS: "dp_" + "1".repeat(40) }, (l) => lines.push(l))).rejects.toThrow();
+      expect(lines.at(-1)).toMatch(/^RESULT: FAIL/);
+      expect(lines.some((l) => l.startsWith("FAIL  the rehearsal stopped on an error"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 });

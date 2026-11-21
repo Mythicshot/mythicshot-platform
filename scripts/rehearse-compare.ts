@@ -642,19 +642,28 @@ const LINK_ID = /^[a-z2-7]{20}$/;
  * `media` table (before 0010). The links are kept in memory and never printed.
  */
 export function sharedItemsOf(db: DbSnapshot, workspaceId: string): SharedItem[] {
+  return sharedItemRows(db, workspaceId).items;
+}
+
+/** sharedItemsOf, with how many online items of the workspace it left out: a content type the routes do not serve, or a link id not of the link shape. */
+export function sharedItemRows(db: DbSnapshot, workspaceId: string): { items: SharedItem[]; skipped: number } {
   const num = (v: Cell) => (typeof v === "number" ? v : 0);
   const rows = rowsOf(db.media)
     .filter((m) => m.workspace_id === workspaceId && m.state === "online")
     .sort((a, b) => num(a.created_at) - num(b.created_at) || String(a.id).localeCompare(String(b.id)));
   const out: SharedItem[] = [];
+  let skipped = 0;
   for (const m of rows) {
     const access = typeof m.access === "string" ? m.access : "public";
     const link = access === "public" ? m.link_id : m.private_link_id;
     const file = ITEM_FILE[String(m.content_type)];
-    if (file === undefined || typeof link !== "string" || !LINK_ID.test(link)) continue;
+    if (file === undefined || typeof link !== "string" || !LINK_ID.test(link)) {
+      skipped++;
+      continue;
+    }
     out.push({ letter: file.letter, link, ext: file.ext });
   }
-  return out;
+  return { items: out, skipped };
 }
 
 /**

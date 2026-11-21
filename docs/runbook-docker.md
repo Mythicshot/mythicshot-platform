@@ -420,7 +420,7 @@ The same holds for a version before 0.1.47 once a shared image or clip is restri
 docker compose exec -T app node -e 'const { DatabaseSync } = process.getBuiltinModule("node:sqlite"); const db = new DatabaseSync("/data/db.sqlite", { readOnly: true }); console.log(db.prepare("SELECT count(*) AS n FROM media WHERE access <> ?").get("public").n); db.close();'
 ```
 
-Anything but `0` means restore, not go back. An older version cannot delete a restricted item whose list holds an address either: its delete stops serving the item and removes its files, but answers `500 cleanup_pending` every time and leaves the item's row, which 0.1.47 or later removes at the workspace's next share or when the delete is sent again.
+Anything but `0` means restore, not go back. An older version also cannot fully delete an item whose list of addresses holds one, whether the item is restricted now or was before (the list is kept when an item goes back to public): its delete stops serving the item and removes its files, but answers `500 cleanup_pending` every time and leaves the item's row, which 0.1.47 or later removes at the workspace's next share or when the delete is sent again.
 
 ### Make yourself the admin
 

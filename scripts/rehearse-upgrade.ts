@@ -32,9 +32,11 @@
 // list, the usage when the build has it, the workspace, every listed tour's public page and
 // every picture on it, and every published shared item of the token's workspace that the data
 // holds: page, file, download and preview with GET, HEAD and the recorded ETag, the file with
-// one Range; when the data holds none and the old build has the media API, from 0.1.35, it
-// first shares one image and one clip on the copy through that API, and the report says so:
-// sharedItemsFor); the new build on the same copy, which applies the pending
+// one Range; when none of them serves its file on the old build (or the data holds none) and
+// that build has the share route, POST /api/v1/media (from 0.1.19, in this shape from 0.1.24),
+// it first shares one image and one clip on the copy through that route, and the report says
+// so; a refusal or a build without the route is a SKIP line: sharedItemsFor); the new build
+// on the same copy, which applies the pending
 // migrations as it starts; every answer byte for byte (scripts/rehearse-compare.ts holds
 // the short allow-list), both stores file for file, every row of the old tables in the
 // columns they had, the accounts tables and their backfill, SQLite's own checks, and the
@@ -75,7 +77,7 @@ import {
   gateProblems,
   migrationProblems,
   servesNoPicture,
-  sharedItemsOf,
+  sharedItemRows,
   ITEM_CACHE_BEFORE,
   ITEM_ROUTES,
   tourContentOf,
@@ -957,12 +959,28 @@ function rehearsalGif(width: number, height: number, total: number): Uint8Array 
 }
 
 /**
- * Whether a build can share an item through its API (from 0.1.35), from its own compiled files
- * and never by starting it: its dist/media.js has the route POST /api/v1/media.
+ * Whether a build has the route to share an item, POST /api/v1/media, from its own compiled
+ * files and never by starting it (dist/media.js). The route is in builds from 0.1.19 on, in the
+ * shape the rehearsal sends from 0.1.24; a build whose API refuses the rehearsal's share is
+ * told apart when it answers (sharedItemsFor: a SKIP with the statuses), not here.
  */
 export function knowsMediaApi(buildDir: string): boolean {
   try {
     return /\.post\(\s*["']\/api\/v1\/media["']/.test(readFileSync(join(buildDir, "dist", "media.js"), "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a build serves the pages and files a shared link opens, from its own compiled files:
+ * its app (dist/app.js) calls sharePageRoutes from ./media-page.js. A build with the media API
+ * but without them would answer every item address as no route at all.
+ */
+export function knowsItemPages(buildDir: string): boolean {
+  try {
+    const app = readFileSync(join(buildDir, "dist", "app.js"), "utf8");
+    return /import\s*\{[^}]*\bsharePageRoutes\b[^}]*\}\s*from\s*["']\.\/media-page\.js["']/.test(app) && /\bsharePageRoutes\(\s*app\s*,/.test(app);
   } catch {
     return false;
   }
@@ -1121,25 +1139,45 @@ function workspaceOf(snapshot: DbSnapshot, token: string): string | null {
   return typeof ws === "string" ? ws : null;
 }
 
+/** What sharedItemsFor does before recording: the data's items, a share through the old build's API, or a SKIP and why. */
+export type SeedDecision = "use" | "share" | "skip-no-pages" | "skip-cannot-share";
+
 /**
- * The shared items whose answers the rehearsal records, per token: the published items of
- * the token's workspace that the data holds before the update (sharedItemsOf), read from the
- * copy before any build has started on it. The report says in its own line which case it is:
- * - the data holds some: how many, of which kind;
- * - it holds none and the old build can share (knowsMediaApi, from 0.1.35): the old build is
- *   started on the copy, before anything is recorded or read, and shares one image and one
- *   clip of token 1 through its own API (shareRehearsalItems), so that the old build, the new
- *   one and the way back all run on the same data with those two items in it; null (the
- *   rehearsal stops) when that fails;
- * - it holds none and the old build cannot share: a SKIP line, and no item answer is recorded.
- * `made` is how many items the rehearsal shared (0 or 2), and `source` then a copy of the data
- * as the old build left it with them, for the two new builds started together (null otherwise).
+ * The decision, from what the data holds and what the old build can do: `found` items of the
+ * tokens' workspaces in the data, of which `served` answered their file (200) on the old build;
+ * whether the old build serves item pages at all (knowsItemPages) and has the share route
+ * (knowsMediaApi). The data's items are used as they are when at least one serves its file;
+ * otherwise (none at all, or every one restricted or gone) one public image and one clip are
+ * shared through the old build's API when it can; else a SKIP says why.
+ */
+export function seedDecision(s: { found: number; served: number; pages: boolean; mediaApi: boolean }): SeedDecision {
+  if (!s.pages) return "skip-no-pages";
+  if (s.served > 0) return "use";
+  return s.mediaApi ? "share" : "skip-cannot-share";
+}
+
+/**
+ * The shared items whose answers the rehearsal records, per token: the published items of the
+ * token's workspace that the data holds before the update (sharedItemRows), read from the copy
+ * before any build has started on it. When the old build serves item pages, it is started on
+ * the copy (one address) before anything is recorded or read, and each item's file is asked
+ * once; then (seedDecision):
+ * - `use`: at least one serves its file; the line counts them;
+ * - `share`: none does, or the data holds none, and the old build shares one public image and
+ *   one clip of token 1 through its own API (shareRehearsalItems), still before anything is
+ *   recorded, so that the old build, the new one, the way back and the two new builds all run
+ *   on the same data with them in it; a check line says so and that both serve their file. An
+ *   API that refuses the share (an older shape) is a SKIP with the statuses, and the data's
+ *   own items, if any, are still recorded;
+ * - `skip-…`: a SKIP line saying why, and the data's own items, if any, are still recorded.
+ * Null (the rehearsal stops) only when the old build does not start. `made` is how many items
+ * the rehearsal shared, and `source` then a copy of the data with them, for the two new builds.
  */
 async function sharedItemsFor(oldBuild: BuildInfo, copy: string, snapshot: DbSnapshot, tokens: string[], work: string, report: Report): Promise<{ items: SharedItem[][]; made: number; source: string | null } | null> {
-  const itemsOf = (snap: DbSnapshot) =>
+  const rowsOf = (snap: DbSnapshot) =>
     tokens.map((t) => {
       const ws = workspaceOf(snap, t);
-      return ws === null ? [] : sharedItemsOf(snap, ws);
+      return ws === null ? { items: [], skipped: 0 } : sharedItemRows(snap, ws);
     });
   const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
   const kinds = (xs: SharedItem[][]) => {
@@ -1147,37 +1185,68 @@ async function sharedItemsFor(oldBuild: BuildInfo, copy: string, snapshot: DbSna
     const images = all.filter((x) => x.letter === "i").length;
     return `${plural(images, "image")}, ${plural(all.length - images, "clip")}`;
   };
-  const found = itemsOf(snapshot);
+  const read = rowsOf(snapshot);
+  const found = read.map((x) => x.items);
+  const skipped = read.reduce((n, x) => n + x.skipped, 0);
   const total = found.flat().length;
-  if (total > 0) {
-    report.line(`      shared items: the data holds ${plural(total, "published item")} in the tokens' workspaces (${kinds(found)}); each one's page, file, download and preview are asked with GET, with HEAD and with its ETag, and its file with one Range, of every build`);
-    return { items: found, made: 0, source: null };
+  const skippedText = skipped > 0 ? `; ${plural(skipped, "online item")} left out (a type the item routes do not serve, or a malformed link)` : "";
+  const holds = total === 0 ? "the data holds no published shared item in the tokens' workspaces" : `the data holds ${plural(total, "published item")} in the tokens' workspaces (${kinds(found)})`;
+  const v = oldBuild.version;
+  const pages = knowsItemPages(oldBuild.dir);
+  const mediaApi = knowsMediaApi(oldBuild.dir);
+  if (!pages) {
+    report.line(`SKIP  shared item answers: ${holds}${skippedText}, and the old build ${v} has no pages for shared items (dist/app.js does not call sharePageRoutes), so no item answer is recorded`);
+    return { items: found.map(() => []), made: 0, source: null };
   }
-  if (!knowsMediaApi(oldBuild.dir)) {
-    report.line(`SKIP  shared item answers: the data holds no published shared item in the tokens' workspaces, and the old build ${oldBuild.version} cannot share one (it has no media API, which came in 0.1.35), so no item answer is recorded; the way back with a restricted item below shares one through the new build instead`);
-    return { items: found, made: 0, source: null };
-  }
-  const what = `shared items: the data holds no published shared item in the tokens' workspaces, so the old build ${oldBuild.version} (it has the media API, from 0.1.35)`;
   const port = await freePort();
   const r = spawnBuild(oldBuild.dir, copy, "one", work, port);
-  let shared: Shared;
+  const fileOf = (x: SharedItem) => `/${x.letter}/${x.link}.${x.ext}`;
+  let served = 0;
+  let decision: SeedDecision;
+  let shared: Shared | null = null;
+  let madeServed = 0;
   try {
     try {
       await waitReady(r, healthHosts("one"), healthRoles("one"));
     } catch {
-      report.check(false, `${what} starts on the copy to share one`, r.err.slice(-3).map((l) => l.split(work).join("<scratch>")));
+      report.check(false, `shared items: the old build ${v} starts on the copy to ask the items' files`, r.err.slice(-3).map((l) => l.split(work).join("<scratch>")));
       return null;
     }
-    shared = await shareRehearsalItems(port, HOSTS.one.app, tokens[0]);
+    for (const x of found.flat()) if ((await fetchAnswer(port, "GET", fileOf(x), HOSTS.one.app)).status === 200) served++;
+    decision = seedDecision({ found: total, served, pages, mediaApi });
+    if (decision === "share") {
+      shared = await shareRehearsalItems(port, HOSTS.one.app, tokens[0]);
+      if (shared.ok) {
+        const before = new Set(found.flat().map((x) => x.link));
+        const fresh = rowsOf(readDb(join(copy, "db.sqlite")).snapshot)
+          .map((x) => x.items)
+          .flat()
+          .filter((x) => !before.has(x.link));
+        for (const x of fresh) if ((await fetchAnswer(port, "GET", fileOf(x), HOSTS.one.app)).status === 200) madeServed++;
+      }
+    }
   } finally {
     await stopBuild(r);
   }
-  const items = itemsOf(readDb(join(copy, "db.sqlite")).snapshot);
-  const made = items.flat().length;
+  const why = total === 0 ? holds : `${holds}, and none serves its file on the old build ${v} (each is restricted or answers as one that does not exist)`;
+  if (decision === "use") {
+    report.line(`      shared items: ${holds}${skippedText}; ${served} of them serve their file on the old build ${v}. Each one's page, file, download and preview are asked with GET, with HEAD and with its ETag, and its file with one Range, of every build`);
+    return { items: found, made: 0, source: null };
+  }
+  if (decision === "skip-cannot-share") {
+    report.line(`SKIP  shared item files: ${why}${skippedText}, and the old build ${v} has no route to share one (POST /api/v1/media), so no answer of a served item file is compared${total > 0 ? "; the data's items are still asked" : ""}`);
+    return { items: found, made: 0, source: null };
+  }
+  if (shared === null || !shared.ok) {
+    report.line(`SKIP  shared item files: ${why}${skippedText}, and the old build ${v} refused the rehearsal's share (${shared?.ok === false ? shared.problem : "not tried"}; its API may be of an older shape), so no answer of a served item file is compared${total > 0 ? "; the data's items are still asked" : ""}`);
+    return { items: found, made: 0, source: null };
+  }
+  const items = rowsOf(readDb(join(copy, "db.sqlite")).snapshot).map((x) => x.items);
+  const made = items.flat().length - total;
   const ok = report.check(
-    shared.ok && made === 2,
-    `${what} shared ${kinds(items)} of token 1 through that API, on the scratch copy only and before anything was recorded or read; the old and new builds answer for them below, and the two new builds start from this copy too`,
-    shared.ok ? [`${made} published items were found after sharing, not 2`] : [shared.problem],
+    made === 2 && madeServed === 2,
+    `shared items: ${why}${skippedText}, so the old build ${v} shared ${plural(shared.images, "public image")} and ${plural(shared.clips, "clip")} of token 1 through its API (POST /api/v1/media), on the scratch copy only and before anything was recorded or read, and ${madeServed} of them serve their file; the old and new builds answer for them below, and the two new builds start from this copy too`,
+    [`${made} items were added and ${madeServed} serve their file, not 2 and 2`],
   );
   if (!ok) return null;
   // The data as the old build left it with the two items, for the two new builds started together.
@@ -1186,30 +1255,70 @@ async function sharedItemsFor(oldBuild: BuildInfo, copy: string, snapshot: DbSna
   return { items, made, source };
 }
 
+/** Whether the old-to-new comparison may let through a shared item's answer that differs only in its cache rule: only when the old build does not know who may view an item (before 0.1.47). */
+export const allowItemCacheFor = (oldKnowsItemAccess: boolean): boolean => !oldKnowsItemAccess;
+
+export type ItemCacheVerdict = { kind: "none" } | { kind: "skip"; text: string } | { kind: "check"; ok: boolean; text: string; problems: string[] };
+
 /**
  * The line on the cache allowance (itemCacheOnly) once the old build's answers are compared
- * with the new one's: when the old build is from before 0.1.47 (knowsItemAccess false), every
- * item answer it gave with 0.1.46's cache rule must differ from the new build's only in it, and
- * the line counts them; when it is from 0.1.47 on, the allowance is not needed and the line says so.
- * Nothing when no item answer was recorded (the shared items line said why).
+ * with the new one's, from the old build's recorded answers and how many answers the allowance
+ * let through (`itemCache`):
+ * - before 0.1.47 (`oldKnowsItemAccess` false): every item answer of the old build with 0.1.46's
+ *   cache rule must have been let through by the allowance alone; none with that rule is a skip;
+ * - from 0.1.47: no item answer of the old build may carry 0.1.46's rule, and the allowance (off
+ *   for such a build) must have let nothing through: a check that fails otherwise.
+ * `none` when no item answer was recorded (the shared items line said why).
  */
-function itemCacheCheck(oldAnswers: Recorded[], itemCache: number, oldBuild: BuildInfo, report: Report): void {
+export function itemCacheVerdict(oldAnswers: Recorded[], itemCache: number, oldKnowsItemAccess: boolean, version: string): ItemCacheVerdict {
   const itemAnswers = oldAnswers.filter((r) => ITEM_ROUTES.includes(r.route));
-  if (itemAnswers.length === 0) return;
+  if (itemAnswers.length === 0) return { kind: "none" };
   const cacheable = itemAnswers.filter((r) => ITEM_CACHE_BEFORE.includes(r.answer.headers["cache-control"] ?? "")).length;
-  if (knowsItemAccess(oldBuild.dir)) {
-    report.line(`      shared item cache rule: no allowance needed, the old build ${oldBuild.version} knows who may view an item and sends no-cache already (${cacheable} of its ${itemAnswers.length} item answers carry 0.1.46's rule)`);
-    return;
+  if (oldKnowsItemAccess) {
+    const problems = [
+      ...(cacheable > 0 ? [`${cacheable} item answer(s) of the old build carry 0.1.46's cache rule, which a build that knows who may view an item must not send`] : []),
+      ...(itemCache > 0 ? [`the allowance let ${itemCache} answer(s) through, though it is off for this old build`] : []),
+    ];
+    return {
+      kind: "check",
+      ok: problems.length === 0,
+      text: `shared item cache rule: the old build ${version} knows who may view an item, so no allowance applies: ${cacheable} of its ${itemAnswers.length} item answers carry 0.1.46's rule and ${itemCache} were let through by it`,
+      problems,
+    };
   }
-  if (cacheable === 0) {
-    report.line(`SKIP  shared item cache rule: none of the old build's ${itemAnswers.length} item answers carries 0.1.46's rule, so the allowance had nothing to let through`);
-    return;
-  }
-  report.check(
-    itemCache === cacheable,
-    `shared item cache rule: the old build ${oldBuild.version} sends 0.1.46's rule ("public, max-age=60" for a page, "public, max-age=3600" for a file, download or preview); ${itemCache} of its ${cacheable} item answers that carry it differ from the new build's only in it, now "no-cache", allowed from the old build to the new one only (of ${itemAnswers.length} item answers)`,
-    [`${cacheable - itemCache} item answer(s) with that rule were not let through by it alone`],
-  );
+  if (cacheable === 0) return { kind: "skip", text: `shared item cache rule: none of the old build's ${itemAnswers.length} item answers carries 0.1.46's rule, so the allowance had nothing to let through` };
+  return {
+    kind: "check",
+    ok: itemCache === cacheable,
+    text: `shared item cache rule: the old build ${version} sends 0.1.46's rule ("public, max-age=60" for a page, "public, max-age=3600" for a file, download or preview); ${itemCache} of its ${cacheable} item answers that carry it differ from the new build's only in it, now "no-cache", allowed from the old build to the new one only (of ${itemAnswers.length} item answers)`,
+    problems: [`${cacheable - itemCache} item answer(s) with that rule were not let through by it alone`],
+  };
+}
+
+export type ItemAnswerSummary = { total: number; byStatus: Record<number, number>; filesServed: number };
+
+const FILE_KEY = /: item \d+ file(?: \(range\))?$/;
+
+/** The old build's item answers by status, and how many of its file answers (GET whole or with the Range) served the file (200 or 206). */
+export function itemAnswerSummary(oldAnswers: Recorded[]): ItemAnswerSummary {
+  const items = oldAnswers.filter((r) => ITEM_ROUTES.includes(r.route));
+  const byStatus: Record<number, number> = {};
+  for (const r of items) byStatus[r.answer.status] = (byStatus[r.answer.status] ?? 0) + 1;
+  const filesServed = items.filter((r) => r.route.startsWith("GET ") && FILE_KEY.test(r.key) && (r.answer.status === 200 || r.answer.status === 206)).length;
+  return { total: items.length, byStatus, filesServed };
+}
+
+/** The report's lines on that summary: the counts, and a SKIP when no file answer served the file, so the item comparison claims no coverage it does not have. None when no item answer was recorded. */
+export function itemCoverageLines(s: ItemAnswerSummary): string[] {
+  if (s.total === 0) return [];
+  const statuses = Object.keys(s.byStatus)
+    .map(Number)
+    .sort((a, b) => a - b)
+    .map((k) => `${k}: ${s.byStatus[k]}`)
+    .join(", ");
+  const lines = [`      shared item answers of the old build: ${s.total} (${statuses}); ${s.filesServed} of its file and range answers served the file`];
+  if (s.filesServed === 0) lines.push("SKIP  shared item files: no file answer of the old build served a file (every item is restricted or answers as one that does not exist), so no served item file is compared");
+  return lines;
 }
 
 /** Runs the whole rehearsal and returns the exit status. */
@@ -1240,15 +1349,16 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     const unknownToOld = before.migrations.filter((m) => !oldBuild.migrations.includes(m));
     if (!report.check(unknownToOld.length === 0, `the data was written by the old build or an older one (${plural(before.migrations.length, "migration")} applied)`, unknownToOld.map((m) => `${m} is applied but not in the old build`))) return 1;
 
-    // --- the shared items whose answers are compared: those the data holds, or, when it holds
-    // none and the old build can share, one image and one clip it shares on this copy first,
-    // before anything is recorded or read, so that every phase below sees the same data.
+    // --- the shared items whose answers are compared: those the data holds, or, when none of
+    // them serves its file and the old build can share, one image and one clip it shares on this
+    // copy first, before anything is recorded or read, so that every phase below sees the same data.
     const seeded = await sharedItemsFor(oldBuild, copy, before.snapshot, tokens, work, report);
     if (seeded === null) return 1;
     const { items, made, source } = seeded;
     const old = await runPhase(oldBuild, copy, modes.old, work, tokens, items, report, `old build ${oldBuild.version}`);
     if (old === null) return 1;
     report.line(`      recorded ${plural(old.answers.length, "answer")}; stores hold ${plural(old.stores.size, "file")}; database has ${plural(Object.keys(old.endDb.snapshot).length, "table")}`);
+    for (const l of itemCoverageLines(itemAnswerSummary(old.answers))) report.line(l);
     const pending = newBuild.migrations.filter((m) => !old.endDb.migrations.includes(m));
     report.line(`      pending for the new build: ${pending.length === 0 ? "none" : pending.join(", ")}`);
 
@@ -1259,11 +1369,14 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     // The old build against the new one: a JSON answer that only adds fields is allowed, and
     // named; a tour page that names the new build's player files is allowed, and counted; a
     // shared item's answer that changes only from 0.1.46's cache rule to no-cache is allowed, and counted.
-    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true, allowPlayerNames: true, allowItemCache: true });
+    const oldKnowsItemAccess = knowsItemAccess(oldBuild.dir);
+    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true, allowPlayerNames: true, allowItemCache: allowItemCacheFor(oldKnowsItemAccess) });
     addedCount = addedFieldCount(cmp);
     report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.playerNames} differ only in the player's file names, ${cmp.itemCache} shared item answers differ only in their cache rule, ${cmp.addedFields} differ only by added fields, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
     for (const route of Object.keys(cmp.addedFieldsByRoute).sort()) report.line(`      added fields, ${route}: ${cmp.addedFieldsByRoute[route].join(", ")}`);
-    itemCacheCheck(old.answers, cmp.itemCache, oldBuild, report);
+    const verdict = itemCacheVerdict(old.answers, cmp.itemCache, oldKnowsItemAccess, oldBuild.version);
+    if (verdict.kind === "skip") report.line(`SKIP  ${verdict.text}`);
+    else if (verdict.kind === "check") report.check(verdict.ok, verdict.text, verdict.problems);
 
     // The player files the new build's tour pages name must be there: a page that names a
     // file its own build does not serve would pass the comparison above and play nothing.
@@ -1353,6 +1466,11 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
       const raceProblems = identityProblems(same);
       report.check(raceProblems.length === 0 && same.added.length === 0, `two new builds: answers ${same.identical} identical to the single new build's, ${same.problems.length} differ${made > 0 ? " (on a copy with the items the rehearsal shared)" : ""}`, raceProblems);
     }
+  } catch (err) {
+    // An error (a request that failed, a file that could not be read) ends the run: it is a
+    // failure, so the last line can never say PASS. The error itself is printed after it.
+    report.check(false, "the rehearsal stopped on an error before its end; the error is printed after the result");
+    throw err;
   } finally {
     rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     scratch = null;
