@@ -20,6 +20,7 @@ import { LOGO_RULE, STEP_IMAGE_RULE } from "../sniff.ts";
 import { DELETE_FILES_PER_CALL } from "../tours.ts";
 import { EMAIL_CHANGE_MS } from "../email-change.ts";
 import { DOWNLOAD_URL_MAX } from "../https-address.ts";
+import { MAX_LIMIT_DAYS } from "../lifetimes.ts";
 import { CONNECT_MS, DEVICE_NAME_MAX, OPEN_PER_NETWORK, POLL_INTERVAL_S, USER_CODE_ALPHABET, VERIFY_PATH } from "../connect.ts";
 import { INVITE_KEPT_MS, INVITE_MS, MAX_INVITES } from "../invites.ts";
 import { MAX_TOKENS_LISTED } from "../tokens.ts";
@@ -170,6 +171,10 @@ const text = (maxLength: number, description: string, minLength = 0): Schema => 
 const percent = (description: string): Schema => ({ type: "number", minimum: 0, maximum: 100, description });
 const colour = (description: string): Schema => ({ type: "string", pattern: "^#[0-9A-Fa-f]{6}$", description });
 const whole = (description: string, minimum = 0): Schema => ({ type: "integer", minimum, description });
+/** One sign-in lifetime of the session answer: whole days, or null when the site has switched it off. */
+const LIMIT_DAYS = (description: string): Schema => ({ type: ["integer", "null"], minimum: 1, maximum: MAX_LIMIT_DAYS, description: description + " null when it is off." });
+/** When a session ends however active it is (SESSION_MAX_DAYS), in the session and sessions answers. */
+const ENDS_AT: Schema = { type: ["integer", "null"], minimum: 0, description: "When it ends however much it is used: its sign-in plus the site's SESSION_MAX_DAYS, in milliseconds since 1970. null when that limit is off. It ends at expires_at instead when that comes first." };
 /** A tour's viewing setting, in the tour list, the publish answers and the access requests. */
 const ACCESS_FIELD: Schema = {
   type: "string",
@@ -228,6 +233,8 @@ function introduction(): string {
     "## Signing in and sessions",
     "",
     `The site's own pages sign a person in with a link sent by mail: POST /api/v1/signin/request mails the link, and POST /api/v1/signin/complete turns the code in it into a session. The link works once and for ${SIGNIN_CODE_MS / 60_000} minutes. The session is a cookie, ${SESSION_COOKIE}, on the app address only (on a server with one address, on that address); it lasts ${SESSION_MS / 86_400_000} days from its last use. Every request that lists the session can be sent with it instead of a token, and acts in the account's one workspace.`,
+    "",
+    "The site's settings set three sign-in lifetimes, in whole days, each switched off with 0 or off: SESSION_MAX_DAYS (90 unless set) ends a session that long after its sign-in however active it is; CONNECTION_IDLE_DAYS (90 unless set) stops a token made by signing in from the app (kind sign_in) that has not been used for that long; CONNECTION_MAX_DAYS (off unless set) stops such a token that long after it was made. A token of kind setup is never touched by them. They are read when a request is made, so a changed setting applies to every session and token at once. A session or token past one of them is refused exactly as a revoked one is, with 401 unauthorized: the app then signs in again. GET /api/v1/session gives the three limits (limits), the tokens list gives each token's expires_at and expired, and the session and sessions answers give each session's ends_at.",
     "",
     `A signed-in person changes the account's email address in two steps: POST /api/v1/account/email mails a link to the new address, and POST /api/v1/account/email/confirm, sent with the code in that link from the same account's session, makes the change, once and within ${EMAIL_CHANGE_MS / 60_000} minutes. The old address is then sent a notice. Both need the session; a token cannot change an address.`,
     "",
@@ -639,21 +646,28 @@ function schemas(): Record<string, Schema> {
     ),
     UserCode: input(["user_code"], { user_code: { type: "string", maxLength: 32, description: "The short code the app shows, with or without its dash, in any case." } }),
     TokenEntry: object(
-      ["id", "name", "created_at", "last_used_at", "kind"],
+      ["id", "name", "created_at", "last_used_at", "kind", "expires_at", "expired"],
       {
         id: { type: "string", pattern: "^tok_[0-9a-f]{24}$" },
         name: { type: "string", description: "The token's name: First token for the one made with the workspace, the device's name for one made by connecting the app, or what it was renamed to." },
         created_at: whole("When it was made, in milliseconds since 1970."),
         last_used_at: { type: ["integer", "null"], minimum: 0, description: "When it was last used, in milliseconds since 1970; null until then." },
         kind: { type: "string", enum: ["setup", "sign_in"], description: "How it was made: setup by the setup wizard or with a new account; sign_in by connecting the app while signed in." },
+        expires_at: {
+          type: ["integer", "null"],
+          minimum: 0,
+          description:
+            "When it stops working, in milliseconds since 1970, unless something changes: for kind sign_in, the earlier of its last use (or its creation, when never used) plus the site's CONNECTION_IDLE_DAYS and its creation plus CONNECTION_MAX_DAYS. Each use moves the first. null for kind setup, which no limit touches, and when both limits are off. The limits are read when a request is made, so a changed setting changes this at once.",
+        },
+        expired: { type: "boolean", description: "true from expires_at on: the token is refused as a revoked one is (401 unauthorized), and the computer must sign in again. It stays listed until it is revoked." },
       },
       "One token. Never the token itself, nor any part of it.",
     ),
-    TokenList: object(["tokens"], { tokens: { type: "array", description: `The workspace's tokens that are not revoked, newest first, at most ${MAX_TOKENS_LISTED}.`, items: ref("TokenEntry") } }),
+    TokenList: object(["tokens"], { tokens: { type: "array", description: `The workspace's tokens that are not revoked, expired ones included, newest first, at most ${MAX_TOKENS_LISTED}.`, items: ref("TokenEntry") } }),
     TokenRename: input(["name"], { name: text(DEVICE_NAME_MAX * 4 + 64, `The new name: ${DEVICE_NAME_MAX} characters at most once spaces around it are dropped, with no control or formatting characters.`, 1) }),
     Ok: object(["ok"], { ok: { type: "boolean", const: true } }),
     Session: object(
-      ["account", "workspace", "session", "csrf", "email_change", "download_url"],
+      ["account", "workspace", "session", "csrf", "email_change", "download_url", "limits"],
       {
         account: object(
           ["id", "username", "email", "admin"],
@@ -667,8 +681,13 @@ function schemas(): Record<string, Schema> {
         ),
         workspace: object(["id", "name"], { id: { type: "string", pattern: "^ws_[0-9a-f]{24}$" }, name: { type: "string" } }, "The account's workspace, the one every request of the session acts in."),
         session: object(
-          ["id", "created_at", "expires_at"],
-          { id: { type: "string", pattern: "^ses_[0-9a-f]{24}$" }, created_at: whole("When the browser signed in, in milliseconds since 1970."), expires_at: whole("When the session ends unless it is used, in milliseconds since 1970.") },
+          ["id", "created_at", "expires_at", "ends_at"],
+          {
+            id: { type: "string", pattern: "^ses_[0-9a-f]{24}$" },
+            created_at: whole("When the browser signed in, in milliseconds since 1970."),
+            expires_at: whole("When the session ends unless it is used, in milliseconds since 1970."),
+            ends_at: ENDS_AT,
+          },
           "This session.",
         ),
         csrf: { type: "string", pattern: "^[0-9a-f]{64}$", description: "The anti-forgery value: send it in the X-Csrf-Token header of every change made with this session." },
@@ -678,18 +697,28 @@ function schemas(): Record<string, Schema> {
           maxLength: DOWNLOAD_URL_MAX,
           description: "The address of the public page the desktop app is downloaded from, from the site's DOWNLOAD_URL setting: an https address with a host name, an optional port and a path, no user name and no fragment. null when the site has none. The dashboard links to it.",
         },
+        limits: object(
+          ["session_max_days", "connection_idle_days", "connection_max_days"],
+          {
+            session_max_days: LIMIT_DAYS("SESSION_MAX_DAYS: a session ends this many days after it was made, however active it is."),
+            connection_idle_days: LIMIT_DAYS("CONNECTION_IDLE_DAYS: a connection made by signing in from the app stops working after this many days without use."),
+            connection_max_days: LIMIT_DAYS("CONNECTION_MAX_DAYS: a connection made by signing in from the app stops working this many days after it was made."),
+          },
+          "The site's sign-in lifetimes, in whole days, as its settings give them now.",
+        ),
       },
     ),
     SessionList: object(["sessions"], {
       sessions: {
         type: "array",
         description: "The account's live sessions, the current one first.",
-        items: object(["id", "label", "created_at", "last_used_at", "expires_at", "current"], {
+        items: object(["id", "label", "created_at", "last_used_at", "expires_at", "ends_at", "current"], {
           id: { type: "string", pattern: "^ses_[0-9a-f]{24}$" },
           label: { type: "string", maxLength: 40, description: "The browser and the system it was signed in on, such as Firefox on Linux, or Unknown browser." },
           created_at: whole("When it was signed in, in milliseconds since 1970."),
           last_used_at: whole("When it was last used, to the hour, in milliseconds since 1970."),
           expires_at: whole("When it ends unless it is used, in milliseconds since 1970."),
+          ends_at: ENDS_AT,
           current: { type: "boolean", description: "true for the session this request was sent with." },
         }),
       },

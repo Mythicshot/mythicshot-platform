@@ -124,6 +124,11 @@ const TEXT: Record<string, string> = {
   downloadBefore: " Not installed yet? Get Mythicshot from ",
   downloadLink: "the download page",
   downloadAfter: ".",
+  // Proposed (Plan 2j): the muted line under a connection from Mythicshot about when it stops working.
+  expires: "Expires ",
+  unlessUsed: " unless it is used",
+  expired: "Expired ",
+  signInAgain: ". Sign in again from Mythicshot.",
 };
 
 const CLASS_NAMES = ["note plain", "btn sm quiet", "btn sm danger", "t name", "confirm-facts confirm-elsewhere confirm-warn", "confirm-facts confirm-warn"];
@@ -235,6 +240,9 @@ describe("the Connections page", () => {
     expect(TEXT.welcomeBefore + "mara" + TEXT.welcomeAfter).toBe(
       "Welcome, mara. Your workspace is ready. Connect Mythicshot on your computer to start sharing: open Workspace in Mythicshot, press Sign in, and type the code it shows below.",
     );
+    expect(TEXT.expires + "20 Feb 2027" + TEXT.unlessUsed).toBe("Expires 20 Feb 2027 unless it is used");
+    expect(TEXT.expires + "20 Feb 2027").toBe("Expires 20 Feb 2027");
+    expect(TEXT.expired + "20 Feb 2027" + TEXT.signInAgain).toBe("Expired 20 Feb 2027. Sign in again from Mythicshot.");
     expect(TEXT.downloadBefore + TEXT.downloadLink + TEXT.downloadAfter).toBe(" Not installed yet? Get Mythicshot from the download page.");
     expect(CONNECTIONS_JS).toContain('var link = Dash.downloadLink(TEXT.downloadLink, "");');
     // The welcome's place: the green note above the heading, empty and hidden until the script fills it.

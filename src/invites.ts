@@ -66,7 +66,7 @@ import { apiError, json, noContent, readCapped } from "./http.ts";
 import { inviteLink, inviteMail, linkOrigin } from "./mail.ts";
 import { canMailLinks, isNotNullViolation, isUniqueViolation, mailOf, type Deps } from "./ports.ts";
 import { LIMITS_INVITE, SITE_KEY, accountKey, hitLimit, networkKey } from "./rate.ts";
-import { SESSION_MS, resolveSession, sessionCookie, sessionCookiePresent, sessionLabel } from "./sessions.ts";
+import { firstEnd, resolveSession, sessionCookie, sessionCookiePresent, sessionLabel } from "./sessions.ts";
 import { MAIL_REASONS, ownJsonBody, withHeader } from "./signin.ts";
 import { parseUsername } from "./usernames.ts";
 
@@ -440,7 +440,7 @@ export function inviteRoutes(app: Hono, deps: Deps): void {
         { sql: "INSERT INTO signin_method (user_id, kind, created_at) VALUES (?, 'email_link', ?)", params: [userId, now] },
         {
           sql: "INSERT INTO session (id, user_id, hash, label, created_at, last_used_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          params: [sessionId, userId, await hashToken(secret), sessionLabel(req.headers.get("user-agent")), now, now, now + SESSION_MS],
+          params: [sessionId, userId, await hashToken(secret), sessionLabel(req.headers.get("user-agent")), now, now, firstEnd(deps, now)],
         },
         auditStatement(deps, { event: "signin", userId, workspaceId, subject: sessionId }),
       ]);

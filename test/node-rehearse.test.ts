@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   checkAccountsBackfill,
   compareAnswers,
+  onlyAddedFields,
   compareRows,
   compareStores,
   identityProblems,
@@ -1049,5 +1050,22 @@ describe("the new build's player files", () => {
     } finally {
       server.close();
     }
+  });
+});
+
+describe("the added-fields rule and the sign-in lifetimes (Plan 2j)", () => {
+  const answer = (value: unknown): Answer => ({ status: 200, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(value)) });
+  it("lets through the fields the tokens, sessions and session answers gain, by their paths, and nothing else", () => {
+    const tok = { id: "tok_" + "1".repeat(24), name: "Laptop", created_at: 1, last_used_at: null, kind: "sign_in" };
+    expect(onlyAddedFields(answer({ tokens: [tok] }), answer({ tokens: [{ ...tok, expires_at: 7776000001, expired: false }] }))).toEqual({ ok: true, paths: ["tokens[].expired", "tokens[].expires_at"] });
+    const ses = { id: "ses_" + "1".repeat(24), label: "Firefox on Linux", created_at: 1, last_used_at: 1, expires_at: 2, current: true };
+    expect(onlyAddedFields(answer({ sessions: [ses] }), answer({ sessions: [{ ...ses, ends_at: 3 }] }))).toEqual({ ok: true, paths: ["sessions[].ends_at"] });
+    const who = { session: { id: ses.id, created_at: 1, expires_at: 2 }, csrf: "c" };
+    expect(onlyAddedFields(answer(who), answer({ session: { ...who.session, ends_at: null }, csrf: "c", limits: { session_max_days: 90, connection_idle_days: 90, connection_max_days: null } }))).toEqual({
+      ok: true,
+      paths: ["limits", "session.ends_at"],
+    });
+    // A changed value is not an added field.
+    expect(onlyAddedFields(answer({ tokens: [tok] }), answer({ tokens: [{ ...tok, last_used_at: 5, expired: true }] })).ok).toBe(false);
   });
 });

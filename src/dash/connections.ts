@@ -164,7 +164,14 @@ export const CONNECTIONS_JS = String.raw`(function () {
     downloadBefore: " Not installed yet? Get Mythicshot from ",
     downloadLink: "the download page",
     downloadAfter: ".",
+    expires: "Expires ",
+    unlessUsed: " unless it is used",
+    expired: "Expired ",
+    signInAgain: ". Sign in again from Mythicshot.",
   };
+  var DAY_MS = 86400000;
+  // The site's sign-in lifetimes, from the session (Dash.start).
+  var limits = { connectionMaxDays: null };
   var TOKENS = "/api/v1/tokens";
   var USAGE = "/api/v1/usage";
   var LOOKUP = "/api/v1/connect/lookup";
@@ -476,6 +483,19 @@ export const CONNECTIONS_JS = String.raw`(function () {
     return Dash.dateOf(t.last_used_at, true);
   }
 
+  // The muted line about when a connection stops working (src/lifetimes.ts): "Expired <date>.
+  // Sign in again from Mythicshot." once it has, "Expires <date>" when its age limit comes
+  // first (use does not move it), "Expires <date> unless it is used" for the idle limit, and
+  // "" when nothing ends it (a setup token, or both limits off).
+  function expiryOf(t) {
+    if (!isTime(t.expires_at)) return "";
+    var date = Dash.dateOf(t.expires_at, true);
+    if (t.expired === true) return TEXT.expired + date + TEXT.signInAgain;
+    var max = limits.connectionMaxDays;
+    var byAge = max !== null && t.expires_at === t.created_at + max * DAY_MS;
+    return byAge ? TEXT.expires + date : TEXT.expires + date + TEXT.unlessUsed;
+  }
+
   function kindOf(t) {
     return t.kind === "sign_in" ? TEXT.signedIn : t.kind === "setup" ? TEXT.fromSetup : "";
   }
@@ -494,6 +514,8 @@ export const CONNECTIONS_JS = String.raw`(function () {
     d.appendChild(el("span", "", kind));
     d.appendChild(el("span", "narrow-only", (kind !== "" ? TEXT.dot : "") + TEXT.connectedOn + connected + TEXT.dot + TEXT.lastUsed + lastUsedOf(t, true)));
     what.appendChild(d);
+    var expiry = expiryOf(t);
+    if (expiry !== "") what.appendChild(el("div", "d", expiry));
     tr.appendChild(what);
     tr.appendChild(el("td", "when", connected));
     tr.appendChild(el("td", "when", lastUsedOf(t, false)));
@@ -521,7 +543,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
   // The rows, rebuilt only when what they show changed. A row control that had the focus has
   // it again in the new rows; nothing else takes the focus.
   function render(list) {
-    var key = JSON.stringify([new Date().toDateString(), list.map(function (t) { return [t.id, t.name, t.created_at, t.last_used_at, t.kind]; })]);
+    var key = JSON.stringify([new Date().toDateString(), list.map(function (t) { return [t.id, t.name, t.created_at, t.last_used_at, t.kind, t.expires_at, t.expired]; })]);
     items = list;
     if (key === shownKey) return;
     shownKey = key;
@@ -780,6 +802,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
   startPage();
   Dash.start(function (who) {
     workspace = who.workspace;
+    if (who.limits !== null && typeof who.limits === "object") limits = who.limits;
     $("connections-sub").textContent = TEXT.subBefore + workspace + TEXT.subAfter;
     return read().then(function (r) {
       if (r === false) return;

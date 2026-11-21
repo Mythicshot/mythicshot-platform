@@ -275,6 +275,16 @@ Two browsers: the owner's (signed in, as above) and a visitor's (Firefox, or a p
 - [ ] Two addresses (if set up): `/view`, `/view/signout/<slug>` and a picture's `/t/<slug>/v/…` address on the app address answer `{"error":"not_found"}`, and the mailed link uses the tours address.
 - [ ] At 380 pixels wide and at 320 the gate, the link's page and the not-shared page fit without a sideways scroll and a long address wraps; in dark mode they are readable, and so is the line under the tour.
 
+## Sign-in lifetimes
+
+On the scratch site, start the server with `CONNECTION_MAX_DAYS=365` in its settings, and connect a test copy of Mythicshot as in the Connections part.
+
+- [ ] The Connections page shows, under the new connection, one muted line "Expires <date>", a year from today; a connection from setup shows no such line.
+- [ ] Restart without `CONNECTION_MAX_DAYS`: the line reads "Expires <date> unless it is used", 90 days from the connection's last use.
+- [ ] Restart with `CONNECTION_IDLE_DAYS=1` and wait a day without using the connection (or set the computer's clock forward on a scratch machine only): the row reads "Expired <date>. Sign in again from Mythicshot.", Mythicshot shows its Sign in state, and Disconnect removes the row.
+- [ ] The Account page shows "Ends <date>" beside each session, 90 days after it signed in; with `SESSION_MAX_DAYS=off` it shows none.
+- [ ] With `SESSION_MAX_DAYS=nonsense` the server starts, its log has the one line naming `SESSION_MAX_DAYS` and not the value, and the pages show 90 days.
+
 ## When something fails
 
 - [ ] With the server stopped, any button gives "Something went wrong. Try again in a moment." under the heading line (in the question, for "Delete tour") and comes back. Start the server again.

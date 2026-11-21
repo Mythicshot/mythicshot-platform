@@ -1034,3 +1034,63 @@ describe("the Connections page against the real app", () => {
     expect(rows(tab).map((r) => nameOf(r).textContent)).toEqual(["Lossy", "First token"]);
   });
 });
+
+describe("the Connections page: when a connection expires (Plan 2j)", () => {
+  const DAY = 86_400_000;
+  const withLimits = (limits: unknown): Answer => ({ status: 200, json: { ...(session as { json: Record<string, unknown> }).json, limits } });
+  const expiryLines = (row: FakeElement) => row.all().filter((e) => e.className === "d").slice(1).map((e) => e.textContent);
+
+  it("says when each connection from Mythicshot expires: unless used for the idle limit, plainly for the age limit, and Expired for a lapsed one", async () => {
+    const idleEnd = day(2027, 2, 17);
+    const ageCreated = day(2026, 11, 1);
+    const tokens = [
+      token(T1, "Idle", { expires_at: idleEnd, expired: false }),
+      token(T2, "Old", { created_at: ageCreated, expires_at: ageCreated + 100 * DAY, expired: false }),
+      token(T3, "Lapsed", { expires_at: day(2026, 11, 18), expired: true }),
+      token(T4, "Mythicshot", { kind: "setup", expires_at: null, expired: false }),
+    ];
+    const tab = openPage(standard({ "GET /api/v1/session": withLimits({ session_max_days: 90, connection_idle_days: 90, connection_max_days: 100 }), "GET /api/v1/tokens": list(tokens) }));
+    await tab.settle();
+    expect(rows(tab).map(expiryLines)).toEqual([
+      [`Expires ${shown(idleEnd)} unless it is used`],
+      [`Expires ${shown(ageCreated + 100 * DAY)}`],
+      [`Expired ${shown(day(2026, 11, 18))}. Sign in again from Mythicshot.`],
+      [],
+    ]);
+    // A lapsed connection keeps its usual Rename and Disconnect.
+    expect(rows(tab)[2].all().filter((e) => e.tagName === "button").map((b) => b.textContent)).toEqual(["Rename", "Disconnect"]);
+    // Through textContent only: the line is one text node in its own element.
+    expect(rows(tab)[0].all().filter((e) => e.className === "d")[1].children.every((c) => !(c instanceof FakeElement))).toBe(true);
+  });
+
+  it("without the age limit, or without limits in the session at all, an end is the idle one; no end, no line", async () => {
+    const created = day(2026, 11, 1);
+    const tokens = [token(T1, "Same day", { created_at: created, expires_at: created + 100 * DAY, expired: false }), token(T2, "None", { expires_at: null, expired: false })];
+    for (const limits of [{ session_max_days: 90, connection_idle_days: 100, connection_max_days: null }, undefined, "x"]) {
+      const tab = openPage(standard({ "GET /api/v1/session": withLimits(limits), "GET /api/v1/tokens": list(tokens) }));
+      await tab.settle();
+      expect(rows(tab).map(expiryLines), JSON.stringify(limits)).toEqual([[`Expires ${shown(created + 100 * DAY)} unless it is used`], []]);
+    }
+  });
+
+  it("with the real app: a connection that lapsed is listed as Expired, on the day its idle limit passed", async () => {
+    const made = await makeDeps({ lifetimes: { connectionIdleDays: 3 } });
+    const { deps } = made;
+    deps.now = () => NOW;
+    await seedAccount(deps, { admin: true, username: "boss" });
+    const owner = await seedAccount(deps, { username: "solex" });
+    const signed = await redeemSignInCode(deps, await createSignInCode(deps, owner.userId), null, null);
+    const id = "tok_" + "9".repeat(24);
+    await deps.db.run("INSERT INTO api_token (id, workspace_id, name, hash, created_at, kind) VALUES (?, ?, 'Laptop', ?, ?, 'sign_in')", [id, owner.workspaceId, "a".repeat(64), NOW - 5 * DAY]);
+    const cookie = `${SESSION_COOKIE}=${signed!.secret}`;
+    const app = createApp(deps);
+    const tab = openPage(async (req) => {
+      const res = await app.fetch(new Request("https://app.example.com" + req.path, { method: req.method, headers: { ...req.headers, cookie, origin: "https://app.example.com", "sec-fetch-site": "same-origin" }, body: req.body === undefined ? undefined : JSON.stringify(req.body) }));
+      const text = await res.text();
+      return { status: res.status, json: text === "" ? undefined : JSON.parse(text) };
+    });
+    await tab.settle();
+    const laptop = rows(tab).find((r) => nameOf(r).textContent === "Laptop")!;
+    expect(expiryLines(laptop)).toEqual([`Expired ${shown(NOW - 2 * DAY)}. Sign in again from Mythicshot.`]);
+  });
+});

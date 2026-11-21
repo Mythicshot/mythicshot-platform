@@ -697,8 +697,8 @@ describe("the workspace's tokens", () => {
     expect(list.status).toBe(200);
     expect(list.json).toEqual({
       tokens: [
-        { id: connectedId, name: "Laptop", created_at: NOW + 1000, last_used_at: NOW + 2000, kind: "sign_in" },
-        { id: setupId, name: "First token", created_at: NOW, last_used_at: null, kind: "setup" },
+        { id: connectedId, name: "Laptop", created_at: NOW + 1000, last_used_at: NOW + 2000, kind: "sign_in", expires_at: NOW + 2000 + 90 * 86_400_000, expired: false },
+        { id: setupId, name: "First token", created_at: NOW, last_used_at: null, kind: "setup", expires_at: null, expired: false },
       ],
     });
     const hashes = await deps.db.all<{ hash: string }>("SELECT hash FROM api_token");
@@ -716,7 +716,7 @@ describe("the workspace's tokens", () => {
     const sb = await signIn(deps, b.userId);
     const id = (await deps.db.first<{ id: string }>("SELECT id FROM api_token WHERE workspace_id = ?", [a.workspaceId]))!.id;
     const done = await rename(deps, sa, id, "  Studio PC ");
-    expect([done.status, done.json]).toEqual([200, { id, name: "Studio PC", created_at: NOW, last_used_at: null, kind: "setup" }]);
+    expect([done.status, done.json]).toEqual([200, { id, name: "Studio PC", created_at: NOW, last_used_at: null, kind: "setup", expires_at: null, expired: false }]);
     expect(await deps.db.all("SELECT event, user_id, workspace_id, subject, detail FROM audit WHERE event = 'token_renamed'")).toEqual([{ event: "token_renamed", user_id: a.userId, workspace_id: a.workspaceId, subject: id, detail: null }]);
     for (const name of ["", "x".repeat(61), "a‮b"]) expect((await rename(deps, sa, id, name)).json.error).toBe("bad_name");
     // Another workspace's id, an id nobody has and something that is no id: the one 404, and nothing changes.

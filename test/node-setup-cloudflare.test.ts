@@ -910,9 +910,13 @@ describe("the two address settings (TOURS_HOST and APP_HOST)", () => {
         '"INVITE_CONTACT": "hello@example.com", "DOWNLOAD_URL": "https://made-up.example.com/download"',
         { INVITE_CONTACT: "hello@example.com", DOWNLOAD_URL: "https://made-up.example.com/download" },
       ],
+      [
+        '"SESSION_MAX_DAYS": "30", "CONNECTION_IDLE_DAYS": "off", "CONNECTION_MAX_DAYS": "365"',
+        { SESSION_MAX_DAYS: "30", CONNECTION_IDLE_DAYS: "off", CONNECTION_MAX_DAYS: "365" },
+      ],
     ];
     for (const [written, values] of hand) {
-      writeFileSync(path, readFileSync(path, "utf8").replace(/"APP_HOST": ""(,\s*"(?:SITE_HOST|STORAGE_ALLOWANCE_BYTES|INVITE_CONTACT|DOWNLOAD_URL)": [^\n,}]+)*/, `"APP_HOST": "", ${written}`));
+      writeFileSync(path, readFileSync(path, "utf8").replace(/"APP_HOST": ""(,\s*"(?:SITE_HOST|STORAGE_ALLOWANCE_BYTES|INVITE_CONTACT|DOWNLOAD_URL|SESSION_MAX_DAYS|CONNECTION_IDLE_DAYS|CONNECTION_MAX_DAYS)": [^\n,}]+)*/, `"APP_HOST": "", ${written}`));
       const kept = { ...VARS, ...values };
       expect(deployed(first.root).vars, written).toEqual(kept);
       for (const argv of [["update", "--yes"], ["--yes"], ["status"], ["update", "--yes"]]) {
@@ -926,6 +930,7 @@ describe("the two address settings (TOURS_HOST and APP_HOST)", () => {
     // The file's own first lines say it is kept.
     expect(readFileSync(path, "utf8").split("\n").slice(0, 4).join("\n")).toContain("INVITE_CONTACT");
     expect(readFileSync(path, "utf8").split("\n").slice(0, 4).join("\n")).toContain("DOWNLOAD_URL");
+    expect(readFileSync(path, "utf8").split("\n").slice(0, 5).join("\n")).toContain("CONNECTION_MAX_DAYS");
   });
 
   it("update keeps a hand-set IMG_HOST beside the two addresses", async () => {

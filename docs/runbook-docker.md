@@ -1137,6 +1137,18 @@ DOWNLOAD_URL=https://downloads.example.com/mythicshot/
 
 **How to tell it worked:** the Account page shows the card "Mythicshot for Windows" with "Open the download page". A value that cannot be used never stops the app: the card is not shown, and `docker compose logs app` has the line `download page: off, because DOWNLOAD_URL is not a usable https address. The site runs; the dashboard shows no download link.` To take the link away, remove the line and recreate the container.
 
+### Change how long sign-ins last
+
+A browser session ends 90 days after its sign-in however active it is, and a computer connected by signing in from Mythicshot stops working after 90 days without use; each then signs in again, and nothing is lost. A third limit, off unless set, ends a connection a number of days after it was made. Add a line to `.env` for each limit to change, a whole number of days from 1 to 3650 or `off`, then recreate the container as above. Both routes hand them on: the direct stack passes the whole `.env`, and the tunnel stack names `SESSION_MAX_DAYS`, `CONNECTION_IDLE_DAYS` and `CONNECTION_MAX_DAYS` among the settings it passes. What each means is in [Settings](../README.md#settings) in the README.
+
+```text
+SESSION_MAX_DAYS=30
+CONNECTION_IDLE_DAYS=off
+CONNECTION_MAX_DAYS=365
+```
+
+**How to tell it worked:** the Connections page says under each connection from Mythicshot when it expires, and the Account page says when each session ends. A smaller number applies at once to sessions and connections that already exist. A value that cannot be used never stops the app: the default applies, and `docker compose logs app` has one line naming the setting, such as `sign-in lifetimes: SESSION_MAX_DAYS is not a whole number of days from 1 to 3650, 0 or off, so the default of 90 days applies. The site runs.` To go back to the defaults, remove the lines and recreate the container.
+
 ### Read the audit record
 
 The audit record lists what was done with accounts: sign-ins, sign-outs, links printed, allowances set, email changes, connections of the app, tokens renamed or revoked, and accounts disabled, enabled or deleted; and, for tours shared with a list of addresses, the links mailed to visitors and their sign-ins. It holds ids, never an email address, a code or a token.

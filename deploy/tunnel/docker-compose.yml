@@ -37,6 +37,12 @@ services:
       INVITE_CONTACT: ${INVITE_CONTACT:-}
       # The public page the desktop app is downloaded from, linked on the dashboard: an https address.
       DOWNLOAD_URL: ${DOWNLOAD_URL:-}
+      # The sign-in lifetimes in whole days, each 0 or off to switch it off: a browser session
+      # ends this long after its sign-in (default 90), a connection from Mythicshot stops after
+      # this long unused (default 90) or this long after it was made (default off).
+      SESSION_MAX_DAYS: ${SESSION_MAX_DAYS:-}
+      CONNECTION_IDLE_DAYS: ${CONNECTION_IDLE_DAYS:-}
+      CONNECTION_MAX_DAYS: ${CONNECTION_MAX_DAYS:-}
       # The optional third address, for shared images and clips, beside the two above.
       # The stack does not add it to Caddy's site address: see the runbook first.
       IMG_HOST: ${IMG_HOST:-}

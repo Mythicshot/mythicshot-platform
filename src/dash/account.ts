@@ -97,6 +97,7 @@ export const ACCOUNT_JS = `(function () {
     sending: "Sending…",
     checkBefore: "Check ",
     openDownload: "Open the download page",
+    ends: "Ends ",
   };
   // What the page behind a box is, made inert while one is open.
   var BEHIND = ["dash-top", "account-page"];
@@ -155,6 +156,8 @@ export const ACCOUNT_JS = `(function () {
     li.appendChild(what);
     var right = el("span", "r");
     right.appendChild(el("span", "when", s.current === true ? TEXT.since + Dash.dateOf(s.created_at) : TEXT.lastUsed + Dash.dateOf(s.last_used_at)));
+    // When it ends however much it is used (SESSION_MAX_DAYS); nothing when that limit is off.
+    if (typeof s.ends_at === "number" && isFinite(s.ends_at)) right.appendChild(el("span", "when", TEXT.ends + Dash.dateOf(s.ends_at)));
     if (s.current !== true) {
       var end = el("button", "btn sm quiet", TEXT.signOut);
       end.type = "button";

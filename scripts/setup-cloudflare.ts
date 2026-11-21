@@ -222,7 +222,7 @@ const HOST_VARS = ["TOURS_HOST", "APP_HOST"] as const;
  * not drop. IMG_HOST, the optional third address, is one of them: an install sets it by
  * hand beside TOURS_HOST and APP_HOST.
  */
-const KEPT_VARS = ["STORAGE_ALLOWANCE_BYTES", "SITE_HOST", "INVITE_CONTACT", "IMG_HOST", "DOWNLOAD_URL"] as const;
+const KEPT_VARS = ["STORAGE_ALLOWANCE_BYTES", "SITE_HOST", "INVITE_CONTACT", "IMG_HOST", "DOWNLOAD_URL", "SESSION_MAX_DAYS", "CONNECTION_IDLE_DAYS", "CONNECTION_MAX_DAYS"] as const;
 
 /** The comment line in wrangler.deploy.jsonc that records a confirmed address not attached yet. */
 const PENDING_LINE = /^\/\/ setup:cloudflare: address (\S+) confirmed, not attached yet; attached before: (\S+)$/m;
@@ -305,7 +305,8 @@ export function deployConfigText(root: string, install: Install & { databaseId: 
   // The two address vars stay empty, as in wrangler.jsonc, unless the install's own file
   // had them set by hand: then they are written back exactly as they were.
   // A storage allowance, a link host (SITE_HOST), who to ask for an invite
-  // (INVITE_CONTACT) or the app's download page (DOWNLOAD_URL) set by hand in the
+  // (INVITE_CONTACT), the app's download page (DOWNLOAD_URL) or a sign-in lifetime
+  // (SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS, CONNECTION_MAX_DAYS) set by hand in the
   // install's file is written back as it was, too.
   c.vars = { ...(c.vars ?? {}), PUBLIC_IMAGE_BASE: install.publicImageBase, ...(install.hostVars ?? {}), ...(install.keptVars ?? {}) };
   const pending =
@@ -316,7 +317,8 @@ export function deployConfigText(root: string, install: Install & { databaseId: 
     "// This install's Wrangler configuration, written by `npm run setup:cloudflare` from\n" +
     "// wrangler.jsonc. Ignored by Git; holds no secret. `update` rewrites it, keeping the\n" +
     "// name, database id, address, PUBLIC_IMAGE_BASE, TOURS_HOST, APP_HOST, IMG_HOST,\n" +
-    "// STORAGE_ALLOWANCE_BYTES, SITE_HOST, INVITE_CONTACT and DOWNLOAD_URL.\n" +
+    "// STORAGE_ALLOWANCE_BYTES, SITE_HOST, INVITE_CONTACT, DOWNLOAD_URL and the sign-in\n" +
+    "// lifetimes SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and CONNECTION_MAX_DAYS.\n" +
     pending +
     JSON.stringify(c, null, 2) +
     "\n"
