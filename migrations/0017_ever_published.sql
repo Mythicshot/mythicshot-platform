@@ -21,9 +21,10 @@ UPDATE tour SET ever_published = 1
     OR EXISTS (SELECT 1 FROM snapshot s WHERE s.tour_id = tour.id)
     OR EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = tour.id);
 
--- A first publish that states a list compares it with the tour's only when the tour's latest
--- access entry in the audit is that same token's at creation (src/access.ts, OWN_CREATION).
--- This index finds a tour's entries of one event without reading the rest of the audit, the
--- latest first (rowid is the index's last column), however large the audit grows and however
--- often a token asks.
-CREATE INDEX audit_subject_event ON audit (subject, event);
+-- The id of the token whose first publish set the tour's setting and list, while nothing else
+-- has written them since; NULL otherwise, and for every tour at this migration. A first publish
+-- that states a list compares it with the tour's only when this is the asking token's id
+-- (src/access.ts, OWN_CREATION), so a token can confirm only a list it sent itself. The access
+-- PUT empties it in every batch that writes the setting or the list. An id is "tok_" and 24
+-- lowercase hex characters (src/auth.ts, newId).
+ALTER TABLE tour ADD COLUMN access_set_by TEXT CHECK (access_set_by IS NULL OR (length(access_set_by) = 28 AND length(CAST(access_set_by AS BLOB)) = 28 AND substr(access_set_by, 1, 4) = 'tok_' AND substr(access_set_by, 5) NOT GLOB '*[^0-9a-f]*'));
