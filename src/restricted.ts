@@ -37,11 +37,10 @@
 // Calls of the page: the public lookup, the tour, and, with a viewer cookie, the session and
 // mayView: at most 4 database calls, and one more after the answer at most once a day (the
 // session's last use). A picture: 3 database calls and 1 store read (see the route below).
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { mayView, tourForServing, type ServedPicture, type ServedTour } from "./access.ts";
 import { isBeforeAccounts } from "./accounts.ts";
 import { hashToken } from "./auth.ts";
-import { json } from "./http.ts";
 import { MalformedSnapshot, contentSecurityPolicy, escapeHtml, pageHtml, pageTour, type PageTour } from "./page.ts";
 import { ACCOUNT_PAGE_HEADERS } from "./pages.ts";
 import type { Deps } from "./ports.ts";
@@ -163,7 +162,7 @@ function platformPage(body: string, status = 200, type = HTML): Response {
  * file); null for the not-found page. `slug` is the route's, already reduced to "" when it is
  * malformed (then no call is made).
  */
-export async function restrictedAnswer(req: Request, deps: Deps, slug: string): Promise<Response | null> {
+export const restrictedAnswer = guarded(async (req: Request, deps: Deps, slug: string): Promise<Response | null> => {
   const tour = await servedTour(deps, slug);
   if (!servable(tour)) return null;
   // Built before anything about the visitor is read, so a snapshot that cannot be served
@@ -180,7 +179,7 @@ export async function restrictedAnswer(req: Request, deps: Deps, slug: string): 
   if (email === null) return platformPage(VIEW_GATE_HTML, 403);
   if (!(await mayView(deps, tour, email))) return platformPage(VIEW_DENIED_HTML, 403);
   return new Response(restrictedPageHtml(page, tour.slug, email), { status: 200, headers: RESTRICTED_PAGE_HEADERS });
-}
+});
 
 /**
  * True for the failure of a lookup on a database that migrations 0014 (the access setting,
@@ -212,8 +211,36 @@ async function servedTour(deps: Deps, slug: string): Promise<ServedTour | null> 
   }
 }
 
-/** The one answer of the picture route for anything it does not serve: the picture route's (/p/) own 404. */
-const missing = () => json(404, { error: "not_found" });
+/**
+ * The answer to a failure inside these routes (a database or store call that threw): a fixed
+ * 500 that no cache keeps, where the app's own error answer would carry no cache rule. Fixed
+ * text only, in the answer and the log.
+ */
+export function failedAnswer(): Response {
+  return new Response('{"error":"internal"}', { status: 500, headers: { "content-type": "application/json", "cache-control": RESTRICTED_CACHE, "x-content-type-options": "nosniff" } });
+}
+
+/**
+ * `fn` with every failure turned into failedAnswer, for the restricted page (when the public
+ * lookup found nothing), the picture route and the two platform pages. Answers pass through.
+ */
+export function guarded<A extends unknown[], R>(fn: (...args: A) => R | Promise<R>): (...args: A) => Promise<R | Response> {
+  return async (...args: A) => {
+    try {
+      return await fn(...args);
+    } catch {
+      console.error("restricted: a request failed; answering 500");
+      return failedAnswer();
+    }
+  };
+}
+
+/** The one answer of the picture route for anything it does not serve: the /p/ route's 404, which no other site may frame either. */
+const missing = () =>
+  new Response('{"error":"not_found"}', {
+    status: 404,
+    headers: { "content-type": "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; frame-ancestors 'none'", "x-frame-options": "DENY" },
+  });
 
 export function restrictedRoutes(app: Hono, deps: Deps): void {
   // A restricted tour's picture or logo. Checked in this order, each failure the same 404 and
@@ -224,10 +251,10 @@ export function restrictedRoutes(app: Hono, deps: Deps): void {
   // read, and one more database call after the answer at most once a day. No Range (the whole picture is always a correct answer),
   // no ETag, and no-store, so an address removed from the list loses the pictures it has
   // seen at its next request.
-  app.get("/t/:slug/v/:name", async (c) => {
-    const name = c.req.param("name");
+  app.get("/t/:slug/v/:name", guarded(async (c: Context) => {
+    const name = c.req.param("name") ?? "";
     if (!PICTURE_NAME.test(name)) return missing();
-    const tour = await servedTour(deps, c.req.param("slug"));
+    const tour = await servedTour(deps, c.req.param("slug") ?? "");
     if (!servable(tour)) return missing();
     const picture = tour.pictures.get(name);
     if (picture === undefined) return missing();
@@ -242,17 +269,18 @@ export function restrictedRoutes(app: Hono, deps: Deps): void {
         "content-length": String(file.size),
         "cache-control": RESTRICTED_CACHE,
         "x-content-type-options": "nosniff",
-        "content-security-policy": "default-src 'none'; sandbox",
+        "content-security-policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
+        "x-frame-options": "DENY",
         "referrer-policy": "no-referrer",
         "cross-origin-resource-policy": "same-origin",
       },
     });
-  });
+  }));
 
   // The page a viewer link opens, the sign-out page "Not you?" leads to, and the two
   // stylesheets and one script of these pages. Fixed text, no call.
-  app.get("/view", () => platformPage(VIEW_LINK_HTML));
-  app.get("/view/signout/:slug", (c) => (SLUG.test(c.req.param("slug")) ? platformPage(VIEW_SIGNOUT_HTML) : c.notFound()));
+  app.get("/view", guarded(() => platformPage(VIEW_LINK_HTML)));
+  app.get("/view/signout/:slug", guarded((c: Context) => (SLUG.test(c.req.param("slug") ?? "") ? platformPage(VIEW_SIGNOUT_HTML) : c.notFound())));
   app.get("/view/view.js", () => platformPage(VIEW_JS, 200, "text/javascript; charset=utf-8"));
   app.get("/view/view.css", () => platformPage(VIEW_CSS, 200, "text/css; charset=utf-8"));
   app.get("/view/shared.css", () => platformPage(SHARED_CSS, 200, "text/css; charset=utf-8"));

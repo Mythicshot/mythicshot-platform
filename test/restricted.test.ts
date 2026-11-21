@@ -17,7 +17,7 @@ import type { Db, Deps, FileStore } from "../src/ports.ts";
 import { COPY_BATCH } from "../src/publish.ts";
 import { PLAYER_CSS_PATH, PLAYER_JS_PATH } from "../src/player/assets.ts";
 import { LIMITS_VIEWER } from "../src/rate.ts";
-import { isBeforeRestricted, RESTRICTED_GATE, RESTRICTED_PAGE_CSP, RESTRICTED_PAGE_HEADERS, restrictedPageHtml, workspaceKeyOf } from "../src/restricted.ts";
+import { guarded, isBeforeRestricted, RESTRICTED_GATE, RESTRICTED_PAGE_CSP, RESTRICTED_PAGE_HEADERS, restrictedPageHtml, workspaceKeyOf } from "../src/restricted.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { VIEW_DENIED_HTML, VIEW_GATE_HTML } from "../src/view-page.ts";
 import { VIEWER_CODE_MS, VIEWER_COOKIE } from "../src/viewers.ts";
@@ -223,7 +223,12 @@ describe("a restricted tour, for every visitor and every way of asking", () => {
     const pictures = [...s.aNames];
     const strangers = [MADE_UP, ...s.bNames, ...s.retired, s.aNames[0].replace(/\.png$/, ".jpg"), s.aNames[0].toUpperCase()];
     const unknownPicture = seen(await send(deps, "GET", `/t/${a.slug}/v/${MADE_UP}`, { origin: TOURS }));
-    expect(unknownPicture).toEqual({ status: 404, headers: [["cache-control", "no-store"], ["content-type", "application/json"], ["x-content-type-options", "nosniff"]], body: NOT_FOUND_JSON });
+    // The one 404, which no other site may frame either.
+    expect(unknownPicture).toEqual({
+      status: 404,
+      headers: [["cache-control", "no-store"], ["content-security-policy", "default-src 'none'; frame-ancestors 'none'"], ["content-type", "application/json"], ["x-content-type-options", "nosniff"], ["x-frame-options", "DENY"]],
+      body: NOT_FOUND_JSON,
+    });
     const bytes = new Map<string, Uint8Array>();
     for (const name of pictures) bytes.set(name, await storedBytes(deps, name));
     const reads = watchPrivateReads(deps);
@@ -269,7 +274,8 @@ describe("a restricted tour, for every visitor and every way of asking", () => {
               "content-length": String(bytes.get(name)!.length),
               "cache-control": "private, no-store",
               "x-content-type-options": "nosniff",
-              "content-security-policy": "default-src 'none'; sandbox",
+              "content-security-policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
+              "x-frame-options": "DENY",
               "referrer-policy": "no-referrer",
               "cross-origin-resource-policy": "same-origin",
             });
@@ -411,6 +417,61 @@ async function previousPage(deps: Deps, raw: string, ifNoneMatch: string | null)
 async function seenOf(res: Response) {
   return { status: res.status, headers: [...res.headers.entries()].sort(), body: await res.text() };
 }
+
+describe("a failure inside the restricted routes", () => {
+  it("answers 500 with private, no-store on the page, the picture and the two pages, and changes nothing for a public tour", SLOW, async () => {
+    const s = await site();
+    const { deps, a, p } = s;
+    const listed = await viewerFor(deps, LISTED, a.slug);
+    const name = s.aNames[0];
+    const publicBefore = seen(await send(deps, "GET", `/t/${p.slug}`, { origin: TOURS }));
+    const realDb = deps.db;
+    const realDrafts = deps.drafts;
+    // Each way to fail: the tour's lookup, the session's read, mayView, and the store.
+    const failing = (what: RegExp | "store") => {
+      deps.db = what === "store" ? realDb : { ...realDb, first: (sql, params) => (what.test(sql) ? Promise.reject(new Error("injected failure")) : realDb.first(sql, params)) };
+      deps.drafts = what === "store" ? { ...realDrafts, get: () => Promise.reject(new Error("injected failure")) } : realDrafts;
+    };
+    const expectFailed = (r: Call, what: string) => {
+      expect(r.status, what).toBe(500);
+      expect(r.headers.get("cache-control"), what).toBe("private, no-store");
+      expect(r.headers.get("x-content-type-options"), what).toBe("nosniff");
+      expect(r.text, what).toBe('{"error":"internal"}');
+      expectNothingOf(s, r, what);
+    };
+    for (const [what, cause] of [["the tour's lookup", /access_switch/], ["the session's read", /viewer_session/], ["mayView", /tour_viewer/]] as const) {
+      failing(cause);
+      expectFailed(await send(deps, "GET", `/t/${a.slug}`, { origin: TOURS, headers: { cookie: listed } }), `page: ${what}`);
+      expectFailed(await send(deps, "GET", `/t/${a.slug}/v/${name}`, { origin: TOURS, headers: { cookie: listed } }), `picture: ${what}`);
+      // A public tour is found by its one lookup before anything here runs: the same bytes.
+      expect(seen(await send(deps, "GET", `/t/${p.slug}`, { origin: TOURS })), `public: ${what}`).toEqual(publicBefore);
+    }
+    failing("store");
+    expectFailed(await send(deps, "GET", `/t/${a.slug}/v/${name}`, { origin: TOURS, headers: { cookie: listed } }), "picture: the store");
+    deps.db = realDb;
+    deps.drafts = realDrafts;
+    expect((await send(deps, "GET", `/t/${a.slug}/v/${name}`, { origin: TOURS, headers: { cookie: listed } })).status).toBe(200);
+  });
+
+  it("the guard the restricted routes and the two pages answer through turns any failure into that 500, and passes every answer through unchanged", async () => {
+    const failed = await guarded(async () => {
+      throw new Error("injected failure with a secret: dpw_" + "a".repeat(64));
+    })();
+    expect([failed.status, Object.fromEntries(failed.headers.entries()), await failed.text()]).toEqual([
+      500,
+      { "cache-control": "private, no-store", "content-type": "application/json", "x-content-type-options": "nosniff" },
+      '{"error":"internal"}',
+    ]);
+    const fine = new Response("x", { status: 203 });
+    expect(await guarded(async () => fine)()).toBe(fine);
+    // The two pages still answer as before through it.
+    const { deps } = await makeDeps({ hosts: TWO });
+    for (const path of ["/view", "/view/signout/abcdefghij"]) {
+      const r = await send(deps, "GET", path, { origin: TOURS });
+      expect([r.status, r.headers.get("cache-control")], path).toEqual([200, "no-store"]);
+    }
+  });
+});
 
 describe("a database migrations have not reached", () => {
   it("only the names migrations 0014 and 0015 (and the accounts migration) add count as such; any other missing name is a failure", () => {
