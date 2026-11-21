@@ -27,6 +27,7 @@ import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../
 import { VIEW_GATE_HTML } from "../src/view-page.ts";
 import { MEDIA_VIEWER_COOKIE, VIEWER_CODE_MS } from "../src/viewers.ts";
 import { ORIGIN, png, send, uploadTour, type Call, type Json } from "./bundle.ts";
+import { openapi } from "../src/docs/openapi.ts";
 import { manifestOf } from "./isolation-world.ts";
 import { oldPage, oldPicture } from "./old-build-0.1.35.ts";
 
@@ -86,6 +87,11 @@ async function sessionOf(deps: Deps, userId: string, origin: string): Promise<Se
   const made = await redeemSignInCode(deps, await createSignInCode(deps, userId), FIREFOX, null);
   if (made === null) throw new Error("the sign-in was refused");
   return { cookie: `${SESSION_COOKIE}=${made.secret}`, "x-csrf-token": await csrfFor(made.secret), origin, "sec-fetch-site": "same-origin" };
+}
+
+/** The id (never the secret) of the one token of a workspace, as the audit names it. */
+async function tokenIdOf(deps: Deps, workspaceId: string): Promise<string | null> {
+  return (await deps.db.first<{ id: string }>("SELECT id FROM api_token WHERE workspace_id = ? ORDER BY created_at LIMIT 1", [workspaceId]))?.id ?? null;
 }
 
 // ---- Shared items ----
@@ -281,10 +287,11 @@ describe("a shared item made restricted by its create", () => {
     const b = (await create(deps, ONE, owner.token, itemBody(file, { access: "me" }))).json.id;
     const c = (await create(deps, ONE, owner.token, itemBody(file, { access: "public", viewers: [LISTED] }))).json.id;
     const rows = await deps.db.all<{ subject: string; detail: string; user_id: string | null; workspace_id: string }>("SELECT subject, detail, user_id, workspace_id FROM audit WHERE event = 'media_access_changed' ORDER BY at, id");
+    const tokenId = (await tokenIdOf(deps, owner.workspaceId))!;
     expect(rows.map((r) => [r.subject, JSON.parse(r.detail), r.user_id, r.workspace_id])).toEqual([
-      [a, { from: "public", to: "people", viewers_before: 0, viewers: 2, by: "token", at: "creation" }, null, owner.workspaceId],
-      [b, { from: "public", to: "me", viewers_before: 0, viewers: 0, by: "token", at: "creation" }, null, owner.workspaceId],
-      [c, { from: "public", to: "public", viewers_before: 0, viewers: 1, by: "token", at: "creation" }, null, owner.workspaceId],
+      [a, { from: "public", to: "people", viewers_before: 0, viewers: 2, by: "token", at: "creation", token_id: tokenId }, null, owner.workspaceId],
+      [b, { from: "public", to: "me", viewers_before: 0, viewers: 0, by: "token", at: "creation", token_id: tokenId }, null, owner.workspaceId],
+      [c, { from: "public", to: "public", viewers_before: 0, viewers: 1, by: "token", at: "creation", token_id: tokenId }, null, owner.workspaceId],
     ]);
     expect(JSON.stringify(await deps.db.all("SELECT * FROM audit"))).not.toContain("@");
     expect(lines.join("\n")).not.toContain("@");
@@ -449,7 +456,7 @@ describe("a tour made restricted by its first publish", () => {
     const mine = await tourViewerFor(s.deps, s.owner.email);
     expect((await send(s.deps, "GET", `/t/${t.slug}`, { headers: { cookie: mine } })).status).toBe(200);
     const rows = await s.deps.db.all<{ detail: string; user_id: string | null }>("SELECT detail, user_id FROM audit WHERE event = 'tour_access_changed' AND subject = ?", [t.id]);
-    expect(rows.map((x) => [JSON.parse(x.detail), x.user_id])).toEqual([[{ from: "public", to: "me", viewers_before: 0, viewers: 1, by: "token", at: "creation" }, null]]);
+    expect(rows.map((x) => [JSON.parse(x.detail), x.user_id])).toEqual([[{ from: "public", to: "me", viewers_before: 0, viewers: 1, by: "token", at: "creation", token_id: await tokenIdOf(s.deps, s.owner.workspaceId) }, null]]);
     expect(JSON.stringify(await s.deps.db.all("SELECT * FROM audit"))).not.toContain("@");
     expect(lines.join("\n")).not.toContain("@");
   });
@@ -616,11 +623,22 @@ describe("a token never changes the setting of a tour that exists", () => {
     const t = await tourOf(s, 2);
     const before = await settingOf(s.deps, t.id);
     const none = await publish(s, "tour_" + "0".repeat(24), { access: "me" }, intruder.token);
-    for (const body of [{ access: "people", viewers: ["intruder@example.com"] }, { access: "me" }, { access: "public" }]) {
+    const auditBefore = await s.deps.db.all("SELECT * FROM audit ORDER BY at, id");
+    for (const body of [{ access: "people", viewers: ["intruder@example.com"] }, { access: "me" }, { access: "public", viewers: ["intruder@example.com"] }]) {
       const r = await publish(s, t.id, body, intruder.token);
       expect([r.status, r.text]).toEqual([404, none.text]);
+      expect(await settingOf(s.deps, t.id)).toEqual(before);
+      // The very same request on the intruder's own never-published tour is taken: the fields
+      // were read, and only whose the tour is refused it.
+      const own = await uploadTour(s.deps, intruder.token, manifestOf([300], "Intruder's own tour"), { kind: "new" }, 5);
+      const mine = await publish(s, own.tour_id, body, intruder.token);
+      expect([mine.status, mine.json.access], mine.text).toEqual([200, body.access]);
     }
     expect(await settingOf(s.deps, t.id)).toEqual(before);
+    // The audit gained the intruder's own three entries, about its own tours, and nothing about this one.
+    const added = (await s.deps.db.all<{ subject: string; workspace_id: string }>("SELECT subject, workspace_id FROM audit ORDER BY at, id")).slice(auditBefore.length);
+    expect(added.length).toBe(3);
+    for (const a of added) expect([a.subject === t.id, a.workspace_id]).toEqual([false, intruder.workspaceId]);
   });
 
   it("a first publish of a tour of 60 steps with the largest list of the longest addresses stays within the call budget", SLOW, async () => {
@@ -629,6 +647,149 @@ describe("a token never changes the setting of a tour that exists", () => {
     const calls = await finish(s, t.id, await publish(s, t.id, { access: "people", viewers: fullList() }));
     expect(Math.max(...calls.map((c) => c.calls))).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
     expect((await settingOf(s.deps, t.id)).viewers.length).toBe(200);
+    expect(await s.publicKeys()).toEqual([]);
+  });
+});
+
+// ---- The review's fixes ----
+
+/** The publish body of `n` bytes exactly: the fields, padded with `pad`. */
+function padded(fields: Json, n: number): string {
+  const bare = JSON.stringify({ ...fields, pad: "" });
+  if (bare.length > n) throw new Error("too small to pad");
+  return JSON.stringify({ ...fields, pad: "x".repeat(n - bare.length) });
+}
+
+describe("a token cannot learn a list it did not set", () => {
+  it("a right and a wrong guess of a list set in the dashboard answer the same, with the same calls, and nothing is published or changed", SLOW, async () => {
+    const s = await tourSite();
+    const t = await tourOf(s, 2);
+    expect((await setAccess(s, t.id, { access: "people", viewers: [LISTED] })).status).toBe(200);
+    const before = await settingOf(s.deps, t.id);
+    const right = await publish(s, t.id, { access: "people", viewers: [LISTED] });
+    const wrong = await publish(s, t.id, { access: "people", viewers: [OTHER] });
+    expect([right.status, right.json.error]).toEqual([409, "access_already_set"]);
+    expect({ status: right.status, body: right.text, headers: [...right.headers.entries()].sort() }).toEqual({ status: wrong.status, body: wrong.text, headers: [...wrong.headers.entries()].sort() });
+    expect(right.calls).toBe(wrong.calls);
+    expect(right.calls).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
+    expect(await settingOf(s.deps, t.id)).toEqual(before);
+    expect(await s.publicKeys()).toEqual([]);
+    // Stating only the setting it has publishes it as it is set.
+    const same = await finish(s, t.id, await publish(s, t.id, { access: "people" }));
+    expect(same.at(-1)!.json).toMatchObject({ access: "people", viewers: 1 });
+  });
+
+  it("a list the token set at creation is compared on a resend after a lost answer; after a dashboard edit of it, the same resend is refused", SLOW, async () => {
+    const s = await tourSite();
+    const t = await tourOf(s, 2 * COPY_BATCH + 3);
+    const first = await publish(s, t.id, { access: "people", viewers: [LISTED] });
+    expect(first.status).toBe(202);
+    const again = await publish(s, t.id, { access: "people", viewers: [LISTED] });
+    expect([again.status, again.json.publish_id]).toEqual([202, first.json.publish_id]);
+    // The dashboard edits the list and puts it back: the state is the token's no more.
+    expect((await setAccess(s, t.id, { access: "people", viewers: [LISTED, OTHER] })).status).toBe(200);
+    expect((await setAccess(s, t.id, { access: "people", viewers: [LISTED] })).status).toBe(200);
+    const refused = await publish(s, t.id, { access: "people", viewers: [LISTED] });
+    expect([refused.status, refused.json.error]).toEqual([409, "access_already_set"]);
+    // The publish the token started goes on by its id.
+    await finish(s, t.id, await publish(s, t.id, { publish_id: first.json.publish_id }));
+  });
+});
+
+describe("a stated setting is the one published", () => {
+  it("a dashboard change between the decision and the publish is refused, and nothing is published", SLOW, async () => {
+    const s = await tourSite();
+    const t = await tourOf(s, 2);
+    expect((await setAccess(s, t.id, { access: "me" })).status).toBe(200);
+    // Forced interleaving: the dashboard makes the tour public right after the request decided
+    // that `me` is what it already has, before the publish reads the tour.
+    const real = s.deps.db.first.bind(s.deps.db);
+    let fired = false;
+    s.deps.db.first = async (sql, params) => {
+      if (!fired && sql.includes("AS job_id")) {
+        fired = true;
+        await s.deps.db.run("UPDATE tour SET access = 'public' WHERE id = ?", [t.id]);
+      }
+      return real(sql, params);
+    };
+    const r = await publish(s, t.id, { access: "me" });
+    s.deps.db.first = real;
+    expect(fired).toBe(true);
+    expect([r.status, r.json.error], r.text).toEqual([409, "access_already_set"]);
+    expect((await settingOf(s.deps, t.id)).tour).toMatchObject({ access: "public", status: "draft" });
+    expect((await settingOf(s.deps, t.id)).jobs).toEqual([]);
+    expect(await s.publicKeys()).toEqual([]);
+  });
+});
+
+describe("padding keeps an older server from acting on a request it would misread", () => {
+  it("a first publish with access, padded just over 1,024 bytes, is taken; pad must be text; without access the old limit stands", SLOW, async () => {
+    const s = await tourSite();
+    const t = await tourOf(s, 1);
+    const body = padded({ access: "me" }, 1025);
+    expect(body.length).toBe(1025);
+    const r = await send(s.deps, "POST", `/api/v1/tours/${t.id}/publish`, { token: s.owner.token, headers: JSON_HEADERS, body });
+    expect([r.status, r.json.access], r.text).toEqual([200, "me"]);
+    const u = await tourOf(s, 1);
+    const bad = await publish(s, u.id, { access: "me", pad: 5 });
+    expect([bad.status, bad.json.error]).toEqual([400, "bad_request"]);
+    const noAccess = await send(s.deps, "POST", `/api/v1/tours/${u.id}/publish`, { token: s.owner.token, headers: JSON_HEADERS, body: padded({}, 1025) });
+    expect([noAccess.status, noAccess.json]).toEqual([413, { error: "too_large", detail: "the request is over 1024 bytes" }]);
+    expect((await settingOf(s.deps, u.id)).tour).toMatchObject({ access: "public", status: "draft" });
+  });
+
+  it("an item's create with access, padded just over 4,096 bytes, is taken; pad must be text; without access the old limit stands", SLOW, async () => {
+    const { deps } = await makeDeps({ siteHost: "tours.example.com" });
+    const owner = await seedAccount(deps, { admin: true });
+    const file = png(40, 30, 2000, 3);
+    const body = padded(itemBody(file, { access: "me" }), 4097);
+    const r = await send(deps, "POST", "/api/v1/media", { token: owner.token, headers: JSON_HEADERS, body });
+    expect([r.status, r.json.access], r.text).toEqual([201, "me"]);
+    const bad = await create(deps, ONE, owner.token, itemBody(file, { access: "me", pad: ["x"] }));
+    expect([bad.status, bad.json.error]).toEqual([400, "bad_request"]);
+    const noAccess = await send(deps, "POST", "/api/v1/media", { token: owner.token, headers: JSON_HEADERS, body: padded(itemBody(file), 4097) });
+    expect([noAccess.status, noAccess.json]).toEqual([413, { error: "too_large", detail: "the request is over 4096 bytes" }]);
+    expect(await deps.db.first("SELECT count(*) AS n FROM media")).toEqual({ n: 1 });
+  });
+
+  it("the description names pad on both requests and tells a client to pad first", () => {
+    const doc = openapi() as Json;
+    for (const name of ["PublishBody", "MediaCreate"]) {
+      expect(doc.components.schemas[name].properties.pad, name).toMatchObject({ type: "string" });
+      expect(doc.components.schemas[name].properties.access.description, name).toContain("pad");
+    }
+  });
+});
+
+describe("the busiest first publish", () => {
+  it("a stated setting, a publish of an older draft to stop, a due page and a start that must be made twice stay within the budget", SLOW, async () => {
+    const s = await tourSite();
+    const t = await tourOf(s, 2 * COPY_BATCH + 3);
+    // A publish of the public store, left in progress; then the draft moves on.
+    expect((await publish(s, t.id)).status).toBe(202);
+    const chapter = await uploadTour(s.deps, s.owner.token, manifestOf([310, 311], "Secret tour title"), { kind: "chapter", tour_id: t.id }, 4);
+    expect(chapter.tour_id).toBe(t.id);
+    // Retired pictures of the tour whose time has come, more than one page of them.
+    for (let i = 0; i < 1001; i += 250) {
+      const rows = Array.from({ length: Math.min(250, 1001 - i) }, (_, j) => `('p/${hex(16)}.png', '${t.id}', 'unpub_x${i + j}', 'retired', 0, 0)`).join(", ");
+      await s.deps.db.run(`INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, delete_after) VALUES ${rows}`);
+    }
+    // The first start meets a draft that moved meanwhile, and starts again.
+    const real = s.deps.db.batch.bind(s.deps.db);
+    let moved = false;
+    s.deps.db.batch = async (stmts) => {
+      if (!moved && stmts.some((x) => x.sql.includes("INSERT INTO publish_job"))) {
+        moved = true;
+        await s.deps.db.run("UPDATE tour SET draft_version = draft_version + 1 WHERE id = ?", [t.id]);
+      }
+      return real(stmts);
+    };
+    const r = await publish(s, t.id, { access: "people", viewers: fullList() });
+    s.deps.db.batch = real;
+    expect(moved).toBe(true);
+    expect([r.status, r.json.access], r.text).toEqual([202, "people"]);
+    expect(r.calls).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
+    await finish(s, t.id, r);
     expect(await s.publicKeys()).toEqual([]);
   });
 });

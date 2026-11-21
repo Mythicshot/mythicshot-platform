@@ -1195,6 +1195,27 @@ describe("one workspace against another", () => {
     expect(w.writes()).toEqual([]);
   });
 
+  it("the fields of the cases that name the other workspace's tours are taken on the caller's own never-published tour, so their 404 is about whose the tour is", SLOW, async () => {
+    const w = await build({ siteHost: "tours.example.com" });
+    const [mine, theirs] = directions(w)[0];
+    const bodies = new Map<string, unknown>();
+    for (const r of CASES["POST /api/v1/tours/:id/publish"](theirs.ids, mine.ids)) {
+      const json = r.json as Record<string, unknown> | undefined;
+      if (json !== undefined && Object.hasOwn(json, "access")) bodies.set(JSON.stringify(json), json);
+    }
+    expect(bodies.size).toBe(3);
+    for (const [text, json] of bodies) {
+      const fresh = await send(w.deps, "POST", "/api/v1/uploads", { token: mine.token, body: JSON.stringify({ manifest: manifestOf([801], `${mine.name} own ${bodies.size}`), target: { kind: "new" } }), headers: JSON_HEADERS });
+      expect(fresh.status, fresh.text).toBe(201);
+      expect((await putStep(w.deps, mine.token, fresh.json.upload_id, 1, stepImage(manifestOf([801], "x").steps[0], 4))).status).toBe(204);
+      const committed = await commit(w.deps, mine.token, fresh.json.upload_id);
+      const before = await snapshotOf(w.deps, theirs, w.keys);
+      const r = await fire(w.deps, { method: "POST", path: tourPath(committed.json.tour_id, "/publish"), json }, BY_TOKEN.of(mine));
+      expect([r.status, r.json.access], `${text}: ${r.text}`).toEqual([200, (json as { access: string }).access]);
+      expect(await snapshotOf(w.deps, theirs, w.keys), text).toEqual(before);
+    }
+  });
+
   it("who may view, stated at a create or a first publish on a site that can mail, reaches nothing of the other workspace", SLOW, async () => {
     const w = await build({ siteHost: "tours.example.com" });
     for (const [mine, theirs] of directions(w)) {
