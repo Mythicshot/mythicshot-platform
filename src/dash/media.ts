@@ -8,6 +8,18 @@
 // Each body is fixed text; each script fills it through createElement and textContent, so
 // a title can never become markup.
 //
+// Who can view an item (Plan 2k): the list's "Who can view" column shows each item's setting
+// from the list (`access`, and `viewers`, the count on its list), as the Tours page shows a
+// tour's, and on a phone the setting joins the details line. Each row has Copy link, Open and
+// More, as a published tour's row has; More holds "Sharing…" then Delete. Sharing… reads GET
+// /api/v1/media/<id>/access and opens the tour's Sharing box, made by src/dash/sharing.ts for
+// both pages, with an item's differences: nothing moves, so a change is in force at once (no
+// progress and no stopped move); 409 too_large_to_restrict has its own sentence; and while a
+// restricted setting is chosen for an item that is public now, a line says that restricting
+// takes effect at once here but cannot take back a copy someone already opened or saved. Only
+// a signed-in session may change the setting (src/media-access.ts); this page has no other
+// credential, and the addresses travel only in a JSON body, never in a path.
+//
 // The line under the heading is the mockup's "48 images in <workspace> · 64 MB used" from
 // the first load: the count and the size of the page's kind from GET /api/v1/usage, read
 // beside the list every time the list is read (so also after a delete): the top-level
@@ -28,7 +40,7 @@
 // (which is then put after this page's own origin, as the Tours page does in one-address
 // mode). Anything else gives the row no Copy link and no Open.
 //
-// Delete asks first (Dash.question). While it answers 500 cleanup_pending (the item is
+// Delete, in More, asks first (Dash.question). While it answers 500 cleanup_pending (the item is
 // deleted; some of its files are not removed yet) it is sent again after a pause, at most
 // MAX_TRIES times in all. 204, 404 (already gone) and cleanup_pending are done, as on the
 // Tours page. When no answer came, the item itself is asked (GET /api/v1/media/<id>): only the
@@ -39,6 +51,7 @@
 // delete that worked whose list cannot be read again says so, as on the Tours page. The
 // list is read one request at a time: Show more does nothing while a read runs, and a read
 // waits for Show more, as on the Admin page.
+import { shareConstants, shareHelpers, shareHtml, shareListeners, shareMenu, shareQuestion, shareRepeatIds, shareScript, shareState, shareText, shareViewOf, type SharePage } from "./sharing.ts";
 import { dashHtml } from "./shell.ts";
 
 /** What makes one of the two pages: its tab, its words and the API's kind. */
@@ -55,7 +68,11 @@ type MediaPage = {
   emptyTitle: string;
   emptyText: string;
   hint: string;
+  /** The line shown under the hint while the list has a restricted item. */
+  gate: string;
   deleteButton: string;
+  /** Who can view one of the page's items: the Sharing box's words and the API's ids. */
+  sharing: SharePage;
   /** The words of the page's script (its TEXT). */
   text: Record<string, string>;
 };
@@ -80,8 +97,28 @@ const SHARED_TEXT = {
   askAfter: '"?',
   deleting: "Deleting…",
   cut: "…",
+  more: "More",
   notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
 };
+
+/** Who can view an item of the noun's kind: nothing moves (src/dash/sharing.ts). */
+function itemSharing(noun: "image" | "clip"): SharePage {
+  const copies = `Restricting takes effect at once on this site, but anyone who already opened or saved the ${noun} keeps their copy.`;
+  return {
+    moves: false,
+    noun,
+    nouns: noun + "s",
+    idVar: "ITEM_ID",
+    api: "/api/v1/media/",
+    title: "titleOf(t)",
+    words: {
+      restrict: `Restrict ${noun}`,
+      askWarn: copies,
+      copies,
+      tooLarge: `This ${noun} is too large to restrict on this site. Nothing was changed.`,
+    },
+  };
+}
 
 const IMAGES: MediaPage = {
   tab: "images",
@@ -93,8 +130,10 @@ const IMAGES: MediaPage = {
   column: "Image",
   emptyTitle: "No images yet",
   emptyText: "Take a screenshot in Mythicshot and choose Publish to. It shows up here with a link to share.",
-  hint: "Anyone with the link can see the image. Deleting it stops the link for everyone.",
+  hint: 'Deleting an image stops its link for everyone. "More" holds: Sharing, Delete.',
+  gate: "Opening a restricted image asks you for your email address too: the dashboard's sign-in does not carry over to the image's address.",
   deleteButton: "Delete image",
+  sharing: itemSharing("image"),
   text: { oneItem: "1 image", items: " images", untitled: "Untitled image", ...SHARED_TEXT },
 };
 
@@ -108,8 +147,10 @@ const GIFS: MediaPage = {
   column: "GIF",
   emptyTitle: "No GIFs yet",
   emptyText: "Record a clip in Mythicshot and choose Publish to. It shows up here with a link to share.",
-  hint: "Anyone with the link can watch the GIF. Deleting it stops the link for everyone.",
+  hint: 'Deleting a GIF stops its link for everyone. "More" holds: Sharing, Delete.',
+  gate: "Opening a restricted clip asks you for your email address too: the dashboard's sign-in does not carry over to the clip's address.",
   deleteButton: "Delete GIF",
+  sharing: itemSharing("clip"),
   text: { oneItem: "1 GIF", items: " GIFs", untitled: "Untitled GIF", ...SHARED_TEXT },
 };
 
@@ -122,7 +163,7 @@ function mediaMain(p: MediaPage): string {
     <p class="message" id="media-message" role="status" aria-live="polite" hidden></p>
     <div class="card" id="media-list" hidden>
       <table class="media">
-        <thead><tr><th scope="col" class="thumb-cell"><span class="vh">Preview</span></th><th scope="col">${p.column}</th><th scope="col" class="n">Size</th><th scope="col" class="n">Shared</th><th scope="col"><span class="vh">Actions</span></th></tr></thead>
+        <thead><tr><th scope="col" class="thumb-cell"><span class="vh">Preview</span></th><th scope="col">${p.column}</th><th scope="col">Who can view</th><th scope="col" class="n">Size</th><th scope="col" class="n">Shared</th><th scope="col"><span class="vh">Actions</span></th></tr></thead>
         <tbody id="media-rows"></tbody>
       </table>
     </div>
@@ -134,6 +175,7 @@ function mediaMain(p: MediaPage): string {
       </div>
     </div>
     <p class="hint" id="media-hint" hidden>${p.hint}</p>
+    <p class="hint" id="media-gate" hidden>${p.gate}</p>
   </section>
   </div>
   <div class="backdrop" id="delete-dialog" hidden>
@@ -146,7 +188,8 @@ function mediaMain(p: MediaPage): string {
         <button type="button" class="btn danger" id="delete-go">${p.deleteButton}</button>
       </div>
     </div>
-  </div>`;
+  </div>
+${shareHtml(p.sharing)}`;
 }
 
 /** The page's script: the same code for both pages, with the page's words and kind. */
@@ -158,7 +201,7 @@ function mediaJs(p: MediaPage): string {
   "use strict";
   var TEXT = {
 ${text}
-  };
+${shareText(p.sharing)}  };
   // The items this page lists (the kind of GET /api/v1/media), and whether a preview carries the play mark.
   var KIND = ${JSON.stringify(p.api)};
   var PLAY = ${p.play ? "true" : "false"};
@@ -171,7 +214,7 @@ ${text}
   var MAX_TRIES = 3;
   // The pauses before the second and the third send, so a moment's fault in the store does not use them all at once.
   var PAUSES_MS = [400, 1200];
-  // How long Copy link reads Copied.
+${shareConstants(p.sharing)}  // How long Copy link reads Copied.
   var COPIED_MS = 2000;
   // How many characters of the link's last part the row shows.
   var SHOWN = 4;
@@ -187,7 +230,7 @@ ${text}
   var BEHIND = ["dash-top", "media-page"];
   // The question before a delete (Dash.question, src/dash/script.ts).
   var question = Dash.question({ backdrop: "delete-dialog", box: "delete-box", role: "alertdialog", title: "delete-title", message: "delete-message", behind: BEHIND, buttons: ["delete-keep", "delete-go"] });
-
+${shareQuestion(p.sharing)}
   var $ = function (id) { return document.getElementById(id); };
   var workspace = "";
   // The items shown, how many pages of the list they are, and the cursor of the page after them.
@@ -198,15 +241,17 @@ ${text}
   var totals = null;
   // The list request running (a read, or Show more), or null: one at a time.
   var listing = null;
-  // The item the question is about, and whether its delete is running.
+  // The item the question is about, and whether a delete, or a read or change of who can view, is running.
   var asking = null;
   var working = false;
-  // Each row's first control and its Delete, by item id, to give the focus back after the list is rebuilt.
+  // The menu that is open.
+  var openMenu = null;
+  // Each row's first control and its More, by item id, to give the focus back after the list is rebuilt.
   var firstOf = {};
-  var deleteOf = {};
-  // Every button of every row, to disable while a delete runs.
+  var moreOf = {};
+  // Every button of every row, menus included, to disable while a change runs.
   var rowButtons = [];
-
+${shareState(p.sharing)}
   function el(tag, cls, text) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -225,6 +270,7 @@ ${text}
     rowButtons.forEach(function (b) { b.disabled = on; });
   }
 
+${shareHelpers()}
   function isCount(n) {
     return typeof n === "number" && isFinite(n) && n >= 0 && Math.floor(n) === n;
   }
@@ -279,6 +325,7 @@ ${text}
     return box;
   }
 
+${shareMenu(p.sharing)}
   // ---- Copy link ----
 
   // Inside the click: the clipboard, and "Copied" for a moment. When the browser refuses,
@@ -296,6 +343,7 @@ ${text}
 
   // ---- One row ----
 
+${shareViewOf(p.sharing)}
   function row(it, i) {
     var tr = el("tr");
     var titleId = "item-" + i;
@@ -304,6 +352,7 @@ ${text}
     var when = Dash.dateOf(it.created_at);
     var details = detailsOf(it);
     var lead = details !== "" ? TEXT.dot : "";
+    var view = viewOf(it);
 
     var thumb = el("td", "thumb-cell");
     thumb.setAttribute("aria-hidden", "true");
@@ -321,9 +370,13 @@ ${text}
       shown.setAttribute("title", link);
       d.appendChild(shown);
     }
-    d.appendChild(el("span", "narrow-only", lead + size + TEXT.dot + when));
+    // On a phone the setting joins this line, as on the Tours page.
+    d.appendChild(el("span", "narrow-only", lead + size + TEXT.dot + when + (view !== null ? TEXT.dot + view.text : "")));
     what.appendChild(d);
     tr.appendChild(what);
+    var who = el("td", "view");
+    who.appendChild(view === null ? el("span", "", TEXT.noSetting) : el("span", view.tag ? "tag warn" : "", view.text));
+    tr.appendChild(who);
     tr.appendChild(el("td", "n size", size));
     tr.appendChild(el("td", "n when", when));
 
@@ -358,22 +411,17 @@ ${text}
       open.setAttribute("aria-describedby", titleId);
       acts.appendChild(open);
     }
-    var del = el("button", "btn sm danger", TEXT.remove);
-    del.type = "button";
-    del.setAttribute("aria-describedby", titleId);
-    del.addEventListener("click", function () { ask(it); });
-    acts.appendChild(del);
-    rowButtons.push(del);
-    deleteOf[it.id] = del;
-    if (firstOf[it.id] === undefined) firstOf[it.id] = del;
+    acts.appendChild(moreMenu(it, i, [{ text: TEXT.sharing, kind: "share" }, { text: TEXT.remove, kind: "delete", danger: true }], titleId));
+    if (firstOf[it.id] === undefined) firstOf[it.id] = moreOf[it.id];
     cell.appendChild(acts);
     tr.appendChild(cell);
     return tr;
   }
 
   function render() {
+    closeMenu(false);
     firstOf = {};
-    deleteOf = {};
+    moreOf = {};
     rowButtons = [];
     var n = items.length;
     var all = next === null;
@@ -393,6 +441,8 @@ ${text}
     rowsDisabled(working);
     $("media-list").hidden = n === 0;
     $("media-hint").hidden = n === 0;
+    // The line about opening a restricted item, when the list has one to open.
+    $("media-gate").hidden = !items.some(function (it) { return it.access === "people" || it.access === "me"; });
     $("media-empty").hidden = n !== 0 || !all;
     $("media-more").hidden = all;
     $("dash-load").textContent = "";
@@ -487,6 +537,15 @@ ${text}
     }).then(null, function () { return null; });
   }
 
+  // The list read again for the Sharing box (as read, which it is), with its rows usable
+  // afterwards, as the Tours page's rows are when its list is rebuilt.
+  function reload() {
+    return read().then(function (r) {
+      if (r === true) rowsDisabled(false);
+      return r;
+    });
+  }
+
   // ---- Show more ----
 
   function more() {
@@ -511,12 +570,12 @@ ${text}
   // ---- The question before a delete ----
 
   function ask(it) {
-    if (working || asking !== null) return;
+    if (working || anyOpen()) return;
     var opened = question.open({
       title: TEXT.askBefore + titleOf(it) + TEXT.askAfter,
       focus: "delete-keep",
-      // Back to the item's Delete when it is still listed, else to the page's heading.
-      back: function () { return deleteOf[it.id]; },
+      // Back to the item's More when it is still listed, else to the page's heading.
+      back: function () { return moreOf[it.id]; },
       fallback: "h-page",
       onClose: function () { asking = null; },
     });
@@ -527,10 +586,6 @@ ${text}
   // sent again, to finish the cleaning (a later request finishes it otherwise).
   function cleaning(res) {
     return res !== null && res.status === 500 && Dash.errorOf(res) === "cleanup_pending";
-  }
-
-  function pause(ms) {
-    return new Promise(function (resolve) { setTimeout(resolve, ms); });
   }
 
   // Sends the delete, again after a pause while it answers cleanup_pending, at most MAX_TRIES times; the last answer.
@@ -556,14 +611,16 @@ ${text}
   // API's own 404 not_found (deleted, or never there), not a 404 from something in between;
   // res is that answer (null when none came), for the sentence of a failure (429 has its own).
   // Null when the visitor was sent to sign in. The id matched ITEM_ID.
-  function gone(id) {
+  function itemGone(id) {
     return Dash.api("GET", ITEM + encodeURIComponent(id)).then(function (res) {
       if (res.status === 401) { Dash.signedOut(); return null; }
       return { gone: res.status === 404 && Dash.errorOf(res) === "not_found", res: res };
     }, function () { return { gone: false, res: null }; });
   }
 
+${shareScript(p.sharing)}
   function startPage() {
+${shareListeners(p.sharing)}    [${shareRepeatIds(p.sharing)}, "delete-keep", "delete-go"].forEach(function (id) { noRepeat($(id)); });
     $("media-more").addEventListener("click", more);
     $("delete-keep").addEventListener("click", function () { question.dismiss(); });
     $("delete-go").addEventListener("click", function () {
@@ -597,17 +654,22 @@ ${text}
         });
       }
       run(it.id).then(function (res) { return settle(res); }, function () {
-        return gone(it.id).then(function (g) {
+        return itemGone(it.id).then(function (g) {
           if (g === null) return;
           return settle(null, g);
         });
       });
+    });
+    // A click outside the open menu closes it.
+    document.body.addEventListener("click", function (ev) {
+      if (openMenu !== null && !openMenu.wrap.contains(ev.target)) closeMenu(false);
     });
   }
 
   startPage();
   Dash.start(function (who) {
     workspace = who.workspace;
+    myEmail = who.email;
     return read().then(function (r) {
       if (r !== true && r !== false) $("dash-load").textContent = Dash.failure(r);
     });

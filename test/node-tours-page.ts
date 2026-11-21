@@ -1,7 +1,8 @@
 // Test only, Node only (left out of the Workers typecheck in tsconfig.cloudflare.json, as
 // test/harness.node.ts is): the harness that runs the Tours page's scripts under Node, shared by
 // test/node-dash-pages.test.ts (the list and its changes) and test/node-dash-tours-sharing.test.ts
-// (who can view a tour). The page's document, the shared /dash/dash.js and the page's
+// (who can view a tour), and through openDash by test/node-dash-media-sharing.test.ts (who can
+// view an image or a clip). The page's document, the shared /dash/dash.js and the page's
 // /dash/tours.js are run in one fresh Node `vm` context against a stand-in document built from
 // the page's own HTML (test/pages-dom.ts), with a stand-in address, clipboard, timer, window
 // listener and fetch. The fetch either answers from the test or is handed to the real app, as a
@@ -65,7 +66,16 @@ export function checkTabs(): void {
 
 /** Opens the Tours page at `origin` and runs its two scripts in order, as a browser does with two deferred scripts. */
 export function openTours(respond: Responder, opts: { origin?: string; clipboard?: Clipboard["answer"] } = {}): Tab {
-  const doc = new FakeDocument(TOURS_HTML);
+  return openDash({ html: TOURS_HTML, js: TOURS_JS, file: "tours.js" }, respond, opts);
+}
+
+/**
+ * Opens a dashboard page (its document, and its script after /dash/dash.js) at `origin`, as
+ * openTours does the Tours page; `forbid` names more globals the script must not touch (the
+ * Images and GIFs pages' tests add URL and Image).
+ */
+export function openDash(page: { html: string; js: string; file: string }, respond: Responder, opts: { origin?: string; clipboard?: Clipboard["answer"]; forbid?: string[] } = {}): Tab {
+  const doc = new FakeDocument(page.html);
   const origin = opts.origin ?? APP;
   let left: string | null = null;
   const fetched: Fetched[] = [];
@@ -116,7 +126,7 @@ export function openTours(respond: Responder, opts: { origin?: string; clipboard
   const addEventListener = (type: string, fn: () => void) => (onWindow[type] ??= []).push(fn);
 
   const context: Record<string, unknown> = { document: doc, location, fetch, navigator, setTimeout, addEventListener };
-  for (const name of ["localStorage", "sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "window", "self", "top", "parent", "opener", "open", "postMessage", "setInterval", "console", "alert", "confirm", "prompt", "history"]) {
+  for (const name of ["localStorage", "sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "window", "self", "top", "parent", "opener", "open", "postMessage", "setInterval", "console", "alert", "confirm", "prompt", "history", ...(opts.forbid ?? [])]) {
     Object.defineProperty(context, name, {
       get() {
         violations.push(name);
@@ -127,7 +137,7 @@ export function openTours(respond: Responder, opts: { origin?: string; clipboard
   const ctx = vm.createContext(context);
   vm.runInContext(`(function () { var Real = Date; Date = function (v) { return arguments.length === 0 ? new Real(${NOW}) : new Real(v); }; Date.now = function () { return ${NOW}; }; Date.prototype = Real.prototype; })();`, ctx);
   vm.runInContext(DASH_JS, ctx, { filename: "dash.js" });
-  vm.runInContext(TOURS_JS, ctx, { filename: "tours.js" });
+  vm.runInContext(page.js, ctx, { filename: page.file });
 
   const tab: Tab = {
     doc,

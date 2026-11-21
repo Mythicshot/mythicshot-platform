@@ -64,8 +64,72 @@ const SHARED_TEXT: Record<string, string> = {
   askAfter: '"?',
   deleting: "Deleting…",
   cut: "…",
+  more: "More",
   notReloaded: NOT_RELOADED,
 };
+
+/**
+ * The Sharing box's words in the script (Plan 2k): the tour box's own (test/dash.test.ts), with
+ * the noun of the page's items in place of "tour", none of a move's, and the refusal 409
+ * too_large_to_restrict.
+ */
+const shareText = (noun: string): Record<string, string> => ({
+  anyone: "Anyone with the link",
+  onePerson: "1 person",
+  people: " people",
+  nobody: "Nobody yet",
+  onlyMe: "Only me",
+  noSetting: "—",
+  sharing: "Sharing…",
+  shareBefore: 'Who can view "',
+  meBefore: "You prove your own address, ",
+  meAfter: ", the same way.",
+  countBefore: "People who can view · ",
+  of: " of ",
+  removeBefore: "Remove ",
+  removeMark: "✕",
+  quote: '"',
+  notEmailAfter: '" does not look like an email address. Nothing was added.',
+  fullBefore: "The list is full at ",
+  fullAfter: " people. Remove someone first.",
+  wouldBefore: "That would make ",
+  wouldMiddle: " people, and the list holds ",
+  wouldAfter: ". Nothing was added.",
+  saving: "Saving…",
+  restrictBefore: 'Restrict "',
+  restrictPeople: "From now on only the people you chose can open the link. The link itself stays the same.",
+  restrictMe: "From now on only you can open the link. The link itself stays the same.",
+  keepPublic: "Keep it public",
+  restrictTour: `Restrict ${noun}`,
+  publicBefore: 'Let anyone with the link view "',
+  publicText: "Nobody will be asked to sign in any more. Anyone who has or gets the link can open it. Your list of people is kept in case you restrict it again.",
+  keepRestricted: "Keep it restricted",
+  makePublic: "Make public",
+  cannotRestrict: `This site cannot send mail, so this ${noun} cannot be restricted. Nothing was changed.`,
+  tooLarge: `This ${noun} is too large to restrict on this site. Nothing was changed.`,
+  busyAgain: `The ${noun} changed while this was being saved. Press Save again.`,
+  badViewerAfter: '" is not accepted as an email address. Remove it and press Save again.',
+  tooManyBefore: "The list holds at most ",
+  tooManyAfter: " people. Remove some and press Save again.",
+});
+
+/** The Sharing box's words in the document: the tour box's, with the noun of the page's items, and the line about copies already made. */
+const shareWording = (noun: string): string[] => [
+  "Who can view",
+  "Anyone with the link",
+  "No sign-in. Fastest for viewers.",
+  "Only people I choose",
+  "They prove their email address with a link we send them.",
+  "Only me",
+  'This site cannot send mail, so only "Anyone with the link" can be chosen here.',
+  `Restricting takes effect at once on this site, but anyone who already opened or saved the ${noun} keeps their copy.`,
+  "Add",
+  `You can always view your own ${noun}s. People on the list are not told they were added: send them the link yourself.`,
+  `Restricting takes effect at once on this site, but anyone who already opened or saved the ${noun} keeps their copy.`,
+  `This site cannot send mail, so once this ${noun} is public it cannot be restricted again here.`,
+  "Cancel",
+  "Save",
+];
 
 type Page = { name: string; path: string; script: string; html: string; js: string; wording: string[]; text: Record<string, string>; api: string; other: string; button: string };
 
@@ -85,18 +149,21 @@ const PAGES: Page[] = [
       // Proposed: the names a screen reader gives the preview's column and the buttons' column; the eye does not see them.
       "Preview",
       "Image",
+      "Who can view",
       "Size",
       "Shared",
       "Actions",
       "Show more",
       "No images yet",
       "Take a screenshot in Mythicshot and choose Publish to. It shows up here with a link to share.",
-      "Anyone with the link can see the image. Deleting it stops the link for everyone.",
+      'Deleting an image stops its link for everyone. "More" holds: Sharing, Delete.',
+      "Opening a restricted image asks you for your email address too: the dashboard's sign-in does not carry over to the image's address.",
       QUESTION,
       "Keep it",
       "Delete image",
+      ...shareWording("image"),
     ],
-    text: { oneItem: "1 image", items: " images", untitled: "Untitled image", ...SHARED_TEXT },
+    text: { oneItem: "1 image", items: " images", untitled: "Untitled image", ...SHARED_TEXT, ...shareText("image") },
   },
   {
     name: "GIFs",
@@ -112,23 +179,26 @@ const PAGES: Page[] = [
       "GIFs",
       "Preview",
       "GIF",
+      "Who can view",
       "Size",
       "Shared",
       "Actions",
       "Show more",
       "No GIFs yet",
       "Record a clip in Mythicshot and choose Publish to. It shows up here with a link to share.",
-      "Anyone with the link can watch the GIF. Deleting it stops the link for everyone.",
+      'Deleting a GIF stops its link for everyone. "More" holds: Sharing, Delete.',
+      "Opening a restricted clip asks you for your email address too: the dashboard's sign-in does not carry over to the clip's address.",
       QUESTION,
       "Keep it",
       "Delete GIF",
+      ...shareWording("clip"),
     ],
-    text: { oneItem: "1 GIF", items: " GIFs", untitled: "Untitled GIF", ...SHARED_TEXT },
+    text: { oneItem: "1 GIF", items: " GIFs", untitled: "Untitled GIF", ...SHARED_TEXT, ...shareText("clip") },
   },
 ];
 
 /** The strings with a space in the scripts that are not words for a person: class names and a link's rel. */
-const CLASS_NAMES = ["btn sm", "btn sm quiet", "btn sm danger", "thumb play", "n size", "n when", "noopener noreferrer"];
+const CLASS_NAMES = ["btn sm", "btn sm quiet", "btn sm danger", "thumb play", "n size", "n when", "noopener noreferrer", "tag warn"];
 
 const seen = (c: Call) => ({ status: c.status, headers: [...c.headers.entries()].sort(), body: c.text });
 
@@ -248,7 +318,14 @@ describe("the Images and GIFs pages", () => {
       const doc = new FakeDocument(p.html);
       expect(textNodes(doc.body), p.path).toEqual(p.wording);
       expect(textNodes(doc.head), p.path).toEqual([p.name]);
-      for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt", "placeholder"]) expect(e.hasAttribute(name), `${p.path} <${e.tagName} ${name}>`).toBe(false);
+      // No other words hide in attributes a person can meet; the one exception is the Sharing
+      // box's address field, whose placeholder is the tour box's example address, exactly.
+      for (const e of doc.body.all()) {
+        for (const name of ["aria-label", "title", "alt", "placeholder"]) {
+          const allowed = e.id === "share-input" && name === "placeholder" && e.getAttribute(name) === "name@example.com";
+          expect(e.hasAttribute(name) && !allowed, `${p.path} <${e.tagName} ${name}>`).toBe(false);
+        }
+      }
       const current = doc.body.all().filter((e) => e.tagName === "a" && e.getAttribute("aria-current") === "page");
       expect(current.map((a) => [a.textContent, a.getAttribute("href")]), p.path).toEqual([[p.name, p.path]]);
       // The question before a delete.
@@ -273,9 +350,10 @@ describe("the Images and GIFs pages", () => {
   it("are one module: the two documents and the two scripts differ only in their words and the API's kind", () => {
     const [images, gifs] = PAGES;
     const neutral = (text: string, p: Page) => {
-      let out = text;
+      // The kind and the play mark first: the words include a lone quote (the Sharing box's), which would split them.
+      let out = text.replace(/var KIND = "[a-z]+";/, "").replace(/var PLAY = (?:true|false);/, "");
       for (const w of [...p.wording.slice(SHELL.length), ...Object.values(p.text), p.name, p.path, p.script].sort((a, b) => b.length - a.length)) out = out.split(w).join("<w>");
-      return out.replace(/var KIND = "[a-z]+";/, "").replace(/var PLAY = (?:true|false);/, "");
+      return out;
     };
     const main = (html: string) => html.slice(html.indexOf("<main"));
     expect(neutral(main(images.html), images)).toBe(neutral(main(gifs.html), gifs));
@@ -327,7 +405,14 @@ describe("the Images and GIFs pages", () => {
       expect(p.js).toContain('var USAGE = "/api/v1/usage";');
       expect(p.js).toContain('var TOTAL = KIND === "image" ? "images" : "gifs";');
       expect(p.js).toContain('return Dash.api("GET", USAGE).then(');
-      expect(p.js.match(/Dash\.api\(/g), p.path).toHaveLength(4);
+      // Who can view an item (Plan 2k): read and changed through its access path, made only from an id of the API's shape, escaped.
+      expect(p.js).toContain('if (typeof id !== "string" || !ITEM_ID.test(id)) throw new TypeError("id");\n    return "/api/v1/media/" + encodeURIComponent(id) + "/access";');
+      expect(p.js).toContain('return Dash.api("GET", accessPath(id)).then(');
+      expect(p.js).toContain('return Dash.api("PUT", path, body).then(step, function () { return step(null); });');
+      expect(p.js).toContain("var path = accessPath(s.id);");
+      // Exactly these six: list, usage, delete, the item, and its access read and write.
+      expect(p.js.match(/Dash\.api\(/g)).toHaveLength(6);
+      expect(p.js.match(/Dash\.api\(/g), p.path).toHaveLength(6);
       expect(p.js).not.toContain(p.other === "clip" ? "kind=clip" : "kind=image");
       // The preview's address: the fixed path and the item's own id, which matched the API's exact shape.
       expect(p.js).toContain("var ITEM_ID = /^med_[0-9a-f]{24}$/;");
@@ -338,7 +423,7 @@ describe("the Images and GIFs pages", () => {
       for (const api of forbidden) expect(p.js, `${p.path} ${api}`).not.toContain(api);
       // The one use of the address is its origin, put before a link that is one path of this site.
       expect([...p.js.matchAll(/\blocation\b\s*(\.\s*[a-zA-Z]+)?/g)].map((m) => m[1])).toEqual([".origin"]);
-      // Two timers: the moment "Copied" shows, and the pause before a delete is sent again. The one browser API beyond the page is the clipboard.
+      // Two timers: the moment "Copied" shows, and pause() (before a delete or a change of who can view is sent again, and before the Sharing box's confirming button works). The one browser API beyond the page is the clipboard.
       expect(p.js.match(/setTimeout\(/g), p.path).toHaveLength(2);
       expect(p.js).toContain("var PAUSES_MS = [400, 1200];");
       expect([...p.js.matchAll(/navigator\.[a-zA-Z]+/g)].map((m) => m[0]), p.path).toEqual(["navigator.clipboard", "navigator.clipboard", "navigator.clipboard"]);
@@ -371,16 +456,28 @@ describe("the Images and GIFs pages", () => {
       const all = doc.root.all();
       for (const b of all.filter((e) => e.tagName === "button")) expect(b.getAttribute("type"), `${p.path} #${b.id}`).toBe("button");
       const messages = all.filter((e) => /\b(?:message|load)\b/.test(e.className) && e.parent?.tagName !== "noscript");
-      expect(messages.map((m) => m.id).sort(), p.path).toEqual(["dash-load", "delete-message", "media-message"]);
+      expect(messages.map((m) => m.id).sort(), p.path).toEqual(["dash-load", "delete-message", "media-message", "share-add-message", "share-message"]);
       for (const m of messages) expect([m.getAttribute("role"), m.getAttribute("aria-live")], `${p.path} #${m.id}`).toEqual(["status", "polite"]);
       for (const m of messages.filter((e) => e.id !== "dash-load")) expect(m.hidden, `${p.path} #${m.id}`).toBe(true);
       expect(p.js).toContain('var BEHIND = ["dash-top", "media-page"];');
       expect(doc.getElementById("media-page")!.contains(doc.getElementById("delete-dialog"))).toBe(false);
+      expect(doc.getElementById("media-page")!.contains(doc.getElementById("share-dialog"))).toBe(false);
+      // The Sharing box is the tour's: a dialog named by its title, with three real radio buttons of one group, each in its label.
+      const box = doc.getElementById("share-box")!;
+      expect([box.getAttribute("role"), box.getAttribute("aria-modal"), box.getAttribute("aria-labelledby")]).toEqual(["dialog", "true", "share-title"]);
+      expect(all.filter((e) => e.tagName === "input" && e.getAttribute("type") === "radio").map((r) => [r.id, r.getAttribute("name"), all.some((l) => l.tagName === "label" && l.getAttribute("for") === r.id && l.contains(r))])).toEqual([
+        ["share-public", "share-access", true],
+        ["share-people", "share-access", true],
+        ["share-me", "share-access", true],
+      ]);
+      // An item's box has no move: no progress, no stopped move, and none of a move's words.
+      for (const id of ["share-moving", "share-progress", "share-resume", "share-resume-buttons", "share-make-public"]) expect(doc.getElementById(id), `${p.path} #${id}`).toBeNull();
+      expect(p.js, p.path).not.toMatch(/Moving|pictures|pagehide|PAUSE_MS|showMoving|function keepRestricted|makePublicAgain|access_switching|switch_cancelled|republish_needed/);
       for (const h of all.filter((e) => e.tagName === "h1" || e.tagName === "h2")) expect(h.getAttribute("tabindex"), `${p.path} #${h.id}`).toBe("-1");
       const dialog = all.find((e) => e.getAttribute("role") === "alertdialog")!;
       expect([dialog.getAttribute("aria-modal"), dialog.getAttribute("aria-labelledby"), dialog.getAttribute("aria-describedby")]).toEqual(["true", "delete-title", "delete-text"]);
       // The empty headers have names a screen reader reads and the eye does not see.
-      expect(all.filter((e) => e.tagName === "th").map((th) => [th.textContent, th.all().map((c) => c.className)]), p.path).toEqual([["Preview", ["vh"]], [p.wording[SHELL.length + 2], []], ["Size", []], ["Shared", []], ["Actions", ["vh"]]]);
+      expect(all.filter((e) => e.tagName === "th").map((th) => [th.textContent, th.all().map((c) => c.className)]), p.path).toEqual([["Preview", ["vh"]], [p.wording[SHELL.length + 2], []], ["Who can view", []], ["Size", []], ["Shared", []], ["Actions", ["vh"]]]);
       // On a phone the workspace's name is left out of the line, as in mockup 11.
       expect(doc.getElementById("media-in")!.className).toBe("wide-only");
       // Every element the script looks up by id is on the page.
@@ -392,6 +489,8 @@ describe("the Images and GIFs pages", () => {
     const phone = [...DASH_CSS.matchAll(/@media \(max-width: 720px\) \{\n([\s\S]*?)\n\}/g)].map((m) => m[1]).join("\n");
     expect(phone).toContain(".media thead, .media td.size, .media td.when { display: none; }");
     expect(phone).toContain(".media td.acts-cell { grid-column: 1 / -1; margin-top: 8px; }");
+    // On a phone "Who can view" joins the details line (the script), and its column is hidden, as on the Tours page.
+    expect(phone).toContain(".tours td.view, .media td.view { display: none; }");
     expect(DASH_CSS).not.toMatch(/overflow-x|100vw/);
   });
 });

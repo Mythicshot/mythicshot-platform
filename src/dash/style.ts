@@ -176,8 +176,9 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
 .progress::-webkit-progress-bar { background: var(--line); border-radius: 8px; }
 .progress::-webkit-progress-value { background: var(--accent); border-radius: 8px; }
 .progress::-moz-progress-bar { background: var(--accent); border-radius: 8px; }
+/* On a phone "Who can view" joins the details line, on the Tours page and the Images and GIFs pages alike. */
 @media (max-width: 720px) {
-  .tours td.view { display: none; }
+  .tours td.view, .media td.view { display: none; }
 }
 @media (max-width: 720px) {
   .tours, .tours tbody, .tours tr, .tours td { display: block; }
