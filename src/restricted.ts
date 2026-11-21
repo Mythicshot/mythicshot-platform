@@ -34,10 +34,12 @@
 //   unknown slug: for a tour that is not published, is of a disabled workspace, is in the
 //   middle of a move of its pictures (either way), or whose snapshot cannot be served.
 //
-// Calls: the public lookup, the tour, and, with a viewer cookie, the session and mayView:
-// at most 4, and one more after the answer at most once a day (the session's last use).
+// Calls of the page: the public lookup, the tour, and, with a viewer cookie, the session and
+// mayView: at most 4 database calls, and one more after the answer at most once a day (the
+// session's last use). A picture: 3 database calls and 1 store read (see the route below).
 import type { Hono } from "hono";
 import { mayView, tourForServing, type ServedPicture, type ServedTour } from "./access.ts";
+import { isBeforeAccounts } from "./accounts.ts";
 import { hashToken } from "./auth.ts";
 import { json } from "./http.ts";
 import { MalformedSnapshot, contentSecurityPolicy, escapeHtml, pageHtml, pageTour, type PageTour } from "./page.ts";
@@ -181,18 +183,31 @@ export async function restrictedAnswer(req: Request, deps: Deps, slug: string): 
 }
 
 /**
- * The tour, or null also on a database a migration has not reached yet (no access setting,
- * no private text, no switch table): such a database has no restricted tour, and the tour
- * page must answer an unknown slug there as it always did, never with an error. Any other
- * failure is a failure.
+ * True for the failure of a lookup on a database that migrations 0014 (the access setting,
+ * the private text, the switch and the list) and 0015 (viewer codes and sessions) have not
+ * reached, or that the accounts migration has not reached (isBeforeAccounts): those names
+ * exactly, as the two runtimes write them (`no such table: access_switch` on Node,
+ * `D1_ERROR: no such column: t.access at offset 40: SQLITE_ERROR` on Workers), ending where
+ * the name does. Any other missing name, a typo in a query included, is a real failure.
+ */
+export function isBeforeRestricted(err: unknown): boolean {
+  if (isBeforeAccounts(err)) return true;
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
+    if (/(?:^|: )no such (?:table: (?:access_switch|tour_viewer|viewer_code|viewer_session)|column: (?:t\.access|s\.private_data))(?:$|:| at offset )/.test(e.message)) return true;
+  }
+  return false;
+}
+
+/**
+ * The tour, or null also on a database those migrations have not reached (isBeforeRestricted):
+ * such a database has no restricted tour, and the tour page must answer an unknown slug there
+ * as it always did, never with an error. Any other failure is a failure.
  */
 async function servedTour(deps: Deps, slug: string): Promise<ServedTour | null> {
   try {
     return await tourForServing(deps, { slug });
   } catch (err) {
-    for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
-      if (/no such (?:table|column)/.test(e.message)) return null;
-    }
+    if (isBeforeRestricted(err)) return null;
     throw err;
   }
 }
@@ -205,8 +220,8 @@ export function restrictedRoutes(app: Hono, deps: Deps): void {
   // nothing ever read from the store first: the name's shape (no call); the tour (one call),
   // which must be servable and whose LIVE snapshot must hold the picture by that name (from
   // tourForServing's map, never a key made from the request); the proved address (one call);
-  // mayView (one call); then the one read of the private store. 4 calls, and one more after
-  // the answer at most once a day. No Range (the whole picture is always a correct answer),
+  // mayView (one call); then the one read of the private store: 3 database calls and 1 store
+  // read, and one more database call after the answer at most once a day. No Range (the whole picture is always a correct answer),
   // no ETag, and no-store, so an address removed from the list loses the pictures it has
   // seen at its next request.
   app.get("/t/:slug/v/:name", async (c) => {

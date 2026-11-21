@@ -236,7 +236,8 @@ describe("the viewer pages", () => {
     ];
     for (const [html, id, sentence] of where) {
       const el = new FakeDocument(html).getElementById(id)!;
-      expect([el.tagName, el.className, el.children.length], id).toEqual(["span", "address", 0]);
+      // The address a link proves stands out as the invite page's does: bold, in the sentence.
+      expect([el.tagName, el.className, el.children.length], id).toEqual(id === "open-email" ? ["strong", "address invited", 0] : ["span", "address", 0]);
       expect(el.parent!.textContent, id).toBe(sentence);
       expect(VIEW_JS, id).toMatch(new RegExp(`say\\(\\$\\("${id}"\\), (value|d\\.email)\\);`));
     }
@@ -343,6 +344,7 @@ describe("the viewer pages", () => {
     expect([shownAtFirst(VIEW_GATE_HTML), shownAtFirst(VIEW_DENIED_HTML), shownAtFirst(VIEW_LINK_HTML), shownAtFirst(VIEW_SIGNOUT_HTML)]).toEqual([["ask"], [], [], ["signout"]]);
     // The look is the sign-in card's, with a quiet button added; the tour page's line keeps to its own two rules.
     expect(VIEW_CSS.startsWith(SIGNIN_CSS)).toBe(true);
+    expect(SIGNIN_CSS).toContain(".address.invited { font-weight: 700; }");
     expect(VIEW_CSS.slice(SIGNIN_CSS.length)).toMatch(/^button\.quiet \{/);
     expect(SHARED_CSS).not.toMatch(/url\(|@import|https?:/);
     expect(SHARED_CSS.match(/^\.dp-shared/gm)).toHaveLength(2);

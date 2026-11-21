@@ -22,7 +22,9 @@
 // - denied (mockup 6, left): served at /t/<slug> to a browser whose proved address may not
 //   view the tour. "Use another address" signs the browser out and loads the tour's address
 //   again, which then shows the gate.
-// - link (mockup 5, right; 6, right): /view, the page a viewer link opens. The code is after
+// - link (mockup 5, right; 6, right): /view, the page a viewer link opens. It shows the address
+//   the link proves in bold, inside its one sentence, as the invite page shows the invited
+//   address, so a person who was forwarded someone else's link notices. The code is after
 //   `#`, which a browser sends to no server. The script's first two statements read that
 //   part of the address and take it out of the address bar, before anything else and before
 //   any request, so back, reload and the tab's history never show it. The code then lives in
@@ -121,7 +123,7 @@ export const VIEW_LINK_HTML = `${HEAD("Open the tour")}
 
   <section id="open" aria-labelledby="h-open" hidden>
     <h1 id="h-open" tabindex="-1">Open the tour</h1>
-    <p class="lead">Press the button to view it in this browser as <span class="address" id="open-email"></span>.</p>
+    <p class="lead">Press the button to view it in this browser as <strong class="address invited" id="open-email"></strong>.</p>
     <p class="message" id="open-message" role="status" aria-live="polite"></p>
     <button type="button" class="primary wide" id="open-button">Open the tour</button>
     <p class="small">This browser will remember your address for tours shared with you, for 30 days of use. It gives no access to anything else.</p>

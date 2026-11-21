@@ -17,7 +17,7 @@ import type { Db, Deps, FileStore } from "../src/ports.ts";
 import { COPY_BATCH } from "../src/publish.ts";
 import { PLAYER_CSS_PATH, PLAYER_JS_PATH } from "../src/player/assets.ts";
 import { LIMITS_VIEWER } from "../src/rate.ts";
-import { RESTRICTED_GATE, RESTRICTED_PAGE_CSP, RESTRICTED_PAGE_HEADERS, restrictedPageHtml, workspaceKeyOf } from "../src/restricted.ts";
+import { isBeforeRestricted, RESTRICTED_GATE, RESTRICTED_PAGE_CSP, RESTRICTED_PAGE_HEADERS, restrictedPageHtml, workspaceKeyOf } from "../src/restricted.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { VIEW_DENIED_HTML, VIEW_GATE_HTML } from "../src/view-page.ts";
 import { VIEWER_CODE_MS, VIEWER_COOKIE } from "../src/viewers.ts";
@@ -411,6 +411,26 @@ async function previousPage(deps: Deps, raw: string, ifNoneMatch: string | null)
 async function seenOf(res: Response) {
   return { status: res.status, headers: [...res.headers.entries()].sort(), body: await res.text() };
 }
+
+describe("a database migrations have not reached", () => {
+  it("only the names migrations 0014 and 0015 (and the accounts migration) add count as such; any other missing name is a failure", () => {
+    const yes = [
+      "no such table: access_switch",
+      "no such table: tour_viewer",
+      "no such table: viewer_session",
+      "no such column: t.access",
+      "D1_ERROR: no such column: s.private_data at offset 77: SQLITE_ERROR",
+      "D1_ERROR: no such table: access_switch: SQLITE_ERROR",
+      "no such table: membership",
+      "no such column: du.status",
+    ];
+    const no = ["no such table: acess_switch", "no such table: access_switches", "no such column: t.accessx", "no such column: t.acces", "no such table: snapshot_objekt", "no such column: s.data2", "database is locked", "SQLITE_BUSY"];
+    for (const m of yes) expect(isBeforeRestricted(new Error(m)), m).toBe(true);
+    for (const m of yes) expect(isBeforeRestricted(new Error("D1_ERROR", { cause: new Error(m) })), `cause: ${m}`).toBe(true);
+    for (const m of no) expect(isBeforeRestricted(new Error(m)), m).toBe(false);
+    expect(isBeforeRestricted("no such table: access_switch")).toBe(false);
+  });
+});
 
 describe("public tours", () => {
   it("answer the very bytes 0.1.38 answered for a fixed tour, apart from the player's file names (and so the ETag)", SLOW, async () => {
