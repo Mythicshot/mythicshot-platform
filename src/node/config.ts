@@ -55,9 +55,9 @@ export const NODE_SETTINGS: readonly string[] = [
  *
  * HOME_URL is the site's home page, where the mark and the name at the top of the
  * dashboard, sign-in and invite pages lead (homeUrlSetting, src/https-address.ts). Unset or
- * empty, the config has no such key and they are no link. A value that cannot be used
- * throws its own fixed line, as an address that cannot be used does: an install that asked
- * for a link should not quietly get none.
+ * empty, the config has no such key and they are no link. A value that cannot be used is
+ * left out the same way; it never stops the start (the link is cosmetic), and the entry
+ * writes the one line for it, as for DOWNLOAD_URL.
  *
  * SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and CONNECTION_MAX_DAYS are the sign-in lifetimes
  * (lifetimesSetting, src/lifetimes.ts): unset or empty is the default (the config then has no
@@ -78,9 +78,9 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   // The app's download page: kept only when usable, never a reason to stop (the entry says
   // the one line for a value that cannot be used, from downloadUrlSetting).
   const downloadUrl = downloadUrlSetting(env.DOWNLOAD_URL).url;
-  // The site's home page: a value that cannot be used stops the start.
-  const home = homeUrlSetting(env.HOME_URL);
-  if (!home.ok) throw new Error(home.problem);
+  // The site's home page: kept only when usable, never a reason to stop (the entry says
+  // the one line for a value that cannot be used, from homeUrlSetting).
+  const homeUrl = homeUrlSetting(env.HOME_URL).url;
   // The sign-in lifetimes, read by name: env.SESSION_MAX_DAYS, env.CONNECTION_IDLE_DAYS, env.CONNECTION_MAX_DAYS.
   const { lifetimes } = lifetimesSetting({ SESSION_MAX_DAYS: env.SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS: env.CONNECTION_IDLE_DAYS, CONNECTION_MAX_DAYS: env.CONNECTION_MAX_DAYS });
   return {
@@ -91,7 +91,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
     ...(siteHost === null ? {} : { siteHost }),
     ...(inviteContact === "" ? {} : { inviteContact }),
     ...(downloadUrl === null ? {} : { downloadUrl }),
-    ...(home.url === null ? {} : { homeUrl: home.url }),
+    ...(homeUrl === null ? {} : { homeUrl }),
     ...(sameLifetimes(lifetimes, DEFAULT_LIFETIMES) ? {} : { lifetimes }),
   };
 }

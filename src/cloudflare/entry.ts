@@ -98,10 +98,8 @@ export function depsFromEnv(
   const inviteContact = inviteContactFromWorkerEnv(env);
   // A var that is not text, or not a usable address, is left out (downloadUrlSetting).
   const downloadUrl = downloadUrlSetting(env.DOWNLOAD_URL).url;
-  // The site's home page. One that cannot be used never gets here: the fetch handler
-  // answers misconfigured first; here it is only left out.
-  const home = homeUrlSetting(env.HOME_URL);
-  const homeUrl = home.ok ? home.url : null;
+  // The site's home page: a var that is not text, or not a usable address, is left out (homeUrlSetting).
+  const homeUrl = homeUrlSetting(env.HOME_URL).url;
   // The sign-in lifetimes: a var that cannot be used is its default (lifetimesSetting).
   const { lifetimes } = lifetimesSetting(lifetimeVars(env));
   return {
@@ -138,6 +136,8 @@ export function depsFromEnv(
 
 /** Whether this isolate has said the line for a DOWNLOAD_URL that cannot be used. */
 let downloadSaid = false;
+/** Whether this isolate has said the line for a HOME_URL that cannot be used. */
+let homeSaid = false;
 /** Whether this isolate has said the lines for the sign-in lifetimes that cannot be used. */
 let lifetimesSaid = false;
 
@@ -169,13 +169,6 @@ export default {
       console.error(`storage: ${allowance.problem}`);
       return misconfigured();
     }
-    // And for a home page that cannot be used: the install asked for a link, and quietly
-    // serving the pages without it would hide the mistake.
-    const home = homeUrlSetting(env.HOME_URL);
-    if (!home.ok) {
-      console.error(`home page: ${home.problem}`);
-      return misconfigured();
-    }
     // The client address, for rate limits only: the connecting address as Cloudflare gives
     // it, which a visitor cannot set. No other header is read for it, and it is kept only
     // when it is one bare IP address (setClientAddress checks); else it is unknown.
@@ -187,6 +180,15 @@ export default {
       if (download.problem !== null) {
         downloadSaid = true;
         console.error(download.problem);
+      }
+    }
+    // Nor does a home page that cannot be used: the logo is no link, and its one fixed
+    // line, which holds no value, is written once for the life of the isolate.
+    if (!homeSaid) {
+      const home = homeUrlSetting(env.HOME_URL);
+      if (home.problem !== null) {
+        homeSaid = true;
+        console.error(home.problem);
       }
     }
     // Nor do sign-in lifetimes that cannot be used: each is its default, and its one fixed

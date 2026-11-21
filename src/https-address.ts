@@ -2,7 +2,7 @@
 // INVITE_CONTACT's https form (src/signin/invite.ts), DOWNLOAD_URL, the public page the
 // desktop app is downloaded from, and HOME_URL, the site's home page the brand links to. A
 // value that cannot be used is never an error in httpsAddressFrom: the caller decides, and
-// leaves the feature out (INVITE_CONTACT, DOWNLOAD_URL) or stops the start (HOME_URL).
+// leaves the feature out (INVITE_CONTACT, DOWNLOAD_URL, HOME_URL).
 import { normaliseHost } from "./hosts.ts";
 
 /** The longest DOWNLOAD_URL used, in characters, as written and as handed on. */
@@ -79,8 +79,7 @@ export function downloadUrlSetting(raw: unknown): { url: string | null; problem:
 export const HOME_URL_MAX = 300;
 
 /** The one line for a HOME_URL that cannot be used. It names the setting and never repeats the value. */
-export const HOME_URL_UNUSABLE =
-  "HOME_URL is not a usable address. Write it like https://www.example.com/: https:// (http:// only for localhost), no user name or password, no # part, at most 300 characters.";
+export const HOME_URL_UNUSABLE = "home page: off, because HOME_URL is not a usable address. The site runs; the logo is not a link.";
 
 /** An http address on this machine as written: the strict rule's characters, after `http://`. */
 const LOCAL_HTTP_WRITTEN = /^http:\/\/[a-z0-9.-]+(?::[0-9]{1,5})?(?:[\/?][A-Za-z0-9._~!$&'()*+,;=:@%\/?-]*)?$/i;
@@ -117,17 +116,18 @@ function localHttpAddressFrom(text: string, maxChars: number): string | null {
  * writes it. That is an https address the strict rule keeps (httpsAddressFrom, as
  * DOWNLOAD_URL), or an http address on localhost, a `*.localhost` name or 127.0.0.1; at most
  * HOME_URL_MAX characters, no user name or password, no fragment. Anything else, text or
- * not, is a problem: the one fixed line, which stops the start on Node and closes every path
- * on Workers, as an address setting that cannot be used does.
+ * not: off, and `problem` is the one fixed line for the target to write. The link is
+ * cosmetic, so, as with DOWNLOAD_URL, it never stops the start, the site or the admin
+ * commands.
  */
-export function homeUrlSetting(raw: unknown): { ok: true; url: string | null } | { ok: false; problem: string } {
-  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return { ok: true, url: null };
-  if (typeof raw !== "string") return { ok: false, problem: HOME_URL_UNUSABLE };
+export function homeUrlSetting(raw: unknown): { url: string | null; problem: string | null } {
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return { url: null, problem: null };
+  if (typeof raw !== "string") return { url: null, problem: HOME_URL_UNUSABLE };
   const text = raw.trim();
   const url = /^http:\/\//i.test(text)
     ? text.length <= HOME_URL_MAX && /^[\x21-\x7e]+$/.test(text)
       ? localHttpAddressFrom(text, HOME_URL_MAX)
       : null
     : httpsAddressFrom(text, { maxChars: HOME_URL_MAX, strict: true });
-  return url === null ? { ok: false, problem: HOME_URL_UNUSABLE } : { ok: true, url };
+  return url === null ? { url: null, problem: HOME_URL_UNUSABLE } : { url, problem: null };
 }
