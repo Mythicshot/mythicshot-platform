@@ -128,7 +128,8 @@ describe("the session answer's download_url", () => {
     const off = await sessionOf({});
     expect(off.status).toBe(200);
     expect(off.json.download_url).toBeNull();
-    expect(Object.keys(off.json)).toEqual(["account", "workspace", "session", "csrf", "email_change", "download_url"]);
+    // download_url, then limits (0.1.46), each an added field after the ones before it.
+    expect(Object.keys(off.json)).toEqual(["account", "workspace", "session", "csrf", "email_change", "download_url", "limits"]);
     const on = await sessionOf({ downloadUrl: PAGE });
     expect(on.json.download_url).toBe(PAGE);
     // A config value that is not usable (made by hand, not from the setting) is never handed on.
