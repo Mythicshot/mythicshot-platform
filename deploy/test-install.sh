@@ -140,6 +140,9 @@ case "$args" in
   *" config --quiet "*)
     [ "${STUB_FAIL_CONFIG:-0}" != 1 ] || { echo "the compose file is not valid" >&2; exit 1; } ;;
   *" config "*)
+    # STUB_FAIL_RENDER=1: Compose cannot render the stack file (the --quiet check above
+    # still passes).
+    [ "${STUB_FAIL_RENDER:-0}" != 1 ] || { echo "cannot render the compose file" >&2; exit 1; }
     # Like Compose, prints the stack file as it reads it, values filled in from its own
     # environment and then .env, secrets included. Only what the tests look at is
     # modelled: the app's environment (in direct mode with every line of .env, as
@@ -180,7 +183,10 @@ case "$args" in
       grep -E '^[A-Z_]+=' "$pd/.env" | grep -vE '^(DATA_DIR|TOURS_HOST|APP_HOST|IMG_HOST)=' | sed 's/^\([A-Z_]*\)=/      \1: /'
       if img="$(lenient IMG_HOST)"; then printf '      IMG_HOST: %s\n' "$(yaml "$img")"; fi
     fi
-    printf '      APP_HOST: %s\n      DATA_DIR: /data\n      TOURS_HOST: %s\n' "$(yaml "$a")" "$(yaml "$tours")"
+    # The app's two address settings only when the stack file has them, as Compose would.
+    if grep -q 'APP_HOST:' "$cf"; then printf '      APP_HOST: %s\n' "$(yaml "$a")"; fi
+    printf '      DATA_DIR: /data\n'
+    if grep -q 'TOURS_HOST:' "$cf"; then printf '      TOURS_HOST: %s\n' "$(yaml "$tours")"; fi
     printf '    image: %s\n  caddy:\n    environment:\n      APP_DOMAIN: %s\n      DOMAIN: %s\n' "$(val APP_IMAGE)" "$(yaml "$a")" "$d"
     if grep -q 'TUNNEL_TOKEN:?' "$cf"; then
       printf '  cloudflared:\n    environment:\n      TUNNEL_TOKEN: %s\n' "$(val TUNNEL_TOKEN)"
@@ -2902,10 +2908,10 @@ test_update_refuses_until_install_has_written_the_caddyfile_for_the_img_address(
   sed -i '/^IMG_HOST=/d' "$INST/.env"
   : >"$LOG"
   install_sh "" update
-  expect "the other way round: refused" test "$RC" = 1
-  expect "the other way round: says why, naming the name" has "$ERR" "$INST/.env holds no IMG_HOST, but the Caddyfile here answers for a third name, $IMG, and update does not rewrite it. Nothing was changed."
-  expect "the other way round: says install replaces a hand edit and keeps a copy" has "$ERR" "install writes the Caddyfile for the addresses in .env and so replaces that edit (it keeps the edited file as a .bak copy); to keep the name as the img address, add IMG_HOST=$IMG to .env first. Then run: sudo bash $SCRIPT install"
-  expect "the other way round: nothing pulled or started" test "$(grep -cE ' (up|down|pull|exec) ' "$LOG")" = 0
+  expect "the other way round: update goes on" test "$RC" = 0
+  expect "the other way round: warns, naming the name" has "$ERR" "WARNING: the Caddyfile here answers for a third name, $IMG, that /opt/demo-platform/.env does not hold as IMG_HOST. Run: sudo bash $SCRIPT install"
+  expect "the other way round: the stack is started as usual" grep -q 'compose .* up -d --wait' "$LOG"
+  expect "the other way round: the img address is not asked" test "$(asked "$IMG")" = 0
 }
 
 test_bad_img_host_in_env_stops_before_any_change() {
@@ -3160,13 +3166,52 @@ test_update_names_a_third_name_added_to_the_caddyfile_by_hand() {
   # shellcheck disable=SC2016 # the literal Caddyfile placeholders
   sed -i 's/^{\$DOMAIN}, {\$APP_DOMAIN} {$/{$DOMAIN}, {$APP_DOMAIN}, www.example.com {/' "$INST/caddy/Caddyfile"
   expect "the hand edit is in place" grep -qxF '{$DOMAIN}, {$APP_DOMAIN}, www.example.com {' "$INST/caddy/Caddyfile"
-  local before; before="$(snapshot)"
+  local caddy_sum; caddy_sum="$(sum_of "$INST/caddy/Caddyfile")"
+  : >"$LOG"
+  STUB_RESOLVE="$HERE" install_sh "" update
+  expect "update goes on" test "$RC" = 0
+  expect "warns, naming the name it found" has "$ERR" "WARNING: the Caddyfile here answers for a third name, www.example.com, that /opt/demo-platform/.env does not hold as IMG_HOST. Run: sudo bash $SCRIPT install"
+  expect "the stack is started as usual" grep -q 'compose .* up -d --wait' "$LOG"
+  expect "the hand edit is left as it is" test "$(sum_of "$INST/caddy/Caddyfile")" = "$caddy_sum"
+  expect "no rendering is asked for: .env names no IMG_HOST" test "$(grep -c ' config' "$LOG")" = 0
+  expect "the two addresses are asked as before" test "$(asked "$DOMAIN") $(asked "$APP") $(asked www.example.com)" = "1 1 0"
+}
+
+# update asks Docker Compose for the app's IMG_HOST only when .env has anything to do
+# with it: an install without a word of IMG_HOST updates exactly as before 0.1.50, also
+# with a stack file from before two addresses, whose rendering has no TOURS_HOST.
+test_update_asks_compose_only_when_env_mentions_img_host() {
+  new_sandbox
+  fresh_install
+  sed -i '/APP_DOMAIN/d; /TOURS_HOST/d; /APP_HOST/d' "$INST/docker-compose.yml"
   : >"$LOG"
   install_sh "" update
-  expect "update refuses" test "$RC" = 1
-  expect "names the name it found" has "$ERR" "answers for a third name, www.example.com, and update does not rewrite it"
-  expect "says install replaces the edit and keeps a copy" has "$ERR" "If that name was added to the Caddyfile by hand, install writes the Caddyfile for the addresses in .env and so replaces that edit (it keeps the edited file as a .bak copy)"
-  expect "nothing changed" test "$(snapshot)" = "$before"
+  expect "an old stack file: update succeeds" test "$RC" = 0
+  expect "an old stack file: no rendering is asked for" test "$(grep -c ' config' "$LOG")" = 0
+  expect "an old stack file: the stack is started" grep -q 'compose .* up -d --wait' "$LOG"
+  : >"$LOG"
+  STUB_FAIL_RENDER=1 install_sh "" update
+  expect "a rendering that would fail: not asked, update succeeds" test "$RC $(grep -c ' config' "$LOG")" = "0 0"
+  # .env mentions IMG_HOST (here a line Compose reads and the script does not): the
+  # rendering is asked for, also on the old stack file, and must give the same IMG_HOST.
+  printf 'export IMG_HOST=%s\n' "$IMG" >>"$INST/.env"
+  : >"$LOG"
+  install_sh "" update
+  expect "old stack file, export line: update stops" test "$RC" = 1
+  expect "old stack file, export line: with the sentence" has "$ERR" "ERROR: $IMG_RENDER_SENTENCE"
+  expect "old stack file, export line: nothing pulled or started" test "$(grep -cE ' (up|down|pull|exec|restart) ' "$LOG")" = 0
+  # The rendering fails: update stops with a message of its own.
+  sed -i '/IMG_HOST/d' "$INST/.env"
+  printf '# IMG_HOST=%s\n' "$IMG" >>"$INST/.env"
+  : >"$LOG"
+  STUB_FAIL_RENDER=1 install_sh "" update
+  expect "a failed rendering: update stops" test "$RC" = 1
+  expect "a failed rendering: says so, in its own words" has "$ERR" "ERROR: Docker Compose could not be asked which IMG_HOST it gives the app (docker compose config failed), so update did not start anything."
+  expect "a failed rendering: not the sentence about two addresses" hasnt "$ERR" "two-address settings"
+  expect "a failed rendering: nothing pulled or started" test "$(grep -cE ' (up|down|pull|exec|restart) ' "$LOG")" = 0
+  : >"$LOG"
+  install_sh "" update
+  expect "with the rendering working, the comment line updates" test "$RC $(grep -c ' config' "$LOG")" = "0 1"
 }
 
 # ---------------------------------------------------------------- run
