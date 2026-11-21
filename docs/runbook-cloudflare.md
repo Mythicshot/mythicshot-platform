@@ -355,6 +355,8 @@ Going back to a version before 0.1.38 is refused once a tour is restricted: on c
 
 Find out first with `npx wrangler d1 execute demo-platform --remote --config wrangler.deploy.jsonc --command "SELECT (SELECT count(*) FROM tour WHERE access <> 'public') + (SELECT count(*) FROM access_switch) AS n"`: anything but `0` means restore (see [Back up and restore](#back-up-and-restore)), not go back. Restoring brings back the tours, links, accounts and settings as they were when the backup was taken; everything done since is lost.
 
+The same holds for a version before 0.1.47 once a shared image or clip is restricted to people or to its owner: such a version does not know who may view an item, answers a restricted item's link as one that does not exist, and could show the item to anyone through another link it would give its owner. Check with `npx wrangler d1 execute demo-platform --remote --config wrangler.deploy.jsonc --command "SELECT count(*) AS n FROM media WHERE access <> 'public'"`: anything but `0` means restore, not go back.
+
 ## Back up and restore
 
 | What | Where |

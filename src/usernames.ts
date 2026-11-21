@@ -32,7 +32,7 @@ const RESERVED_NAMES = [
   "demo", "dev", "dmca", "docs", "email", "embed", "ember", "everyone", "example", "false",
   "feedback", "ftp", "gifs", "guest", "healthz", "hello", "help", "helpdesk", "home", "hostmaster",
   "images", "imap", "img", "info", "invite", "invites", "legal", "localhost", "login", "logout",
-  "mail", "media", "mod", "moderator", "moderators", "mods", "mythic", "mythic-lab", "mythiclab",
+  "mail", "media", "media-view", "mod", "moderator", "moderators", "mods", "mythic", "mythic-lab", "mythiclab",
   "mythicshot", "nan", "new", "no-reply", "nobody", "none", "noreply", "notifications", "null",
   "oauth", "official", "openapi", "owner", "player", "postmaster", "press", "pricing", "privacy",
   "public", "register", "removed", "report", "root", "safety", "sales", "search", "security",

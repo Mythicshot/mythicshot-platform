@@ -8,10 +8,12 @@ const ACCOUNT_TABLES = ["audit", "membership", "rate_counter", "session", "signi
 
 /**
  * The triggers of the schema: only migration 0014's four guards, which refuse a public
- * picture or a published text for a restricted tour (an older build's publish or rename) and
- * do nothing else: each body is one RAISE(ABORT, ...) and no statement that writes.
+ * picture or a published text for a restricted tour (an older build's publish or rename), and
+ * migration 0016's four, which hold a restricted item's link id apart and keep a link id from
+ * naming two items; they do nothing else: each body is one RAISE(ABORT, ...) and no statement
+ * that writes.
  */
-const GUARD_TRIGGERS = ["restricted_tour_no_public_picture", "restricted_tour_no_public_picture_update", "restricted_tour_stub_insert", "restricted_tour_stub_update"];
+const GUARD_TRIGGERS = ["media_link_names_one_insert", "media_link_names_one_update", "media_restricted_link_insert", "media_restricted_link_update", "restricted_tour_no_public_picture", "restricted_tour_no_public_picture_update", "restricted_tour_stub_insert", "restricted_tour_stub_update"];
 async function guardTriggers(deps: Deps): Promise<string[]> {
   const rows = await deps.db.all<{ name: string; sql: string }>("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name");
   for (const r of rows) {
@@ -35,6 +37,9 @@ const TABLES = [
   "invite",
   "media",
   "media_object",
+  "media_viewer",
+  "media_viewer_code",
+  "media_viewer_session",
   "membership",
   "public_object",
   "publish_job",
@@ -791,7 +796,7 @@ describe("schema", () => {
       expect(t?.sql, name).not.toMatch(/cascade|set null|set default/i);
     }
     const indexes = await deps.db.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'media' AND sql IS NOT NULL ORDER BY name");
-    expect(indexes.map((i) => i.name)).toEqual(["media_list", "media_state"]);
+    expect(indexes.map((i) => i.name)).toEqual(["media_list", "media_private_link", "media_state"]);
     const objectIndexes = await deps.db.all<{ name: string; sql: string }>("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'media_object' AND sql IS NOT NULL ORDER BY name");
     expect(objectIndexes.map((i) => i.name)).toEqual(["media_object_current"]);
     expect(objectIndexes[0].sql).toMatch(/^CREATE UNIQUE INDEX .* WHERE current = 1$/);

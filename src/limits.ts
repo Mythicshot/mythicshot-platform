@@ -19,6 +19,15 @@ export const MAX_PARTS = 999;
  */
 export const SERVE_LOOKUP_CALLS = 2;
 export const MAX_SERVED_PARTS = 38;
+/**
+ * A restricted item (src/media-page.ts) makes three calls more before any part: the viewer
+ * session (provedEmail), the check of its list (mayView), and the session's last use written
+ * after the answer, at most once a day. So one of its answers reads at most this many parts,
+ * and an item of more parts cannot be restricted (src/media-access.ts refuses it): its whole
+ * file could not be sent within the budget. Tests hold the sum to SUBREQUEST_BUDGET.
+ */
+export const RESTRICTED_EXTRA_CALLS = 3;
+export const RESTRICTED_SERVED_PARTS = MAX_SERVED_PARTS - RESTRICTED_EXTRA_CALLS;
 /** The most pixels a setting may allow a shared image on a side: what a GIF's or JPEG's header can say. */
 const MAX_SIDE_SETTING = 65_535;
 

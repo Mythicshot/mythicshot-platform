@@ -80,6 +80,9 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   // session alone, which counts on the app address only, so the change answers there only.
   "GET /api/v1/tours/:id/access": "both",
   "PUT /api/v1/tours/:id/access": "app",
+  // Who may view a shared item: the same rules as a tour's.
+  "GET /api/v1/media/:id/access": "both",
+  "PUT /api/v1/media/:id/access": "app",
 
   // Signing in and the session. The session cookie belongs to the app address alone, so
   // none of these answers on the tours address, which holds what users publish.
@@ -128,6 +131,14 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "POST /api/v1/view/complete": "tours",
   "POST /api/v1/view/signout": "tours",
   "GET /api/v1/view/session": "tours",
+  // A visitor proving an address for a shared item: the media viewer cookie belongs to the
+  // media address alone (the img address when it is set, else the tours address), so these
+  // answer there only, and 404 everywhere else.
+  "POST /api/v1/media-view/request": "media",
+  "POST /api/v1/media-view/check": "media",
+  "POST /api/v1/media-view/complete": "media",
+  "POST /api/v1/media-view/signout": "media",
+  "GET /api/v1/media-view/session": "media",
   "POST /api/v1/admin/accounts/:id/disable": "app",
   "POST /api/v1/admin/accounts/:id/enable": "app",
   "GET /api/v1/admin/accounts/:id/removal": "app",
@@ -192,6 +203,14 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /r/:name/preview": "media",
   "GET /s/share.css": "media",
   "GET /s/share.js": "media",
+  // A restricted item's pages around it (src/media-view-page.ts): they read the media viewer
+  // cookie, so they live where it does.
+  "GET /i/:name/signout": "media",
+  "GET /r/:name/signout": "media",
+  "GET /s/view": "media",
+  "GET /s/view.js": "media",
+  "GET /s/view.css": "media",
+  "GET /s/shared.css": "media",
 
   // The API documentation. The tours origin holds what users publish and may be framed
   // anywhere, so nothing of the page is served from it: it sends the page on to the app

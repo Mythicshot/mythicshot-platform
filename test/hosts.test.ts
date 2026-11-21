@@ -68,6 +68,8 @@ const admin = (method: string, path: string, body?: unknown): Row => ({ method, 
  */
 const media = (path: string, status: number): Row => ({ method: "GET", path, one: status, tours: status, app: 404, unknown: 421, img: status, toursImg: 404 });
 const LINK = "abcdefghijklmnopqrst";
+/** A request of the media viewer scope: rule `media` too, with a method and a body. */
+const mediaViewer = (method: string, path: string, status: number, body?: unknown): Row => ({ method, path, body, one: status, tours: status, app: 404, unknown: 421, img: status, toursImg: 404 });
 
 /** Keyed like HOST_RULES: "<METHOD> <route path>" exactly as in the route table. */
 const ROWS: Record<string, Row> = {
@@ -102,6 +104,8 @@ const ROWS: Record<string, Row> = {
   "POST /api/v1/tours/:id/publish": api("POST", `/api/v1/tours/${TOUR}/publish`),
   "GET /api/v1/tours/:id/access": api("GET", `/api/v1/tours/${TOUR}/access`),
   "PUT /api/v1/tours/:id/access": session("PUT", `/api/v1/tours/${TOUR}/access`, 401),
+  "GET /api/v1/media/:id/access": api("GET", `/api/v1/media/med_${"0".repeat(24)}/access`),
+  "PUT /api/v1/media/:id/access": session("PUT", `/api/v1/media/med_${"0".repeat(24)}/access`, 401),
   "POST /api/v1/tours/:id/unpublish": api("POST", `/api/v1/tours/${TOUR}/unpublish`),
   // Signing in and the session: on the app address only. Asking for a link answers 200
   // for any well-formed address; a code nobody was given is the one refusal; the rest
@@ -151,6 +155,12 @@ const ROWS: Record<string, Row> = {
   "POST /api/v1/view/complete": viewer("POST", "/api/v1/view/complete", 404, { code: "dpv_" + "0".repeat(40) }),
   "POST /api/v1/view/signout": viewer("POST", "/api/v1/view/signout", 204, {}),
   "GET /api/v1/view/session": viewer("GET", "/api/v1/view/session", 401),
+  // The same for a shared item, on the media address, where the media viewer cookie belongs.
+  "POST /api/v1/media-view/request": mediaViewer("POST", "/api/v1/media-view/request", 202, { email: "nobody@example.com", path: `/i/${"a".repeat(20)}` }),
+  "POST /api/v1/media-view/check": mediaViewer("POST", "/api/v1/media-view/check", 404, { code: "dpi_" + "0".repeat(40) }),
+  "POST /api/v1/media-view/complete": mediaViewer("POST", "/api/v1/media-view/complete", 404, { code: "dpi_" + "0".repeat(40) }),
+  "POST /api/v1/media-view/signout": mediaViewer("POST", "/api/v1/media-view/signout", 204, {}),
+  "GET /api/v1/media-view/session": mediaViewer("GET", "/api/v1/media-view/session", 401),
   // The sign-in pages and their two files: on the app address only, like the session they lead to.
   "GET /signin": page("/signin"),
   "GET /signin/link": page("/signin/link"),
@@ -200,6 +210,13 @@ const ROWS: Record<string, Row> = {
   "GET /r/:name/preview": media(`/r/${LINK}/preview`, 404),
   "GET /s/share.css": media("/s/share.css", 200),
   "GET /s/share.js": media("/s/share.js", 200),
+  // The pages around a restricted item: fixed text, where the media viewer cookie lives.
+  "GET /i/:name/signout": media(`/i/${LINK}/signout`, 200),
+  "GET /r/:name/signout": media(`/r/${LINK}/signout`, 200),
+  "GET /s/view": media("/s/view", 200),
+  "GET /s/view.js": media("/s/view.js", 200),
+  "GET /s/view.css": media("/s/view.css", 200),
+  "GET /s/shared.css": media("/s/shared.css", 200),
   // The documentation page lives on the app address: the tours address sends the page on and has none of its files.
   "GET /docs": { method: "GET", path: "/docs", one: 200, tours: 308, app: 200, unknown: 421, img: 404 },
   "GET /docs/:file{(?:viewer|docs)\\.[0-9a-f]{16}\\.(?:js|css)}": { method: "GET", path: "/docs/viewer.0123456789abcdef.js", one: 200, tours: 404, app: 200, unknown: 421, img: 404 },
@@ -213,7 +230,7 @@ const KEYS = Object.keys(ROWS);
 const DESCRIPTION_KEYS = KEYS.filter((k) => k.includes(" /api/v1/openapi."));
 /** Signing in, the session, looking up and accepting an invite, typing a short code and the workspace's tokens: the app address's own part of the API. */
 // The change of who may view a tour takes a session alone, so it is one of these too.
-const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account|invite|connect\/(?:lookup|confirm|refuse)|tokens)(?:\/|$)/.test(k) || k === "PUT /api/v1/tours/:id/access");
+const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account|invite|connect\/(?:lookup|confirm|refuse)|tokens)(?:\/|$)/.test(k) || k === "PUT /api/v1/tours/:id/access" || k === "PUT /api/v1/media/:id/access");
 /** The app's two requests while it connects: no credential, on both addresses. */
 const CONNECT_KEYS = ["POST /api/v1/connect/start", "POST /api/v1/connect/token"];
 /** The site admin's routes. */
@@ -221,7 +238,9 @@ const ADMIN_KEYS = KEYS.filter((k) => k.includes(" /api/v1/admin/"));
 /** A visitor proving an address: the tours address's own part of the API. */
 const VIEWER_KEYS = KEYS.filter((k) => k.includes(" /api/v1/view/"));
 /** The token API: everything under /api/v1/ but the description files, which need no token, the session's own routes and the admin's. */
-const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k) && !SESSION_KEYS.includes(k) && !ADMIN_KEYS.includes(k) && !CONNECT_KEYS.includes(k) && !VIEWER_KEYS.includes(k));
+/** A visitor proving an address for a shared item: the media address's own part of the API. */
+const MEDIA_VIEWER_KEYS = KEYS.filter((k) => k.includes(" /api/v1/media-view/"));
+const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k) && !SESSION_KEYS.includes(k) && !ADMIN_KEYS.includes(k) && !CONNECT_KEYS.includes(k) && !VIEWER_KEYS.includes(k) && !MEDIA_VIEWER_KEYS.includes(k));
 const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 /** The sign-in pages and their stylesheet and script, the invite page and its script, and the dashboard's account pages (/account, /account/email). */
 const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account|invite)(?:\/|$)/.test(k));
@@ -232,10 +251,10 @@ const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
 const DOCS_PAGE_KEY = "GET /docs";
 /** The page's own files and the licence notices. */
 const DOCS_FILE_KEYS = KEYS.filter((k) => k.startsWith("GET /docs/"));
-/** Shared items' pages, files and previews, and the pages' two files. */
-const MEDIA_KEYS = KEYS.filter((k) => /^GET \/(?:i|r|s)\//.test(k));
+/** Shared items' pages, files and previews, the pages' files, the pages around a restricted item and the media viewer's requests: rule `media`. */
+const MEDIA_KEYS = KEYS.filter((k) => /^GET \/(?:i|r|s)\//.test(k) || MEDIA_VIEWER_KEYS.includes(k));
 /** The media routes that look an item up: two database calls each (onlineItemFiles). */
-const ITEM_KEYS = MEDIA_KEYS.filter((k) => !k.startsWith("GET /s/"));
+const ITEM_KEYS = MEDIA_KEYS.filter((k) => /^GET \/(?:i|r)\//.test(k) && !k.endsWith("/signout"));
 
 function sendRow(deps: Deps, row: Row, origin: string): Promise<Call> {
   if (row.body === undefined) return send(deps, row.method, row.path, { origin });
@@ -346,16 +365,16 @@ describe("the host-routing matrix", () => {
     // Every dashboard page and its script is in one of the two lists, and nothing is in both.
     for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES]) for (const key of [`GET ${p.path}`, `GET ${p.script.path}`]) expect([PAGE_KEYS.includes(key), DASH_KEYS.includes(key)].filter(Boolean), key).toEqual([true]);
     for (const key of ["GET /dash/dash.css", "GET /dash/dash.js"]) expect(DASH_KEYS, key).toContain(key);
-    // 9, the two requests of an invite, the three requests that take a short code and the three of the token list.
-    expect(SESSION_KEYS.length).toBe(18);
+    // 9, the two requests of an invite, the three requests that take a short code, the three of the token list, and the change of who may view a tour or an item.
+    expect(SESSION_KEYS.length).toBe(19);
     expect(ADMIN_KEYS.length).toBe(11);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
-    // 15, and the eight routes of shared items.
-    expect(API_KEYS.length).toBe(24);
+    // 15, the eight routes of shared items, and the read of who may view one.
+    expect(API_KEYS.length).toBe(25);
     expect(WIZARD_KEYS.length).toBe(5);
     // The shared items' routes are the media routes, and the img address has them and health alone.
-    expect(MEDIA_KEYS.length).toBe(8);
+    expect(MEDIA_KEYS.length).toBe(19);
     expect(KEYS.filter((k) => HOST_RULES[k] === "media")).toEqual(MEDIA_KEYS);
     for (const key of KEYS) if (key !== "GET /healthz" && !MEDIA_KEYS.includes(key)) expect(ROWS[key].img, key).toBe(404);
   });
@@ -520,7 +539,10 @@ describe("the host-routing matrix", () => {
     }
     expect(answers["GET /healthz"].text).toBe('{"ok":true,"address":"img"}');
     expect(answers["GET /healthz"].headers.get("content-type")).toBe("application/json");
-    expect(calls() - before).toBe(1 + 2 * ITEM_KEYS.length);
+    // The media viewer's requests make their own calls (asking for a link counts and sweeps); every other route here makes none.
+    const viewerCalls = MEDIA_VIEWER_KEYS.reduce((n, key) => n + answers[key].calls, 0);
+    expect(viewerCalls).toBeGreaterThan(0);
+    expect(calls() - before).toBe(1 + 2 * ITEM_KEYS.length + viewerCalls);
     // Its name matches in capitals, with a trailing dot and with a default port; another port is unknown.
     for (const origin of ["https://IMG.Example.com", "https://img.example.com.", "http://img.example.com:80"]) {
       expect((await send(deps, "GET", "/healthz", { origin })).text, origin).toBe('{"ok":true,"address":"img"}');
