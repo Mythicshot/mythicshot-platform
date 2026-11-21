@@ -570,9 +570,7 @@ function commitStatements(auth: Auth, tourId: string, publishId: string, justCop
     },
     { sql: "DELETE FROM public_object WHERE publish_id = ? AND state = 'pending'", params: [publishId] },
     { sql: "DELETE FROM publish_job WHERE publish_id = ?", params: [publishId] },
-    // ever_published (migration 0017) is never cleared: unpublish leaves it, so a first publish
-    // can tell a tour that was published before (src/access.ts, EVER_PUBLISHED).
-    { sql: "UPDATE tour SET status = 'published', published_at = ?, ever_published = 1 WHERE id = ? AND workspace_id = ?", params: [now, tourId, auth.workspaceId] },
+    { sql: "UPDATE tour SET status = 'published', published_at = ? WHERE id = ? AND workspace_id = ?", params: [now, tourId, auth.workspaceId] },
   ];
 }
 
@@ -728,6 +726,14 @@ export async function nextBatch(deps: Deps, tourId: string, publishId: string, l
     [publishId, tourId, publishId, tourId, Math.max(1, limit)],
   );
   return { batch: rows.slice(0, limit).map((r) => ({ from: r.source_key, to: r.image_key })), left: rows[0]?.left ?? 0 };
+}
+
+/** True for the error of a statement naming tour.ever_published on a database migration 0017 has not reached. */
+function isBeforeEverPublished(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
+    if (/no such column: ever_published(?:$|:| at offset )/.test(e.message)) return true;
+  }
+  return false;
 }
 
 export function publishRoutes(app: Hono, deps: Deps): void {
@@ -913,7 +919,17 @@ export function publishRoutes(app: Hono, deps: Deps): void {
     const ws = auth.workspaceId;
     const owned = "SELECT id FROM tour WHERE id = ? AND workspace_id = ?";
     const now = deps.now();
-    await deps.db.batch([
+    // A tour that has been published keeps the mark that says so (migration 0017) through
+    // this unpublish, set in the same batch that removes the rest of that evidence, so a first
+    // publish can tell it apart (src/access.ts, EVER_PUBLISHED). Nothing ever clears the mark.
+    // On a database that migration has not reached, the batch runs without it, as before.
+    const mark: Stmt = {
+      sql: `UPDATE tour SET ever_published = 1 WHERE id = ? AND workspace_id = ? AND ever_published = 0
+              AND (status = 'published' OR published_at IS NOT NULL OR EXISTS (SELECT 1 FROM snapshot s WHERE s.tour_id = tour.id)
+                   OR EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = tour.id))`,
+      params: [tour.id, ws],
+    };
+    const unpublishStatements: Stmt[] = [
       // Unpublish has no grace: images an earlier re-publish retired stop now as well.
       {
         sql: `UPDATE public_object SET delete_after = ? WHERE state = 'retired' AND delete_after > ? AND tour_id IN (${owned})`,
@@ -933,7 +949,13 @@ export function publishRoutes(app: Hono, deps: Deps): void {
       { sql: `DELETE FROM snapshot_object WHERE tour_id IN (${owned})`, params: [tour.id, ws] },
       { sql: `DELETE FROM snapshot WHERE tour_id IN (${owned})`, params: [tour.id, ws] },
       { sql: "UPDATE tour SET status = 'draft', published_at = NULL WHERE id = ? AND workspace_id = ?", params: [tour.id, ws] },
-    ]);
+    ];
+    try {
+      await deps.db.batch([mark, ...unpublishStatements]);
+    } catch (err) {
+      if (!isBeforeEverPublished(err)) throw err;
+      await deps.db.batch(unpublishStatements);
+    }
     // Nothing of the tour is served from here on; deleting the objects takes as many
     // requests as it takes, UNPUBLISH_PAGES pages of keys at a time.
     const cleared = await housekeeping(deps, ws, tour.id, UNPUBLISH_PAGES, CARRY_CALLS);

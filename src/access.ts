@@ -281,11 +281,11 @@ type State = {
 };
 
 /**
- * Whether a tour has been published at least once, over a tour row `t` in scope: its
- * ever_published mark (migration 0017: set by every commit of a publish, never cleared, so it
- * stays through an unpublish), or, for what an older build may have written, its status says
- * published, published_at is set, or it has a snapshot or a switch. A tour unpublished before
- * migration 0017 left nothing behind and does not count. No parameter.
+ * Whether a tour has been published at least once, over a tour row `t` in scope: it is
+ * published now (its status, published_at, a snapshot or a switch says so), or its
+ * ever_published mark is set (migration 0017: unpublish sets it in the batch that removes the
+ * rest of that evidence, and nothing clears it). A tour unpublished before migration 0017, or
+ * by an older build, left nothing behind and does not count. No parameter.
  */
 const EVER_PUBLISHED = `(t.ever_published = 1 OR t.status = 'published' OR t.published_at IS NOT NULL
    OR EXISTS (SELECT 1 FROM snapshot e WHERE e.tour_id = t.id) OR EXISTS (SELECT 1 FROM access_switch e WHERE e.tour_id = t.id))`;

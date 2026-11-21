@@ -2,8 +2,9 @@
 -- request that starts its FIRST publish only (src/access.ts, planFirstPublish): never for a tour
 -- that has been published before, also when it was unpublished since. Nothing the schema kept
 -- said so once a tour was unpublished (unpublish empties tour.published_at and removes the
--- snapshot), so this column keeps it: every commit of a publish sets it (src/publish.ts), and
--- nothing ever clears it. It is additive, with a default, so rows written before this migration
+-- snapshot), so this column keeps it: unpublish sets it (src/publish.ts) in the batch that
+-- removes the rest of that evidence, and nothing ever clears it; while a tour is published,
+-- its status and snapshot say so already. It is additive, with a default, so rows written before this migration
 -- stay valid; an older build never names it, and its publish leaves it as it was.
 --
 -- The tours that are published now, or have a live version or a move of their pictures, are
