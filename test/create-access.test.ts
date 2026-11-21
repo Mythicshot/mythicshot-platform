@@ -803,16 +803,6 @@ async function secondToken(deps: Deps, workspaceId: string): Promise<string> {
   return token;
 }
 
-/** An audit entry of a dashboard change of the tour's list, written as the PUT writes one, at a chosen time. */
-async function dashboardEntry(deps: Deps, workspaceId: string, tourId: string, at: number): Promise<void> {
-  await deps.db.run("INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES (?, ?, 'tour_access_changed', NULL, ?, ?, ?)", [
-    "aud_" + hex(12),
-    at,
-    workspaceId,
-    tourId,
-    JSON.stringify({ from: "people", to: "people", viewers_before: 1, viewers: 1, by: "session" }),
-  ]);
-}
 
 describe("a list is compared only with the token that set it", () => {
   it("another token of the workspace gets the same refusal for a right and a wrong guess while the first publish is under way; the token that set it still joins", SLOW, async () => {
@@ -832,13 +822,19 @@ describe("a list is compared only with the token that set it", () => {
     expect([again.status, again.json.publish_id]).toEqual([202, first.json.publish_id]);
   });
 
-  it("the latest entry is the one written last: a dashboard entry with the same time, or an earlier one, ends the comparison", SLOW, async () => {
+  it("a dashboard change ends the comparison whatever the clocks say: made at the same time as the creation, or with a time before it", SLOW, async () => {
     for (const shift of [0, -60_000]) {
       const s = await tourSite();
       const t = await tourOf(s, 2 * COPY_BATCH + 3);
       expect((await publish(s, t.id, { access: "people", viewers: [LISTED] })).status).toBe(202);
       const created = (await s.deps.db.first<{ at: number }>("SELECT at FROM audit WHERE event = 'tour_access_changed' AND subject = ?", [t.id]))!.at;
-      await dashboardEntry(s.deps, s.owner.workspaceId, t.id, created + shift);
+      // The dashboard's change, by a server whose clock gives the same time, or one a minute behind.
+      const clock = s.deps.now;
+      s.deps.now = () => created + shift;
+      expect((await setAccess(s, t.id, { access: "people", viewers: [LISTED, OTHER] })).status).toBe(200);
+      expect((await setAccess(s, t.id, { access: "people", viewers: [LISTED] })).status).toBe(200);
+      s.deps.now = clock;
+      expect((await s.deps.db.first<{ at: number }>("SELECT max(at) AS at FROM audit WHERE event = 'tour_access_changed' AND subject = ?", [t.id]))!.at).toBe(created + Math.max(0, shift));
       const r = await publish(s, t.id, { access: "people", viewers: [LISTED] });
       expect([r.status, r.json.error], `shift ${shift}`).toEqual([409, "access_already_set"]);
     }
