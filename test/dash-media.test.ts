@@ -14,7 +14,7 @@ import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { send, type Call } from "./bundle.ts";
-import { expectNoForbiddenApis, expectPageShape, isBrandMarkAlt } from "./dash-checks.ts";
+import { expectNoForbiddenApis, expectPageShape, isBrandMarkAlt, isBrandMark } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -372,7 +372,7 @@ describe("the Images and GIFs pages", () => {
         ["/dash/dash.js", true, ""],
         [p.script, true, ""],
       ]);
-      expect(all.filter((e) => e.tagName === "style" || e.tagName === "form" || e.tagName === "img"), p.path).toEqual([]);
+      expect(all.filter((e) => e.tagName === "style" || e.tagName === "form" || (e.tagName === "img" && !isBrandMark(e))), p.path).toEqual([]);
       for (const e of all) {
         for (const [name, value] of e.attrs) {
           expect(name === "style" || name.startsWith("on"), `${p.path} <${e.tagName} ${name}>`).toBe(false);

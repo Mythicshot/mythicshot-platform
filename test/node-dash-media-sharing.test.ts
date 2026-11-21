@@ -8,6 +8,7 @@
 //
 // What this leaves unproven, for docs/dashboard-browser-check.md: the real layout at phone
 // width, focus rings, a screen reader reading the box, and a real browser's radio buttons.
+import { isBrandMark } from "./dash-checks.ts";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
 import { GIFS_HTML, GIFS_JS, IMAGES_HTML, IMAGES_JS } from "../src/dash/media.ts";
@@ -725,7 +726,7 @@ for (const which of ["images", "gifs"] as Which[]) {
         ["", '"?'],
       ]);
       expect(addresses(tab)).toEqual(list);
-      expect(tab.doc.body.all().some((e) => e.tagName === "img" || e.tagName === "script")).toBe(false);
+      expect(tab.doc.body.all().some((e) => (e.tagName === "img" && !isBrandMark(e)) || e.tagName === "script")).toBe(false);
     });
   });
 }

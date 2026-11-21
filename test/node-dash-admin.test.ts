@@ -9,6 +9,7 @@
 //
 // What this leaves unproven, for docs/dashboard-browser-check.md: real layout at phone
 // width, focus rings, `inert` as a browser applies it, and a screen reader.
+import { isBrandMark } from "./dash-checks.ts";
 import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
@@ -285,7 +286,7 @@ describe("the Admin page for the admin", () => {
     const tab = openAdmin(standard({ "GET /api/v1/admin/accounts": list([evil]) }));
     await tab.settle();
     expect(rowOf(rows(tab)[0])).toMatchObject({ name: "<img src=x onerror=alert(1)>", email: '"<b>"@example.com', workspace: "</td><script>x</script>" });
-    expect(tab.doc.root.all().some((e) => ["img", "b", "script"].includes(e.tagName) && e.parent?.tagName !== "head")).toBe(false);
+    expect(tab.doc.root.all().some((e) => ["img", "b", "script"].includes(e.tagName) && !isBrandMark(e) && e.parent?.tagName !== "head")).toBe(false);
     allowFor(rows(tab)[0]);
     expect(tab.$("allow-title").textContent).toBe("Storage allowance for </td><script>x</script>");
     expect(tab.$("allow-title").children.every((c) => !(c instanceof FakeElement))).toBe(true);

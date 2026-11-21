@@ -8,6 +8,7 @@
 // What this leaves unproven, for docs/dashboard-browser-check.md: real layout at phone width
 // and with a very long name, the caret while the code is regrouped, focus rings, a screen
 // reader, and the two-device sign-in with a real Mythicshot.
+import { isBrandMark } from "./dash-checks.ts";
 import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
@@ -269,7 +270,7 @@ describe("the Connections page: the list", () => {
     const tab = openPage(standard({ "GET /api/v1/tokens": list(names.map((n, i) => token("tok_" + String(i + 1).repeat(24), n))) }));
     await tab.settle();
     expect(rows(tab).map((row) => nameOf(row).textContent)).toEqual(names);
-    expect(tab.doc.root.all().filter((e) => e.tagName === "img" || e.tagName === "b" && e.id !== "confirm-device")).toEqual([]);
+    expect(tab.doc.root.all().filter((e) => (e.tagName === "img" && !isBrandMark(e)) || e.tagName === "b" && e.id !== "confirm-device")).toEqual([]);
     for (const row of rows(tab)) expect(nameOf(row).children.every((c) => !(c instanceof FakeElement))).toBe(true);
     // Disconnect asks with the name as text too.
     button(rows(tab)[0], "Disconnect").click();
@@ -336,7 +337,7 @@ describe("the Connections page: the welcome of a new account (invite mockup 7)",
     await markup.settle();
     const parts = markup.$("connections-welcome").children.map((c) => (c instanceof FakeElement ? [c.tagName, c.className, c.children.length, c.textContent] : ["#text"]));
     expect(parts[1]).toEqual(["span", "name", 1, "<img src=x onerror=alert(1)>"]);
-    expect(markup.doc.root.all().filter((e) => e.tagName === "img")).toEqual([]);
+    expect(markup.doc.root.all().filter((e) => e.tagName === "img" && !isBrandMark(e))).toEqual([]);
   });
 
   it("with a usable download_url the welcome ends with one sentence whose words the download page are the link; without it the welcome reads as before", async () => {

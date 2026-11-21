@@ -129,7 +129,8 @@ describe("HOME_URL", () => {
       "HOME_URL is not a usable address. Write it like https://www.example.com/: https:// (http:// only for localhost), no user name or password, no # part, at most 300 characters.",
     );
     expect(HOME_URL_UNUSABLE.split("\n")).toHaveLength(1);
-    for (const [, value] of BAD) if (typeof value === "string" && value.length > 6) expect(HOME_URL_UNUSABLE, String(value)).not.toContain(value);
+    // (A bad value that is a piece of the line's own example, such as //www.example.com/, is not a repeat.)
+    for (const [, value] of BAD) if (typeof value === "string" && value.length > 6 && !"https://www.example.com/".includes(value)) expect(HOME_URL_UNUSABLE, String(value)).not.toContain(value);
   });
 });
 

@@ -43,3 +43,11 @@ export function isBrandMarkAlt(e: FakeElement, name: string): boolean {
   const p = e.parent;
   return p !== null && (p.className === "brand" || (p.tagName === "a" && p.parent?.className === "brand"));
 }
+
+/**
+ * Whether `e` is the brand's mark (src/brand.ts), the one image a page holds by itself:
+ * the checks that nothing a page shows became markup skip it, and only it.
+ */
+export function isBrandMark(e: FakeElement): boolean {
+  return isBrandMarkAlt(e, "alt");
+}
