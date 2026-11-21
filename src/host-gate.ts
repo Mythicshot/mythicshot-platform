@@ -171,6 +171,15 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /p/:name": "tours-redirect",
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": "tours",
   "GET /t/:slug": "tours-redirect",
+  // A restricted tour's pictures (src/restricted.ts) and the pages around it: they read the
+  // viewer cookie, which belongs to the tours address alone, so they answer there only, and
+  // 404 on the app and img addresses (never a redirect, which would carry nothing useful).
+  "GET /t/:slug/v/:name": "tours",
+  "GET /view": "tours",
+  "GET /view/signout/:slug": "tours",
+  "GET /view/view.js": "tours",
+  "GET /view/view.css": "tours",
+  "GET /view/shared.css": "tours",
 
   // The pages and files a shared link opens, the preview pictures, and the pages' own
   // stylesheet and script: on the img address when it is set, else on the tours address.

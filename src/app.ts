@@ -15,6 +15,7 @@ import type { Deps } from "./ports.ts";
 import { pageRoutes } from "./page.ts";
 import { pageRoutesForAccounts } from "./pages.ts";
 import { publishRoutes } from "./publish.ts";
+import { restrictedAnswer, restrictedRoutes } from "./restricted.ts";
 import { setupRoutes } from "./setup.ts";
 import { signinRoutes } from "./signin.ts";
 import { tokenRoutes } from "./tokens.ts";
@@ -56,7 +57,10 @@ export function createApp(deps: Deps): Hono {
   pageRoutesForAccounts(app, deps);
   dashRoutes(app);
   publishRoutes(app, deps);
-  pageRoutes(app, deps);
+  // A restricted tour's pictures and the pages around it; its page is GET /t/<slug>, which
+  // asks restrictedAnswer only when its public lookup found nothing.
+  restrictedRoutes(app, deps);
+  pageRoutes(app, deps, restrictedAnswer);
   sharePageRoutes(app, deps);
 
   app.notFound((c) => c.json({ error: "not_found" }, 404));
