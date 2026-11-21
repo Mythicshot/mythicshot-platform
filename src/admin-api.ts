@@ -9,7 +9,7 @@
 // id, username, email, status, whether it is the admin, when it was made, whether its delete
 // has started, its workspace's id and name (the admin page's Workspace column), its tour count, the bytes it uses with the breakdown GET /api/v1/usage gives the
 // account itself (the shared images' and GIFs' bytes as two totals), and its allowance (the workspace's own number or null for the site's,
-// and the number in force). Never a tour's id, title, slug or link, a chapter or step, a
+// and the number in force), and its newest agreement to the site's terms (the version's label and the time, or null). Never a tour's id, title, slug or link, a chapter or step, a
 // picture's address or file name, a shared item's id, title or link, a token, a session, or anything a tour's address could
 // be built from; and the one change they take is a number.
 //
@@ -29,6 +29,7 @@ import { auditStatement } from "./audit.ts";
 import { requireAuth } from "./auth.ts";
 import { apiError, json, readCapped } from "./http.ts";
 import { isNotNullViolation, type Deps } from "./ports.ts";
+import { isBeforeTerms } from "./sessions.ts";
 import { ALLOWANCE_SQL, USAGE_COLUMNS, usageFromRow, usageOf, type Usage } from "./usage.ts";
 
 /** The most accounts one page of the list holds. */
@@ -74,6 +75,15 @@ const BAD_ALLOWANCE = "storage_allowance_bytes must be a whole number of bytes f
 function notFound(): Response {
   return json(404, { error: "not_found" });
 }
+
+/**
+ * The account's newest agreement to the site's terms (src/terms.ts), as two columns of the
+ * list's one read: the version's label and when it was agreed to, both null for "Not yet".
+ * Both pick the same row: by the time, then by the version's order. Only the label and the
+ * time: never the terms' text, never anything of how the account agreed.
+ */
+const NEWEST_AGREEMENT_COLUMNS = `(SELECT t.version_label FROM terms_agreement a JOIN terms_version t ON t.id = a.terms_id WHERE a.user_id = p.id ORDER BY a.agreed_at DESC, t.seq DESC LIMIT 1) AS terms_version,
+              (SELECT a.agreed_at FROM terms_agreement a JOIN terms_version t ON t.id = a.terms_id WHERE a.user_id = p.id ORDER BY a.agreed_at DESC, t.seq DESC LIMIT 1) AS terms_agreed_at`;
 
 /** The numbers of one workspace, in the shape GET /api/v1/usage gives them. */
 function numbers(u: Usage) {
@@ -146,6 +156,8 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       tours: number;
       images: number;
       gifs: number;
+      terms_version: string | null;
+      terms_agreed_at: number | null;
     };
     // One read. The page of accounts is chosen first, one more than a page to tell whether
     // another follows; then each account's numbers, with the account's own usage SQL, over
@@ -155,8 +167,9 @@ export function adminRoutes(app: Hono, deps: Deps): void {
     //
     // The page starts after the cursor's own (created_at, id) values, never by looking its
     // account up, so a cursor whose account was deleted since still gives the rest.
-    const rows = await deps.db.all<Row>(
-      `SELECT p.id, p.username, p.email, p.status, p.is_admin, p.created_at, p.deleting, p.ws AS workspace_id, p.ws_name AS workspace_name, p.own, p.allowance, ${USAGE_COLUMNS}
+    const list = (agreements: string) =>
+      deps.db.all<Row>(
+      `SELECT p.id, p.username, p.email, p.status, p.is_admin, p.created_at, p.deleting, p.ws AS workspace_id, p.ws_name AS workspace_name, p.own, p.allowance, ${USAGE_COLUMNS}, ${agreements}
          FROM (SELECT u.id, u.username, u.email, u.status, u.is_admin, u.created_at, m.workspace_id AS ws, workspace.name AS ws_name,
                       EXISTS (SELECT 1 FROM account_removal r WHERE r.user_id = u.id) AS deleting,
                       workspace.storage_allowance_bytes AS own, ${ALLOWANCE_SQL} AS allowance
@@ -170,6 +183,14 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       // In the order the placeholders stand in the text: the site's default, the cursor (whether there is one, its time, its id), the page.
       [deps.config.storageAllowanceBytes ?? null, after === null ? null : 1, after?.createdAt ?? null, after?.id ?? null, ADMIN_PAGE + 1],
     );
+    let rows: Row[];
+    try {
+      rows = await list(NEWEST_AGREEMENT_COLUMNS);
+    } catch (err) {
+      // A database before the terms migration (0018) has no agreement: every account is "Not yet".
+      if (!isBeforeTerms(err)) throw err;
+      rows = await list("NULL AS terms_version, NULL AS terms_agreed_at");
+    }
     const page = rows.slice(0, ADMIN_PAGE);
     const accounts = page.map((r) => ({
       id: r.id,
@@ -183,6 +204,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       workspace_name: r.workspace_name,
       ...numbers(usageFromRow(r)),
       storage_allowance_bytes: r.own,
+      terms: r.terms_version === null || r.terms_agreed_at === null ? null : { version: r.terms_version, agreed_at: r.terms_agreed_at },
     }));
     const last = page[page.length - 1];
     return json(200, { accounts, next: rows.length > ADMIN_PAGE ? encodeAccountCursor(last.created_at, last.id) : null });

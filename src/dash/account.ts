@@ -7,6 +7,12 @@
 // textContent, so a username, a workspace's name, an address or a session's label can never
 // become markup.
 //
+// The terms line (0.1.53), at the end of the details: "You agreed to the terms of <version> on
+// <date>." with a check mark and "Read them", which opens the version agreed to, read-only
+// (/terms?read). Filled from the session answer's terms_agreed (no request more) through
+// textContent; hidden when the account has agreed to no version, so a site without terms reads
+// as before.
+//
 // The download card (Plan 2i), between the details and the sessions: shown only when the
 // session names a usable address of the app's download page (download_url, checked again by
 // the shared script), with a link that opens it in a new tab; hidden otherwise, so without
@@ -39,6 +45,7 @@ const ACCOUNT_MAIN = `  <div id="account-page">
       <div class="row"><span>Email address</span><span class="r"><span id="account-email"></span><button type="button" class="btn sm quiet" id="email-change" hidden>Change</button></span></div>
       <p class="hint" id="email-off" hidden>This site cannot send mail, so an email address cannot be changed here.</p>
       <div class="row"><span>Workspace</span><span class="r" id="account-workspace"></span></div>
+      <p class="terms-agreed" id="terms-agreed" hidden><span class="terms-check" aria-hidden="true">✓</span> <span id="terms-agreed-text"></span> <a href="/terms?read" id="terms-read">Read them</a></p>
     </div>
     <div class="card" id="download-card" hidden>
       <h2 class="card-title" id="h-download" tabindex="-1">Mythicshot for Windows</h2>
@@ -98,6 +105,9 @@ export const ACCOUNT_JS = `(function () {
     checkBefore: "Check ",
     openDownload: "Open the download page",
     ends: "Ends ",
+    agreedBefore: "You agreed to the terms of ",
+    agreedMiddle: " on ",
+    agreedAfter: ".",
   };
   // What the page behind a box is, made inert while one is open.
   var BEHIND = ["dash-top", "account-page"];
@@ -301,6 +311,14 @@ export const ACCOUNT_JS = `(function () {
     $("download-card").hidden = false;
   }
 
+  // The line under the details: the version of the site's terms the account agreed to last,
+  // and when, with "Read them"; hidden when it has agreed to none (a site without terms).
+  function showAgreement(agreed) {
+    if (agreed === null || typeof agreed !== "object") return;
+    $("terms-agreed-text").textContent = TEXT.agreedBefore + agreed.version + TEXT.agreedMiddle + Dash.dateOf(agreed.agreedAt, true) + TEXT.agreedAfter;
+    $("terms-agreed").hidden = false;
+  }
+
   startPage();
   Dash.start(function (who) {
     current = who.sessionId;
@@ -313,6 +331,7 @@ export const ACCOUNT_JS = `(function () {
     $("account-workspace").textContent = who.workspace;
     $("email-change").hidden = !who.emailChange;
     $("email-off").hidden = who.emailChange;
+    showAgreement(who.agreed);
     return Dash.api("GET", "/api/v1/sessions").then(showSessions, function () { return null; }).then(function (shown) {
       if (shown === "out") { Dash.signedOut(); return; }
       if (shown !== true) sayIn($("account-message"), Dash.failure(shown));

@@ -500,6 +500,8 @@ The API documentation page (`/docs`, see [API documentation](../README.md#api-do
 
 ## Accounts and mail
 
+The site's terms (see [The site's terms](../README.md#the-sites-terms) in the README) work on Cloudflare as on the Node target: the screen, "I agree", the Account line and the Admin column, all from the database. But they are published with the server command, which runs on the Node target only, so terms cannot be published on Cloudflare yet, and a Cloudflare install has none: nobody is asked anything, and every answer is as before.
+
 The database of a Cloudflare install holds accounts as the Node target's does: the setup wizard makes the owner's. But in this version a Worker sends no mail, whatever mail vars it is given, and the server command that makes the first admin, prints recovery links, changes an address and reads the audit record runs on the Node target only. So a Cloudflare install has no admin, its sign-in page sends no link, and nobody can sign in to its dashboard. Mythicshot, the API tokens, tours, publishing and the storage allowance work as before. How accounts behave where they can be used is in [Accounts and signing in](../README.md#accounts-and-signing-in) in the README.
 
 What that means for the operator's usual tasks:

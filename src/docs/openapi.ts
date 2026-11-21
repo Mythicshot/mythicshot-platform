@@ -30,6 +30,7 @@ import { LARGEST_TOURS } from "../usage.ts";
 import { VERSION } from "../version.ts";
 import { MEDIA_VIEWER_COOKIE, VIEWER_CODE_MS, VIEWER_COOKIE, VIEWER_IDLE_MS, VIEWER_MAX_MS } from "../viewers.ts";
 import { RESTRICTED_MAX_BYTES } from "../media-access.ts";
+import { TERMS_LIMITS } from "../terms.ts";
 
 export type OpenApiParameter = { name: string; in: "path"; required: true; description: string; schema: Record<string, unknown> };
 export type OpenApiOperation = {
@@ -101,6 +102,8 @@ export const UNDOCUMENTED_ROUTES: Readonly<Record<string, string>> = {
   "GET /dash/account.js": "the Account page's own script",
   "GET /account/email": "the page an email-change link opens, for people in a browser; it calls the email-change confirm request described here",
   "GET /dash/account-email.js": "the email-change link page's own script",
+  "GET /terms": "the page that asks a signed-in person to agree to the site's terms, and with ?read shows the terms they agreed to, for people in a browser; it calls the terms requests described here",
+  "GET /dash/terms.js": "the terms page's own script",
   "GET /t/:slug": "the public tour page, for visitors; not part of the token API",
   "GET /p/:name": "a published picture, for visitors; not part of the token API",
   "GET /t/:slug/v/:name": "a restricted tour's picture, for a visitor whose browser proved an address the tour may be viewed by; not part of the token API",
@@ -275,6 +278,10 @@ function introduction(): string {
     "",
     "The documentation page never sends a cookie, so a session cannot be tried from it; with a token, try the requests that take one.",
     "",
+    "## The site's terms",
+    "",
+    "A site may publish terms, with its server command. Until a signed-in account has agreed to the current version, every request made with its session answers `403 terms_required` and does nothing, except GET /api/v1/terms (the terms, the account's agreement and the anti-forgery value), GET /api/v1/terms/agreed (the version it agreed to last), POST /api/v1/terms/agree and the two sign-outs. This holds for the site's admin too. When the site publishes new terms, it holds again from the account's next request, until it agrees to the new version. A request made with a token is never held: tokens keep working whatever the terms. A site that has published no terms asks nothing of anyone.",
+    "",
     "## Connecting the app",
     "",
     `The desktop app gets its token with a pair of codes, so nobody has to copy one. It asks POST /api/v1/connect/start, with no credential, for a long secret device code and a short user code such as ABCD-EFGH, shows the short one and opens verify_url, the dashboard's Connections page. A signed-in person types the short code there; the page shows the device's name (POST /api/v1/connect/lookup, with the code in the body) and the person confirms it (POST /api/v1/connect/confirm) or refuses it (POST /api/v1/connect/refuse). Meanwhile the app asks POST /api/v1/connect/token with the device code every ${POLL_INTERVAL_S} seconds: pending, until it is answered connected with a token for that person's workspace, once; the person who confirmed is then mailed at their address that a computer was connected, after the answer, which is the same whether or not that mail goes. The codes live ${CONNECT_MS / 60_000} minutes. Neither is ever put in an address.`,
@@ -291,12 +298,13 @@ function introduction(): string {
     '- `400 {"error":"mixed_credentials","detail":"send a token or a session cookie, not both"}`: the request carries a token and a session cookie.',
     '- `403 {"error":"bad_origin","detail":"this request must come from the site\'s own pages"}`: a change made with a session did not come from a page of the address it was sent to.',
     '- `403 {"error":"bad_csrf","detail":"the anti-forgery header is missing or wrong"}`: a change made with a session lacks the session\'s X-Csrf-Token.',
+    '- `403 {"error":"terms_required","detail":"agree to the site\'s terms first"}`: a request made with a session, on a site with terms the account has not agreed to yet (see The site\'s terms above). Nothing was done. The admin routes answer it only to the site\'s admin.',
     '- `404 {"error":"not_found"}`, with no detail: no request has that address.',
     "- `421` with nothing in it: on a server with two addresses, the request was sent to another host name.",
     '- `500 {"error":"internal"}`: the server failed; nothing about the failure is given.',
     '- `500 {"error":"misconfigured"}`: on Cloudflare, the two addresses in the settings cannot be used together; every request answers this until they are fixed.',
     "",
-    "The admin routes (under /api/v1/admin/) answer every refusal, the 400 and the two 403s above included, with the one `404 {\"error\":\"not_found\"}`.",
+    "The admin routes (under /api/v1/admin/) answer every refusal, the 400 and the two 403s above included, with the one `404 {\"error\":\"not_found\"}`; to the site's admin they answer terms_required as every route does.",
     "",
     "The app's two requests while it connects take no credential at all: one that carries a token or a session cookie answers `400 credentials_not_allowed`. Every device code that cannot give a token, whether unknown, expired, refused, already used or not a device code at all, answers the one `410 expired_code`, and asking again sooner than the interval answers `429 slow_down`.",
     "",
@@ -781,6 +789,11 @@ function schemas(): Record<string, Schema> {
           },
           "The site's sign-in lifetimes, in whole days, as its settings give them now.",
         ),
+        terms_agreed: object(
+          ["version", "agreed_at"],
+          { version: { type: "string", description: "Its label. Show it as text." }, agreed_at: whole("When, in milliseconds since 1970.") },
+          "Only when the account has agreed to a version of the site's terms: the newest it agreed to, for the account page. An account that has agreed to none, and so every account of a site without terms, gets no such field.",
+        ),
       },
     ),
     SessionList: object(["sessions"], {
@@ -799,7 +812,7 @@ function schemas(): Record<string, Schema> {
       },
     }),
     AdminAccount: object(
-      ["id", "username", "email", "status", "admin", "created_at", "deleting", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted"],
+      ["id", "username", "email", "status", "admin", "created_at", "deleting", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "terms"],
       {
         id: { type: "string", pattern: "^usr_[0-9a-f]{24}$", description: "The account's id." },
         username: { type: ["string", "null"], description: "null until the account has one." },
@@ -826,9 +839,61 @@ function schemas(): Record<string, Schema> {
           },
           "What used_bytes is made of, in bytes, as in GET /api/v1/usage. The five numbers add up to used_bytes.",
         ),
+        terms: orNull(
+          object(
+            ["version", "agreed_at"],
+            { version: { type: "string", description: "The label of the version of the site's terms the account agreed to last. Show it as text." }, agreed_at: whole("When it agreed to it, in milliseconds since 1970.") },
+            "The account's newest agreement to the site's terms: the version's label and the time, nothing else. null when it has agreed to none (the Admin page says Not yet).",
+          ),
+        ),
       },
       "One account and how its workspace uses its storage. Nothing of the workspace's tours or shared items: no tour, item, title, link, picture, token or session.",
     ),
+    TermsLink: object(["label", "url"], { label: text(TERMS_LIMITS.linkLabelChars, "What the link says. Show it as text."), url: { type: "string", maxLength: TERMS_LIMITS.linkUrlChars, description: "An https address with a host name, no user name or password and no # part, as the site published it." } }),
+    TermsBlock: {
+      oneOf: [
+        object(["kind", "text"], { kind: { type: "string", enum: ["heading", "paragraph"] }, text: { type: "string", minLength: 1, description: "Show it as text." } }, "A heading or a paragraph."),
+        object(["kind", "items"], { kind: { type: "string", const: "list" }, items: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "The bullets, in order. Show them as text." } }, "A list of bullets."),
+      ],
+    },
+    Terms: object(
+      ["id", "title", "version", "points", "links", "body", "published_at"],
+      {
+        id: { type: "string", pattern: "^trm_[0-9a-f]{24}$", description: "The version's id, which POST /api/v1/terms/agree takes." },
+        title: text(TERMS_LIMITS.titleChars, "The terms' title.", 1),
+        version: text(TERMS_LIMITS.versionChars, "The version's label, free text such as a date.", 1),
+        points: { type: "array", minItems: 1, maxItems: TERMS_LIMITS.points, items: text(TERMS_LIMITS.pointChars, "One main point.", 1), description: "The main points: a summary. The full terms in body are what is agreed to." },
+        links: { type: "array", maxItems: TERMS_LIMITS.links, items: ref("TermsLink"), description: "Pages the site offers the terms as, if any." },
+        body: { type: "array", minItems: 1, items: ref("TermsBlock"), description: "The full terms, block by block." },
+        published_at: whole("When the version was published, in milliseconds since 1970."),
+      },
+      "One version of the site's terms, exactly as it was published; a version is never changed. Every text is the site's own: show it as text, never as markup.",
+    ),
+    TermsAgreement: object(
+      ["terms_id", "version", "agreed_at"],
+      {
+        terms_id: { type: "string", pattern: "^trm_[0-9a-f]{24}$", description: "The version agreed to." },
+        version: { type: "string", description: "Its label." },
+        agreed_at: whole("When, in milliseconds since 1970."),
+      },
+      "The account's newest agreement.",
+    ),
+    TermsState: object(
+      ["terms", "agreed", "required", "csrf"],
+      {
+        terms: orNull(ref("Terms")),
+        agreed: orNull(ref("TermsAgreement")),
+        required: { type: "boolean", description: "true while the account has not agreed to the current terms: until it does, its session can make no other request but these and signing out." },
+        csrf: { type: "string", pattern: "^[0-9a-f]{64}$", description: "The session's anti-forgery value, for the X-Csrf-Token header of POST /api/v1/terms/agree; GET /api/v1/session gives the same value once the terms are agreed to." },
+      },
+      "The current terms (null: the site has published none), the account's newest agreement (null: none), and whether the account still has to agree.",
+    ),
+    TermsAgreed: object(
+      ["terms", "agreed_at"],
+      { terms: orNull(ref("Terms")), agreed_at: { type: ["integer", "null"], minimum: 0, description: "When the account agreed to it, in milliseconds since 1970; null with terms." } },
+      "The version the account agreed to last, with the time; both null when it has agreed to none.",
+    ),
+    TermsAgree: input(["terms"], { terms: { type: "string", pattern: "^trm_[0-9a-f]{24}$", description: "The id of the version that was shown, from GET /api/v1/terms." } }, "The body takes this one field and nothing else."),
     AdminSummary: object(
       ["accounts", "used_bytes", "standard_allowance_bytes"],
       {
@@ -1680,6 +1745,43 @@ function paths(): OpenApiDoc["paths"] {
         },
       },
     },
+    "/api/v1/terms": {
+      get: {
+        tags: ["Accounts"],
+        summary: "The site's terms and the account's agreement",
+        description: `The current version of the site's terms, the account's newest agreement, whether the account still has to agree, and the session's anti-forgery value. Open before the terms are agreed to. ${NOT_FROM_THE_PAGE}`,
+        operationId: "getTerms",
+        security: SESSION,
+        responses: { "200": answer("The terms and the account's state.", ref("TermsState")), "401": UNAUTHORIZED },
+      },
+    },
+    "/api/v1/terms/agreed": {
+      get: {
+        tags: ["Accounts"],
+        summary: "The terms the account agreed to",
+        description: `The version of the site's terms the account agreed to last, exactly as it was published, with when it agreed. Open before the terms are agreed to. ${NOT_FROM_THE_PAGE}`,
+        operationId: "getAgreedTerms",
+        security: SESSION,
+        responses: { "200": answer("The version, or null for an account that has agreed to none.", ref("TermsAgreed")), "401": UNAUTHORIZED },
+      },
+    },
+    "/api/v1/terms/agree": {
+      post: {
+        tags: ["Accounts"],
+        summary: "Agree to the site's terms",
+        description: `Records that the caller's own account agrees, now, to the version of the terms it was shown, named by its id, and only while that is still the current version. Only the account, the version and the time are stored. Agreeing again to a version already agreed to changes nothing and answers 204. ${NOT_FROM_THE_PAGE}`,
+        operationId: "agreeToTerms",
+        security: SESSION,
+        requestBody: { required: true, content: json(ref("TermsAgree")) },
+        responses: {
+          "204": empty("Agreed: from now on the session works as before."),
+          "400": refusal("The body is not a JSON object with the one field terms, an id of a version's shape.", "bad_request"),
+          "401": UNAUTHORIZED,
+          "403": SESSION_CHANGE_REFUSED,
+          "409": refusal("The id is not the current version: newer terms were published since they were shown, or it names no version (or the site has none). Nothing was recorded; ask GET /api/v1/terms again.", "terms_changed"),
+        },
+      },
+    },
     "/api/v1/connect/start": {
       post: {
         tags: ["Connections"],
@@ -2142,7 +2244,7 @@ export function openapi(): OpenApiDoc {
       { name: "Uploads", description: "Send a tour, a new chapter or a chapter's replacement: start, one request per image, finish." },
       { name: "Items", description: "Share a single image or a short clip: start, one request per part, an optional preview, finish; then list, read and delete." },
       { name: "Workspace", description: "The workspace a token or a session belongs to." },
-      { name: "Accounts", description: "Signing in with a link sent by mail, accepting an invite, the browser sessions of an account, and changing its email address. The site's own pages use these." },
+      { name: "Accounts", description: "Signing in with a link sent by mail, accepting an invite, the browser sessions of an account, changing its email address, and agreeing to the site's terms. The site's own pages use these." },
       { name: "Connections", description: "Connecting the desktop app with a short code a signed-in person confirms, and the workspace's tokens: list, rename and revoke. The app's two requests take no credential; the rest take the session." },
       { name: "Admin", description: "For the site's admin alone: the site's storage in all, how each account uses its storage, each workspace's allowance, inviting people, and disabling, enabling and deleting an account. To anyone else these answer 404." },
       { name: "Viewers", description: "A visitor proving an email address, to view a tour or a shared image or clip that is shared with a list of addresses: on the tours address for tours (/api/v1/view/), on the address for images and clips for those (/api/v1/media-view/), each with its own cookie. No account and no token: the pages use these." },

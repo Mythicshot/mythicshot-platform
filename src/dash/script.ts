@@ -10,13 +10,17 @@
 // address, this session's id, and whether the address can be changed here), and for the
 // Admin page { accountId } (the account's own id, to know its own row), and for every
 // page { download } (whether the session named a usable address of the app's download
-// page, which Dash.downloadLink then links to) and { limits } (the site's three sign-in
+// page, which Dash.downloadLink then links to), { agreed } (the account's newest agreement to the
+// site's terms from the session's terms_agreed, { version, agreedAt }, or null) and { limits } (the site's three sign-in
 // lifetimes in days from the session's limits, each a whole number or null when off or not
 // given: sessionMaxDays, connectionIdleDays, connectionMaxDays). A page that
 // has something to say to a visitor who is not signed in passes a second function, which is
 // called instead of sending the visitor to /signin. Every request goes
 // through Dash.api: to this site only, with the browser's session for this address, no
 // referrer, and the X-Csrf-Token header on every change, as the account page sends it.
+// While the site's current terms wait for the account's agreement every session request is
+// refused with 403 terms_required (src/auth.ts); Dash.api then sends the browser to the terms
+// screen, /terms, with the page it came from in ?next=, and Dash.start does nothing more.
 // Nothing here writes to storage, to a cookie or to an address.
 import { DOWNLOAD_URL_MAX } from "../https-address.ts";
 import { MAX_LIMIT_DAYS } from "../lifetimes.ts";
@@ -62,9 +66,23 @@ export const DASH_JS = `var Dash = (function () {
       return r.text().then(function (t) {
         var data = null;
         try { data = t ? JSON.parse(t) : null; } catch (e) { data = null; }
-        return { status: r.status, data: data, retryAfter: r.headers.get("retry-after") };
+        var res = { status: r.status, data: data, retryAfter: r.headers.get("retry-after") };
+        // The site's terms changed, or were never agreed to: nothing works until they are.
+        if (termsRequired(res)) toTerms();
+        return res;
       });
     });
+  }
+
+  // True for the refusal every session request gets while the site's current terms wait for
+  // the account's agreement (403 terms_required, src/auth.ts).
+  function termsRequired(res) {
+    return res.status === 403 && res.data !== null && typeof res.data === "object" && res.data.error === "terms_required";
+  }
+
+  // The terms screen, told which dashboard page to come back to (it takes only a tab's own path).
+  function toTerms() {
+    location.replace("/terms?next=" + encodeURIComponent(location.pathname));
   }
 
   function errorOf(res) {
@@ -109,6 +127,12 @@ export const DASH_JS = `var Dash = (function () {
 
   function signedOut() {
     location.replace("/signin");
+  }
+
+  // The session's terms_agreed (the account's newest agreement to the site's terms) as
+  // { version, agreedAt }, or null when the answer has none or it is not of that shape.
+  function agreedOf(v) {
+    return v !== null && typeof v === "object" && typeof v.version === "string" && typeof v.agreed_at === "number" && isFinite(v.agreed_at) ? { version: v.version, agreedAt: v.agreed_at } : null;
   }
 
   // ---- The app's download page ----
@@ -305,6 +329,8 @@ export const DASH_JS = `var Dash = (function () {
   function start(page, whenSignedOut) {
     var load = $("dash-load");
     api("GET", "/api/v1/session").then(function (res) {
+      // The terms screen is on its way (api went there): the page waits for nothing more.
+      if (termsRequired(res)) return;
       if (res.status === 401) {
         if (typeof whenSignedOut === "function") whenSignedOut();
         else signedOut();
@@ -334,6 +360,7 @@ export const DASH_JS = `var Dash = (function () {
         accountId: typeof who.id === "string" ? who.id : "",
         emailChange: d.email_change === true,
         download: download !== "",
+        agreed: agreedOf(d.terms_agreed),
         limits: {
           sessionMaxDays: limitDays(d.limits !== null && typeof d.limits === "object" ? d.limits.session_max_days : null),
           connectionIdleDays: limitDays(d.limits !== null && typeof d.limits === "object" ? d.limits.connection_idle_days : null),

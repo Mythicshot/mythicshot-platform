@@ -18,6 +18,16 @@ import { csrfFor, readSessionCookie, resolveSession, sameOriginChange, sessionCo
 export type Auth = { workspaceId: string; tokenId: string; session?: { id: string; userId: string; admin: boolean } };
 
 /**
+ * The refusal of every session request while the site's current terms wait for the account's
+ * agreement (src/terms.ts), but the requests that ask with `terms: "open"`: the terms screen's
+ * own three and the two sign-outs. Built with json, in the shape apiError gives; the API
+ * description lists it once, among the answers any request can get.
+ */
+function termsRequired(): Response {
+  return json(403, { error: "terms_required", detail: "agree to the site's terms first" });
+}
+
+/**
  * The roles whose address takes any credential, a token or a session: the tours and the
  * app address (a session only the app address: SESSION_ROLES). The img address serves
  * shared media to anyone and takes none, nor does a role added later until it is listed.
@@ -144,36 +154,56 @@ function notFound(): Response {
  * and the two 403s too, is the one 404 `not_found` a member gets: an admin route says
  * nothing about itself to anyone else.
  *
+ * Then, for a session only: while the site's current terms wait for the account's agreement
+ * (resolveSession's termsPending, read in its one query), the answer is 403 `terms_required`
+ * and the route runs no further, unless it asks with `terms: "open"` (the terms screen's own
+ * requests and the two sign-outs). An admin is held to it like anyone, after the admin rule,
+ * so a member still gets the one 404 from an admin route. A token is never held to it: its
+ * path is exactly as before, with no call more.
+ *
  * No token, cookie, code or digest is ever logged or put in an answer: only digests
  * reach the database.
  */
 export async function requireAuth(
   req: Request,
   deps: Deps,
-  opts: { touch?: boolean; only?: "token" | "session"; admin?: boolean } = {},
+  opts: { touch?: boolean; only?: "token" | "session"; admin?: boolean; terms?: "open" } = {},
 ): Promise<Auth | Response> {
   if (opts.admin === true) {
-    const who = await callerOf(req, deps, { touch: opts.touch, only: "session" });
-    return who instanceof Response || who.session?.admin !== true ? notFound() : who;
+    const found = await callerOf(req, deps, { touch: opts.touch, only: "session" });
+    if (found instanceof Response || found.who.session?.admin !== true) return notFound();
+    return found.termsPending ? termsRequired() : found.who;
   }
-  return callerOf(req, deps, opts);
+  const found = await callerOf(req, deps, opts);
+  if (found instanceof Response) return found;
+  return found.termsPending && opts.terms !== "open" ? termsRequired() : found.who;
 }
 
-/** `requireAuth` without the admin rule: the caller, or the refusal a route that is no admin route answers. */
-async function callerOf(req: Request, deps: Deps, opts: { touch?: boolean; only?: "token" | "session" }): Promise<Auth | Response> {
+/**
+ * `requireAuth` without the admin rule and the terms rule: the caller, with whether its
+ * session waits for the terms (always false for a token), or the refusal a route that is no
+ * admin route answers.
+ */
+type Found = { who: Auth; termsPending: boolean };
+async function callerOf(req: Request, deps: Deps, opts: { touch?: boolean; only?: "token" | "session" }): Promise<Found | Response> {
   if (!onRole(deps.config.hosts, req, CREDENTIAL_ROLES)) return unauthorized();
   const header = req.headers.get("authorization");
   // Before any cookie is read: a token-only route has no session to mix a token with.
-  if (opts.only === "token") return tokenAuth(header ?? "", deps, opts.touch !== false);
+  if (opts.only === "token") return byToken(await tokenAuth(header ?? "", deps, opts.touch !== false));
   const cookie = sessionCookiePresent(req);
   if (header !== null && cookie) return mixedCredentials();
   if (cookie) return sessionAuth(req, deps);
   if (opts.only === "session") return unauthorized();
-  return tokenAuth(header ?? "", deps, opts.touch !== false);
+  return byToken(await tokenAuth(header ?? "", deps, opts.touch !== false));
+}
+
+/** A token's caller: never held to the terms. */
+function byToken(r: Auth | Response): Found | Response {
+  return r instanceof Response ? r : { who: r, termsPending: false };
 }
 
 /** The session path of `requireAuth`: the request has a session cookie and no Authorization header. */
-async function sessionAuth(req: Request, deps: Deps): Promise<Auth | Response> {
+async function sessionAuth(req: Request, deps: Deps): Promise<Found | Response> {
   if (!sessionHost(req, deps)) return unauthorized();
   const secret = readSessionCookie(req);
   if (secret === null) return unauthorized();
@@ -188,7 +218,7 @@ async function sessionAuth(req: Request, deps: Deps): Promise<Auth | Response> {
   }
   const session = await resolveSession(req, deps);
   if (session === null) return unauthorized();
-  return { workspaceId: session.workspaceId, tokenId: "", session: { id: session.sessionId, userId: session.userId, admin: session.admin } };
+  return { who: { workspaceId: session.workspaceId, tokenId: "", session: { id: session.sessionId, userId: session.userId, admin: session.admin } }, termsPending: session.termsPending };
 }
 
 /**

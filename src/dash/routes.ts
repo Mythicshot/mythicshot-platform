@@ -1,5 +1,6 @@
 // The dashboard's routes on the app address: GET / (which sends a person on), each page in
-// DASH_PAGES with its own script, and the shared stylesheet and script. Every page and
+// DASH_PAGES with its own script, the shared stylesheet and script, and the terms screen
+// (TERMS_PAGE, also the read-only terms) with its own script. Every page and
 // file answers its fixed text with the sign-in pages' headers (ACCOUNT_PAGE_HEADERS): no
 // database or storage call, no credential read, nothing about anyone.
 //
@@ -20,6 +21,7 @@ import { ADMIN_HTML, ADMIN_JS } from "./admin.ts";
 import { ACCOUNT_HTML, ACCOUNT_JS } from "./account.ts";
 import { CONNECTIONS_HTML, CONNECTIONS_JS } from "./connections.ts";
 import { ACCOUNT_EMAIL_HTML, ACCOUNT_EMAIL_JS } from "./account-email.ts";
+import { TERMS_HTML, TERMS_JS } from "./terms.ts";
 
 /** One dashboard page: where it is served, its document, and its own script. */
 export type DashPage = { path: string; html: string; script: { path: string; body: string } };
@@ -45,6 +47,14 @@ export const DASH_LINK_PAGES: readonly DashPage[] = [
   { path: "/account/email", html: ACCOUNT_EMAIL_HTML, script: { path: "/dash/account-email.js", body: ACCOUNT_EMAIL_JS } },
 ];
 
+/**
+ * The terms screen, which is also the read-only terms at /terms?read (src/dash/terms.ts):
+ * served as DASH_PAGES are, with no database call, and kept apart because it is no dashboard
+ * page: no top bar and no tabs, one card on its own page, with a script of its own. Its checks
+ * are in test/dash-terms.test.ts.
+ */
+export const TERMS_PAGE: DashPage = { path: "/terms", html: TERMS_HTML, script: { path: "/dash/terms.js", body: TERMS_JS } };
+
 const HTML = "text/html; charset=utf-8";
 const CSS = "text/css; charset=utf-8";
 const JS = "text/javascript; charset=utf-8";
@@ -63,4 +73,6 @@ export function dashRoutes(app: Hono): void {
   }
   app.get("/dash/dash.css", serve(DASH_CSS, CSS));
   app.get("/dash/dash.js", serve(DASH_JS, JS));
+  app.get(TERMS_PAGE.path, serve(TERMS_PAGE.html, HTML));
+  app.get(TERMS_PAGE.script.path, serve(TERMS_PAGE.script.body, JS));
 }

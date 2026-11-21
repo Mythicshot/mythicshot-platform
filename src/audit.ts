@@ -39,6 +39,7 @@ export const AUDIT_EVENTS = [
   "media_access_changed",
   "viewer_link_sent",
   "viewer_signin",
+  "terms_agreed",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 
@@ -48,7 +49,7 @@ export type AuditEntry = {
   userId?: string | null;
   /** The id of the workspace it happened in. */
   workspaceId?: string | null;
-  /** The id of what was acted on: a session, an account, a workspace, a token, a connect request, an invite, a viewer code or a viewer session. */
+  /** The id of what was acted on: a session, an account, a workspace, a token, a connect request, an invite, a viewer code, a viewer session or a version of the terms. */
   subject?: string | null;
   /**
    * A flat record of at most 8 entries. A value is a whole number, null (such as an

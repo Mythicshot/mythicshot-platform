@@ -186,6 +186,7 @@ export const CODE_MEANINGS: Readonly<Record<string, string>> = {
   mail_off: "The site cannot send mail, so an email address cannot be changed there and nobody can be invited.",
   bad_origin: "The request did not come from a page of the site's own address, which signing in, and every change made with a session, needs.",
   bad_csrf: "A change made with a session did not carry that session's anti-forgery value.",
+  terms_changed: "The terms shown are no longer the site's current terms: a newer version was published. Ask for the terms again and agree to the new version.",
   mixed_credentials: "The request carried both a token and a session. Send one.",
   link_invalid: "The sign-in link has expired or was already used; ask for a new one.",
   rate_limited: "Too many sign-in requests from this network, too many email-change requests for an account or an address, too many requests to connect the app from this network (or too many of them waiting), too many wrong short codes from an account or a network, too many invites from an admin or invite mails from the site, or too many invite look-ups and accepts from this network. The retry-after header says how long to wait.",

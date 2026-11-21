@@ -19,6 +19,7 @@ import { publishRoutes } from "./publish.ts";
 import { restrictedAnswer, restrictedRoutes } from "./restricted.ts";
 import { setupRoutes } from "./setup.ts";
 import { signinRoutes } from "./signin.ts";
+import { termsRoutes } from "./terms.ts";
 import { tokenRoutes } from "./tokens.ts";
 import { tourRoutes } from "./tours.ts";
 import { uploadRoutes } from "./uploads.ts";
@@ -57,6 +58,7 @@ export function createApp(deps: Deps): Hono {
   viewerRoutes(app, deps);
   mediaViewerRoutes(app, deps);
   accountRemovalRoutes(app, deps);
+  termsRoutes(app, deps);
   pageRoutesForAccounts(app, deps);
   dashRoutes(app);
   publishRoutes(app, deps);

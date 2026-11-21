@@ -381,27 +381,35 @@ export async function redeemSignInCode(
  *
  * The secret itself is not handed back: nothing needs it once the session is found.
  * `csrf` is the session's anti-forgery value (`csrfFor` of the secret), which the session
- * answer gives the site's own page; it does not reveal the secret.
+ * answer gives the site's own page; it does not reveal the secret. `termsPending` is true
+ * while the site's current terms wait for this account's agreement (src/terms.ts), read in
+ * the same one read.
  */
 export async function resolveSession(
   req: Request,
   deps: Deps,
-): Promise<{ sessionId: string; userId: string; workspaceId: string; admin: boolean; csrf: string } | null> {
+): Promise<{ sessionId: string; userId: string; workspaceId: string; admin: boolean; csrf: string; termsPending: boolean } | null> {
   if (!sessionHost(req, deps)) return null;
   const secret = readSessionCookie(req);
   if (secret === null) return null;
   const now = deps.now();
   // The workspace comes from membership alone. An account has at most one membership (a
   // unique index holds that); should that ever change, more than one row is nobody.
-  const rows = await deps.db.all<{ id: string; user_id: string; last_used_at: number; is_admin: number; workspace_id: string }>(
-    `SELECT s.id, s.user_id, s.last_used_at, u.is_admin, m.workspace_id
-       FROM session s
-       JOIN user u ON u.id = s.user_id
-       JOIN membership m ON m.user_id = u.id
-      WHERE s.hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND ${SESSION_AGE_SQL} AND u.status = 'active'
-      LIMIT 2`,
-    [await sha256Hex(secret), now, ...sessionParams(deps.config, now)],
-  );
+  //
+  // The same query says whether the site's current terms (the newest version, migration
+  // 0018) still wait for this account's agreement: terms_pending is 1 only when there is a
+  // version and the account has not agreed to it. Read here, from the database on every
+  // request and never kept, so the gate in requireAuth costs no call and no account's state
+  // can reach another's request. A database before 0018 has no terms, and so nothing waits.
+  type Row = { id: string; user_id: string; last_used_at: number; is_admin: number; workspace_id: string; terms_pending?: number };
+  const params = [await sha256Hex(secret), now, ...sessionParams(deps.config, now)];
+  let rows: Row[];
+  try {
+    rows = await deps.db.all<Row>(SESSION_LOOKUP.replace("/*terms*/", TERMS_PENDING_SQL), params);
+  } catch (err) {
+    if (!isBeforeTerms(err)) throw err;
+    rows = await deps.db.all<Row>(SESSION_LOOKUP.replace("/*terms*/", ""), params);
+  }
   if (rows.length !== 1) return null;
   const row = rows[0];
   if (now - row.last_used_at >= SESSION_TOUCH_MS) {
@@ -418,7 +426,37 @@ export async function resolveSession(
       now - SESSION_TOUCH_MS,
     ]);
   }
-  return { sessionId: row.id, userId: row.user_id, workspaceId: row.workspace_id, admin: row.is_admin === 1, csrf: await csrfFor(secret) };
+  return { sessionId: row.id, userId: row.user_id, workspaceId: row.workspace_id, admin: row.is_admin === 1, csrf: await csrfFor(secret), termsPending: row.terms_pending === 1 };
+}
+
+/** The lookup of resolveSession; `/*terms*\/` is where the terms column goes, or nothing. */
+const SESSION_LOOKUP = `SELECT s.id, s.user_id, s.last_used_at, u.is_admin, m.workspace_id/*terms*/
+       FROM session s
+       JOIN user u ON u.id = s.user_id
+       JOIN membership m ON m.user_id = u.id
+      WHERE s.hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND ${SESSION_AGE_SQL} AND u.status = 'active'
+      LIMIT 2`;
+
+/**
+ * 1 when the site has terms and the session's account has not agreed to the current version
+ * (the one with the highest seq), else 0. It names the row's own account (s.user_id) only.
+ */
+const TERMS_PENDING_SQL = `,
+            (SELECT CASE WHEN t.id IS NULL THEN 0
+                         WHEN EXISTS (SELECT 1 FROM terms_agreement a WHERE a.user_id = s.user_id AND a.terms_id = t.id) THEN 0
+                         ELSE 1 END
+               FROM (SELECT (SELECT id FROM terms_version ORDER BY seq DESC LIMIT 1) AS id) t) AS terms_pending`;
+
+/**
+ * True for the error of a database the terms migration (0018) has not reached yet, in the
+ * words each target uses: `no such table: terms_version` (Node), with D1's own prefix and
+ * suffix around it on Workers. Such a database has no terms.
+ */
+export function isBeforeTerms(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
+    if (/(?:^|: )no such table: (?:main\.)?terms_(?:version|agreement)(?:$|:| at offset )/.test(e.message)) return true;
+  }
+  return false;
 }
 
 /**

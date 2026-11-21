@@ -96,6 +96,11 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   // Changing the account's email address takes a session alone, so it lives where the cookie does.
   "POST /api/v1/account/email": "app",
   "POST /api/v1/account/email/confirm": "app",
+  // The site's terms (src/terms.ts): the screen's three requests take a session alone, so they
+  // live where the cookie does.
+  "GET /api/v1/terms": "app",
+  "GET /api/v1/terms/agreed": "app",
+  "POST /api/v1/terms/agree": "app",
 
   // Connecting the desktop app (src/connect.ts). The app has no credential yet and talks to
   // whichever address it was set up with (an install from before this had only the tours
@@ -177,6 +182,9 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /dash/account.js": "app",
   "GET /account/email": "app",
   "GET /dash/account-email.js": "app",
+  // The terms screen, also the read-only terms (/terms?read), and its script (src/dash/terms.ts).
+  "GET /terms": "app",
+  "GET /dash/terms.js": "app",
 
   // Tour pages, their pictures and the player's files.
   "GET /p/:name": "tours-redirect",

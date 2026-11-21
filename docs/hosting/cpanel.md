@@ -749,6 +749,20 @@ touch ~/apps/tours/tmp/restart.txt
 
 **How to tell it worked:** the Connections page says under each connection from Mythicshot when it expires, and the Account page says when each session ends. A smaller number applies at once to sessions and connections that already exist. A value that cannot be used never stops the app: the default applies, and the app's log has one line naming the setting, such as `sign-in lifetimes: SESSION_MAX_DAYS is not a whole number of days from 1 to 3650, 0 or off, so the default of 90 days applies. The site runs.` To go back to the defaults, remove the lines and restart.
 
+### Publish the site's terms
+
+A site can ask everyone to agree to its terms before they use the dashboard (see [The site's terms](../../README.md#the-sites-terms) in the README). Without terms, nobody is asked anything.
+
+1. Write the terms in a plain-text file in the format of [docs/terms-example.txt](../terms-example.txt), and upload it to your home folder, for example as `terms.txt`.
+
+2. Publish it, from the folder the file is in:
+
+```sh
+./cpanel.sh admin terms publish terms.txt
+```
+
+**How to tell it worked:** the command prints `Published version 1 of the terms, "<your version label>" (trm_…).`, and the next time anyone signs in or opens a dashboard page, you included, the dashboard shows the terms with "I agree". A file that breaks a rule is refused with one line that names the line, such as `The terms were not published: line 4: this main point is empty.`, and nothing changes. `./cpanel.sh admin terms list` lists the versions and how many accounts agreed to each; `./cpanel.sh admin terms show <id>` prints one. To change the terms, publish a new file: every version is kept, and everyone is asked again. Connected computers keep working throughout.
+
 ## What has been run where
 
 **Run by hand on real hosting,** on one shared cPanel account at one provider (CloudLinux, with the app run by Passenger):
