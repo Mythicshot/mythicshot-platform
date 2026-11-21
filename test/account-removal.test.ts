@@ -199,9 +199,9 @@ describe("disabling an account", () => {
     const codes = await deps.db.all("SELECT id FROM signin_code WHERE user_id = ?", [b.userId]);
     expect(seen(await ask(b.email))).toEqual(seen(await ask("nobody-at-all@example.com")));
     expect(await deps.db.all("SELECT id FROM signin_code WHERE user_id = ?", [b.userId])).toEqual(codes);
-    // The removal counts are still there for the admin.
+    // The removal counts are still there for the admin (the world shares an image, a clip and a restricted image).
     const counts = await asAdmin(w, "GET", account(b.userId, "/removal"));
-    expect(counts.json).toEqual({ username: null, email: b.email, tours: 5, items: 2, connections: 2, used_bytes: expect.any(Number) });
+    expect(counts.json).toEqual({ username: null, email: b.email, tours: 5, items: 3, connections: 2, used_bytes: expect.any(Number) });
 
     // Enabled: 204, only the status changes, and everything public and by token is byte for byte what it was.
     await deps.db.run("UPDATE session SET revoked_at = ? WHERE id = ?", [deps.now(), b.session.id]);
