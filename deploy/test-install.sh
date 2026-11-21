@@ -147,14 +147,38 @@ case "$args" in
     # that does not fill in TOURS_HOST the way the stack file means it.
     val() { if [ -n "${!1+set}" ]; then printf '%s' "${!1}"; else sed -n "s/^$1=//p" "$pd/.env" 2>/dev/null | tail -n 1; fi; }
     yaml() { if [ -n "$1" ]; then printf '%s' "$1"; else printf '""'; fi; }
+    # IMG_HOST is read the way Compose's own .env reader is assumed to read a line, more
+    # leniently than install.sh: blanks before the name, an "export " in front, blanks
+    # around the = and one pair of quotes around the value are taken off; the last line
+    # for the name wins. Prints nothing and fails when no line names it. In direct mode
+    # the line comes into the app's environment by env_file (absent when there is none),
+    # in tunnel mode by the stack file's ${IMG_HOST:-} (empty when there is none).
+    lenient() {
+      local l k v found=1 out=""
+      while IFS= read -r l || [ -n "$l" ]; do
+        l="${l#"${l%%[![:space:]]*}"}"
+        case "$l" in "" | "#"*) continue ;; esac
+        l="${l#export }"; l="${l#"${l%%[![:space:]]*}"}"
+        [[ "$l" == *=* ]] || continue
+        k="${l%%=*}"; k="${k%"${k##*[![:space:]]}"}"
+        [ "$k" = "$1" ] || continue
+        v="${l#*=}"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+        if [[ "$v" =~ ^\"(.*)\"$ || "$v" =~ ^\'(.*)\'$ ]]; then v="${BASH_REMATCH[1]}"; fi
+        out="$v"; found=0
+      done <"$pd/.env"
+      printf '%s' "$out"
+      return "$found"
+    }
     d="$(val DOMAIN)"; a="$(val APP_DOMAIN)"
     tours=""; [ -z "$a" ] || tours="$d"
     if [ "${STUB_RENDER:-}" = wrong ]; then if [ -n "$a" ]; then tours="'\${DOMAIN}'"; else tours="'}'"; fi; fi
     printf 'name: demo-platform\nservices:\n  app:\n    environment:\n'
     if grep -q 'TUNNEL_TOKEN:?' "$cf"; then
       printf '      SETUP_CODE: %s\n' "$(val SETUP_CODE)"
+      printf '      IMG_HOST: %s\n' "$(yaml "${IMG_HOST-$(lenient IMG_HOST)}")"
     else
-      grep -E '^[A-Z_]+=' "$pd/.env" | grep -vE '^(DATA_DIR|TOURS_HOST|APP_HOST)=' | sed 's/^\([A-Z_]*\)=/      \1: /'
+      grep -E '^[A-Z_]+=' "$pd/.env" | grep -vE '^(DATA_DIR|TOURS_HOST|APP_HOST|IMG_HOST)=' | sed 's/^\([A-Z_]*\)=/      \1: /'
+      if img="$(lenient IMG_HOST)"; then printf '      IMG_HOST: %s\n' "$(yaml "$img")"; fi
     fi
     printf '      APP_HOST: %s\n      DATA_DIR: /data\n      TOURS_HOST: %s\n' "$(yaml "$a")" "$(yaml "$tours")"
     printf '    image: %s\n  caddy:\n    environment:\n      APP_DOMAIN: %s\n      DOMAIN: %s\n' "$(val APP_IMAGE)" "$(yaml "$a")" "$d"
@@ -2488,6 +2512,14 @@ test_rendered_app_hosts_reads_only_the_apps_two_settings() {
   expect "another service's do not count" test "$(printf 'services:\n  caddy:\n    environment:\n      APP_HOST: ""\n      TOURS_HOST: ""\n' | rendered_app_hosts)" = ""
   expect "another section of the app does not count" test "$(printf 'services:\n  app:\n    labels:\n      APP_HOST: ""\n      TOURS_HOST: ""\n' | rendered_app_hosts)" = ""
   expect "nothing else is passed on" test "$(printf '%s      APP_HOST: ""\n      TOURS_HOST: ""\n' "$head" | rendered_app_hosts | grep -c secret)" = 0
+  # With "img", the app's IMG_HOST too, as a third field; absent and empty are the same.
+  expect "img: absent" test "$(printf '%s      APP_HOST: ""\n      TOURS_HOST: ""\n' "$head" | rendered_app_hosts img)" = "||"
+  expect "img: empty" test "$(printf '%s      APP_HOST: ""\n      IMG_HOST: ""\n      TOURS_HOST: ""\n' "$head" | rendered_app_hosts img)" = "||"
+  expect "img: a name, quoted" test "$(printf '%s      APP_HOST: a.example.com\n      IMG_HOST: "img.example.com"\n      TOURS_HOST: t.example.com\n' "$head" | rendered_app_hosts img)" = "t.example.com|a.example.com|img.example.com"
+  expect "img: a setting without a value is not an empty one" test "$(printf '%s      APP_HOST: ""\n      IMG_HOST:\n      TOURS_HOST: ""\n' "$head" | rendered_app_hosts img)" != "||"
+  expect "img: twice is not a name" test "$(printf '%s      APP_HOST: ""\n      IMG_HOST: x.example.com\n      IMG_HOST: x.example.com\n      TOURS_HOST: ""\n' "$head" | rendered_app_hosts img)" != "||x.example.com"
+  expect "img: another service's does not count" test "$(printf '%s      APP_HOST: ""\n      TOURS_HOST: ""\n  caddy:\n    environment:\n      IMG_HOST: x.example.com\n' "$head" | rendered_app_hosts img)" = "||"
+  expect "img: nothing when the two are not there" test "$(printf '%s      IMG_HOST: x.example.com\n' "$head" | rendered_app_hosts img)" = ""
 }
 
 # An app image from before two addresses answers /healthz without any role: the run
@@ -2871,7 +2903,8 @@ test_update_refuses_until_install_has_written_the_caddyfile_for_the_img_address(
   : >"$LOG"
   install_sh "" update
   expect "the other way round: refused" test "$RC" = 1
-  expect "the other way round: says why" has "$ERR" "$INST/.env holds no IMG_HOST, but the Caddyfile here answers for a third name, and update does not rewrite it. Nothing was changed. Run: sudo bash $SCRIPT install"
+  expect "the other way round: says why, naming the name" has "$ERR" "$INST/.env holds no IMG_HOST, but the Caddyfile here answers for a third name, $IMG, and update does not rewrite it. Nothing was changed."
+  expect "the other way round: says install replaces a hand edit and keeps a copy" has "$ERR" "install writes the Caddyfile for the addresses in .env and so replaces that edit (it keeps the edited file as a .bak copy); to keep the name as the img address, add IMG_HOST=$IMG to .env first. Then run: sudo bash $SCRIPT install"
   expect "the other way round: nothing pulled or started" test "$(grep -cE ' (up|down|pull|exec) ' "$LOG")" = 0
 }
 
@@ -3003,6 +3036,137 @@ test_img_host_in_the_environment_does_not_reach_the_stack() {
   expect "tunnel: a later run succeeds" test "$RC" = 0
   expect "tunnel: the start was not handed it" test "$(sort -u "$STATE/up-img-names")" = unset
   expect "the name from the environment appears nowhere" test "$(cat "$OUT" "$ERR" "$LOG" | grep -c 'example\.net')" = 0
+}
+
+# The sentence a run stops with when Compose gives the app another IMG_HOST than the
+# script reads in .env.
+IMG_RENDER_SENTENCE='Docker Compose hands the app another IMG_HOST than install.sh reads in .env, so nothing was changed. Write the line exactly as IMG_HOST=<name>, at the start of the line, without export, spaces or quotes (or remove it), and run install again.'
+
+# A hand-written IMG_HOST line that install.sh does not read as one, but Compose may hand
+# to the app: the run stops before anything is replaced, never writing the two-address
+# Caddyfile for an app that serves images and clips on a third name.
+test_img_host_line_compose_reads_differently_stops_the_run() {
+  local mode form before
+  for mode in direct tunnel; do
+    for form in "export IMG_HOST=$IMG" "  IMG_HOST=$IMG" "IMG_HOST = $IMG"; do
+      new_sandbox
+      if [ "$mode" = tunnel ]; then tunnel_two_install; else two_install; fi
+      printf '%s\n' "$form" >>"$INST/.env"
+      before="$(snapshot)"
+      : >"$LOG"
+      STUB_RESOLVE="$HERE" install_sh "" install
+      expect "$mode, '$form': install stops" test "$RC" = 1
+      expect "$mode, '$form': with the sentence, once" test "$(grep -cF -- "ERROR: $IMG_RENDER_SENTENCE" "$ERR")" = 1
+      expect "$mode, '$form': nothing changed" test "$(snapshot)" = "$before"
+      expect "$mode, '$form': nothing started or restarted" test "$(grep -cE ' (up|down|restart) ' "$LOG")" = 0
+      expect "$mode, '$form': no secret shown" no_secret_shown
+      : >"$LOG"
+      STUB_RESOLVE="$HERE" install_sh "" update
+      expect "$mode, '$form': update stops too" test "$RC $(grep -cF -- "ERROR: $IMG_RENDER_SENTENCE" "$ERR")" = "1 1"
+      expect "$mode, '$form': update pulls, backs up and starts nothing" test "$(grep -cE ' (up|down|pull|exec|restart) ' "$LOG")" = 0
+      expect "$mode, '$form': still nothing changed" test "$(snapshot)" = "$before"
+    done
+    # The line written as the script reads it: the run goes through with three addresses.
+    sed -i '$d' "$INST/.env"
+    printf 'IMG_HOST=%s\n' "$IMG" >>"$INST/.env"
+    STUB_RESOLVE="$HERE" install_sh "" install
+    expect "$mode: written plainly, the same line installs" test "$RC $(asked "$IMG")" = "0 1"
+  done
+  # With the rendering as expected, update renders and goes on as before.
+  new_sandbox
+  three_install
+  : >"$LOG"
+  STUB_RESOLVE="$HERE" install_sh "" update
+  expect "update with a plain line succeeds" test "$RC" = 0
+}
+
+# The Caddyfiles are staged from content made before, so a failure while making it stops
+# the run; the bytes are the same as before (the checksum tests above), with one newline
+# at the end.
+test_caddyfile_content_is_made_before_it_is_staged() {
+  new_sandbox; load_functions
+  expect "install_stack_files takes the Caddyfile from a variable" grep -qF 'caddy_content="$(caddyfile_for_install)" || exit 1' "$SCRIPT"
+  # shellcheck disable=SC2034 # read by the sourced functions
+  APP_DOMAIN="$APP" IMG_HOST="$IMG" MODE=direct
+  local c; c="$(caddyfile_for_install)"
+  expect "the content ends as the file does" cmp -s <(printf '%s\n' "$c") <(caddyfile_for_install)
+  new_sandbox
+  three_install
+  expect "the three-address file ends in one newline" test "$(tail -c 2 "$INST/caddy/Caddyfile" | od -An -c | tr -d ' ')" = '}\n'
+}
+
+# A start that fails after IMG_HOST was added by hand puts the old Caddyfile back and
+# says what to do; update then refuses until install has run.
+test_a_failed_start_after_img_host_was_added_says_what_to_do() {
+  new_sandbox
+  two_install
+  printf 'IMG_HOST=%s\n' "$IMG" >>"$INST/.env"
+  forget_starts
+  STUB_FAIL_UP=1 STUB_RESOLVE="$HERE" install_sh "" install
+  expect "the run fails" test "$RC" != 0
+  expect "the two-address Caddyfile is put back" cmp -s "$INST/caddy/Caddyfile" /src/caddy/Caddyfile.two
+  expect "says to remove the line or run install again" has "$ERR" "The earlier Caddyfile was put back, and it does not answer for IMG_HOST=$IMG in /opt/demo-platform/.env: remove that line, or put right what stopped the start and run: sudo bash $SCRIPT install"
+  : >"$LOG"
+  install_sh "" update
+  expect "update then refuses" test "$RC" = 1
+  expect "update says why" has "$ERR" "holds IMG_HOST=$IMG, but the Caddyfile here does not answer for that name"
+  # The other way: the line removed, and the start fails; the three-address file is back.
+  new_sandbox
+  three_install
+  sed -i '/^IMG_HOST=/d' "$INST/.env"
+  forget_starts
+  STUB_FAIL_UP=1 STUB_RESOLVE="$HERE" install_sh "" install
+  expect "removed: the run fails" test "$RC" != 0
+  expect "removed: the three-address Caddyfile is put back" is_three_of /src/caddy/Caddyfile.two "$THREE_SITE_LINE"
+  expect "removed: says to put the line back or run install again" has "$ERR" "The earlier Caddyfile was put back, and it still answers for $IMG, which /opt/demo-platform/.env no longer holds as IMG_HOST: put that line back, or put right what stopped the start and run: sudo bash $SCRIPT install"
+  # Without the third address the message is the one from before.
+  new_sandbox
+  fresh_install
+  printf '# previous working state\n' >>"$INST/docker-compose.yml"
+  forget_starts
+  STUB_FAIL_UP=1 install_sh "" install
+  expect "one address: no word of the img address" test "$RC $(grep -c 'IMG_HOST' "$ERR")" = "1 0"
+}
+
+# status says when .env and the Caddyfile disagree on the img address, and then does not
+# ask the img address (which would blame a certificate).
+test_status_says_when_the_caddyfile_does_not_match_img_host() {
+  new_sandbox
+  two_install
+  printf 'IMG_HOST=%s\n' "$IMG" >>"$INST/.env"
+  : >"$LOG"
+  STUB_RESOLVE="$HERE" install_sh "" status
+  expect "status succeeds" test "$RC" = 0
+  expect "warns that the Caddyfile does not answer for it" has "$ERR" "the Caddyfile here does not answer for IMG_HOST=$IMG in /opt/demo-platform/.env, so the img address cannot work yet. Run: sudo bash $SCRIPT install"
+  expect "does not blame a certificate" hasnt "$ERR" "getting the certificate for $IMG"
+  expect "does not ask the img address" test "$(asked "$IMG")" = 0
+  expect "asks the two others" test "$(asked "$DOMAIN") $(asked "$APP")" = "1 1"
+  new_sandbox
+  three_install
+  sed -i '/^IMG_HOST=/d' "$INST/.env"
+  STUB_RESOLVE="$HERE" install_sh "" status
+  expect "the other way: status succeeds" test "$RC" = 0
+  expect "the other way: warns" has "$ERR" "the Caddyfile here answers for a third name, $IMG, that /opt/demo-platform/.env does not hold as IMG_HOST. Run: sudo bash $SCRIPT install"
+  new_sandbox
+  three_install
+  STUB_RESOLVE="$HERE" install_sh "" status
+  expect "matching: no such warning" test "$RC $(grep -c 'the Caddyfile here' "$ERR")" = "0 0"
+}
+
+# A third name added to the Caddyfile by hand (not by install.sh) is named by update.
+test_update_names_a_third_name_added_to_the_caddyfile_by_hand() {
+  new_sandbox
+  two_install
+  # shellcheck disable=SC2016 # the literal Caddyfile placeholders
+  sed -i 's/^{\$DOMAIN}, {\$APP_DOMAIN} {$/{$DOMAIN}, {$APP_DOMAIN}, www.example.com {/' "$INST/caddy/Caddyfile"
+  expect "the hand edit is in place" grep -qxF '{$DOMAIN}, {$APP_DOMAIN}, www.example.com {' "$INST/caddy/Caddyfile"
+  local before; before="$(snapshot)"
+  : >"$LOG"
+  install_sh "" update
+  expect "update refuses" test "$RC" = 1
+  expect "names the name it found" has "$ERR" "answers for a third name, www.example.com, and update does not rewrite it"
+  expect "says install replaces the edit and keeps a copy" has "$ERR" "If that name was added to the Caddyfile by hand, install writes the Caddyfile for the addresses in .env and so replaces that edit (it keeps the edited file as a .bak copy)"
+  expect "nothing changed" test "$(snapshot)" = "$before"
 }
 
 # ---------------------------------------------------------------- run
