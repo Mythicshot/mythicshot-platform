@@ -29,11 +29,14 @@ function statements(sql: string): string[] {
 describe("migration 0017's backfill, on this target's database", () => {
   it("marks the tours that are published, have a live version or a move, and no other", async () => {
     expect(typeof MIGRATION).toBe("string");
-    const [alter, backfill, ...rest] = statements(MIGRATION);
+    const [alter, backfill, index, ...rest] = statements(MIGRATION);
     expect(alter).toMatch(/^ALTER TABLE tour ADD COLUMN ever_published /);
     expect(backfill).toMatch(/^UPDATE tour SET ever_published = 1/);
+    expect(index).toMatch(/^CREATE INDEX audit_subject_event ON audit \(subject, event\)$/);
     expect(rest).toEqual([]);
     const { deps } = await makeDeps();
+    // The index is there on this target's database.
+    expect(await deps.db.first("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'audit_subject_event'")).toEqual({ name: "audit_subject_event" });
     const owner = await seedAccount(deps);
     const id = (n: number) => "tour_" + String(n).repeat(24);
     const tour = (n: number, status: string, publishedAt: number | null) =>

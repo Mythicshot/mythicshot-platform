@@ -13,6 +13,7 @@ import { NodeFileStore } from "../src/node/files.ts";
 import { migrate } from "../src/node/migrate.ts";
 import type { Deps } from "../src/ports.ts";
 import { createWorkspace } from "../src/workspaces.ts";
+import { OWN_CREATION } from "../src/access.ts";
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url));
 const NAME = "0017_ever_published.sql";
@@ -56,6 +57,12 @@ describe("migration 0017", () => {
       [tourId(4), 1],
       [tourId(5), 1],
     ]);
+    // The index the first publish's lookup of the tour's latest access entry uses, and that it uses it.
+    expect(await db.first("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'audit_subject_event'")).toEqual({ sql: "CREATE INDEX audit_subject_event ON audit (subject, event)" });
+    const plan = (await db.all<{ detail: string }>(`EXPLAIN QUERY PLAN SELECT ${OWN_CREATION} AS own FROM tour t WHERE t.id = ?`, ["tok_" + "0".repeat(24), tourId(1)])).map((r) => r.detail).join("\n");
+    expect(plan).toMatch(/SEARCH a USING INDEX audit_subject_event \(subject=\? AND event=\?\)/);
+    expect(plan).not.toMatch(/SCAN a\b/);
+    expect(plan).not.toMatch(/TEMP B-TREE/);
     // A new tour starts unmarked; the mark takes 0 or 1 only.
     await tour(6, "draft", null);
     expect(await db.first("SELECT ever_published FROM tour WHERE id = ?", [tourId(6)])).toEqual({ ever_published: 0 });
