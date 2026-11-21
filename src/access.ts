@@ -280,21 +280,32 @@ type State = {
   ever: boolean;
   /**
    * Read only for a first publish (readState's `creation`): true when the last change of the
-   * tour's setting or list on record is a token's at creation (its audit entry has
-   * `at: "creation"` and `by: "token"`), so no session has written either since.
+   * tour's setting or list on record is THIS token's at creation (its audit entry has
+   * `at: "creation"`, `by: "token"` and this token's id), so no session and no other token
+   * has written either since.
    */
   ownCreation: boolean;
 };
 
 /**
- * Whether the last change of who may view the tour `t` on record was a token's at creation:
- * its latest tour_access_changed audit entry, in the order they were written, among those
- * written since the tour was made (which the audit's index on its time bounds). Every change a
- * session makes to the setting or the list writes such an entry, so one ends it. No parameter.
+ * Whether the last change of who may view the tour `t` on record was made at creation by the
+ * token asking (one parameter: its id): the latest tour_access_changed audit entry of the
+ * tour, found through the index on (subject, event) of migration 0017, must have
+ * `at: "creation"`, `by: "token"` and that token's id. Every change of the setting or the list,
+ * by a session or another token, writes such an entry, so one ends it.
+ *
+ * "Latest" is the entry written last, by rowid alone, never by its time: an entry's time is
+ * taken before its batch commits, so with clocks that differ a little a later change could
+ * carry an earlier time. Rowid order is commit order here on both targets: nothing ever
+ * deletes from the audit table (src/audit.ts is its only writer, and only inserts), so each
+ * new row takes the largest rowid plus one, and SQLite and D1 commit one writer at a time.
+ * Nor is the time used to bound the entries looked at: a change made just after the tour was
+ * created could carry a time before the tour's own under the same skew, and the index already
+ * reads only this tour's entries (a tour id is 96 random bits, never reused).
  */
-const OWN_CREATION = `coalesce((SELECT json_extract(a.detail, '$.at') = 'creation' AND json_extract(a.detail, '$.by') = 'token' FROM audit a
-    WHERE a.at >= t.created_at AND a.event = 'tour_access_changed' AND a.subject = t.id AND a.workspace_id = t.workspace_id
-    ORDER BY a.at DESC, a.rowid DESC LIMIT 1), 0)`;
+export const OWN_CREATION = `coalesce((SELECT json_extract(a.detail, '$.at') = 'creation' AND json_extract(a.detail, '$.by') = 'token' AND json_extract(a.detail, '$.token_id') = ? FROM audit a
+    WHERE a.subject = t.id AND a.event = 'tour_access_changed' AND a.workspace_id = t.workspace_id
+    ORDER BY a.rowid DESC LIMIT 1), 0)`;
 
 /**
  * Whether a tour has been published at least once, over a tour row `t` in scope: it is
@@ -319,7 +330,7 @@ async function readState(deps: Deps, auth: Auth, id: string, creation = false): 
             ${EVER_PUBLISHED} AS ever, ${creation ? OWN_CREATION : "0"} AS own
        FROM tour t LEFT JOIN snapshot s ON s.tour_id = t.id LEFT JOIN access_switch w ON w.tour_id = t.id
       WHERE t.id = ? AND t.workspace_id = ?`,
-    [deps.now(), id, auth.workspaceId],
+    creation ? [deps.now(), auth.tokenId, id, auth.workspaceId] : [deps.now(), id, auth.workspaceId],
   );
   if (row === null) return null;
   return {
@@ -989,9 +1000,10 @@ export async function planFirstPublish(deps: Deps, auth: Auth, id: string, body:
   if (body.access === st.access) {
     // The setting it has, with no list stated (or none on either side): the publish of today.
     if (body.viewers === null || (body.viewers.length === 0 && st.viewers.length === 0)) return { kind: "same" };
-    // A stated list against a list the tour holds is compared only when a token wrote that
-    // list at creation and nobody changed it since (a resend after a lost answer); a list set
-    // in the dashboard is never compared, so a token cannot test guesses of it.
+    // A stated list against a list the tour holds is compared only when this same token wrote
+    // that list at creation and nobody changed it since (a resend after a lost answer); a list
+    // set in the dashboard, or by another token, is never compared, so no token can test
+    // guesses of a list it did not send itself.
     if (body.viewers.length > 0 && st.viewers.length > 0) return st.ownCreation && sameList(body.viewers, st.viewers) ? { kind: "same" } : { kind: "refuse", res: alreadySet() };
   }
   if (st.access !== "public" || st.viewers.length > 0 || st.switch !== null) return { kind: "refuse", res: alreadySet() };

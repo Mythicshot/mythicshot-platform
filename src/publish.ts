@@ -667,9 +667,12 @@ type Started = { kind: "started"; publishId: string; total: number; steps: numbe
  * starts once more from the draft as it is now. Two calls: the read and the batch. `head`
  * is put at the start of the batch: the statements of a setting stated at a first publish,
  * which take effect only together with the job (a guard among them that fails answers
- * "changed" too).
+ * "changed" too). `exactly`, for a publish whose request stated a setting, records the job only
+ * while the tour's setting is exactly that one (not only of the same store), so a change in the
+ * dashboard after the decision answers "changed", and the caller decides again from the tour
+ * as it is then (src/publish.ts refuses a stated setting the tour no longer has).
  */
-async function startPublish(deps: Deps, auth: Auth, tourId: string, restricted: boolean, head: Stmt[] = []): Promise<Started> {
+async function startPublish(deps: Deps, auth: Auth, tourId: string, restricted: boolean, head: Stmt[] = [], exactly: AccessBody["access"] | null = null): Promise<Started> {
   const rows = await deps.db.all<DraftRow>(DRAFT_SQL, [tourId, auth.workspaceId, MAX_PUBLISH_STEPS + 1]);
   if (rows.length === 0) return { kind: "answer", res: apiError(400, "empty_tour", "a tour with no steps cannot be published") };
   if (rows.length > MAX_PUBLISH_STEPS) return { kind: "answer", res: apiError(413, "too_large", `a tour of more than ${MAX_PUBLISH_STEPS} steps cannot be published`) };
@@ -696,10 +699,10 @@ async function startPublish(deps: Deps, auth: Auth, tourId: string, restricted: 
         // And only while the tour's setting still says the store these keys are for and no
         // access switch of it is in progress (src/access.ts).
         sql: `INSERT INTO publish_job (tour_id, publish_id, data, steps, total, draft_version, created_at, touched_at)
-              VALUES ((SELECT id FROM tour WHERE id = ? AND workspace_id = ? AND draft_version = ? AND access ${restricted ? "<>" : "="} 'public'
+              VALUES ((SELECT id FROM tour WHERE id = ? AND workspace_id = ? AND draft_version = ? AND access ${exactly !== null ? "= ?" : restricted ? "<> 'public'" : "= 'public'"}
                          AND NOT EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = tour.id)), ?,
                       json_set(?, '$.title', (SELECT title FROM tour WHERE id = ? AND workspace_id = ?)), ?, ?, ?, ?, ?)`,
-        params: [tourId, auth.workspaceId, rows[0].draft_version, publishId, data, tourId, auth.workspaceId, rows.length, copies.length, rows[0].draft_version, now, now],
+        params: [tourId, auth.workspaceId, rows[0].draft_version, ...(exactly !== null ? [exactly] : []), publishId, data, tourId, auth.workspaceId, rows.length, copies.length, rows[0].draft_version, now, now],
       },
       {
         sql: `INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, source_key, seq, copied)
@@ -809,7 +812,9 @@ export function publishRoutes(app: Hono, deps: Deps): void {
       steps = tour.job_steps ?? 0;
       ({ batch, left } = await nextBatch(d, tour.id, publishId, room()));
     } else {
-      let started = plan === null ? await startPublish(d, auth, tour.id, tour.access !== "public") : await startPublish(d, auth, tour.id, isRestricted(plan.access), plan.stmts);
+      // With a stated setting, the job is recorded only while the tour has exactly that setting.
+      const exactly = body.access === null ? null : body.access.access;
+      let started = plan === null ? await startPublish(d, auth, tour.id, tour.access !== "public", [], exactly) : await startPublish(d, auth, tour.id, isRestricted(plan.access), plan.stmts, exactly);
       if (started.kind === "changed") {
         // The tour is gone, or its draft moved on while the publish was starting (an upload
         // or a chapter replace committed), or its setting changed or a switch began. Nothing
@@ -827,7 +832,7 @@ export function publishRoutes(app: Hono, deps: Deps): void {
         if (again.switching === 1) return accessSwitching();
         if (body.access !== null && plan === null && again.access !== body.access.access) return alreadySet();
         Object.assign(s, plan === null ? shown(again) : { access: plan.access, viewers: plan.viewers });
-        started = plan === null ? await startPublish(d, auth, tour.id, again.access !== "public") : await startPublish(d, auth, tour.id, isRestricted(plan.access), plan.stmts);
+        started = plan === null ? await startPublish(d, auth, tour.id, again.access !== "public", [], exactly) : await startPublish(d, auth, tour.id, isRestricted(plan.access), plan.stmts, exactly);
         if (started.kind === "changed") return (await tourState(d, auth, tour.id)) === null ? notFound() : draftMoved();
       }
       if (started.kind === "answer") return started.res;

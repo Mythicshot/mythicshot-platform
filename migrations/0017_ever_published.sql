@@ -20,3 +20,10 @@ UPDATE tour SET ever_published = 1
  WHERE status = 'published' OR published_at IS NOT NULL
     OR EXISTS (SELECT 1 FROM snapshot s WHERE s.tour_id = tour.id)
     OR EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = tour.id);
+
+-- A first publish that states a list compares it with the tour's only when the tour's latest
+-- access entry in the audit is that same token's at creation (src/access.ts, OWN_CREATION).
+-- This index finds a tour's entries of one event without reading the rest of the audit, the
+-- latest first (rowid is the index's last column), however large the audit grows and however
+-- often a token asks.
+CREATE INDEX audit_subject_event ON audit (subject, event);
