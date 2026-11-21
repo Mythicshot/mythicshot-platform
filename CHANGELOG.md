@@ -2,6 +2,13 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.39 (2026-11-20)
+
+- A new optional setting on both targets, `DOWNLOAD_URL`: the address of the public page the desktop app is downloaded from. It must be `https://`, a plain host name, an optional port and a path (a query is allowed), with no user name or password and no `#` part, at most 300 characters; the https check is the one `INVITE_CONTACT` already used, with this stricter shape on top. Unset or empty, nothing changes. A value that cannot be used never stops the site: the link is left out and the start writes one line that names the setting and never the value (on Cloudflare once per instance, on its first request).
+- `GET /api/v1/session` gains `download_url`, the configured address or null. Only an added field; the API description says what it is.
+- The Account page shows a card "Mythicshot for Windows" above "Where you are signed in", with "Get the installer from the download page. It shows the latest version and its checksum." and the button-styled link "Open the download page", only when the session names a usable address. The Connections page's welcome of a new account then ends with "Not installed yet? Get Mythicshot from the download page.", the last three words the link. Both open in a new tab with no opener and no referrer. The pages check the address again with the server's own shape before they link to it, so an address that does not pass shows nothing. Without the setting both pages read as before. The pages' policy is unchanged.
+- Wired where the other optional settings are: the Node settings, the Worker's vars (kept by `npm run setup:cloudflare -- update`), the cPanel startup file, the container stacks, the README's settings table and the three hosting guides, which say how to add it.
+
 ## 0.1.37 (2026-11-20)
 
 - A visitor can prove an email address on the tours address (with one address, on that address), for tours that will be shared with a list of addresses. No account is made. `POST /api/v1/view/request` with the address and the tour's slug answers the same `202 {"ok":true}` for every tour and address, a malformed address included, after the same database work, and mails a link only when the tour is shared with that address. In this version no tour can be restricted yet, so no viewer link is ever sent; the setting and the pages come in later versions.
