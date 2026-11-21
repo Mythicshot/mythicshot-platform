@@ -628,22 +628,29 @@ describe("caches and a public item made restricted", () => {
     // first; the ETag keeps that cheap while the item is public.
     const s = await site(MODES[2]);
     const { deps, mode } = s;
-    for (const path of routesOf(s.open)) {
-      if (path.endsWith("/preview")) continue; // the GIF has no preview
-      const r = await send(deps, "GET", path, { origin: mode.media });
-      expect([r.status, r.headers.get("cache-control")], path).toEqual([200, "no-cache"]);
-      expect(r.headers.get("etag"), path).toMatch(/^"[0-9a-f]{32}"$/);
+    // A public image with a preview beside the public GIF (which has none), so the preview is covered too.
+    const pic = await shareItem(deps, mode, s.owner.token, { kind: "image", type: "image/png", width: 24, height: 18, title: "Open picture", file: png(24, 18, 1600, 9), preview: png(12, 9, 300, 10) });
+    const held = new Map<string, string>();
+    for (const [item, paths] of [
+      [s.open, routesOf(s.open).filter((p) => !p.endsWith("/preview"))],
+      [pic, routesOf(pic)],
+    ] as const) {
+      for (const path of paths) {
+        const r = await send(deps, "GET", path, { origin: mode.media });
+        expect([r.status, r.headers.get("cache-control")], path).toEqual([200, "no-cache"]);
+        expect(r.headers.get("etag"), path).toMatch(/^"[0-9a-f]{32}"$/);
+        // A cache asking again with the ETag it holds gets 304 while the item is public ...
+        const fresh = await send(deps, "GET", path, { origin: mode.media, headers: { "if-none-match": r.headers.get("etag")! } });
+        expect([fresh.status, fresh.headers.get("cache-control"), fresh.bytes.length], path).toEqual([304, "no-cache", 0]);
+        held.set(path, r.headers.get("etag")!);
+      }
+      // ... and once it is restricted, the gate, never a 304 that would let the copy be reused.
+      expect((await setAccess(deps, mode, s.ownerSession, item.id, { access: "me" })).status).toBe(200);
     }
-    // A cache asking again with the ETag it holds gets 304 while the item is public ...
-    const file = `/r/${s.open.link}.gif`;
-    const etag = (await send(deps, "GET", file, { origin: mode.media })).headers.get("etag")!;
-    const fresh = await send(deps, "GET", file, { origin: mode.media, headers: { "if-none-match": etag } });
-    expect([fresh.status, fresh.headers.get("cache-control"), fresh.bytes.length]).toEqual([304, "no-cache", 0]);
-    // ... and once it is restricted, the gate, never a 304 that would let the copy be reused.
-    expect((await setAccess(deps, mode, s.ownerSession, s.open.id, { access: "me" })).status).toBe(200);
-    for (const path of [file, `/r/${s.open.link}`, `/r/${s.open.link}/download`]) {
+    expect([...held.keys()].filter((p) => p.endsWith("/preview"))).toEqual([`/i/${pic.link}/preview`]);
+    for (const [path, etag] of held) {
       const again = await send(deps, "GET", path, { origin: mode.media, headers: { "if-none-match": etag } });
-      expect([again.status, again.text], path).toEqual([403, MEDIA_GATE_HTML.clip]);
+      expect([again.status, again.text], path).toEqual([403, path.startsWith("/i/") ? MEDIA_GATE_HTML.image : MEDIA_GATE_HTML.clip]);
       expect(again.headers.get("cache-control"), path).toBe("no-store");
       expect(again.headers.get("etag"), path).toBeNull();
     }
@@ -652,30 +659,36 @@ describe("caches and a public item made restricted", () => {
 
 describe("a restricted item tells nobody its file type", () => {
   for (const mode of [MODES[0], MODES[2]]) {
-    it(`every extension its route takes answers the same gate without a session, and the same not-shared page with one not on the list (${mode.name})`, SLOW, async () => {
+    it(`every extension its route takes answers the same gate without a session, and the same not-shared page with one not on the list, with GET and HEAD (${mode.name})`, SLOW, async () => {
       const s = await site(mode);
       const { deps } = s;
       const other = await mediaViewerFor(deps, mode, OTHER);
       const owner = await mediaViewerFor(deps, mode, s.owner.email);
-      for (const [item, html, exts] of [
-        [s.image, { gate: MEDIA_GATE_HTML.image, denied: MEDIA_DENIED_HTML.image }, ["png", "jpg"]],
-        [s.clip, { gate: MEDIA_GATE_HTML.clip, denied: MEDIA_DENIED_HTML.clip }, ["gif", "mp4"]],
+      // Each route takes all four extensions in its name (the other kind's two included), so each must answer them alike.
+      const EXTS = ["png", "jpg", "gif", "mp4"] as const;
+      for (const [item, html] of [
+        [s.image, { gate: MEDIA_GATE_HTML.image, denied: MEDIA_DENIED_HTML.image }],
+        [s.clip, { gate: MEDIA_GATE_HTML.clip, denied: MEDIA_DENIED_HTML.clip }],
       ] as const) {
-        const seen = new Set<string>();
-        for (const ext of exts) {
-          const path = `/${item.letter}/${item.link}.${ext}`;
-          const gate = await send(deps, "GET", path, { origin: mode.media });
-          const denied = await send(deps, "GET", path, { origin: mode.media, headers: { cookie: other } });
-          expect([gate.status, gate.text], path).toEqual([403, html.gate]);
-          expect([denied.status, denied.text], path).toEqual([403, html.denied]);
-          seen.add(JSON.stringify([[...gate.headers.entries()].sort(), [...denied.headers.entries()].sort(), gate.calls, denied.calls]));
+        for (const method of ["GET", "HEAD"] as const) {
+          const seen = new Set<string>();
+          for (const ext of EXTS) {
+            const path = `/${item.letter}/${item.link}.${ext}`;
+            const gate = await send(deps, method, path, { origin: mode.media });
+            const denied = await send(deps, method, path, { origin: mode.media, headers: { cookie: other } });
+            expect([gate.status, gate.text], `${method} ${path}`).toEqual([403, method === "GET" ? html.gate : ""]);
+            expect([denied.status, denied.text], `${method} ${path}`).toEqual([403, method === "GET" ? html.denied : ""]);
+            seen.add(JSON.stringify([[...gate.headers.entries()].sort(), [...denied.headers.entries()].sort(), gate.calls, denied.calls]));
+          }
+          // The four extensions cannot be told apart by any header or by the work done.
+          expect(seen.size, `${method} ${item.letter}`).toBe(1);
         }
-        // The two extensions cannot be told apart by any header or by the work done.
-        expect(seen.size, item.letter).toBe(1);
-        // To a viewer who may see it, the wrong extension is the one 404, the right one the file.
-        const wrong = exts.find((e) => e !== item.ext)!;
-        expect((await send(deps, "GET", `/${item.letter}/${item.link}.${wrong}`, { origin: mode.media, headers: { cookie: owner } })).status).toBe(404);
+        // To a viewer who may see it, every other extension is the one 404, the right one the file.
+        for (const wrong of EXTS.filter((e) => e !== item.ext)) {
+          for (const method of ["GET", "HEAD"] as const) expect((await send(deps, method, `/${item.letter}/${item.link}.${wrong}`, { origin: mode.media, headers: { cookie: owner } })).status, `${method} .${wrong}`).toBe(404);
+        }
         expect((await send(deps, "GET", `/${item.letter}/${item.link}.${item.ext}`, { origin: mode.media, headers: { cookie: owner } })).status).toBe(200);
+        expect((await send(deps, "HEAD", `/${item.letter}/${item.link}.${item.ext}`, { origin: mode.media, headers: { cookie: owner } })).status).toBe(200);
       }
       // An extension no route takes is the one 404 for everyone, as for any link.
       expect((await send(deps, "GET", `/i/${s.image.link}.webp`, { origin: mode.media })).status).toBe(404);
