@@ -88,6 +88,7 @@ export const UNDOCUMENTED_ROUTES: Readonly<Record<string, string>> = {
   "GET /dash/tours.js": "the Tours page's own script",
   "GET /dash/dash.css": "the dashboard's own stylesheet",
   "GET /dash/dash.js": "the dashboard's shared script",
+  "GET /dash/mark.png": "the product's mark beside the name on the dashboard and the sign-in pages",
   "GET /images": "the dashboard's Images page, for people in a browser; it calls the shared item requests described here",
   "GET /dash/images.js": "the Images page's own script",
   "GET /gifs": "the dashboard's GIFs page, for people in a browser; it calls the shared item requests described here",

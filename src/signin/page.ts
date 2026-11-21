@@ -13,6 +13,7 @@
 // history never show it. The code then lives in one variable of the link page's own
 // function and leaves it once: in the JSON body of POST /api/v1/signin/complete, when the
 // button is pressed. Nothing here writes to storage, to a cookie or to an address.
+import { BRAND_PLAIN } from "../brand.ts";
 import { escapeHtml, type InviteContact } from "./invite.ts";
 
 export const SIGNIN_HTML = `<!doctype html>
@@ -28,7 +29,7 @@ export const SIGNIN_HTML = `<!doctype html>
 </head>
 <body data-page="signin">
 <main class="card">
-  <p class="brand">Mythicshot</p>
+  ${BRAND_PLAIN}
   <noscript><p class="message">This page needs JavaScript.</p></noscript>
 
   <section id="ask" aria-labelledby="h-ask">
@@ -68,7 +69,7 @@ export const LINK_HTML = `<!doctype html>
 </head>
 <body data-page="link">
 <main class="card">
-  <p class="brand">Mythicshot</p>
+  ${BRAND_PLAIN}
   <noscript><p class="message">This page needs JavaScript.</p></noscript>
 
   <section id="finish" aria-labelledby="h-finish" hidden>
@@ -148,7 +149,9 @@ body {
   padding: 28px 28px 24px;
   overflow-wrap: anywhere;
 }
-.brand { margin: 0 0 14px; font-size: 0.875rem; font-weight: 650; letter-spacing: 0.02em; color: var(--muted); }
+.brand { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; font-size: 0.875rem; font-weight: 650; letter-spacing: 0.02em; color: var(--muted); }
+.brand a { display: inline-flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; }
+.brand img { display: block; flex: none; }
 h1 { font-size: 1.375rem; line-height: 1.3; font-weight: 650; margin: 0 0 8px; letter-spacing: -0.01em; }
 h1:focus, h2:focus { outline: none; }
 .lead { margin: 0 0 22px; color: var(--muted); }

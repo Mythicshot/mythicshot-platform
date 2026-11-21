@@ -7,6 +7,7 @@
 // account page, /account, is a dashboard page (src/dash/account.ts) and uses the headers
 // below, as every dashboard page does.
 import type { Hono } from "hono";
+import { withHome } from "./brand.ts";
 import type { Deps } from "./ports.ts";
 import { INVITE_HTML, INVITE_JS } from "./signin/accept.ts";
 import { inviteContactFrom } from "./signin/invite.ts";
@@ -31,15 +32,19 @@ const HTML = "text/html; charset=utf-8";
 
 /**
  * Adds the sign-in pages' routes. Nothing they answer depends on the site's data; the
- * sign-in page carries the invite line of the INVITE_CONTACT setting, made once here from
- * the configuration (a value that cannot be used gives the page without a contact).
+ * sign-in page carries the invite line of the INVITE_CONTACT setting, made here from the
+ * configuration when the page is asked for (a value that cannot be used gives the page
+ * without a contact). The three pages' brand links to the site's home page when HOME_URL names one (src/brand.ts);
+ * the mark they show is the dashboard's file, /dash/mark.png.
  */
 export function pageRoutesForAccounts(app: Hono, deps: Deps): void {
   const serve = (body: string, type: string) => () => new Response(body, { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": type } });
-  app.get("/signin", serve(signinHtml(inviteContactFrom(deps.config.inviteContact)), HTML));
-  app.get("/signin/link", serve(LINK_HTML, HTML));
+  // A page is made when it is asked for, so a request makes only its own.
+  const page = (html: () => string) => () => new Response(withHome(html(), deps.config.homeUrl), { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": HTML } });
+  app.get("/signin", page(() => signinHtml(inviteContactFrom(deps.config.inviteContact))));
+  app.get("/signin/link", page(() => LINK_HTML));
   app.get("/signin/signin.css", serve(SIGNIN_CSS, "text/css; charset=utf-8"));
   app.get("/signin/signin.js", serve(SIGNIN_JS, "text/javascript; charset=utf-8"));
-  app.get("/invite", serve(INVITE_HTML, HTML));
+  app.get("/invite", page(() => INVITE_HTML));
   app.get("/invite/invite.js", serve(INVITE_JS, "text/javascript; charset=utf-8"));
 }

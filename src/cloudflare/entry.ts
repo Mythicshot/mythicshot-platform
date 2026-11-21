@@ -2,7 +2,7 @@ import { createApp } from "../app.ts";
 import { mediaLimitsProblem } from "../limits.ts";
 import { withBudget } from "../budget.ts";
 import { setClientAddress } from "../client.ts";
-import { downloadUrlSetting } from "../https-address.ts";
+import { downloadUrlSetting, homeUrlSetting } from "../https-address.ts";
 import { DEFAULT_LIFETIMES, LIFETIME_SETTINGS, lifetimesSetting, sameLifetimes, type LifetimeSetting } from "../lifetimes.ts";
 import { HOST_ROLES, hostSettingsFrom, normaliseHost, resolveHosts, settingOf, type Hosts, type HostsResult } from "../hosts.ts";
 import { DEFER_FAILED, type Deps } from "../ports.ts";
@@ -17,10 +17,11 @@ import { R2FileStore } from "./files.ts";
  * or SITE_HOST, a var only a one-address install that wants sign-in links adds, or
  * IMG_HOST, the optional third address an install with two addresses may add, or
  * DOWNLOAD_URL, the address of the desktop app's download page an install may add, or
+ * HOME_URL, the site's home page the brand links to, which an install may add, or
  * the three sign-in lifetimes, SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and
  * CONNECTION_MAX_DAYS (src/lifetimes.ts), which an install may add to change a default.
  */
-type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown; IMG_HOST?: unknown; DOWNLOAD_URL?: unknown } & Partial<Record<LifetimeSetting, unknown>>;
+type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown; IMG_HOST?: unknown; DOWNLOAD_URL?: unknown; HOME_URL?: unknown } & Partial<Record<LifetimeSetting, unknown>>;
 
 /**
  * Who to ask for an invite, from the Worker's var INVITE_CONTACT, trimmed, or null when it
@@ -97,6 +98,10 @@ export function depsFromEnv(
   const inviteContact = inviteContactFromWorkerEnv(env);
   // A var that is not text, or not a usable address, is left out (downloadUrlSetting).
   const downloadUrl = downloadUrlSetting(env.DOWNLOAD_URL).url;
+  // The site's home page. One that cannot be used never gets here: the fetch handler
+  // answers misconfigured first; here it is only left out.
+  const home = homeUrlSetting(env.HOME_URL);
+  const homeUrl = home.ok ? home.url : null;
   // The sign-in lifetimes: a var that cannot be used is its default (lifetimesSetting).
   const { lifetimes } = lifetimesSetting(lifetimeVars(env));
   return {
@@ -116,6 +121,7 @@ export function depsFromEnv(
       ...(siteHost === null ? {} : { siteHost }),
       ...(inviteContact === null ? {} : { inviteContact }),
       ...(downloadUrl === null ? {} : { downloadUrl }),
+      ...(homeUrl === null ? {} : { homeUrl }),
       ...(sameLifetimes(lifetimes, DEFAULT_LIFETIMES) ? {} : { lifetimes }),
     },
     now: () => Date.now(),
@@ -161,6 +167,13 @@ export default {
     const allowance = allowanceFromWorkerEnv(env);
     if (!allowance.ok) {
       console.error(`storage: ${allowance.problem}`);
+      return misconfigured();
+    }
+    // And for a home page that cannot be used: the install asked for a link, and quietly
+    // serving the pages without it would hide the mistake.
+    const home = homeUrlSetting(env.HOME_URL);
+    if (!home.ok) {
+      console.error(`home page: ${home.problem}`);
       return misconfigured();
     }
     // The client address, for rate limits only: the connecting address as Cloudflare gives
