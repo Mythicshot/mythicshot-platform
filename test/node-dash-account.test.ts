@@ -184,7 +184,7 @@ const ME = "ses_" + "a".repeat(24);
 const OTHER = "ses_" + "b".repeat(24);
 const THIRD = "ses_" + "c".repeat(24);
 
-function sessionAnswer(o: { username?: string | null; email?: string; workspace?: string; emailChange?: boolean } = {}): Answer {
+function sessionAnswer(o: { username?: string | null; email?: string; workspace?: string; emailChange?: boolean; downloadUrl?: unknown } = {}): Answer {
   return {
     status: 200,
     json: {
@@ -193,6 +193,7 @@ function sessionAnswer(o: { username?: string | null; email?: string; workspace?
       session: { id: ME, created_at: day(2026, 11, 2), expires_at: NOW + 1 },
       csrf: CSRF,
       email_change: o.emailChange ?? true,
+      ...("downloadUrl" in o ? { download_url: o.downloadUrl } : {}),
     },
   };
 }
@@ -416,6 +417,116 @@ describe("the Account page", () => {
 });
 
 // ---- Changing the email address: mockup 8's first two boxes ----
+
+// ---- The download card ----
+
+const DOWNLOAD_PAGE = "https://downloads.example.com/mythicshot/";
+const DOWNLOAD_TITLE = "Mythicshot for Windows";
+const DOWNLOAD_TEXT = "Get the installer from the download page. It shows the latest version and its checksum.";
+const DOWNLOAD_LINK = "Open the download page";
+/** Addresses a wrong server could send: none of them may become an href. */
+const HOSTILE: unknown[] = [
+  "javascript:alert(1)",
+  "JAVASCRIPT:alert(1)",
+  " javascript:alert(1)",
+  "data:text/html,<script>alert(1)</script>",
+  "http://downloads.example.com/",
+  "//downloads.example.com/",
+  "/download",
+  "https://downloads.example.com",
+  "https://user:secret@downloads.example.com/",
+  "https://downloads.example.com/#latest",
+  "https://downloads.example.com/\"><script>alert(1)</script>",
+  "https://downloads.example.com/a b",
+  "https://down_loads.example.com/",
+  "https://[::1]/",
+  "https://127.0.0.1/",
+  "https://192.0.2.10/get",
+  "https://2130706433/",
+  "https://0x7f.1/",
+  "https://Downloads.example.com/",
+  " https://downloads.example.com/",
+  "https://downloads.example.com/\n",
+  `https://downloads.example.com/${"a".repeat(271)}`,
+  42,
+  true,
+  { href: DOWNLOAD_PAGE },
+  [DOWNLOAD_PAGE],
+  "",
+];
+
+describe("the Account page's download card", () => {
+  const anchors = (tab: Tab) => tab.doc.root.all().filter((e) => e.tagName === "a" && !(e.getAttribute("href") ?? "").startsWith("/"));
+
+  it("with a usable download_url: the card above Where you are signed in, its sentence, and a button-styled link that opens a new tab with no opener or referrer", async () => {
+    const tab = account({}, { session: sessionAnswer({ downloadUrl: DOWNLOAD_PAGE }) });
+    await tab.settle();
+    const card = tab.$("download-card");
+    expect(card.shown).toBe(true);
+    expect(tab.shows()).toEqual([
+      "Mythicshot",
+      "solex",
+      "Account",
+      "Signed in as solex",
+      "Your details",
+      "Change",
+      DOWNLOAD_TITLE,
+      DOWNLOAD_TEXT,
+      // The link, checked below (this list holds the page's blocks: headings, paragraphs, buttons and rows).
+      "Where you are signed in",
+      "This browser | Firefox on Linux | since 2 Nov",
+      "Chrome on Windows | last used 18 Nov",
+      "Sign out",
+      "Safari on iOS | last used 3 Mar 2025",
+      "Sign out",
+      "Sign out",
+      "Sign out everywhere",
+    ]);
+    const links = anchors(tab);
+    expect(links).toHaveLength(1);
+    const a = links[0];
+    expect([a.textContent, a.className, a.getAttribute("href"), a.getAttribute("target"), a.getAttribute("rel")]).toEqual([DOWNLOAD_LINK, "btn quiet", DOWNLOAD_PAGE, "_blank", "noopener noreferrer"]);
+    expect(card.contains(a)).toBe(true);
+    // The card sits between the details and the sessions.
+    const cards = tab.$("account").children.filter((c): c is FakeElement => c instanceof FakeElement && c.className === "card");
+    expect(cards.map((c) => c.all().find((e) => e.tagName === "h2")!.id)).toEqual(["h-details", "h-download", "h-where"]);
+    // It asks nothing more than the page did.
+    expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", "GET /api/v1/sessions"]);
+  });
+
+  it("without download_url, or with null, there is no card and no link, and the page reads as it did", async () => {
+    for (const session of [sessionAnswer(), sessionAnswer({ downloadUrl: null })]) {
+      const tab = account({}, { session });
+      await tab.settle();
+      expect(tab.$("download-card").shown).toBe(false);
+      expect(anchors(tab)).toEqual([]);
+      expect(tab.shows()).not.toContain(DOWNLOAD_TITLE);
+      expect(tab.shows()).not.toContain(DOWNLOAD_LINK);
+    }
+  });
+
+  it("a hostile download_url, as if the server were wrong, never becomes an href: no card, no link", async () => {
+    for (const bad of HOSTILE) {
+      const tab = account({}, { session: sessionAnswer({ downloadUrl: bad }) });
+      await tab.settle();
+      expect(tab.$("download-card").shown, JSON.stringify(bad)).toBe(false);
+      expect(anchors(tab), JSON.stringify(bad)).toEqual([]);
+      for (const e of tab.doc.root.all()) expect(e.getAttribute("href") ?? "/", JSON.stringify(bad)).toMatch(/^\/(?!\/)/);
+      // The rest of the page is shown as usual.
+      expect(tab.$("account").hidden, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("the longest usable address is taken, one character more is not", async () => {
+    const longest = `https://downloads.example.com/${"a".repeat(300 - "https://downloads.example.com/".length)}`;
+    const ok = account({}, { session: sessionAnswer({ downloadUrl: longest }) });
+    await ok.settle();
+    expect(anchors(ok).map((a) => a.getAttribute("href"))).toEqual([longest]);
+    const over = account({}, { session: sessionAnswer({ downloadUrl: longest + "a" }) });
+    await over.settle();
+    expect(anchors(over)).toEqual([]);
+  });
+});
 
 describe("changing the email address from the Account page", () => {
   it("Change opens the question: the field has the focus, the page behind is inert, Tab stays inside, and Escape, Cancel and the backdrop close it with the focus back on Change", async () => {

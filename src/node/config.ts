@@ -7,6 +7,7 @@ import { hasNetwork } from "../rate.ts";
 import { parseEmail } from "../accounts.ts";
 import { misdirected } from "../host-gate.ts";
 import { hostSettingsFrom, normaliseHost, resolveHosts, type Hosts } from "../hosts.ts";
+import { downloadUrlSetting } from "../https-address.ts";
 import { linkOrigin, NO_MAIL, type Mailer } from "../mail.ts";
 import type { Config } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
@@ -22,7 +23,7 @@ import type { SmtpSettings } from "./smtp.ts";
 export const NODE_SETTINGS: readonly string[] = [
   "APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE",
   "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST",
-  "INVITE_CONTACT", "IMG_HOST",
+  "INVITE_CONTACT", "IMG_HOST", "DOWNLOAD_URL",
 ];
 
 /**
@@ -44,6 +45,11 @@ export const NODE_SETTINGS: readonly string[] = [
  * is ignored), and it never stops the start: unset, empty or not a host name, the config
  * has no such key and the site has no address for links. mailFromEnv says so when mail
  * is switched on.
+ *
+ * DOWNLOAD_URL is the address of the public page the desktop app is downloaded from, for
+ * the dashboard's link (downloadUrlSetting, src/https-address.ts). Unset, empty or not
+ * usable, the config has no such key; it never stops the start, and the entry writes the
+ * one line for a value that cannot be used.
  */
 export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   // The settings by name, so the list in NODE_SETTINGS is checked against them:
@@ -55,6 +61,9 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   const siteHost = hosts.hosts === null && typeof env.SITE_HOST === "string" ? normaliseHost(env.SITE_HOST) : null;
   // Who to ask for an invite: passed on as written, checked by the sign-in page, never a reason to stop.
   const inviteContact = typeof env.INVITE_CONTACT === "string" ? env.INVITE_CONTACT.trim() : "";
+  // The app's download page: kept only when usable, never a reason to stop (the entry says
+  // the one line for a value that cannot be used, from downloadUrlSetting).
+  const downloadUrl = downloadUrlSetting(env.DOWNLOAD_URL).url;
   return {
     publicImageBase: env.PUBLIC_IMAGE_BASE ?? "",
     setupCode: setupCodeFromEnv(env.SETUP_CODE),
@@ -62,6 +71,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
     ...(allowance.bytes === null ? {} : { storageAllowanceBytes: allowance.bytes }),
     ...(siteHost === null ? {} : { siteHost }),
     ...(inviteContact === "" ? {} : { inviteContact }),
+    ...(downloadUrl === null ? {} : { downloadUrl }),
   };
 }
 

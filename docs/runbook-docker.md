@@ -1112,6 +1112,16 @@ Nothing is deleted or taken offline: the workspace's tours keep playing, and onl
 
 An upload that was started and never finished holds its room until it is removed, which happens once it is more than 24 hours old and the workspace starts another upload.
 
+### Link to the app's download page
+
+The dashboard can point signed-in people to the public page the desktop app is downloaded from (see [The app's download page](../README.md#the-apps-download-page) in the README). Add a line to `.env` with that page's `https://` address, then recreate the container as above. Both routes hand it on: the direct stack passes the whole `.env`, and the tunnel stack names `DOWNLOAD_URL` among the settings it passes.
+
+```text
+DOWNLOAD_URL=https://downloads.example.com/mythicshot/
+```
+
+**How to tell it worked:** the Account page shows the card "Mythicshot for Windows" with "Open the download page". A value that cannot be used never stops the app: the card is not shown, and `docker compose logs app` has the line `download page: off, because DOWNLOAD_URL is not a usable https address. The site runs; the dashboard shows no download link.` To take the link away, remove the line and recreate the container.
+
 ### Read the audit record
 
 The audit record lists what was done with accounts: sign-ins, sign-outs, links printed, allowances set, email changes, connections of the app, tokens renamed or revoked, and accounts disabled, enabled or deleted; and, for tours shared with a list of addresses, the links mailed to visitors and their sign-ins. It holds ids, never an email address, a code or a token.

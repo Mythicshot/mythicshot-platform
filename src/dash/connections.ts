@@ -45,7 +45,9 @@
 // page decides from what the account holds: the first read of the list is empty (and whole),
 // and GET /api/v1/usage then says the workspace has no tours, images or GIFs. A usage answer
 // that fails, or any other doubt, shows no welcome. It goes away as soon as a read of the
-// list shows a computer, and the empty state under it stays as it is.
+// list shows a computer, and the empty state under it stays as it is. When the session names
+// a usable address of the app's download page, the welcome ends with one sentence more whose
+// words "the download page" link to it (Dash.downloadLink); without it, it reads as before.
 import { DEVICE_NAME_MAX, USER_CODE_ALPHABET } from "../connect.ts";
 import { MAX_TOKENS_LISTED } from "../tokens.ts";
 import { dashHtml } from "./shell.ts";
@@ -159,6 +161,9 @@ export const CONNECTIONS_JS = String.raw`(function () {
     notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
     welcomeBefore: "Welcome, ",
     welcomeAfter: ". Your workspace is ready. Connect Mythicshot on your computer to start sharing: open Workspace in Mythicshot, press Sign in, and type the code it shows below.",
+    downloadBefore: " Not installed yet? Get Mythicshot from ",
+    downloadLink: "the download page",
+    downloadAfter: ".",
   };
   var TOKENS = "/api/v1/tokens";
   var USAGE = "/api/v1/usage";
@@ -761,6 +766,13 @@ export const CONNECTIONS_JS = String.raw`(function () {
       line.appendChild(el("span", "", TEXT.welcomeBefore));
       line.appendChild(el("span", "name", name));
       line.appendChild(el("span", "", TEXT.welcomeAfter));
+      // With a usable address of the app's download page, one sentence more, its last words the link.
+      var link = Dash.downloadLink(TEXT.downloadLink, "");
+      if (link !== null) {
+        line.appendChild(el("span", "", TEXT.downloadBefore));
+        line.appendChild(link);
+        line.appendChild(el("span", "", TEXT.downloadAfter));
+      }
       line.hidden = false;
     }, function () { /* no welcome */ });
   }

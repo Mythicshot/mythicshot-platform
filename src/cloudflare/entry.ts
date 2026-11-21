@@ -2,6 +2,7 @@ import { createApp } from "../app.ts";
 import { mediaLimitsProblem } from "../limits.ts";
 import { withBudget } from "../budget.ts";
 import { setClientAddress } from "../client.ts";
+import { downloadUrlSetting } from "../https-address.ts";
 import { HOST_ROLES, hostSettingsFrom, normaliseHost, resolveHosts, settingOf, type Hosts, type HostsResult } from "../hosts.ts";
 import { DEFER_FAILED, type Deps } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
@@ -13,9 +14,10 @@ import { R2FileStore } from "./files.ts";
  * SETUP_CODE is a Worker secret, so `wrangler types` does not list it. Nor does it list
  * STORAGE_ALLOWANCE_BYTES, a var only an install that wants a limit adds to its own file,
  * or SITE_HOST, a var only a one-address install that wants sign-in links adds, or
- * IMG_HOST, the optional third address an install with two addresses may add.
+ * IMG_HOST, the optional third address an install with two addresses may add, or
+ * DOWNLOAD_URL, the address of the desktop app's download page an install may add.
  */
-type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown; IMG_HOST?: unknown };
+type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown; IMG_HOST?: unknown; DOWNLOAD_URL?: unknown };
 
 /**
  * Who to ask for an invite, from the Worker's var INVITE_CONTACT, trimmed, or null when it
@@ -90,6 +92,8 @@ export function depsFromEnv(
 ): Deps {
   const siteHost = siteHostFromWorkerEnv(env, hosts);
   const inviteContact = inviteContactFromWorkerEnv(env);
+  // A var that is not text, or not a usable address, is left out (downloadUrlSetting).
+  const downloadUrl = downloadUrlSetting(env.DOWNLOAD_URL).url;
   return {
     db: new D1Db(env.DB),
     drafts: new R2FileStore(env.DRAFTS),
@@ -106,6 +110,7 @@ export function depsFromEnv(
       ...(storageAllowanceBytes === null ? {} : { storageAllowanceBytes }),
       ...(siteHost === null ? {} : { siteHost }),
       ...(inviteContact === null ? {} : { inviteContact }),
+      ...(downloadUrl === null ? {} : { downloadUrl }),
     },
     now: () => Date.now(),
     ...(ctx === undefined
@@ -118,6 +123,9 @@ export function depsFromEnv(
         }),
   };
 }
+
+/** Whether this isolate has said the line for a DOWNLOAD_URL that cannot be used. */
+let downloadSaid = false;
 
 /** The answer to every request while a setting cannot be used. */
 function misconfigured(): Response {
@@ -146,6 +154,15 @@ export default {
     // it, which a visitor cannot set. No other header is read for it, and it is kept only
     // when it is one bare IP address (setClientAddress checks); else it is unknown.
     setClientAddress(request, request.headers.get("cf-connecting-ip"));
+    // A download page that cannot be used closes nothing: the link is left out, and its
+    // one fixed line, which holds no value, is written once for the life of the isolate.
+    if (!downloadSaid) {
+      const download = downloadUrlSetting(env.DOWNLOAD_URL);
+      if (download.problem !== null) {
+        downloadSaid = true;
+        console.error(download.problem);
+      }
+    }
     // Each request gets its own metered ports, so one that goes over the call budget is logged.
     const defers = typeof (ctx as { waitUntil?: unknown } | undefined)?.waitUntil === "function" ? ctx : undefined;
     const deps = depsFromEnv(env, hosts.hosts, allowance.bytes, defers);

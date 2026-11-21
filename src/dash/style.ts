@@ -290,6 +290,7 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
 .name { unicode-bidi: isolate; overflow-wrap: anywhere; }
 .note { margin: 0 0 14px; padding: 10px 12px; border-radius: 10px; background: var(--ok-bg); color: var(--ok-text); font-size: 0.9rem; }
 .note.plain { background: var(--tag-bg); color: var(--text); }
+.note a { color: inherit; text-decoration: underline; }
 .connect-text { margin: 0 0 10px; }
 .inline { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .inline .field { flex: 1 1 180px; width: auto; min-width: 0; }

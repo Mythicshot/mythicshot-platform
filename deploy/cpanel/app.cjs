@@ -27,8 +27,9 @@
 // that names the setting and no value.
 //
 // The other optional settings are passed on the same way: STORAGE_ALLOWANCE_BYTES (the
-// storage allowance of a workspace, in bytes) and INVITE_CONTACT (who to ask for an
-// invite, shown on the sign-in page). PORT and PUBLIC_IMAGE_BASE are read by the app too
+// storage allowance of a workspace, in bytes), INVITE_CONTACT (who to ask for an
+// invite, shown on the sign-in page) and DOWNLOAD_URL (the https address of the public
+// page the desktop app is downloaded from, linked on the dashboard). PORT and PUBLIC_IMAGE_BASE are read by the app too
 // and passed on like any other line; the install writes neither.
 //
 // RECOVERY_LINKS is read only for the admin command below, and never put in the

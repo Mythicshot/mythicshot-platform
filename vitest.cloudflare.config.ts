@@ -44,6 +44,9 @@ export default defineConfig(async () => {
       include: ["test/**/*.test.ts"],
       // Tests of the Node adapters' internals run only under the Node config.
       exclude: ["test/node-*.test.ts", "node_modules/**"],
+      // As in the Node config: with the suite this size a slow test crossed the default five
+      // seconds on a busy machine, which is a timeout and not a failure.
+      testTimeout: 20_000,
     },
   };
 });

@@ -339,6 +339,34 @@ describe("the Connections page: the welcome of a new account (invite mockup 7)",
     expect(markup.doc.root.all().filter((e) => e.tagName === "img")).toEqual([]);
   });
 
+  it("with a usable download_url the welcome ends with one sentence whose words the download page are the link; without it the welcome reads as before", async () => {
+    const PAGE = "https://downloads.example.com/mythicshot/";
+    const withUrl = (url: unknown): Answer => ({ status: 200, json: { ...(session as { json: Record<string, unknown> }).json, download_url: url } });
+    const outside = (tab: Tab) => tab.doc.root.all().filter((e) => e.tagName === "a" && !(e.getAttribute("href") ?? "").startsWith("/"));
+    const tab = openPage(answers({ "GET /api/v1/session": withUrl(PAGE), "GET /api/v1/tokens": list([]), "GET /api/v1/usage": usage() }));
+    await tab.settle();
+    const welcome = tab.$("connections-welcome");
+    expect([welcome.shown, welcome.textContent]).toEqual([true, WELCOME + " Not installed yet? Get Mythicshot from the download page."]);
+    const links = outside(tab);
+    expect(links).toHaveLength(1);
+    expect([links[0].textContent, links[0].getAttribute("href"), links[0].getAttribute("target"), links[0].getAttribute("rel")]).toEqual(["the download page", PAGE, "_blank", "noopener noreferrer"]);
+    expect(welcome.contains(links[0])).toBe(true);
+    // The sentence is the welcome's last: nothing but its full stop after the link.
+    const parts = welcome.children.filter((c): c is FakeElement => c instanceof FakeElement);
+    expect(parts.slice(-3).map((p) => [p.tagName, p.textContent])).toEqual([["span", " Not installed yet? Get Mythicshot from "], ["a", "the download page"], ["span", "."]]);
+    // Without the field, with null, or with an address a wrong server could send: the welcome as before, and no link.
+    for (const bad of [undefined, null, "javascript:alert(1)", "http://downloads.example.com/", "//downloads.example.com/", "https://downloads.example.com/#x", "https://u:p@downloads.example.com/", 'https://downloads.example.com/"><b>x</b>', 42]) {
+      const plain = openPage(answers({ "GET /api/v1/session": bad === undefined ? session : withUrl(bad), "GET /api/v1/tokens": list([]), "GET /api/v1/usage": usage() }));
+      await plain.settle();
+      expect([plain.$("connections-welcome").shown, plain.$("connections-welcome").textContent], JSON.stringify(bad)).toEqual([true, WELCOME]);
+      expect(outside(plain), JSON.stringify(bad)).toEqual([]);
+    }
+    // No welcome, no sentence: the address alone shows nothing on this page.
+    const busy = openPage(answers({ "GET /api/v1/session": withUrl(PAGE), "GET /api/v1/tokens": list([]), "GET /api/v1/usage": usage({ tours: 1 }) }));
+    await busy.settle();
+    expect([busy.$("connections-welcome").shown, outside(busy)]).toEqual([false, []]);
+  });
+
   it("no welcome when the workspace holds a tour, an image or a GIF, when usage cannot be read, or when the account has no username", async () => {
     const cases: [string, Responder][] = [
       ["a tour", standard({ "GET /api/v1/tokens": list([]), "GET /api/v1/usage": usage({ tours: 1 }) })],
