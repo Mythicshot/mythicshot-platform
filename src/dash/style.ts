@@ -113,7 +113,7 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
 .btn.danger { background: transparent; color: var(--error); border-color: var(--line); }
 .btn.quiet:hover:not(:disabled), .btn.danger:hover:not(:disabled) { background: var(--bg); opacity: 1; }
 .btn.sm { min-height: 32px; padding: 6px 10px; font-size: 0.84rem; }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn:disabled, .btn[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
 .btn[aria-busy="true"] { cursor: progress; }
 
 /* A question asked in the page. */

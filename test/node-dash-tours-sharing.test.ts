@@ -418,15 +418,25 @@ describe("saving who can view", () => {
     expect(tab.$("share-box").getAttribute("aria-describedby")).toBe("share-ask-text share-ask-warn");
     // The focus is on the button that keeps it public, so a second Enter keeps it public.
     expect(tab.doc.activeElement).toBe(tab.$("share-keep"));
-    expect(tab.$("share-go").disabled).toBe(true);
-    // Tab reaches only Keep it public until the other button works.
+    // Until it works the other button is inert but stays in the Tab order, announced as
+    // unavailable (aria-disabled), never missing: pressing it then does nothing.
+    expect([tab.$("share-go").disabled, tab.$("share-go").getAttribute("aria-disabled")]).toEqual([false, "true"]);
+    key(tab.doc.body, "Tab");
+    expect(tab.doc.activeElement).toBe(tab.$("share-go"));
+    tab.$("share-go").click();
+    key(tab.$("share-go"), "Enter");
+    await tab.settle();
+    expect(puts(tab)).toEqual([]);
+    expect(tab.$("share-ask").shown).toBe(true);
     key(tab.doc.body, "Tab");
     expect(tab.doc.activeElement).toBe(tab.$("share-keep"));
     // A held Enter's repeats press nothing.
     expect(tab.$("share-keep").dispatch("keydown", { key: "Enter", repeat: true }).defaultPrevented).toBe(true);
     expect(tab.tick()).toEqual([600]);
     await tab.settle();
-    expect(tab.$("share-go").disabled).toBe(false);
+    expect(tab.$("share-go").hasAttribute("aria-disabled")).toBe(false);
+    // The focus stays where it was: nothing is announced when it starts to work.
+    expect(tab.doc.activeElement).toBe(tab.$("share-keep"));
     key(tab.doc.body, "Tab");
     expect(tab.doc.activeElement).toBe(tab.$("share-go"));
     // Keep it public goes back to the options with the edits kept, and sends nothing.
@@ -438,7 +448,7 @@ describe("saving who can view", () => {
     // Escape and the backdrop go back the same way, and the button waits again each time.
     for (const back of [() => key(tab.doc.body, "Escape"), () => tab.$("share-dialog").click()]) {
       tab.$("share-save").click();
-      expect(tab.$("share-go").disabled).toBe(true);
+      expect(tab.$("share-go").getAttribute("aria-disabled")).toBe("true");
       back();
       expect(boxOpen(tab)).toBe(true);
       expect(tab.$("share-form").shown).toBe(true);
@@ -531,7 +541,7 @@ describe("a move of the pictures", () => {
 
   it("sends again after 500 access_failed or a lost answer, at most three times in a row, then decides by reading the setting again", async () => {
     // Lost three times; the setting read again is the one sent: done.
-    const won = openTours(standard({ [`GET ${path(T2)}`]: [access(), access({ access: "me" })], [`PUT ${path(T2)}`]: ["network", refused(500, "access_failed"), "network"] }));
+    const won = openTours(standard({ [`GET ${path(T2)}`]: [access(), access(), access({ access: "me" })], [`PUT ${path(T2)}`]: ["network", refused(500, "access_failed"), "network"] }));
     await won.settle();
     await openSharing(won, 1);
     won.$("share-me").click();
@@ -575,7 +585,7 @@ describe("a move of the pictures", () => {
       [refused(409, "access_switching"), "This tour's pictures are still being moved. Open Sharing again to finish that first."],
       [refused(409, "switch_cancelled"), "The tour was unpublished or deleted while its pictures were being moved, so the change did not finish."],
       [refused(409, "access_busy"), "The tour changed while this was being saved. Press Save again."],
-      [refused(409, "republish_needed"), "Publish this tour again from Mythicshot, then set who can view it."],
+      [refused(409, "republish_needed"), "This tour's pictures could not be moved. Unpublish it, publish it again from Mythicshot, then set who can view it."],
       [refused(400, "too_many_viewers"), "The list holds at most 200 people. Remove some and press Save again."],
       [refused(400, "bad_viewer", "viewers[9] is not an email address; nothing was changed"), FAILED],
       [refused(400, "bad_request"), FAILED],
@@ -597,8 +607,8 @@ describe("a move of the pictures", () => {
       expect(tab.$("share-message").textContent, what).toBe(text);
       expect(tab.$("share-form").shown, what).toBe(true);
       expect(checkedOne(tab), what).toBe("share-me");
-      // The list and the setting were read again: the row shows what the API reports.
-      expect(tab.fetched.filter((f) => f.path === path(T2) && f.method === "GET"), what).toHaveLength(2);
+      // The setting was read on opening, before sending and after: the row shows what the API reports.
+      expect(tab.fetched.filter((f) => f.path === path(T2) && f.method === "GET"), what).toHaveLength(3);
       expect(rows(tab)[1].children.filter((c): c is FakeElement => c instanceof FakeElement)[2].textContent, what).toBe("9 people");
       expect(tab.timers(), what).toBe(0);
     }
@@ -623,7 +633,7 @@ describe("a move of the pictures", () => {
   it("stops when the page is left, sends nothing more by itself, and offers to finish when Sharing is opened", async () => {
     const tab = openTours(
       standard({
-        [`GET ${path(T1)}`]: [PUBLIC, access({ viewers: ["ana@example.com"], switching: { done: 1, total: 3 } })],
+        [`GET ${path(T1)}`]: [PUBLIC, PUBLIC, access({ viewers: ["ana@example.com"], switching: { done: 1, total: 3, target: "restricted" } })],
         [`PUT ${path(T1)}`]: [moving(1, 3), access({ viewers: ["ana@example.com"] })],
       }),
     );
@@ -638,8 +648,8 @@ describe("a move of the pictures", () => {
     tab.pagehide();
     await drive(tab);
     expect(puts(tab)).toHaveLength(1);
-    // The box says so, and shows the stopped move as the API reports it. The page knows this
-    // move was to restricted, so it offers only to finish it.
+    // The box says so, and shows the stopped move as the API reports it: a move to restricted,
+    // which it offers only to finish.
     expect(tab.$("share-message").textContent).toBe(FAILED);
     expect(boxShows(tab)).toEqual([
       'Who can view "Timeline rehearsal walkthrough"?',
@@ -660,7 +670,7 @@ describe("a move of the pictures", () => {
   });
 
   it("never loops for ever: after 5000 requests it stops, says so, and shows the move as stopped", async () => {
-    const tab = openTours(standard({ [`GET ${path(T2)}`]: [access(), access({ access: "public", switching: { done: 7, total: 9 } })], [`PUT ${path(T2)}`]: moving(7, 9) }));
+    const tab = openTours(standard({ [`GET ${path(T2)}`]: [access(), access(), access({ switching: { done: 7, total: 9, target: "public" } })], [`PUT ${path(T2)}`]: moving(7, 9) }));
     await tab.settle();
     await openSharing(tab, 1);
     tab.$("share-public").click();
@@ -679,8 +689,8 @@ describe("a move of the pictures", () => {
 });
 
 describe("a move that stopped", () => {
-  it("opens on it: Keep it restricted sends the setting the tour has now; Make public asks first, then sends public", async () => {
-    const stopped = access({ switching: { done: 3, total: 9 } });
+  it("a move to public: Keep it restricted sends the setting the tour has now; Make public asks first, then sends public", async () => {
+    const stopped = access({ switching: { done: 3, total: 9, target: "public" } });
     const tab = openTours(standard({ [`GET ${path(T2)}`]: stopped, [`PUT ${path(T2)}`]: [access(), access({ access: "public" })] }));
     await tab.settle();
     await openSharing(tab, 1);
@@ -712,26 +722,93 @@ describe("a move that stopped", () => {
     expect(boxOpen(tab)).toBe(false);
   });
 
-  it("when Make public finds the move going the other way, it says so and offers only to finish it", async () => {
-    const stopped = access({ switching: { done: 3, total: 9 } });
-    const tab = openTours(standard({ [`GET ${path(T2)}`]: stopped, [`PUT ${path(T2)}`]: refused(409, "access_switching") }));
+  it("a move to restricted offers only to finish it", async () => {
+    const stopped = access({ access: "me", switching: { done: 2, total: 5, target: "restricted" } });
+    const tab = openTours(standard({ [`GET ${path(T2)}`]: stopped, [`PUT ${path(T2)}`]: access({ access: "me" }) }));
+    await tab.settle();
+    await openSharing(tab, 1);
+    expect(boxShows(tab)).toEqual([
+      'Who can view "Loot master setup"?',
+      'Moving this tour\'s pictures stopped at 2 of 5. Choose "Keep it restricted" to finish restricting it.',
+      "Cancel",
+      "Keep it restricted",
+    ]);
+    expect(tab.$("share-make-public").shown).toBe(false);
+    // A hidden Make public pressed anyway (as only a script could) sends nothing.
+    tab.$("share-make-public").click();
+    expect(tab.$("share-ask").shown).toBe(false);
+    tab.$("share-restricted").click();
+    await drive(tab);
+    expect(sent(tab).map((s) => s[3])).toEqual([{ access: "me", viewers: LIST }]);
+    expect(boxOpen(tab)).toBe(false);
+  });
+
+  it("a move the server finished or cancelled meanwhile: nothing is sent, and the box shows the tour as it is now", async () => {
+    // Finished by the server in the background (a move to restricted).
+    const done = openTours(standard({ [`GET ${path(T2)}`]: [access({ switching: { done: 2, total: 5, target: "restricted" } }), access()] }));
+    await done.settle();
+    await openSharing(done, 1);
+    done.$("share-restricted").click();
+    await drive(done);
+    expect(puts(done)).toEqual([]);
+    expect(done.$("share-form").shown).toBe(true);
+    expect([checkedOne(done), addresses(done)]).toEqual(["share-people", LIST]);
+    expect(done.$("share-message").hidden).toBe(true);
+    expect([done.$("share-restricted").textContent, done.$("share-save").disabled]).toEqual(["Keep it restricted", false]);
+    expect(done.doc.activeElement).toBe(done.$("share-save"));
+
+    // Cancelled by the server after it stalled (a move to public): the tour stays restricted.
+    const cancelled = openTours(standard({ [`GET ${path(T2)}`]: [access({ switching: { done: 3, total: 9, target: "public" } }), access()] }));
+    await cancelled.settle();
+    await openSharing(cancelled, 1);
+    cancelled.$("share-make-public").click();
+    await arm(cancelled);
+    cancelled.$("share-go").click();
+    await drive(cancelled);
+    expect(puts(cancelled)).toEqual([]);
+    expect(cancelled.$("share-form").shown).toBe(true);
+    expect(checkedOne(cancelled)).toBe("share-people");
+
+    // A change made elsewhere while the options were open: nothing is sent, the edits stay, and the box says to press Save again.
+    const elsewhere = openTours(standard({ [`GET ${path(T2)}`]: [access(), access({ access: "me" })], [`PUT ${path(T2)}`]: access() }));
+    await elsewhere.settle();
+    await openSharing(elsewhere, 1);
+    chipButton(elsewhere, "bram@example.com").click();
+    elsewhere.$("share-save").click();
+    await drive(elsewhere);
+    expect(puts(elsewhere)).toEqual([]);
+    expect(elsewhere.$("share-message").textContent).toBe("The tour changed while this was being saved. Press Save again.");
+    expect([checkedOne(elsewhere), addresses(elsewhere)]).toEqual(["share-people", LIST.slice(1)]);
+    // The setting read before sending is unreachable: nothing is sent, and the page says so.
+    const unread = openTours(standard({ [`GET ${path(T2)}`]: [access(), "network"] }));
+    await unread.settle();
+    await openSharing(unread, 1);
+    unread.$("share-me").click();
+    unread.$("share-save").click();
+    await drive(unread);
+    expect(puts(unread)).toEqual([]);
+    expect(unread.$("share-message").textContent).toBe(FAILED);
+    expect(checkedOne(unread)).toBe("share-me");
+  });
+
+  it("a move whose state changed under a request is refused gracefully: the box shows what the API now reports", async () => {
+    const tab = openTours(standard({ [`GET ${path(T2)}`]: [access({ switching: { done: 3, total: 9, target: "public" } }), access({ switching: { done: 3, total: 9, target: "public" } }), access({ switching: { done: 4, total: 9, target: "restricted" } })], [`PUT ${path(T2)}`]: refused(409, "access_switching") }));
     await tab.settle();
     await openSharing(tab, 1);
     tab.$("share-make-public").click();
     await arm(tab);
     tab.$("share-go").click();
     await drive(tab);
+    expect(puts(tab)).toHaveLength(1);
     expect(boxShows(tab)).toEqual([
       'Who can view "Loot master setup"?',
-      'Moving this tour\'s pictures stopped at 3 of 9. Choose "Keep it restricted" to finish restricting it.',
-      'This tour is being restricted, so it cannot be made public until that is done. Choose "Keep it restricted" to finish it.',
+      'Moving this tour\'s pictures stopped at 4 of 9. Choose "Keep it restricted" to finish restricting it.',
+      "This tour's pictures are still being moved. Open Sharing again to finish that first.",
       "Cancel",
       "Keep it restricted",
     ]);
-    // Cancel closes it and sends nothing more.
     tab.$("share-close").click();
     expect(boxOpen(tab)).toBe(false);
-    expect(puts(tab)).toHaveLength(1);
   });
 });
 
@@ -919,7 +996,8 @@ describe("sharing against the real app", () => {
     expect(rows(tab)[0].children.filter((c): c is FakeElement => c instanceof FakeElement)[2].textContent).toBe("2 people");
     expect(tab.$("tours-gate").shown).toBe(true);
     const now = await send(s.deps, "GET", `/api/v1/tours/${s.id}/access`, { token: s.owner.token });
-    expect(now.json).toEqual({ access: "people", viewers: ["ana@example.com", "bo@example.com"], limit: 200, can_restrict: true, switching: null });
+    // A token reads the count only (the addresses are for the session, which the page shows on opening Sharing again below).
+    expect(now.json).toEqual({ access: "people", viewers_count: 2, limit: 200, can_restrict: true, switching: null });
     expect((await send(s.deps, "GET", `/t/${s.slug}`, { origin: "https://tours.example.com" })).status).toBe(404);
     // A token (the desktop app) cannot make it public: only the session can, and the page has no other credential.
     const byToken = await send(s.deps, "PUT", `/api/v1/tours/${s.id}/access`, { origin: APP, token: s.owner.token, body: JSON.stringify({ access: "public" }), headers: { "content-type": "application/json" } });
@@ -934,7 +1012,7 @@ describe("sharing against the real app", () => {
     await drive(tab, 200);
     expect(boxOpen(tab)).toBe(false);
     expect(rows(tab)[0].children.filter((c): c is FakeElement => c instanceof FakeElement)[2].textContent).toBe("Anyone with the link");
-    expect((await send(s.deps, "GET", `/api/v1/tours/${s.id}/access`, { token: s.owner.token })).json).toMatchObject({ access: "public", viewers: ["ana@example.com", "bo@example.com"], switching: null });
+    expect((await send(s.deps, "GET", `/api/v1/tours/${s.id}/access`, { token: s.owner.token })).json).toMatchObject({ access: "public", viewers_count: 2, switching: null });
     expect((await send(s.deps, "GET", `/t/${s.slug}`, { origin: "https://tours.example.com" })).status).toBe(200);
   });
 
