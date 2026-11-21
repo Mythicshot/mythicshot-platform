@@ -183,6 +183,14 @@ const ROWS: Record<string, Row> = {
   "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421, img: 404 },
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { method: "GET", path: "/player.js", one: 200, tours: 200, app: 404, unknown: 421, img: 404 },
   "GET /t/:slug": { method: "GET", path: "/t/no-such-tour", one: 404, tours: 404, app: 308, unknown: 421, img: 404 },
+  // A restricted tour's pictures and the pages around it (src/restricted.ts): on the tours
+  // address only, like the viewer cookie they read; 404 on the app and img addresses.
+  "GET /t/:slug/v/:name": viewer("GET", `/t/nosuchtour/v/${"0123456789abcdef".repeat(2)}.png`, 404),
+  "GET /view": viewer("GET", "/view", 200),
+  "GET /view/signout/:slug": viewer("GET", "/view/signout/nosuchtour", 200),
+  "GET /view/view.js": viewer("GET", "/view/view.js", 200),
+  "GET /view/view.css": viewer("GET", "/view/view.css", 200),
+  "GET /view/shared.css": viewer("GET", "/view/shared.css", 200),
   // Shared items: on the img address when it is set, else on the tours address.
   "GET /i/:name": media(`/i/${LINK}`, 404),
   "GET /i/:name/download": media(`/i/${LINK}/download`, 404),

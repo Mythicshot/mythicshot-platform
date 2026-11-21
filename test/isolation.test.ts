@@ -29,7 +29,9 @@
 //   separate from every other.
 // - VIEWER: a visitor proving an email address on the tours address (src/viewers.ts), which
 //   takes no credential and reaches no workspace; a test of its own checks that a viewer
-//   cookie changes the answer of no other route, byte for byte.
+//   cookie changes the answer of no other route, byte for byte, but a restricted tour's page
+//   and live pictures (OPEN, served by src/restricted.ts), which it opens to an address the
+//   tour may be viewed by, and to nothing else (test/restricted.test.ts has every case).
 // A route in none of them, or in two, fails the first test below; so does a table key no
 // route has. The route list is the router's own, as in test/openapi.test.ts, so the
 // tables cannot drift from the app.
@@ -61,6 +63,7 @@ import { LIMITS_SIGNIN } from "../src/rate.ts";
 import { POLL_GAP_MS } from "../src/connect.ts";
 import { PAD_BUCKET } from "../src/signin.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
+import { VIEW_GATE_HTML } from "../src/view-page.ts";
 import { VIEWER_CODE_MS, VIEWER_COOKIE } from "../src/viewers.ts";
 import { ORIGIN, commit, logoPng, putStep, send, stepImage, type Call, type Json } from "./bundle.ts";
 import { OWNED, SHARED, TRY_BUCKETS, createReplace, dumpOf, inventedIds, manifestOf, mediaPart, namesIn, needlesOf, snapshotOf, tablesOf, world, type Ids, type Side, type World } from "./isolation-world.ts";
@@ -268,7 +271,12 @@ const LISTS: Record<string, { path: string; holds: string; only?: "token" | "ses
   "GET /api/v1/tokens": { path: "/api/v1/tokens", holds: "the caller's workspace's tokens that are not revoked: ids, names, times and kinds", only: "session" },
 };
 
-type Sample = { method: string; path: string; json?: unknown; headers?: Record<string, string> };
+/**
+ * `viewer`: the answer depends on the viewer cookie as well (a restricted tour's page or live
+ * picture, which src/restricted.ts serves to a proved address that may view it); the test "a
+ * viewer cookie" checks that it opens there, and test/restricted.test.ts checks every case.
+ */
+type Sample = { method: string; path: string; json?: unknown; headers?: Record<string, string>; viewer?: true };
 
 /**
  * Routes with no id that make something new in the caller's own workspace: what they make,
@@ -310,9 +318,31 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
   },
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { reason: "the player's own files, the same for every tour", samples: () => [{ method: "GET", path: "/player.js" }, { method: "GET", path: "/player.css" }] },
   "GET /t/:slug": {
-    reason: "a published tour's page, for visitors: only a published tour answers, from its snapshot",
-    samples: (w) => [w.a.ids.published.slug, w.a.ids.draft.slug, w.a.ids.publishing.slug, inventedIds().published.slug, w.a.ids.restricted.slug, w.a.ids.switching.slug].map((slug) => ({ method: "GET", path: `/t/${slug}` })),
+    reason:
+      "a published tour's page, for visitors: only a published tour answers, from its snapshot; a restricted one answers its fixed gate page to everyone but a viewer cookie of an address it may be viewed by",
+    samples: (w) =>
+      [w.a.ids.published.slug, w.a.ids.draft.slug, w.a.ids.publishing.slug, inventedIds().published.slug, w.a.ids.restricted.slug, w.a.ids.switching.slug].map((slug) => ({
+        method: "GET",
+        path: `/t/${slug}`,
+        ...(slug === w.a.ids.restricted.slug ? { viewer: true as const } : {}),
+      })),
   },
+  "GET /t/:slug/v/:name": {
+    reason: "a restricted tour's live picture, for a visitor whose viewer cookie proved an address the tour may be viewed by; to everyone else the one 404",
+    samples: (w) => [
+      { method: "GET", path: `/t/${w.a.ids.restricted.slug}/v/${w.a.ids.restricted.privateName}`, viewer: true },
+      { method: "GET", path: `/t/${w.a.ids.restricted.slug}/v/${w.b.ids.restricted.privateName}` },
+      { method: "GET", path: `/t/${w.b.ids.restricted.slug}/v/${w.a.ids.restricted.privateName}` },
+      { method: "GET", path: `/t/${w.a.ids.restricted.slug}/v/${inventedIds().restricted.privateName}` },
+      { method: "GET", path: `/t/${w.a.ids.published.slug}/v/${w.a.ids.published.publicName}` },
+      { method: "GET", path: `/t/${w.a.ids.switching.slug}/v/${w.a.ids.switching.movedName}` },
+    ],
+  },
+  "GET /view": { reason: "the page a viewer link opens, fixed text; the code stays in the browser and goes to the API only in request bodies", samples: () => [{ method: "GET", path: "/view" }] },
+  "GET /view/signout/:slug": { reason: "the page \"Not you?\" under a restricted tour leads to, fixed text whatever the slug; it signs out only on a press", samples: (w) => [{ method: "GET", path: `/view/signout/${w.a.ids.restricted.slug}` }] },
+  "GET /view/view.js": { reason: "the viewer pages' script, fixed text", samples: () => [{ method: "GET", path: "/view/view.js" }] },
+  "GET /view/view.css": { reason: "the viewer pages' stylesheet, fixed text", samples: () => [{ method: "GET", path: "/view/view.css" }] },
+  "GET /view/shared.css": { reason: "the stylesheet of the line under a restricted tour, fixed text", samples: () => [{ method: "GET", path: "/view/shared.css" }] },
   // Shared items: found by their 100-bit link id alone, and only while online and of an
   // account that is not disabled; every other link is the one 404 page.
   "GET /i/:name": {
@@ -1523,7 +1553,10 @@ describe("routes with no owner", () => {
     // What each answers: the wizard is closed on a site that has workspaces; a tour page and
     // a picture answer only for what is live (or retired and inside its grace).
     for (const key of Object.keys(OPEN).filter((k) => k.includes(" /setup"))) expect(statuses[key], key).toEqual([404]);
-    expect(statuses["GET /t/:slug"]).toEqual([200, 404, 404, 404, 404, 404]);
+    // The restricted tour answers its fixed gate page (403) to every caller here: none has a viewer cookie.
+    expect(statuses["GET /t/:slug"]).toEqual([200, 404, 404, 404, 403, 404]);
+    expect(statuses["GET /t/:slug/v/:name"]).toEqual([404, 404, 404, 404, 404, 404]);
+    expect(statuses["GET /view/signout/:slug"]).toEqual([200]);
     expect(statuses["GET /p/:name"]).toEqual([200, 200, 404, 404, 404, 404]);
     // A code nobody was given gets the one refusal of a sign-in link.
     expect(statuses["POST /api/v1/signin/complete"]).toEqual([403]);
@@ -1545,10 +1578,10 @@ describe("routes with no owner", () => {
     expect(await page(a.ids.draft.slug)).toEqual(await page(never.draft.slug));
     expect(await page(a.ids.publishing.slug)).toEqual(await page(never.draft.slug));
     expect(await picture(a.ids.publishing.pendingName)).toEqual(await picture(never.published.publicName));
-    // A restricted tour, and one whose switch to restricted is in progress, answer as tours
-    // that never existed: their pages, their live pictures still in the public store, and the
-    // names of their private ones.
-    expect(await page(a.ids.restricted.slug)).toEqual(await page(never.draft.slug));
+    // A tour whose switch to restricted is in progress answers as a tour that never existed,
+    // and so do the live pictures of both still in the public store and the names of their
+    // private ones under /p/. A restricted tour's page is the fixed gate page, nothing of it.
+    expect((await page(a.ids.restricted.slug)).body).toBe(VIEW_GATE_HTML);
     expect(await page(a.ids.switching.slug)).toEqual(await page(never.draft.slug));
     for (const name of [a.ids.switching.publicName, a.ids.switching.movedName, a.ids.restricted.privateName]) expect(await picture(name)).toEqual(await picture(never.published.publicName));
     // The live page names its own public pictures: no draft file, no workspace, account or
@@ -1774,8 +1807,21 @@ describe("a viewer cookie", () => {
     for (const [key, list] of Object.entries(LISTS)) {
       for (const credential of CREDENTIALS) if (list.only === undefined || list.only === credential.name) await compare(key, `by ${credential.name}`, { method: "GET", path: list.path }, credential.of(a));
     }
-    // Routes with no owner, by nobody and by the owner's session.
-    for (const [key, entry] of Object.entries(OPEN)) for (const sample of entry.samples(w)) for (const [who, c] of [["nobody", nobody], ["the session", BY_SESSION.of(a)]] as const) await compare(key, `${sample.path} by ${who}`, sample, c);
+    // Routes with no owner, by nobody and by the owner's session. A restricted tour's page and
+    // live picture open to the viewer cookie of the owner's own address, and to nothing else.
+    for (const [key, entry] of Object.entries(OPEN)) {
+      for (const sample of entry.samples(w)) {
+        for (const [who, c] of [["nobody", nobody], ["the session", BY_SESSION.of(a)]] as const) {
+          if (sample.viewer !== true) {
+            await compare(key, `${sample.path} by ${who}`, sample, c);
+            continue;
+          }
+          const without = await fire(deps, sample, c);
+          const withIt = await fire(deps, sample, plus(sample, c));
+          expect([without.status, withIt.status], `${key}: ${sample.path} by ${who}`).toEqual([key === "GET /t/:slug" ? 403 : 404, 200]);
+        }
+      }
+    }
     // What makes or changes something: asked by nobody (and so refused), which changes nothing either way.
     for (const [key, entry] of Object.entries(CREATES)) await compare(key, "by nobody", entry.sample(a), page);
     for (const [key, entry] of Object.entries(SELF)) await compare(key, "by nobody", { method: "POST", path: entry.path, json: {} }, page);

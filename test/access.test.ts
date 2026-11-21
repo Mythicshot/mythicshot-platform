@@ -9,6 +9,7 @@ import type { Deps, FileStore } from "../src/ports.ts";
 import { COPY_BATCH } from "../src/publish.ts";
 import { usageOf } from "../src/usage.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
+import { VIEW_GATE_HTML } from "../src/view-page.ts";
 import { ORIGIN, send, uploadTour, type Call, type Json } from "./bundle.ts";
 import { manifestOf } from "./isolation-world.ts";
 import { oldPage, oldPicture } from "./old-build-0.1.35.ts";
@@ -25,6 +26,18 @@ afterEach(() => vi.restoreAllMocks());
 
 /** Everything a client can see of an answer. */
 const seen = (c: Call) => ({ status: c.status, headers: [...c.headers.entries()].sort(), body: c.text });
+
+/**
+ * What a restricted tour's page answers a visitor with no viewer cookie (src/restricted.ts):
+ * while it can be served, the fixed gate page, which holds nothing of it; while its pictures
+ * move, or when it cannot be served at all, exactly what an unknown tour's page answers.
+ */
+async function expectClosed(deps: Deps, slug: string, what = slug): Promise<void> {
+  const r = seen(await send(deps, "GET", `/t/${slug}`));
+  const moving = await deps.db.first("SELECT 1 AS x FROM access_switch w JOIN tour t ON t.id = w.tour_id WHERE t.slug = ?", [slug]);
+  if (moving !== null) expect(r, what).toEqual(seen(await send(deps, "GET", `/t/${UNKNOWN_SLUG}`)));
+  else expect([r.status, r.body], what).toEqual([403, VIEW_GATE_HTML]);
+}
 
 type Site = Awaited<ReturnType<typeof makeDeps>> & { owner: Awaited<ReturnType<typeof seedAccount>>; other: Awaited<ReturnType<typeof seedAccount>> };
 
@@ -242,8 +255,8 @@ describe("publishing, unpublishing and deleting a restricted tour", () => {
     for (const k of live) expect(k).toMatch(/^v\/[0-9a-f]{32}\.(png|jpg)$/);
     expect((await s.draftKeys()).filter((k) => k.startsWith("v/")).sort()).toEqual([...live].sort());
     expect(await s.publicKeys()).toEqual([]);
-    // The page and the picture route answer exactly as for a tour that does not exist.
-    expect(seen(await send(s.deps, "GET", `/t/${t.slug}`))).toEqual(seen(await send(s.deps, "GET", `/t/${UNKNOWN_SLUG}`)));
+    // The page is the fixed gate page, and the public picture route answers exactly as for a tour that does not exist.
+    await expectClosed(s.deps, t.slug);
     const missing = seen(await send(s.deps, "GET", `/p/${UNKNOWN_NAME}`));
     for (const k of live) expect(seen(await send(s.deps, "GET", `/p/${k.slice(2)}`))).toEqual(missing);
     expect((await getAccess(s.deps, s.owner.token, t.id)).json.access).toBe("me");
@@ -315,7 +328,7 @@ describe("the switch", () => {
     expect((await namedKeys(s.deps, t.id)).filter((k) => k.startsWith("p/"))).toEqual([]);
     const missing = seen(await send(s.deps, "GET", `/p/${UNKNOWN_NAME}`));
     for (const k of first) expect(seen(await send(s.deps, "GET", `/${k}`))).toEqual(missing);
-    expect(seen(await send(s.deps, "GET", `/t/${t.slug}`))).toEqual(seen(await send(s.deps, "GET", `/t/${UNKNOWN_SLUG}`)));
+    await expectClosed(s.deps, t.slug);
     // Back to public: the same link, served again, and nothing left in the private store.
     await untilDone(s.deps, s.owner.token, t.id, { access: "public" });
     expect((await send(s.deps, "GET", `/t/${t.slug}`)).status).toBe(200);
@@ -381,7 +394,8 @@ describe("the switch", () => {
             expect(row!.slug, at).toBe(t.slug);
             for (const k of await namedKeys(s.deps, t.id)) ever.add(k);
             if (row!.access !== "public") {
-              expect(seen(await send(s.deps, "GET", `/t/${t.slug}`)), at).toEqual(unknownPage);
+              await expectClosed(s.deps, t.slug, at);
+              expect(unknownPage.status, at).toBe(404);
               for (const k of ever) if (k.startsWith("p/")) expect(seen(await send(s.deps, "GET", `/${k}`)), `${at}: ${k}`).toEqual(unknownPicture);
               // Nor would the build before this feature, gone back to on this database.
               expect(await oldPage(s.deps, t.slug), `${at}: 0.1.35's page`).toBeNull();
@@ -646,7 +660,7 @@ describe("the review's follow-ups", () => {
         const faulty = failingAt(s.deps, n, when);
         let r = await setAccess(faulty.deps, s.owner.token, t.id, { access: "me" });
         const met = faulty.hit();
-        expect(seen(await send(s.deps, "GET", `/t/${t.slug}`)), label).toEqual(seen(await send(s.deps, "GET", `/t/${UNKNOWN_SLUG}`)));
+        await expectClosed(s.deps, t.slug, label);
         for (let i = 0; i < 5 && r.status !== 200; i++) r = await setAccess(s.deps, s.owner.token, t.id, { access: "me" });
         expect([r.status, r.json.access, r.json.switching], `${label}: ${r.text}`).toEqual([200, "me", null]);
         // Housekeeping retires what a cut-off cancel left pending, after the stale period.
