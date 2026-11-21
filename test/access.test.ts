@@ -50,7 +50,8 @@ async function site(config: Parameters<typeof makeDeps>[0] = {}): Promise<Site> 
   return { ...ctx, owner, other };
 }
 
-const getAccess = (deps: Deps, token: string, tourId: string) => send(deps, "GET", `/api/v1/tours/${tourId}/access`, { token });
+/** The setting as the account's signed-in session reads it, with the list (a token gets only its count). */
+const getAccess = (deps: Deps, token: string, tourId: string) => send(deps, "GET", `/api/v1/tours/${tourId}/access`, { headers: sessionsByToken.get(token)! });
 /** The change, sent with the signed-in session of the account whose token this is. */
 const setAccess = (deps: Deps, token: string, tourId: string, body: unknown) =>
   send(deps, "PUT", `/api/v1/tours/${tourId}/access`, { headers: { ...JSON_HEADERS, ...sessionsByToken.get(token)! }, body: JSON.stringify(body) });
@@ -582,10 +583,10 @@ describe("the review's follow-ups", () => {
     await nothing("a move to restricted under way", publicKeys);
     await untilDone(s.deps, s.owner.token, t.id, { access: "people" });
     await nothing("restricted", publicKeys);
-    // An older build's rename writes the title into data; the stub stays no tour.
-    await s.deps.db.run("UPDATE snapshot SET data = json_set(data, '$.title', 'Renamed by 0.1.35') WHERE tour_id = ? AND json_valid(data)", [t.id]);
+    // An older build's rename writes the title into data: the database refuses it (the
+    // triggers of migration 0014), and the stub stays.
+    await expect(s.deps.db.run("UPDATE snapshot SET data = json_set(data, '$.title', 'Renamed by 0.1.35') WHERE tour_id = ? AND json_valid(data)", [t.id])).rejects.toThrow(/stub/);
     expect(await oldPage(s.deps, t.slug)).toBeNull();
-    await s.deps.db.run("UPDATE snapshot SET data = ? WHERE tour_id = ?", [RESTRICTED_STUB, t.id]);
     expect((await setAccess(s.deps, s.owner.token, t.id, { access: "public" })).status).toBe(202);
     await nothing("a move to public under way");
     await untilDone(s.deps, s.owner.token, t.id, { access: "public" });

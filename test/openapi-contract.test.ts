@@ -233,6 +233,7 @@ function client(deps: Deps) {
     publish: (token: string | null, tourId: string, body?: unknown) => call("POST", `/api/v1/tours/${tourId}/publish`, body === undefined ? { token } : withJson(token, body)),
     unpublish: (token: string | null, tourId: string) => call("POST", `/api/v1/tours/${tourId}/unpublish`, { token }),
     access: (token: string | null, tourId: string) => call("GET", `/api/v1/tours/${tourId}/access`, { token }),
+    accessBySession: (session: { cookie: string; csrf: string }, tourId: string) => call("GET", `/api/v1/tours/${tourId}/access`, { headers: { cookie: session.cookie } }),
     /** Sent with a session (only a session may change who views a tour): its Cookie, anti-forgery value and this address as Origin. */
     setAccess: (session: { cookie: string; csrf: string }, tourId: string, body: unknown) =>
       call("PUT", `/api/v1/tours/${tourId}/access`, {
@@ -645,7 +646,9 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const a = { ...aSide, session: await sessionOf(aSide.workspaceId) };
     const b = { ...bSide, session: await sessionOf(bSide.workspaceId) };
     const draft = await api.upload(a.token, small(1, "Draft"));
-    expect((await api.access(a.token, draft.tour_id)).json).toEqual({ access: "public", viewers: [], limit: 200, can_restrict: true, switching: null });
+    // A token reads the setting and how many addresses the list holds; a session reads the list itself.
+    expect((await api.access(a.token, draft.tour_id)).json).toEqual({ access: "public", viewers_count: 0, limit: 200, can_restrict: true, switching: null });
+    expect((await api.accessBySession(a.session, draft.tour_id)).json).toEqual({ access: "public", viewers: [], limit: 200, can_restrict: true, switching: null });
     refused(await api.access(b.token, draft.tour_id), 404, "not_found");
     refused(await api.access(a.token, NO_TOUR), 404, "not_found");
     refused(await api.setAccess(b.session, draft.tour_id, { access: "me" }), 404, "not_found");
@@ -660,7 +663,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     expect(bad.text).not.toContain("ana@example.com");
     refused(await api.setAccess(a.session, draft.tour_id, { access: "people", viewers: Array.from({ length: 201 }, (_, i) => `v${i}@example.com`) }), 400, "too_many_viewers");
     refused(await api.setAccess(a.session, draft.tour_id, `{"access":"people","viewers":["${"a".repeat(70_000)}"]}`), 413, "too_large");
-    expect((await api.access(a.token, draft.tour_id)).json.viewers).toEqual([]);
+    expect((await api.accessBySession(a.session, draft.tour_id)).json.viewers).toEqual([]);
 
     // A draft changes at once.
     const set = await api.setAccess(a.session, draft.tour_id, { access: "people", viewers: ["Ana@Example.com ", "bo@example.com", "ana@example.com"] });

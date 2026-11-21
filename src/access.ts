@@ -88,8 +88,8 @@
 // store (src/usage.ts), so a switch changes nothing in it at any moment: every byte it
 // counts is counted once throughout.
 //
-// The list of addresses is the workspace's data: it is answered by GET .../access alone,
-// never by another route, an audit row (which holds counts) or a log line, and a refusal of
+// The list of addresses is the workspace's data: it is answered by GET .../access to a
+// signed-in session alone (a token gets its count), never by another route, an audit row (which holds counts) or a log line, and a refusal of
 // a malformed address names its position only.
 import type { Hono } from "hono";
 import { noDisabledAccount, parseEmail } from "./accounts.ts";
@@ -98,7 +98,7 @@ import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
 import { apiError, json, readCapped } from "./http.ts";
 import { canMailLinks, isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
-import { COPY_BATCH, clearDuePage, copyOne, deleteKeys, keyList, liveKey, mime, nextBatch, randomHex, runLimited, typeOfKey, type Copy } from "./publish.ts";
+import { COPY_BATCH, MissingSource, STALE_PUBLISH_MS, clearDuePage, copyOne, deleteKeys, keyList, liveKey, mime, nextBatch, randomHex, runLimited, typeOfKey, type Copy } from "./publish.ts";
 
 /** A tour's viewing setting. */
 export type Access = "public" | "people" | "me";
@@ -121,12 +121,13 @@ const COPIES_IN_FLIGHT = 4;
 const CALLS_AFTER_COPIES = 9;
 /** A switch to private with no progress for this long is carried on by the workspace's housekeeping. */
 export const CARRY_AFTER_MS = 60_000;
-/**
- * Pictures one housekeeping run moves of a stopped switch to private: at most 15 calls (the
- * look, the batch, 4 copies of 2 calls, marking 2 and the sources 2; or the commit and the
- * clean-up of 4 in place of those last 4).
- */
+/** The most pictures one housekeeping run moves of a stopped switch to private. */
 export const CARRY_COPIES = 4;
+/**
+ * The calls the requests with room give housekeeping for carrying on a switch (the tour list
+ * and unpublish): 9 + 2 per picture, so CARRY_COPIES pictures (see carryOnSwitch).
+ */
+export const CARRY_CALLS = 9 + 2 * CARRY_COPIES;
 
 /**
  * What snapshot.data holds while a tour is restricted (its real text is in private_data). It
@@ -268,6 +269,8 @@ const cancelled = () =>
   apiError(409, "switch_cancelled", "the change was stopped before it finished (the tour was unpublished or deleted meanwhile); send it again to apply it to the tour as it is now");
 const busy = () => apiError(409, "access_busy", "the tour changed while this request was being decided; send it again");
 const failed = () => apiError(500, "access_failed", "the change could not be completed yet; send the same request again to continue it");
+const pictureMissing = () =>
+  apiError(409, "republish_needed", "a picture of the tour's published version is missing, so it cannot be moved; unpublish the tour, then publish it again");
 const republish = () =>
   apiError(409, "republish_needed", "the tour's published version cannot be moved as it is; publish the tour again, then send this change again");
 const progress = (done: number, total: number) => json(202, { status: "switching", done, total });
@@ -500,8 +503,9 @@ function startStatements(deps: Deps, auth: Auth, st: State, body: AccessBody, li
  * fails the whole batch, unless the switch still exists, every one of its rows is pending and
  * copied (or copied by this request), and the snapshot is still the publish it started from.
  * Going private, the renamed text goes to private_data (data keeps the stub) and the source
- * rows left are retired, due now. Going public, the text goes back to data, private_data is
- * emptied, the setting becomes 'public' and `audit` (the audit row) follows that change.
+ * rows left are retired, due now. Going public, the setting becomes 'public' first, `audit`
+ * (the audit row) right after that change as its guard, then the text goes back to data and
+ * private_data is emptied.
  */
 function commitStatements(ws: string, id: string, switchId: string, toPublic: boolean, justCopied: string[], now: number, audit: Stmt | null): Stmt[] {
   const text = `(SELECT json_set(w.data, '$.title', t.title) FROM access_switch w JOIN tour t ON t.id = w.tour_id JOIN snapshot n ON n.tour_id = t.id
@@ -521,7 +525,14 @@ function commitStatements(ws: string, id: string, switchId: string, toPublic: bo
               ON CONFLICT (tour_id) DO UPDATE SET data = excluded.data, private_data = excluded.private_data`,
         params: [id, ...textParams, RESTRICTED_STUB, ...textParams],
       };
+  // Going public, the setting changes first in the batch: the database refuses a public
+  // picture or a text other than the stub for a tour that is still restricted (the
+  // triggers of migration 0014), and the whole batch is undone if anything after it fails.
+  const head: Stmt[] = toPublic
+    ? [{ sql: "UPDATE tour SET access = 'public' WHERE id = ? AND workspace_id = ? AND access <> 'public'", params: [id, ws] }, ...(audit === null ? [] : [audit])]
+    : [];
   const stmts: Stmt[] = [
+    ...head,
     snapshot,
     { sql: "UPDATE public_object SET state = 'retired', delete_after = ? WHERE publish_id = ? AND tour_id = ? AND state = 'pending'", params: [now, sourcesOf(switchId), id] },
     // The old live keys (going public, the private ones): retired and due now.
@@ -534,10 +545,6 @@ function commitStatements(ws: string, id: string, switchId: string, toPublic: bo
     { sql: "DELETE FROM public_object WHERE publish_id = ? AND state = 'pending' AND tour_id = ?", params: [switchId, id] },
     { sql: "DELETE FROM access_switch WHERE switch_id = ? AND tour_id = ?", params: [switchId, id] },
   ];
-  if (toPublic) {
-    stmts.push({ sql: "UPDATE tour SET access = 'public' WHERE id = ? AND workspace_id = ? AND access <> 'public'", params: [id, ws] });
-    if (audit !== null) stmts.push(audit);
-  }
   return stmts;
 }
 
@@ -654,7 +661,7 @@ async function drive(r: Run, st: State, list: string[], sw: NonNullable<State["s
       batch.map((c) => () => copyOne(d, c)),
       COPIES_IN_FLIGHT,
     );
-  } catch {
+  } catch (err) {
     // A switch that was ended meanwhile (its sources may be gone with it) is told apart from
     // a store that failed: then every key written so far is named by its pending row, and
     // the next request copies it again.
@@ -665,6 +672,25 @@ async function drive(r: Run, st: State, list: string[], sw: NonNullable<State["s
       // Cannot tell: answer as for a failure, and leave everything for the next request.
     }
     if (still === null) return ended(r, st, list, sw, written, finalAccess);
+    if (err instanceof MissingSource) {
+      // A source is gone while its copy is still to make (a source goes only after its copy
+      // is marked, so another request's work does not look like this): no request can finish
+      // this switch. The tour stays as it is, restricted; unpublishing it ends the switch and
+      // removes its pictures, and publishing it again puts its draft live in the right store.
+      try {
+        const open = await d.db.first<{ n: number }>("SELECT count(*) AS n FROM public_object WHERE publish_id = ? AND tour_id = ? AND state = 'pending' AND copied = 0 AND image_key IN (SELECT value FROM json_each(?))", [
+          sw.id,
+          st.id,
+          keyList(written),
+        ]);
+        if ((open?.n ?? 0) > 0) {
+          console.error("access: a picture of a published version is missing, so its switch cannot finish; the tour must be unpublished and published again");
+          return pictureMissing();
+        }
+      } catch {
+        // Cannot tell: answer as for a failure.
+      }
+    }
     console.error("access: could not copy a tour's pictures to the other store; the next request retries");
     return failed();
   }
@@ -705,22 +731,61 @@ async function drive(r: Run, st: State, list: string[], sw: NonNullable<State["s
 }
 
 /**
- * Housekeeping's share (src/publish.ts, `housekeeping`): the workspace's switch to private
- * that has made no progress for CARRY_AFTER_MS, the longest stopped first, is moved on by
- * CARRY_COPIES pictures, their public pictures deleted, or committed and cleaned up when those
- * are its last. At most 15 calls. Errors are logged as fixed text and never thrown: a later
- * request tries again. A switch to public is left to its client, who may also cancel it.
+ * Deletes what one run wrote that no live row names: after a copy or a commit that failed
+ * when the switch is gone (unpublish or delete ended it), or a mark that found its rows gone.
+ * Keys another request put live meanwhile are kept. Three calls at most.
  */
-export async function carryOnSwitch(deps: Deps, workspaceId: string): Promise<void> {
+async function dropUnnamed(d: Deps, id: string, written: string[]): Promise<void> {
+  if (written.length === 0) return;
+  const live = new Set(
+    (await d.db.all<{ image_key: string }>("SELECT image_key FROM snapshot_object WHERE tour_id = ? AND image_key IN (SELECT value FROM json_each(?))", [id, keyList(written)])).map((x) => x.image_key),
+  );
+  await deleteKeys(
+    d,
+    written.filter((k) => !live.has(k)),
+  );
+}
+
+/**
+ * Housekeeping's share (src/publish.ts, `housekeeping`), within `allowance` calls, which the
+ * caller gives from what it has left (CARRY_CALLS from the tour list and unpublish; nothing
+ * from the requests with less room): the workspace's switch its client left, the longest
+ * stopped first.
+ * - To private, with no progress for `afterMs` (CARRY_AFTER_MS): moved on by as many pictures
+ *   as the allowance leaves room for (CARRY_COPIES with CARRY_CALLS), their public pictures
+ *   deleted, or committed and cleaned up when those are its last. A run that fails, or meets
+ *   a picture whose source is gone, puts the heartbeat on the switch, so the next run waits
+ *   CARRY_AFTER_MS again rather than spending calls on every request; what it wrote that no
+ *   row names (the switch ended under it) is deleted.
+ * - To public, with no progress for STALE_PUBLISH_MS: cancelled, as asking for the setting
+ *   the tour still has cancels it; the tour stays restricted and the public copies are
+ *   deleted.
+ * The calls: the look (1); to public, the cancel (2) and the clean-up (4); to private, the
+ * batch (1), 2 per picture, and at most 7 after them (marking 2 and then, when the switch
+ * ended meanwhile, a read and 2 deletes; or the commit, the clean-up 4; or after a failure a
+ * look, a read and 2 deletes, or a look and the heartbeat). So 9 + 2 per picture. Errors are
+ * logged as fixed text and never thrown: a later request tries again.
+ */
+export async function carryOnSwitch(deps: Deps, workspaceId: string, allowance: number, afterMs = CARRY_AFTER_MS): Promise<void> {
+  const copies = Math.min(CARRY_COPIES, Math.floor((allowance - 9) / 2));
+  if (allowance < 7) return;
   try {
-    const sw = await deps.db.first<{ switch_id: string; tour_id: string }>(
-      `SELECT w.switch_id, w.tour_id FROM access_switch w JOIN tour t ON t.id = w.tour_id
-        WHERE t.workspace_id = ? AND w.target = 'private' AND w.touched_at < ?
+    const now = deps.now();
+    const sw = await deps.db.first<{ switch_id: string; tour_id: string; target: "public" | "private" }>(
+      `SELECT w.switch_id, w.tour_id, w.target FROM access_switch w JOIN tour t ON t.id = w.tour_id
+        WHERE t.workspace_id = ? AND ((w.target = 'private' AND w.touched_at < ?) OR (w.target = 'public' AND w.touched_at < ?))
         ORDER BY w.touched_at, w.tour_id LIMIT 1`,
-      [workspaceId, deps.now() - CARRY_AFTER_MS],
+      [workspaceId, now - afterMs, now - STALE_PUBLISH_MS],
     );
     if (sw === null) return;
-    const { batch, left } = await nextBatch(deps, sw.tour_id, sw.switch_id, CARRY_COPIES);
+    if (sw.target === "public") {
+      if (await cancelToPublic(deps, sw.tour_id, sw.switch_id)) await clearDuePage(deps, workspaceId, sw.tour_id, 0);
+      return;
+    }
+    if (copies < 1) return;
+    const backOff = () => deps.db.run("UPDATE access_switch SET touched_at = ? WHERE switch_id = ? AND tour_id = ?", [deps.now(), sw.switch_id, sw.tour_id]);
+    const exists = async () => (await deps.db.first("SELECT 1 AS x FROM access_switch WHERE switch_id = ? AND tour_id = ?", [sw.switch_id, sw.tour_id])) !== null;
+    const { batch, left } = await nextBatch(deps, sw.tour_id, sw.switch_id, copies);
     const written = batch.map((c) => c.to);
     try {
       await runLimited(
@@ -728,27 +793,24 @@ export async function carryOnSwitch(deps: Deps, workspaceId: string): Promise<vo
         COPIES_IN_FLIGHT,
       );
     } catch {
-      console.error("access: housekeeping could not move the pictures of a stopped switch; a later request tries again");
+      console.error("access: housekeeping could not move the pictures of a stopped switch; it waits before it tries again");
+      if (await exists()) await backOff();
+      else await dropUnnamed(deps, sw.tour_id, written);
       return;
     }
     if (batch.length < left) {
-      if (await markCopied(deps, sw.tour_id, sw.switch_id, written, false)) {
-        await dropSources(deps, sw.tour_id, sw.switch_id, batch);
-      } else {
-        // Ended meanwhile: what was written here is live only if another request committed.
-        const live = await deps.db.all<{ image_key: string }>("SELECT image_key FROM snapshot_object WHERE tour_id = ? AND image_key IN (SELECT value FROM json_each(?))", [
-          sw.tour_id,
-          keyList(written),
-        ]);
-        const kept = new Set(live.map((x) => x.image_key));
-        await deleteKeys(
-          deps,
-          written.filter((k) => !kept.has(k)),
-        );
-      }
+      if (await markCopied(deps, sw.tour_id, sw.switch_id, written, false)) await dropSources(deps, sw.tour_id, sw.switch_id, batch);
+      else await dropUnnamed(deps, sw.tour_id, written);
       return;
     }
-    await deps.db.batch(commitStatements(workspaceId, sw.tour_id, sw.switch_id, false, written, deps.now(), null));
+    try {
+      await deps.db.batch(commitStatements(workspaceId, sw.tour_id, sw.switch_id, false, written, deps.now(), null));
+    } catch {
+      console.error("access: housekeeping could not finish a stopped switch; it waits before it tries again");
+      if (await exists()) await backOff();
+      else await dropUnnamed(deps, sw.tour_id, written);
+      return;
+    }
     await clearDuePage(deps, workspaceId, sw.tour_id, 0);
   } catch {
     console.error("access: housekeeping could not carry on a stopped switch; a later request tries again");
@@ -874,7 +936,11 @@ async function putAccess(r: Run, id: string, body: AccessBody): Promise<Response
 }
 
 export function accessRoutes(app: Hono, deps: Deps): void {
-  // The setting and the whole list, for the tour's own workspace (a token or a session).
+  // The setting, for the tour's own workspace. A signed-in session gets the whole list of
+  // addresses; a token (the desktop app) gets how many there are, `viewers_count`, in its
+  // place and never the addresses, so a token that leaked does not give them away:
+  //   session: {access, viewers: [...], limit, can_restrict, switching}
+  //   token:   {access, viewers_count, limit, can_restrict, switching}
   // One call after the credential.
   app.get("/api/v1/tours/:id/access", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
@@ -883,6 +949,10 @@ export function accessRoutes(app: Hono, deps: Deps): void {
     if (!TOUR_ID.test(id)) return notFound();
     const st = await readState(deps, auth, id);
     if (st === null) return notFound();
+    if (auth.session === undefined) {
+      const sw = st.switch;
+      return json(200, { access: st.access, viewers_count: st.viewers.length, limit: MAX_VIEWERS, can_restrict: canMailLinks(deps), switching: sw === null ? null : { done: sw.copied, total: sw.total } });
+    }
     return settingAnswer(deps, st.access, st.viewers, st.switch);
   });
 

@@ -34,6 +34,7 @@ import type { Hono } from "hono";
 import { requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, readCapped } from "./http.ts";
 import { parseTitle } from "./manifest.ts";
+import { CARRY_CALLS } from "./access.ts";
 import { housekeeping } from "./publish.ts";
 import { clearReplaced } from "./replace.ts";
 import type { Deps, Stmt } from "./ports.ts";
@@ -196,7 +197,8 @@ export function tourRoutes(app: Hono, deps: Deps): void {
     if (auth instanceof Response) return auth;
     // Publish housekeeping rides on this frequent, cheap request too (at most 4 calls), so
     // an abandoned publish or an image past its grace is cleared without a later publish.
-    await housekeeping(deps, auth.workspaceId, null, 1);
+    // With the calls to carry on a switch its client left (src/access.ts, CARRY_CALLS).
+    await housekeeping(deps, auth.workspaceId, null, 1, CARRY_CALLS);
     // And one page of the draft pictures chapter replaces left behind (at most 3 calls).
     await clearReplaced(deps, auth.workspaceId, null);
     // live_version is the draft_version the live snapshot was built from: null when the
