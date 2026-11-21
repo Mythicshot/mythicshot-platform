@@ -29,6 +29,7 @@ import type { Deps } from "../src/ports.ts";
 import { COPY_BATCH } from "../src/publish.ts";
 import { LIMITS_MEDIA, workspaceKey } from "../src/rate.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
+import { parseTerms, publishTerms } from "../src/terms.ts";
 import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS } from "../src/uploads.ts";
 import { VERSION } from "../src/version.ts";
@@ -1520,8 +1521,51 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     // A session on the tours address is nobody: the one 401.
     const onTours = await send(deps, "GET", "/api/v1/tours", { origin: "https://tours.example.com", headers: { cookie } });
     expect([onTours.status, onTours.text]).toEqual([401, '{"error":"unauthorized"}']);
+    // A session whose account has not agreed to the site's terms: the refusal any session route can give, the admin's too.
+    const termsRequired = '`403 {"error":"terms_required","detail":"agree to the site\'s terms first"}`';
+    expect(intro).toContain(termsRequired);
+    const read = await parseTerms(new TextEncoder().encode("title: T\nversion: 1\nmain points:\n- P\nterms:\nB\n"));
+    if (!read.ok) throw new Error(read.reason);
+    await publishTerms(deps, read);
+    for (const path of ["/api/v1/tours", "/api/v1/admin/accounts"]) {
+      const held = await send(deps, "GET", path, { origin: APP, headers: { cookie } });
+      expect("`403 " + held.text + "`", path).toBe(termsRequired);
+    }
     // `500 {"error":"misconfigured"}` is answered by the Cloudflare entry before the app
     // runs (test/worker-hosts.test.ts); no route answers it.
+  });
+
+  it("every answer of the site's terms is as documented", async () => {
+    const { deps } = await makeDeps();
+    deps.now = () => 1_800_000_000_000;
+    const api = client(deps);
+    const admin = await seedAccount(deps, { admin: true });
+    const made = await redeemSignInCode(deps, await createSignInCode(deps, admin.userId), null, null);
+    if (made === null) throw new Error("the sign-in was refused");
+    const cookie = `${SESSION_COOKIE}=${made.secret}`;
+    const page = { cookie, "x-csrf-token": await csrfFor(made.secret), origin: ORIGIN, "sec-fetch-site": "same-origin", "content-type": JSON_TYPE };
+    const agree = (body: unknown, headers: Record<string, string> = page) => api.call("POST", "/api/v1/terms/agree", { headers, body: typeof body === "string" ? body : JSON.stringify(body) });
+    // No terms yet: both reads answer, and agreeing is refused.
+    expect((await api.call("GET", "/api/v1/terms", { headers: { cookie } })).json.terms).toBeNull();
+    expect((await api.call("GET", "/api/v1/terms/agreed", { headers: { cookie } })).json.terms).toBeNull();
+    refused(await agree({ terms: "trm_" + "0".repeat(24) }), 409, "terms_changed");
+    expect((await api.call("GET", "/api/v1/session", { headers: { cookie } })).json.terms_agreed).toBeUndefined();
+    // Terms with every kind of block and a link.
+    const read = await parseTerms(new TextEncoder().encode("title: T\nversion: 1\nlink: Terms | https://example.com/terms\nmain points:\n- P\nterms:\n# H\nText.\n- a\n"));
+    if (!read.ok) throw new Error(read.reason);
+    const published = await publishTerms(deps, read);
+    if (!published.ok) throw new Error("not published");
+    const state = await api.call("GET", "/api/v1/terms", { headers: { cookie } });
+    expect(state.json.required).toBe(true);
+    refused(await agree("not json"), 400, "bad_request");
+    refused(await agree({ terms: published.id }, { ...page, origin: "https://evil.example.net" }), 403, "bad_origin");
+    refused(await agree({ terms: published.id }, { ...page, "x-csrf-token": "" }), 403, "bad_csrf");
+    expect((await agree({ terms: published.id })).status).toBe(204);
+    expect((await api.call("GET", "/api/v1/terms/agreed", { headers: { cookie } })).json.terms.id).toBe(published.id);
+    expect((await api.call("GET", "/api/v1/session", { headers: { cookie } })).json.terms_agreed).toEqual({ version: "1", agreed_at: 1_800_000_000_000 });
+    expect((await api.call("GET", "/api/v1/admin/accounts", { headers: { cookie } })).json.accounts[0].terms).toEqual({ version: "1", agreed_at: 1_800_000_000_000 });
+    for (const path of ["/api/v1/terms", "/api/v1/terms/agreed"]) refused(await api.call("GET", path, { token: admin.token }), 401, "unauthorized");
+    refused(await api.call("POST", "/api/v1/terms/agree", { token: admin.token, headers: { "content-type": JSON_TYPE }, body: JSON.stringify({ terms: published.id }) }), 401, "unauthorized");
   });
 
   it("who may view, stated by a token at an item's create and a tour's first publish, answers as documented", async () => {
@@ -1796,9 +1840,16 @@ describe("the error codes in the code", () => {
     expect(viewersPlain.length, "viewers.ts: an error answer not built in place").toBe([...viewers.matchAll(/\berror: "/g)].length);
     for (const m of viewersPlain) inCode.add(`${m[1]} ${m[2]}`);
     expect([...inCode]).toEqual(expect.arrayContaining(["404 view_link_invalid", "401 unauthorized", "403 bad_origin"]));
-    // These fourteen are the only modules that answer with apiError (src/http.ts defines it).
+    // The site's terms answer with apiError alone, every call with its status and code in place.
+    const terms = source("terms.ts");
+    const termsLiteral = [...terms.matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
+    expect(termsLiteral.length, "terms.ts: an apiError call without a literal status and code").toBe([...terms.matchAll(/\bapiError\(/g)].length);
+    expect([...terms.matchAll(/\berror: "/g)], "terms.ts: an error answer not built by apiError").toHaveLength(0);
+    for (const m of termsLiteral) inCode.add(`${m[1]} ${m[2]}`);
+    expect([...inCode]).toEqual(expect.arrayContaining(["409 terms_changed"]));
+    // These are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/access.ts", "../src/account-removal.ts", "../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media-access.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts", "../src/viewing.ts"]);
+    expect(callers).toEqual(["../src/access.ts", "../src/account-removal.ts", "../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media-access.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/terms.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts", "../src/viewing.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.
@@ -1807,8 +1858,9 @@ describe("the error codes in the code", () => {
     expect([...source("usage.ts").matchAll(/\berror: "/g)]).toHaveLength(1);
     inCode.add("413 storage_full");
     // The caller guard's two 403s for a change made with a session (src/auth.ts, below) are
-    // listed on each route that takes a session alone and changes something.
-    const guard403 = [...source("auth.ts").matchAll(/\bjson\(403, \{ error: "([a-z_]+)"/g)].map((m) => `403 ${m[1]}`);
+    // listed on each route that takes a session alone and changes something. Its third,
+    // terms_required, any session route can answer: the introduction lists it once (below).
+    const guard403 = [...source("auth.ts").matchAll(/\bjson\(403, \{ error: "([a-z_]+)"/g)].map((m) => `403 ${m[1]}`).filter((a) => a !== "403 terms_required");
     expect(guard403).toEqual(["403 bad_origin", "403 bad_csrf"]);
     for (const answer of guard403) inCode.add(answer);
 
@@ -1844,6 +1896,7 @@ describe("the error codes in the code", () => {
         "DELETE /api/v1/tokens/{id}",
         "PUT /api/v1/tours/{id}/access",
         "PUT /api/v1/media/{id}/access",
+        "POST /api/v1/terms/agree",
       ].sort(),
     );
     for (const o of sessionChanges) {
@@ -1854,7 +1907,7 @@ describe("the error codes in the code", () => {
     // The refusals of the caller guard, which any route that takes a session can answer: in
     // the introduction's list of answers any request can get; the two 403s also on each route above.
     const guard = [...source("auth.ts").matchAll(/\bjson\((\d{3}), \{ error: "([a-z_]+)"/g)].map((m) => `${m[1]} ${m[2]}`);
-    expect(guard).toEqual(["400 mixed_credentials", "404 not_found", "403 bad_origin", "403 bad_csrf"]);
+    expect(guard).toEqual(["403 terms_required", "400 mixed_credentials", "404 not_found", "403 bad_origin", "403 bad_csrf"]);
     for (const answer of guard) {
       const [status, code] = answer.split(" ");
       expect(DOC.info.description, answer).toContain("`" + status + ' {"error":"' + code + '"');

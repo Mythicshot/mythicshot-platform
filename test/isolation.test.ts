@@ -62,6 +62,7 @@ import type { Deps } from "../src/ports.ts";
 import { LIMITS_SIGNIN } from "../src/rate.ts";
 import { POLL_GAP_MS } from "../src/connect.ts";
 import { PAD_BUCKET } from "../src/signin.ts";
+import { parseTerms, publishTerms } from "../src/terms.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { VIEW_GATE_HTML } from "../src/view-page.ts";
 import { MEDIA_VIEWER_COOKIE, VIEWER_CODE_MS, VIEWER_COOKIE } from "../src/viewers.ts";
@@ -291,6 +292,8 @@ const LISTS: Record<string, { path: string; holds: string; only?: "token" | "ses
   "GET /api/v1/session": { path: "/api/v1/session", holds: "the caller's account, workspace, session and anti-forgery value", only: "session" },
   "GET /api/v1/sessions": { path: "/api/v1/sessions", holds: "the live sessions of the caller's own account", only: "session" },
   "GET /api/v1/tokens": { path: "/api/v1/tokens", holds: "the caller's workspace's tokens that are not revoked: ids, names, times and kinds", only: "session" },
+  "GET /api/v1/terms": { path: "/api/v1/terms", holds: "the site's current terms, the caller's own account's newest agreement and its session's anti-forgery value", only: "session" },
+  "GET /api/v1/terms/agreed": { path: "/api/v1/terms/agreed", holds: "the version of the site's terms the caller's own account agreed to last, and when", only: "session" },
 };
 
 /**
@@ -450,6 +453,8 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
   "GET /dash/account.js": { reason: "the Account page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/account.js" }] },
   "GET /account/email": { reason: "the page an email-change link opens, fixed text; the code stays in the browser until the press sends it to the API, which takes it only from the account that asked", samples: () => [{ method: "GET", path: "/account/email" }] },
   "GET /dash/account-email.js": { reason: "the email-change link page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/account-email.js" }] },
+  "GET /terms": { reason: "the terms screen and, with ?read, the terms agreed to: fixed text the same for everyone; the terms and the agreement it shows its script asks the API for", samples: () => [{ method: "GET", path: "/terms" }, { method: "GET", path: "/terms?read" }] },
+  "GET /dash/terms.js": { reason: "the terms page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/terms.js" }] },
   "POST /api/v1/signin/request": {
     reason: "asks for a sign-in link: the answer is the same for every address and every caller, and a link goes only to the address's own mailbox",
     samples: () => [{ method: "POST", path: "/api/v1/signin/request", json: { email: "nobody-here@example.com" }, headers: { origin: ORIGIN } }],
@@ -469,13 +474,14 @@ const SELF: Record<string, { path: string; ends?: string; changes?: string }> = 
   "POST /api/v1/signout/everywhere": { path: "/api/v1/signout/everywhere", ends: "every session of the caller's own account" },
   "POST /api/v1/account/email": { path: "/api/v1/account/email", changes: "asks for a change of the caller's own email address; another account's address answers the same and changes nothing" },
   "POST /api/v1/account/email/confirm": { path: "/api/v1/account/email/confirm", changes: "confirms a change of the caller's own email address; another account's code is refused like one that never existed" },
+  "POST /api/v1/terms/agree": { path: "/api/v1/terms/agree", changes: "records that the caller's own account agrees to the site's current terms; the body names the version and nothing of any account" },
 };
 /** The SELF routes that end sessions, and those that change the caller's email address. */
 const SELF_ENDS = Object.entries(SELF).filter(([, entry]) => entry.ends !== undefined);
-const SELF_CHANGES = Object.keys(SELF).filter((key) => SELF[key].changes !== undefined);
+const SELF_CHANGES = Object.keys(SELF).filter((key) => SELF[key].changes !== undefined && key.includes("/account/email"));
 
 /** The fields of one account in the admin's list: who it is, its counts and its allowance. */
-const ACCOUNT_FIELDS = ["id", "username", "email", "status", "admin", "created_at", "deleting", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "counted.pictures", "counted.logos", "counted.uploads_in_progress", "counted.images", "counted.gifs"];
+const ACCOUNT_FIELDS = ["id", "username", "email", "status", "admin", "created_at", "deleting", "workspace_id", "workspace_name", "tours", "used_bytes", "allowance_bytes", "storage_allowance_bytes", "over", "counted", "counted.pictures", "counted.logos", "counted.uploads_in_progress", "counted.images", "counted.gifs", "terms"];
 
 /**
  * Routes that cross workspaces on purpose, for the site's admin alone: why, a request the
@@ -1029,8 +1035,8 @@ describe("one workspace against another", () => {
     expect(mine.a.length).toBeGreaterThan(80);
 
     const first = { a: await answers(w.a), b: await answers(w.b) };
-    // Four lists take one credential, the others both.
-    expect(Object.keys(first.a)).toHaveLength(Object.keys(LISTS).length * 2 - 4);
+    // Six lists take one credential, the others both.
+    expect(Object.keys(first.a)).toHaveLength(Object.keys(LISTS).length * 2 - 6);
     for (const key of Object.keys(first.a)) {
       expect(first.a[key].status, key).toBe(200);
       expect(first.b[key].status, key).toBe(200);
@@ -1247,6 +1253,33 @@ describe("one workspace against another", () => {
         for (const r of answers) for (const n of [...namesIn(theirs.ids), ...listed]) expect(r.text.includes(n), `${what} told ${n}`).toBe(false);
       }
     }
+  });
+
+  it("an agreement to the site's terms is the account's own: agreeing changes nothing of the other workspace, and neither can read or make the other's", SLOW, async () => {
+    const w = await build();
+    const read = await parseTerms(new TextEncoder().encode("title: Terms\nversion: 1\nmain points:\n- One.\nterms:\nThe terms.\n"));
+    if (!read.ok) throw new Error(read.reason);
+    const published = await publishTerms(w.deps, read);
+    if (!published.ok) throw new Error("not published");
+    for (const [mine, theirs] of directions(w)) {
+      const before = await snapshotOf(w.deps, theirs, w.keys);
+      w.tick();
+      // By token: nobody. By session: the caller's own account only, whatever the body adds.
+      expect((await fire(w.deps, { method: "POST", path: "/api/v1/terms/agree", json: { terms: published.id } }, BY_TOKEN.of(mine))).status).toBe(401);
+      expect((await fire(w.deps, { method: "POST", path: "/api/v1/terms/agree", json: { terms: published.id, user_id: theirs.userId } }, BY_SESSION.of(mine))).status).toBe(400);
+      expect((await fire(w.deps, { method: "POST", path: "/api/v1/terms/agree", json: { terms: published.id } }, BY_SESSION.of(mine))).status).toBe(204);
+      expect(await snapshotOf(w.deps, theirs, w.keys), `${mine.name}'s agreement changed something of ${theirs.name}`).toEqual(before);
+      const mineState = (await fire(w.deps, { method: "GET", path: "/api/v1/terms" }, BY_SESSION.of(mine))).json;
+      expect(mineState.agreed.terms_id).toBe(published.id);
+      for (const n of [theirs.userId, theirs.email, theirs.session.csrf, theirs.session.id]) expect(JSON.stringify(mineState), n).not.toContain(n);
+    }
+    // Each agreed for itself, once; the admin's list shows each account's version and date only.
+    const rows = await w.deps.db.all<{ user_id: string }>("SELECT user_id FROM terms_agreement ORDER BY user_id");
+    expect(rows.map((r) => r.user_id).sort()).toEqual([w.a.userId, w.b.userId].sort());
+    const list = await fire(w.deps, { method: "GET", path: "/api/v1/admin/accounts" }, BY_SESSION.of(w.a));
+    for (const account of list.json.accounts) expect(Object.keys(account.terms).sort()).toEqual(["agreed_at", "version"]);
+    expect(list.text).not.toContain(published.id);
+    expect(w.writes()).toEqual([]);
   });
 
   it("changing an email address reaches nothing of the other workspace: its address answers as a free one, its code as one that never existed", SLOW, async () => {

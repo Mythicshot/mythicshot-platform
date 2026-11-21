@@ -24,7 +24,7 @@ describe("migration 0017", () => {
   it("marks the tours that are published, have a live version or a move, and no other; changes nothing else; cannot run twice", async () => {
     const root = await mkdtemp(join(tmpdir(), "demo-platform-migrate-"));
     const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith(".sql")).sort();
-    expect(files.at(-1)).toBe(NAME);
+    expect(files).toContain(NAME);
     const before = files.filter((f) => f < NAME);
     const upTo16 = join(root, "before");
     const upTo17 = join(root, "with");

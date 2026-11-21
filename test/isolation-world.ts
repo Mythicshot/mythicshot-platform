@@ -517,6 +517,8 @@ export const OWNED: Readonly<Record<string, string>> = {
   connect_request: "workspace_id = ?",
   // A delete of the workspace's account that has started and not finished.
   account_removal: "workspace_id = ?",
+  // Who agreed to which version of the site's terms (migration 0018): the account's own rows.
+  terms_agreement: BY_USER,
 };
 
 /** Tables whose rows belong to no workspace, each with the reason. */
@@ -537,6 +539,8 @@ export const SHARED: Readonly<Record<string, string>> = {
   // The media scope's viewers (migration 0016), on the media address: the same, for shared items.
   media_viewer_code: "mailed viewer codes for shared items: an address, an item's page path and the digest of a code; no workspace, account or item row is named",
   media_viewer_session: "viewer sessions for shared items: an address that proved it reads its mail and the digest of the cookie's secret; no workspace or account is named",
+  // The site's terms (migration 0018): published by the server command, the same for every account.
+  terms_version: "the versions of the site's terms, published by the server command and the same for everyone; who agreed to one is terms_agreement, the account's own",
 };
 
 /**

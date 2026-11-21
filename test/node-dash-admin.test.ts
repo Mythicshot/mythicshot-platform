@@ -255,7 +255,7 @@ describe("the Admin page for the admin", () => {
     for (const [i, row] of rows(tab).entries()) {
       expect(more(row).getAttribute("aria-describedby")).toBe(`account-${i}`);
       expect(more(row).getAttribute("type")).toBe("button");
-      expect(cells(row).map((c) => c.getAttribute("data-label"))).toEqual([null, null, "Tours", null, "Used", "Allowance", "Joined", null]);
+      expect(cells(row).map((c) => c.getAttribute("data-label"))).toEqual([null, null, "Tours", null, "Used", "Allowance", "Joined", "Terms", null]);
     }
     expect(tab.$("allow-dialog").hidden).toBe(true);
   });

@@ -236,6 +236,11 @@ export class FakeDocument {
     this.log?.push("document");
     return new FakeElement(tag.toLowerCase(), this);
   }
+  /** A text node: what a page script puts beside elements in one line (the terms page's line of links). */
+  createTextNode(text: string): FakeText {
+    this.log?.push("document");
+    return new FakeText(String(text));
+  }
   /** Writing a cookie fails the test: the pages' script never touches one. */
   get cookie(): string {
     throw new Error("document.cookie was read");

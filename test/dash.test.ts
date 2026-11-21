@@ -497,10 +497,11 @@ describe("the dashboard's pages and files", () => {
     const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location.href", "location.hash", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer"];
     for (const js of SCRIPTS) for (const api of forbidden) expect(js, api).not.toContain(api);
     const navigations = [...(DASH_JS + TOURS_JS).matchAll(/location\.(replace|assign)\(([^)]*)\)/g)].map((m) => m[2]);
-    expect(navigations).toEqual(['"/signin"']);
+    // And to the terms screen, while the site's terms wait for the account (0.1.53), told the page it came from.
+    expect(navigations).toEqual(['"/terms?next=" + encodeURIComponent(location.pathname', '"/signin"']);
     expect(DASH_JS + TOURS_JS).not.toMatch(/\blocation\s*=(?!=)/);
     const uses = [...(DASH_JS + TOURS_JS).matchAll(/\blocation\b\s*(\.\s*[a-zA-Z]+)?/g)].map((m) => (m[1] ?? "").replace(/\s/g, ""));
-    expect(new Set(uses)).toEqual(new Set([".replace", ".origin"]));
+    expect(new Set(uses)).toEqual(new Set([".replace", ".origin", ".pathname"]));
     // The timers are the moment "Copied" shows and the Sharing box's pauses (between the sends
     // of a move, and before its warning's button works); the one browser API beyond the page is
     // the clipboard, and the one window event the page listens to is pagehide.

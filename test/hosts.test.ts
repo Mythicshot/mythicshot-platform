@@ -5,7 +5,7 @@ import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
-import { DASH_LINK_PAGES, DASH_PAGES } from "../src/dash/routes.ts";
+import { DASH_LINK_PAGES, DASH_PAGES, TERMS_PAGE } from "../src/dash/routes.ts";
 import { HOST_RULES, hostGate, type HostRule } from "../src/host-gate.ts";
 import { HOST_ROLES, type HostRole, type Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
@@ -120,6 +120,10 @@ const ROWS: Record<string, Row> = {
   // Changing the email address takes a session alone: 401 without one, and on the app address only.
   "POST /api/v1/account/email": session("POST", "/api/v1/account/email", 401, { email: "new@example.com" }),
   "POST /api/v1/account/email/confirm": session("POST", "/api/v1/account/email/confirm", 401, { code: "dpe_" + "0".repeat(40) }),
+  // The site's terms take a session alone: 401 without one, and on the app address only.
+  "GET /api/v1/terms": session("GET", "/api/v1/terms", 401),
+  "GET /api/v1/terms/agreed": session("GET", "/api/v1/terms/agreed", 401),
+  "POST /api/v1/terms/agree": session("POST", "/api/v1/terms/agree", 401, { terms: "trm_" + "0".repeat(24) }),
   // Connecting the app: the app's two requests take no credential and answer on both
   // addresses (a code nobody has is the one 410); typing the short code takes a session.
   "POST /api/v1/connect/start": { method: "POST", path: "/api/v1/connect/start", body: { device_name: "Laptop" }, one: 201, tours: 201, app: 201, unknown: 421, img: 404 },
@@ -190,6 +194,8 @@ const ROWS: Record<string, Row> = {
   "GET /dash/account.js": page("/dash/account.js"),
   "GET /account/email": page("/account/email"),
   "GET /dash/account-email.js": page("/dash/account-email.js"),
+  "GET /terms": page("/terms"),
+  "GET /dash/terms.js": page("/dash/terms.js"),
   "GET /p/:name": { method: "GET", path: `/p/${"0123456789abcdef".repeat(2)}.png`, one: 404, tours: 404, app: 308, unknown: 421, img: 404 },
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": { method: "GET", path: "/player.js", one: 200, tours: 200, app: 404, unknown: 421, img: 404 },
   "GET /t/:slug": { method: "GET", path: "/t/no-such-tour", one: 404, tours: 404, app: 308, unknown: 421, img: 404 },
@@ -230,7 +236,7 @@ const KEYS = Object.keys(ROWS);
 const DESCRIPTION_KEYS = KEYS.filter((k) => k.includes(" /api/v1/openapi."));
 /** Signing in, the session, looking up and accepting an invite, typing a short code and the workspace's tokens: the app address's own part of the API. */
 // The change of who may view a tour takes a session alone, so it is one of these too.
-const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account|invite|connect\/(?:lookup|confirm|refuse)|tokens)(?:\/|$)/.test(k) || k === "PUT /api/v1/tours/:id/access" || k === "PUT /api/v1/media/:id/access");
+const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account|invite|connect\/(?:lookup|confirm|refuse)|tokens|terms)(?:\/|$)/.test(k) || k === "PUT /api/v1/tours/:id/access" || k === "PUT /api/v1/media/:id/access");
 /** The app's two requests while it connects: no credential, on both addresses. */
 const CONNECT_KEYS = ["POST /api/v1/connect/start", "POST /api/v1/connect/token"];
 /** The site admin's routes. */
@@ -242,8 +248,8 @@ const VIEWER_KEYS = KEYS.filter((k) => k.includes(" /api/v1/view/"));
 const MEDIA_VIEWER_KEYS = KEYS.filter((k) => k.includes(" /api/v1/media-view/"));
 const API_KEYS = KEYS.filter((k) => k.includes(" /api/v1/") && !DESCRIPTION_KEYS.includes(k) && !SESSION_KEYS.includes(k) && !ADMIN_KEYS.includes(k) && !CONNECT_KEYS.includes(k) && !VIEWER_KEYS.includes(k) && !MEDIA_VIEWER_KEYS.includes(k));
 const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
-/** The sign-in pages and their stylesheet and script, the invite page and its script, and the dashboard's account pages (/account, /account/email). */
-const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account|invite)(?:\/|$)/.test(k));
+/** The sign-in pages and their stylesheet and script, the invite page and its script, the dashboard's account pages (/account, /account/email), and the terms page. */
+const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account|invite|terms)(?:\/|$)/.test(k));
 /** The dashboard's other pages and every file under /dash/ (src/dash/). */
 const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:images|gifs|tours|storage|connections|admin|dash\/[a-z][a-z-]*\.(?:js|css))$/.test(k));
 const ROOT_KEY = "GET /";
@@ -360,13 +366,13 @@ describe("the host-routing matrix", () => {
     for (const key of PAGE_KEYS) expect(HOST_RULES[key], key).toBe("app");
     for (const key of DASH_KEYS) expect(HOST_RULES[key], key).toBe("app");
     expect(HOST_RULES[ROOT_KEY]).toBe("app-redirect");
-    expect(PAGE_KEYS.length).toBe(8);
-    expect(DASH_KEYS.length).toBe(16);
+    expect(PAGE_KEYS.length).toBe(9);
+    expect(DASH_KEYS.length).toBe(17);
     // Every dashboard page and its script is in one of the two lists, and nothing is in both.
-    for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES]) for (const key of [`GET ${p.path}`, `GET ${p.script.path}`]) expect([PAGE_KEYS.includes(key), DASH_KEYS.includes(key)].filter(Boolean), key).toEqual([true]);
+    for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES, TERMS_PAGE]) for (const key of [`GET ${p.path}`, `GET ${p.script.path}`]) expect([PAGE_KEYS.includes(key), DASH_KEYS.includes(key)].filter(Boolean), key).toEqual([true]);
     for (const key of ["GET /dash/dash.css", "GET /dash/dash.js"]) expect(DASH_KEYS, key).toContain(key);
-    // 9, the two requests of an invite, the three requests that take a short code, the three of the token list, and the change of who may view a tour or an item.
-    expect(SESSION_KEYS.length).toBe(19);
+    // 9, the two requests of an invite, the three requests that take a short code, the three of the token list, the change of who may view a tour or an item, and the three of the site's terms.
+    expect(SESSION_KEYS.length).toBe(22);
     expect(ADMIN_KEYS.length).toBe(11);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);

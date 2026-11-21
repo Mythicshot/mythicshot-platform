@@ -241,7 +241,7 @@ describe("sessions", () => {
     for (const at of [NOW, NOW + 1, NOW + 600_000, NOW + SESSION_TOUCH_MS - 1]) {
       clock.now = at;
       const used = await use();
-      expect(used.who).toStrictEqual({ sessionId: s.sessionId, userId: a.userId, workspaceId: a.workspaceId, admin: false, csrf: await csrfFor(s.secret) });
+      expect(used.who).toStrictEqual({ sessionId: s.sessionId, userId: a.userId, workspaceId: a.workspaceId, admin: false, csrf: await csrfFor(s.secret), termsPending: false });
       expect(JSON.stringify(used.who)).not.toContain(s.secret.slice(4));
       expect(used.calls).toBe(1);
     }

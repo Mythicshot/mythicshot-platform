@@ -85,6 +85,10 @@ const ACCOUNT_WORDING = [
   "Change",
   MAIL_OFF_LINE,
   "Workspace",
+  // 0.1.53: the line on the site's terms, hidden unless the account has agreed to a version
+  // (its sentence is filled by the script; test/dash-terms.test.ts pins it).
+  "\u2713",
+  "Read them",
   // Plan 2i: the download card, hidden unless the session names a usable download page.
   "Mythicshot for Windows",
   "Get the installer from the download page. It shows the latest version and its checksum.",
@@ -117,6 +121,10 @@ const ACCOUNT_TEXT: Record<string, string> = {
   openDownload: "Open the download page",
   // Proposed (Plan 2j): when a session ends however much it is used, beside it in the list.
   ends: "Ends ",
+  // 0.1.53: the line on the site's terms, "You agreed to the terms of <version> on <date>."
+  agreedBefore: "You agreed to the terms of ",
+  agreedMiddle: " on ",
+  agreedAfter: ".",
 };
 
 /** Every text of the page a link opens, in order, hidden parts included. Proposed: all but mockup 8's third box. */
