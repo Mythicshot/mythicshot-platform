@@ -4,15 +4,15 @@
 // call, a site without mail, and the call budget with a tour of 60 steps.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
-import { CARRY_AFTER_MS, MAX_VIEWERS, RESTRICTED_STUB, mayView, tourForServing } from "../src/access.ts";
+import { CARRY_AFTER_MS, CARRY_CALLS, MAX_VIEWERS, RESTRICTED_STUB, carryOnSwitch, mayView, tourForServing } from "../src/access.ts";
 import type { Deps, FileStore } from "../src/ports.ts";
-import { COPY_BATCH } from "../src/publish.ts";
+import { COPY_BATCH, STALE_PUBLISH_MS, randomHex } from "../src/publish.ts";
 import { usageOf } from "../src/usage.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { VIEW_GATE_HTML } from "../src/view-page.ts";
 import { ORIGIN, send, uploadTour, type Call, type Json } from "./bundle.ts";
 import { manifestOf } from "./isolation-world.ts";
-import { oldPage, oldPicture } from "./old-build-0.1.35.ts";
+import { oldCommitStatements, oldPage, oldPicture } from "./old-build-0.1.35.ts";
 
 const SLOW = { timeout: 300_000 };
 const VERY_SLOW = { timeout: 1_800_000 };
@@ -63,7 +63,8 @@ async function site(config: Parameters<typeof makeDeps>[0] = {}): Promise<Site> 
   return { ...ctx, owner, other };
 }
 
-const getAccess = (deps: Deps, token: string, tourId: string) => send(deps, "GET", `/api/v1/tours/${tourId}/access`, { token });
+/** The setting as the account's signed-in session reads it, with the list (a token gets only its count). */
+const getAccess = (deps: Deps, token: string, tourId: string) => send(deps, "GET", `/api/v1/tours/${tourId}/access`, { headers: sessionsByToken.get(token)! });
 /** The change, sent with the signed-in session of the account whose token this is. */
 const setAccess = (deps: Deps, token: string, tourId: string, body: unknown) =>
   send(deps, "PUT", `/api/v1/tours/${tourId}/access`, { headers: { ...JSON_HEADERS, ...sessionsByToken.get(token)! }, body: JSON.stringify(body) });
@@ -390,6 +391,8 @@ describe("the switch", () => {
           const unknownPicture = seen(await send(s.deps, "GET", `/p/${UNKNOWN_NAME}`));
 
           const check = async (at: string) => {
+            // Housekeeping's carry runs at every checkpoint too, as if the move had been left.
+            await carryOnSwitch(s.deps, s.owner.workspaceId, CARRY_CALLS, 0);
             const row = await s.deps.db.first<{ access: string; slug: string }>("SELECT access, slug FROM tour WHERE id = ?", [t.id]);
             expect(row!.slug, at).toBe(t.slug);
             for (const k of await namedKeys(s.deps, t.id)) ever.add(k);
@@ -407,6 +410,9 @@ describe("the switch", () => {
               for (const { image_key } of live) expect(image_key.startsWith("p/"), at).toBe(true);
               expect(await s.deps.db.first("SELECT 1 AS x FROM access_switch WHERE tour_id = ? AND target = 'public'", [t.id]), at).toBeNull();
             }
+            // A move under way says which way it goes, the same way whoever drives it.
+            const shown = (await getAccess(s.deps, s.owner.token, t.id)).json.switching;
+            if (shown !== null) expect(shown.target, at).toBe(direction === "restricted" ? "restricted" : "public");
             // Every stored picture of the tour is named by one of its rows.
             const named = new Set(await namedKeys(s.deps, t.id));
             for (const k of [...(await s.publicKeys()), ...(await s.draftKeys()).filter((x) => x.startsWith("v/"))]) expect(named.has(k), `${at}: ${k} is named by no row`).toBe(true);
@@ -417,6 +423,7 @@ describe("the switch", () => {
           const faulty = failingAt(s.deps, n, when);
           let r = await setAccess(faulty.deps, s.owner.token, t.id, target);
           while (r.status === 202 && !faulty.hit()) {
+            expect(r.json.target, label).toBe(direction === "restricted" ? "restricted" : "public");
             await check(`${label}, on the way`);
             r = await setAccess(faulty.deps, s.owner.token, t.id, target);
           }
@@ -596,10 +603,10 @@ describe("the review's follow-ups", () => {
     await nothing("a move to restricted under way", publicKeys);
     await untilDone(s.deps, s.owner.token, t.id, { access: "people" });
     await nothing("restricted", publicKeys);
-    // An older build's rename writes the title into data; the stub stays no tour.
-    await s.deps.db.run("UPDATE snapshot SET data = json_set(data, '$.title', 'Renamed by 0.1.35') WHERE tour_id = ? AND json_valid(data)", [t.id]);
+    // An older build's rename writes the title into data: the database refuses it (the
+    // triggers of migration 0014), and the stub stays.
+    await expect(s.deps.db.run("UPDATE snapshot SET data = json_set(data, '$.title', 'Renamed by 0.1.35') WHERE tour_id = ? AND json_valid(data)", [t.id])).rejects.toThrow(/stub/);
     expect(await oldPage(s.deps, t.slug)).toBeNull();
-    await s.deps.db.run("UPDATE snapshot SET data = ? WHERE tour_id = ?", [RESTRICTED_STUB, t.id]);
     expect((await setAccess(s.deps, s.owner.token, t.id, { access: "public" })).status).toBe(202);
     await nothing("a move to public under way");
     await untilDone(s.deps, s.owner.token, t.id, { access: "public" });
@@ -628,7 +635,11 @@ describe("the review's follow-ups", () => {
     // No access request any more; within the minute housekeeping leaves it to its client.
     await send(s.deps, "GET", "/api/v1/tours", { token: s.owner.token });
     expect(await s.publicKeys()).toHaveLength(total - first.json.done);
+    expect((await getAccess(s.deps, s.owner.token, t.id)).json.switching).toEqual({ done: first.json.done, total, target: "restricted" });
     now += CARRY_AFTER_MS + 1;
+    // Housekeeping carries it on: still a move to restricted, further on.
+    await send(s.deps, "GET", "/api/v1/tours", { token: s.owner.token });
+    expect((await getAccess(s.deps, s.owner.token, t.id)).json.switching).toEqual({ done: first.json.done + 4, total, target: "restricted" });
     let lists = 0;
     while ((await s.deps.db.first("SELECT 1 AS x FROM access_switch")) !== null) {
       expect(++lists, "housekeeping finishes it").toBeLessThan(40);
@@ -703,5 +714,181 @@ describe("the review's follow-ups", () => {
     s.deps.drafts = drafts;
     await setAccess(s.deps, s.owner.token, t.id, { access: "public" });
     expect((await s.draftKeys()).filter((k) => k.startsWith("v/"))).toEqual([]);
+  });
+});
+
+describe("the second review", () => {
+  it("every request that runs housekeeping stays within the budget with a 60-picture move waiting each way; the tour list finishes one and cancels the other", VERY_SLOW, async () => {
+    const s = await site();
+    let now = Date.now();
+    s.deps.now = () => now;
+    const token = s.owner.token;
+    const toPrivate = await tourOf(s, 60, "Going restricted");
+    await publishAll(s.deps, token, toPrivate.id);
+    expect((await setAccess(s.deps, token, toPrivate.id, { access: "people" })).status).toBe(202);
+    const toPublic = await tourOf(s, 60, "Going public");
+    await setAccess(s.deps, token, toPublic.id, { access: "me" });
+    await publishAll(s.deps, token, toPublic.id);
+    const going = await setAccess(s.deps, token, toPublic.id, { access: "public" });
+    expect([going.status, going.json.target]).toEqual([202, "public"]);
+    expect((await send(s.deps, "GET", `/api/v1/tours/${toPublic.id}/access`, { token })).json.switching).toEqual({ done: COPY_BATCH, total: 61, target: "public" });
+    const other = await tourOf(s, COPY_BATCH + 1, "Other");
+    await publishAll(s.deps, token, other.id);
+    const busy = await tourOf(s, COPY_BATCH + 1, "Busy");
+    // Both moves left: the one to restricted for more than a minute, the one to public for more than fifteen.
+    now += STALE_PUBLISH_MS + 1000;
+    expect((await send(s.deps, "POST", `/api/v1/tours/${busy.id}/publish`, { token })).status).toBe(202);
+    const requests: [string, () => Promise<Call>][] = [
+      ["an upload's create", () => send(s.deps, "POST", "/api/v1/uploads", { token, headers: JSON_HEADERS, body: JSON.stringify({ manifest: manifestOf([200], "New tour"), target: { kind: "new" } }) })],
+      ["publish", () => send(s.deps, "POST", `/api/v1/tours/${other.id}/publish`, { token })],
+      ["a delete that meets a publish in progress", () => send(s.deps, "DELETE", `/api/v1/tours/${busy.id}`, { token })],
+      ["unpublish", () => send(s.deps, "POST", `/api/v1/tours/${other.id}/unpublish`, { token })],
+      ["the tour list", () => send(s.deps, "GET", "/api/v1/tours", { token })],
+    ];
+    for (const [what, run] of requests) {
+      const r = await run();
+      expect(r.status, `${what}: ${r.text}`).toBeLessThan(500);
+      expect(r.calls, what).toBeLessThanOrEqual(40);
+    }
+    // The tour list, again and again: each within the budget, until both moves are over.
+    for (let i = 0; (await s.deps.db.first("SELECT 1 AS x FROM access_switch")) !== null; i++) {
+      expect(i, "housekeeping ends both moves").toBeLessThan(40);
+      now += 1000;
+      const r = await send(s.deps, "GET", "/api/v1/tours", { token });
+      expect(r.calls).toBeLessThanOrEqual(40);
+    }
+    expect((await getAccess(s.deps, token, toPrivate.id)).json).toMatchObject({ access: "people", switching: null });
+    // The move to public was cancelled: still restricted, its private pictures live, no public copy left.
+    expect((await getAccess(s.deps, token, toPublic.id)).json).toMatchObject({ access: "me", switching: null });
+    expect((await tourForServing(s.deps, { id: toPublic.id }))!.pictures!.size).toBe(61);
+    // The public store holds only the copies of the publish of the busy tour still in progress.
+    const busyKeys = new Set(await namedKeys(s.deps, busy.id));
+    expect((await s.publicKeys()).filter((k) => !busyKeys.has(k))).toEqual([]);
+  });
+
+  it("a publish by the build before this one, on a restricted tour, fails as a whole and leaves nothing public", SLOW, async () => {
+    const s = await site();
+    const now = Date.now();
+    const published = await tourOf(s, 2, "Restricted and published");
+    await setAccess(s.deps, s.owner.token, published.id, { access: "me" });
+    await publishAll(s.deps, s.owner.token, published.id);
+    const draft = await tourOf(s, 2, "Restricted draft");
+    await setAccess(s.deps, s.owner.token, draft.id, { access: "people" });
+    const text = (await s.deps.db.first<{ private_data: string }>("SELECT private_data FROM snapshot WHERE tour_id = ?", [published.id]))!.private_data.replace(/"v\//g, '"p/');
+    for (const t of [published, draft]) {
+      // What 0.1.35's publish leaves before its commit: the job, its pending rows, the public copies.
+      const publishId = "pub_" + randomHex(24);
+      const keys = [0, 1, 2].map(() => `p/${randomHex(32)}.png`);
+      const version = (await s.deps.db.first<{ draft_version: number }>("SELECT draft_version FROM tour WHERE id = ?", [t.id]))!.draft_version;
+      await s.deps.db.run("INSERT INTO publish_job (tour_id, publish_id, data, steps, total, draft_version, created_at, touched_at) VALUES (?, ?, ?, 2, 3, ?, ?, ?)", [t.id, publishId, text, version, now, now]);
+      for (const [i, key] of keys.entries()) {
+        await s.deps.db.run("INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, source_key, seq, copied) VALUES (?, ?, ?, 'pending', ?, 'u/x', ?, 1)", [key, t.id, publishId, now, i]);
+        await s.deps.pub.put(key, new Uint8Array([1, 2, 3]), { contentType: "image/png" });
+      }
+      const before = await s.deps.db.first("SELECT data, private_data FROM snapshot WHERE tour_id = ?", [t.id]);
+      await expect(s.deps.db.batch(oldCommitStatements(s.owner.workspaceId, t.id, publishId, [], now, 600_000)), t.id).rejects.toThrow(/restricted tour/);
+      expect(await s.deps.db.first("SELECT data, private_data FROM snapshot WHERE tour_id = ?", [t.id]), t.id).toEqual(before);
+      expect((await namedKeys(s.deps, t.id)).filter((k) => k.startsWith("p/") && !keys.includes(k)), t.id).toEqual([]);
+      expect(await s.deps.db.all("SELECT image_key FROM snapshot_object WHERE tour_id = ? AND image_key LIKE 'p/%'", [t.id]), t.id).toEqual([]);
+      expect(await oldPage(s.deps, t.slug), t.id).toBeNull();
+      for (const key of keys) expect(await oldPicture(s.deps, key), key).toBe(false);
+    }
+  });
+
+  it("a picture whose source is gone stops the move with republish_needed; unpublishing and publishing again leaves it; the carry backs off", SLOW, async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const s = await site();
+    let now = Date.now();
+    s.deps.now = () => now;
+    const t = await tourOf(s, COPY_BATCH + 3);
+    await publishAll(s.deps, s.owner.token, t.id);
+    expect((await setAccess(s.deps, s.owner.token, t.id, { access: "people" })).status).toBe(202);
+    // The source of the next picture to copy, so the next request and the next carry both meet it.
+    const source = (await s.deps.db.first<{ source_key: string }>("SELECT source_key FROM public_object WHERE tour_id = ? AND substr(publish_id, 1, 3) = 'sw_' AND copied = 0 ORDER BY seq LIMIT 1", [t.id]))!.source_key;
+    await s.deps.pub.delete([source]);
+    for (let i = 0; i < 2; i++) {
+      const r = await setAccess(s.deps, s.owner.token, t.id, { access: "people" });
+      expect([r.status, r.json.error], r.text).toEqual([409, "republish_needed"]);
+      expect(r.json.detail).toContain("unpublish the tour, then publish it again");
+    }
+    expect((await send(s.deps, "POST", `/api/v1/tours/${t.id}/publish`, { token: s.owner.token })).json.error).toBe("access_switching");
+    expect(seen(await send(s.deps, "GET", `/t/${t.slug}`))).toEqual(seen(await send(s.deps, "GET", `/t/${UNKNOWN_SLUG}`)));
+    // The carry tries once, fails, and puts the heartbeat on the switch: it waits a minute again.
+    now += CARRY_AFTER_MS + 1;
+    await send(s.deps, "GET", "/api/v1/tours", { token: s.owner.token });
+    expect(await s.deps.db.first("SELECT touched_at FROM access_switch WHERE tour_id = ?", [t.id])).toEqual({ touched_at: now });
+    const quiet = await send(s.deps, "GET", "/api/v1/tours", { token: s.owner.token });
+    const first = await send(s.deps, "GET", "/api/v1/tours", { token: s.owner.token });
+    expect(quiet.calls).toBe(first.calls);
+    // The way out: unpublish (it ends the move and removes its pictures), then publish again.
+    expect((await send(s.deps, "POST", `/api/v1/tours/${t.id}/unpublish`, { token: s.owner.token })).status).toBe(204);
+    expect(await s.publicKeys()).toEqual([]);
+    expect((await s.draftKeys()).filter((k) => k.startsWith("v/"))).toEqual([]);
+    expect(await s.deps.db.all("SELECT * FROM access_switch")).toEqual([]);
+    await publishAll(s.deps, s.owner.token, t.id);
+    expect((await tourForServing(s.deps, { id: t.id }))!.pictures!.size).toBe(COPY_BATCH + 4);
+    expect(await s.publicKeys()).toEqual([]);
+  });
+
+  it("housekeeping's carry, failing at any call or meeting an unpublish, leaves no object that no row names, and finishes the move afterwards", VERY_SLOW, async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const orphans = async (s: Site, tourId: string) => {
+      const named = new Set(await namedKeys(s.deps, tourId));
+      return [...(await s.publicKeys()), ...(await s.draftKeys()).filter((k) => k.startsWith("v/"))].filter((k) => !named.has(k));
+    };
+    const abandoned = async () => {
+      const s = await site();
+      const t = await tourOf(s, COPY_BATCH + 6);
+      await publishAll(s.deps, s.owner.token, t.id);
+      expect((await setAccess(s.deps, s.owner.token, t.id, { access: "people" })).status).toBe(202);
+      return { s, t };
+    };
+    for (const when of ["before", "after", "twice"] as const) {
+      for (let n = 1; ; n++) {
+        const label = `carry, failure ${when} call ${n}`;
+        const { s, t } = await abandoned();
+        const faulty = failingAt(s.deps, n, when);
+        await carryOnSwitch(faulty.deps, s.owner.workspaceId, CARRY_CALLS, 0);
+        expect(await orphans(s, t.id), label).toEqual([]);
+        for (let i = 0; i < 20 && (await s.deps.db.first("SELECT 1 AS x FROM access_switch")) !== null; i++) {
+          await new Promise((r) => setTimeout(r, 2));
+          await carryOnSwitch(s.deps, s.owner.workspaceId, CARRY_CALLS, 0);
+          expect(await orphans(s, t.id), label).toEqual([]);
+        }
+        expect(await s.deps.db.all("SELECT * FROM access_switch"), label).toEqual([]);
+        expect(await s.publicKeys(), label).toEqual([]);
+        expect((await tourForServing(s.deps, { id: t.id }))!.pictures!.size, label).toBe(COPY_BATCH + 7);
+        if (!faulty.hit()) {
+          expect(n, "the failure was met").toBeGreaterThan(5);
+          break;
+        }
+      }
+    }
+    // An unpublish lands while the carry copies: what it wrote is deleted, nothing is left.
+    const { s, t } = await abandoned();
+    const drafts = s.deps.drafts;
+    s.deps.drafts = {
+      ...drafts,
+      put: async (key, body, meta) => {
+        s.deps.drafts = drafts;
+        await send(s.deps, "POST", `/api/v1/tours/${t.id}/unpublish`, { token: s.owner.token });
+        return drafts.put(key, body, meta);
+      },
+    };
+    await carryOnSwitch(s.deps, s.owner.workspaceId, CARRY_CALLS, 0);
+    s.deps.drafts = drafts;
+    expect(await s.publicKeys()).toEqual([]);
+    expect((await s.draftKeys()).filter((k) => k.startsWith("v/"))).toEqual([]);
+    expect(await s.deps.db.all("SELECT image_key FROM public_object UNION ALL SELECT image_key FROM snapshot_object")).toEqual([]);
+  });
+
+  it("a token reads the setting and how many addresses there are, never the addresses", SLOW, async () => {
+    const s = await site();
+    const t = await tourOf(s, 1);
+    await setAccess(s.deps, s.owner.token, t.id, { access: "people", viewers: ["ana@example.com", "bo@example.com"] });
+    const byToken = await send(s.deps, "GET", `/api/v1/tours/${t.id}/access`, { token: s.owner.token });
+    expect(byToken.json).toEqual({ access: "people", viewers_count: 2, limit: MAX_VIEWERS, can_restrict: true, switching: null });
+    expect(byToken.text).not.toContain("@");
+    expect((await getAccess(s.deps, s.owner.token, t.id)).json).toEqual({ access: "people", viewers: ["ana@example.com", "bo@example.com"], limit: MAX_VIEWERS, can_restrict: true, switching: null });
   });
 });

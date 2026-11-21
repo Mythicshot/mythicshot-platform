@@ -7,7 +7,7 @@
 // in src/page.ts), and answers 404 for anything it refuses. Going back to 0.1.35 on a database
 // where a tour is restricted must find nothing of that tour to serve.
 import { pageTour } from "../src/page.ts";
-import type { Deps } from "../src/ports.ts";
+import type { Deps, Stmt } from "../src/ports.ts";
 
 const NO_DISABLED_ACCOUNT_0_1_35 =
   "NOT EXISTS (SELECT 1 FROM user du WHERE du.workspace_id = t.workspace_id AND du.status = 'disabled')" +
@@ -40,4 +40,40 @@ export async function oldPicture(deps: Deps, key: string): Promise<boolean> {
   if (file === null) return false;
   await file.body.cancel();
   return true;
+}
+
+/**
+ * The commit batch of 0.1.35's publish (commitStatements in src/publish.ts at a0a2370), word
+ * for word: what that build runs once the pictures of a publish are copied. On a tour this
+ * build restricted it must fail as a whole (the triggers of migration 0014).
+ */
+export function oldCommitStatements(workspaceId: string, tourId: string, publishId: string, justCopied: string[], now: number, graceMs: number): Stmt[] {
+  const keyList = (keys: string[]) => JSON.stringify(keys);
+  return [
+    {
+      sql: `INSERT INTO snapshot (tour_id, data, published_at, publish_id, steps, draft_version)
+            VALUES (?, (SELECT j.data FROM publish_job j
+                         WHERE j.publish_id = ? AND j.tour_id = ?
+                           AND (SELECT count(*) FROM public_object o
+                                 WHERE o.publish_id = ? AND o.state = 'pending' AND o.tour_id = ?
+                                   AND (o.copied = 1 OR o.image_key IN (SELECT value FROM json_each(?)))) = j.total
+                           AND EXISTS (SELECT 1 FROM tour WHERE id = ? AND workspace_id = ?)),
+                    ?, ?, (SELECT steps FROM publish_job WHERE publish_id = ?), (SELECT draft_version FROM publish_job WHERE publish_id = ?))
+            ON CONFLICT (tour_id) DO UPDATE SET data = excluded.data, published_at = excluded.published_at, publish_id = excluded.publish_id, steps = excluded.steps,
+                                                draft_version = excluded.draft_version`,
+      params: [tourId, publishId, tourId, publishId, tourId, keyList(justCopied), tourId, workspaceId, now, publishId, publishId, publishId],
+    },
+    {
+      sql: "INSERT INTO public_object (image_key, tour_id, publish_id, state, created_at, delete_after) SELECT image_key, tour_id, ?, 'retired', ?, ? FROM snapshot_object WHERE tour_id = ?",
+      params: [publishId, now, now + graceMs, tourId],
+    },
+    { sql: "DELETE FROM snapshot_object WHERE tour_id = ?", params: [tourId] },
+    {
+      sql: "INSERT INTO snapshot_object (tour_id, image_key) SELECT tour_id, image_key FROM public_object WHERE publish_id = ? AND state = 'pending' AND tour_id = ?",
+      params: [publishId, tourId],
+    },
+    { sql: "DELETE FROM public_object WHERE publish_id = ? AND state = 'pending'", params: [publishId] },
+    { sql: "DELETE FROM publish_job WHERE publish_id = ?", params: [publishId] },
+    { sql: "UPDATE tour SET status = 'published', published_at = ? WHERE id = ? AND workspace_id = ?", params: [now, tourId, workspaceId] },
+  ];
 }
