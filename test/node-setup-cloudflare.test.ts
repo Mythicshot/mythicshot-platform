@@ -890,7 +890,7 @@ describe("the two address settings (TOURS_HOST and APP_HOST)", () => {
     expect(readFileSync(path, "utf8").split("\n").slice(0, 4).join("\n")).toContain("SITE_HOST");
   });
 
-  it("update keeps a hand-set INVITE_CONTACT, alone and beside the other kept vars", async () => {
+  it("update keeps a hand-set INVITE_CONTACT or DOWNLOAD_URL, alone and beside the other kept vars", async () => {
     const account = fakeAccount();
     const first = harness(account);
     expect(await first.run("--yes")).toBe(0);
@@ -905,9 +905,14 @@ describe("the two address settings (TOURS_HOST and APP_HOST)", () => {
         '"STORAGE_ALLOWANCE_BYTES": "1073741824", "SITE_HOST": "tours.example.com", "INVITE_CONTACT": "hello@example.com"',
         { STORAGE_ALLOWANCE_BYTES: "1073741824", SITE_HOST: "tours.example.com", INVITE_CONTACT: "hello@example.com" },
       ],
+      ['"DOWNLOAD_URL": "https://made-up.example.com/download"', { DOWNLOAD_URL: "https://made-up.example.com/download" }],
+      [
+        '"INVITE_CONTACT": "hello@example.com", "DOWNLOAD_URL": "https://made-up.example.com/download"',
+        { INVITE_CONTACT: "hello@example.com", DOWNLOAD_URL: "https://made-up.example.com/download" },
+      ],
     ];
     for (const [written, values] of hand) {
-      writeFileSync(path, readFileSync(path, "utf8").replace(/"APP_HOST": ""(,\s*"(?:SITE_HOST|STORAGE_ALLOWANCE_BYTES|INVITE_CONTACT)": [^\n,}]+)*/, `"APP_HOST": "", ${written}`));
+      writeFileSync(path, readFileSync(path, "utf8").replace(/"APP_HOST": ""(,\s*"(?:SITE_HOST|STORAGE_ALLOWANCE_BYTES|INVITE_CONTACT|DOWNLOAD_URL)": [^\n,}]+)*/, `"APP_HOST": "", ${written}`));
       const kept = { ...VARS, ...values };
       expect(deployed(first.root).vars, written).toEqual(kept);
       for (const argv of [["update", "--yes"], ["--yes"], ["status"], ["update", "--yes"]]) {
@@ -920,6 +925,7 @@ describe("the two address settings (TOURS_HOST and APP_HOST)", () => {
     }
     // The file's own first lines say it is kept.
     expect(readFileSync(path, "utf8").split("\n").slice(0, 4).join("\n")).toContain("INVITE_CONTACT");
+    expect(readFileSync(path, "utf8").split("\n").slice(0, 4).join("\n")).toContain("DOWNLOAD_URL");
   });
 
   it("update keeps a hand-set IMG_HOST beside the two addresses", async () => {

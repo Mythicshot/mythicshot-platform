@@ -35,6 +35,8 @@ services:
       STORAGE_ALLOWANCE_BYTES: ${STORAGE_ALLOWANCE_BYTES:-}
       # Who to ask for an invite, shown on the sign-in page: an email address or an https address.
       INVITE_CONTACT: ${INVITE_CONTACT:-}
+      # The public page the desktop app is downloaded from, linked on the dashboard: an https address.
+      DOWNLOAD_URL: ${DOWNLOAD_URL:-}
       # The optional third address, for shared images and clips, beside the two above.
       # The stack does not add it to Caddy's site address: see the runbook first.
       IMG_HOST: ${IMG_HOST:-}

@@ -4,6 +4,7 @@ import { serve } from "@hono/node-server";
 import { createApp } from "../app.ts";
 import { withBudget } from "../budget.ts";
 import { setClientAddress } from "../client.ts";
+import { downloadUrlSetting } from "../https-address.ts";
 import { DEFER_FAILED, deferTracker, type Deps } from "../ports.ts";
 import { clientAddressReader, configFromEnv, guardTarget, mailFromEnv, proxyHint, type Incoming } from "./config.ts";
 import { APP_UID, prepareDataDir } from "./datadir.ts";
@@ -49,6 +50,10 @@ async function main(): Promise<void> {
   const closeMail = (mail.mailer as Partial<ClosableMailer>).close;
   const client = clientAddressReader(process.env.CLIENT_ADDRESS_HEADER);
   if (client.problem !== null) console.error(client.problem);
+  // Nor does the app's download page: one that cannot be used is left out (configFromEnv)
+  // and said in its one fixed line.
+  const download = downloadUrlSetting(process.env.DOWNLOAD_URL);
+  if (download.problem !== null) console.error(download.problem);
   // Without the setting, a request from a private or local address is the sign of a proxy
   // whose visitors all look like one: one line says which setting to set, once.
   const hint = proxyHint(process.env.CLIENT_ADDRESS_HEADER, (line) => console.error(line));

@@ -136,6 +136,13 @@ export type Config = {
    * and leaves out a value it cannot use. Absent or null: no contact is shown.
    */
   inviteContact?: string | null;
+  /**
+   * The address of the public page the desktop app is downloaded from, from the
+   * DOWNLOAD_URL setting, as downloadUrlSetting (src/https-address.ts) keeps it: a strict
+   * https address. The session answer hands it to the dashboard, which links to it. Absent
+   * or null: no link is shown.
+   */
+  downloadUrl?: string | null;
 };
 
 export type Deps = {

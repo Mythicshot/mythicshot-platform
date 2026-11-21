@@ -573,7 +573,7 @@ function schemas(): Record<string, Schema> {
     TokenRename: input(["name"], { name: text(DEVICE_NAME_MAX * 4 + 64, `The new name: ${DEVICE_NAME_MAX} characters at most once spaces around it are dropped, with no control or formatting characters.`, 1) }),
     Ok: object(["ok"], { ok: { type: "boolean", const: true } }),
     Session: object(
-      ["account", "workspace", "session", "csrf", "email_change"],
+      ["account", "workspace", "session", "csrf", "email_change", "download_url"],
       {
         account: object(
           ["id", "username", "email", "admin"],
@@ -593,6 +593,11 @@ function schemas(): Record<string, Schema> {
         ),
         csrf: { type: "string", pattern: "^[0-9a-f]{64}$", description: "The anti-forgery value: send it in the X-Csrf-Token header of every change made with this session." },
         email_change: { type: "boolean", description: "true when the site can mail the link an email change needs; false when its mail is off, and POST /api/v1/account/email then answers mail_off." },
+        download_url: {
+          type: ["string", "null"],
+          maxLength: 300,
+          description: "The address of the public page the desktop app is downloaded from, from the site's DOWNLOAD_URL setting: an https address with a host name, an optional port and a path, no user name and no fragment. null when the site has none. The dashboard links to it.",
+        },
       },
     ),
     SessionList: object(["sessions"], {

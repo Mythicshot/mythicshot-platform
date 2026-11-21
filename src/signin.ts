@@ -25,6 +25,7 @@ import { auditStatement } from "./audit.ts";
 import { requireAuth } from "./auth.ts";
 import { clientAddressOf } from "./client.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
+import { downloadUrlSetting } from "./https-address.ts";
 import { NO_MAIL, linkOrigin, signInLink, signInMail } from "./mail.ts";
 import { canMailLinks, deferOf, mailOf, type Deps, type Stmt } from "./ports.ts";
 import { LIMITS_SIGNIN, SITE_KEY, SITE_QUIET_KEY, hitLimit, networkKey, recipientKey, sweepCounters, type Limit } from "./rate.ts";
@@ -300,6 +301,9 @@ export function signinRoutes(app: Hono, deps: Deps): void {
       // Whether the account page may offer to change the email address: only a site that
       // can mail the link to the new address can.
       email_change: canMailLinks(deps),
+      // Where the desktop app is downloaded from, for the dashboard's link: the configured
+      // address, checked again here as the setting is, or null.
+      download_url: downloadUrlSetting(deps.config.downloadUrl ?? undefined).url,
     });
     return withHeader(answer, "set-cookie", sessionCookie(secret));
   });

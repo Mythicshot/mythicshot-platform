@@ -694,6 +694,28 @@ It prints `The account "yourname" now signs in with new@example.com.` and `Remov
 
 **How to tell it worked:** the command printed the two lines above. The account's open sign-in links stop working, and it signs in with the new address from now on; while mail is off, get it a link as in [step 15](#15-make-yourself-the-admin). When it changes nothing, it says why in one line: `No account has that username. Nothing was changed.`, `That email address belongs to another account. Nothing was changed.`, `That is already the account's email address. Nothing was changed.` or `That is not an email address. Nothing was changed.`
 
+### Link to the app's download page
+
+The dashboard can point signed-in people to the public page the desktop app is downloaded from (see [The app's download page](../../README.md#the-apps-download-page) in the README).
+
+1. Add a line with that page's `https://` address to the settings file, and save.
+
+```sh
+nano ~/apps/tours-config.env
+```
+
+```text
+DOWNLOAD_URL=https://downloads.example.com/mythicshot/
+```
+
+2. Restart the app, so that it reads the new line.
+
+```sh
+touch ~/apps/tours/tmp/restart.txt
+```
+
+**How to tell it worked:** the Account page shows the card "Mythicshot for Windows" with "Open the download page". A value that cannot be used never stops the app: the card is not shown, and the app's log has the line `download page: off, because DOWNLOAD_URL is not a usable https address. The site runs; the dashboard shows no download link.` To take the link away, remove the line and restart.
+
 ## What has been run where
 
 **Run by hand on real hosting,** on one shared cPanel account at one provider (CloudLinux, with the app run by Passenger):
