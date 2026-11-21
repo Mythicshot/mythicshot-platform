@@ -698,14 +698,14 @@ It prints `The account "yourname" now signs in with new@example.com.` and `Remov
 
 The dashboard can point signed-in people to the public page the desktop app is downloaded from (see [The app's download page](../../README.md#the-apps-download-page) in the README).
 
-1. Add a line with that page's `https://` address to the settings file, and save.
+1. Add a line with that page's full address, the one beginning with https, to the settings file in place of the part in angle brackets, and save. The address rule is in [Settings](../../README.md#settings) in the README.
 
 ```sh
 nano ~/apps/tours-config.env
 ```
 
 ```text
-DOWNLOAD_URL=https://downloads.example.com/mythicshot/
+DOWNLOAD_URL=<the download page's address>
 ```
 
 2. Restart the app, so that it reads the new line.
