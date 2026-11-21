@@ -107,12 +107,13 @@ describe("the caller", () => {
     expect(calls() - before).toBe(2); // the lookup, and this test's own read of the token row
     expect(await tokenRow(deps, b.workspaceId)).toMatchObject({ last_used_at: null });
 
-    // The statements are the ones 0.1.8 sent: the same lookup with one more condition, the same touch.
+    // The statements are the ones 0.1.8 sent: the same lookup with more conditions, and the same
+    // touch, which since 0.1.46 never moves the recorded use backwards.
     const sql = recordSql(deps);
     await requireAuth(request({ authorization: "Bearer " + a.token }), deps);
     expect(sql).toHaveLength(2);
     expect(sql[0].startsWith("SELECT id, workspace_id, hash FROM api_token WHERE hash = ? AND revoked_at IS NULL")).toBe(true);
-    expect(sql[1]).toBe("UPDATE api_token SET last_used_at = ? WHERE id = ? AND workspace_id = ?");
+    expect(sql[1]).toBe("UPDATE api_token SET last_used_at = max(coalesce(last_used_at, 0), ?) WHERE id = ? AND workspace_id = ?");
 
     // Every refusal is the one 401 with the one header, and none of these reaches the database
     // except the well-formed token nobody has, which is looked up once.
