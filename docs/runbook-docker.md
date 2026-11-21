@@ -401,7 +401,7 @@ Keeping Debian and Docker patched is yours to do, for example with `apt-get upda
 
 ### Going back to an earlier version
 
-Version 0.1.38 brings who may view a tour. A version before it does not know that setting, so once any tour has been made `people` or `me`, or is being changed to or from that, never start an earlier image on the same data: it could show that tour to anyone.
+Going back to a version before 0.1.38 is refused once a tour is restricted: on cPanel, `cpanel.sh` refuses it (unless `--no-restricted-tours-checked-by-hand` states that someone checked by hand, and only when it cannot read the database). On this route nothing checks it for you before you start an earlier image: only the database stands in the way, whose triggers make an earlier version's publish or rename of a restricted tour fail instead of making it public. Version 0.1.38 brings who may view a tour. A version before it does not know that setting, so once any tour has been made `people` or `me`, or is being changed to or from that, never start an earlier image on the same data: it could show that tour to anyone.
 
 > [!WARNING]
 > Do not go back to an earlier version once a tour is restricted; restore the backup taken before the update instead, which loses everything done on the site since it was taken.

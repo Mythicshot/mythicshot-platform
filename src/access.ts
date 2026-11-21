@@ -273,7 +273,12 @@ const pictureMissing = () =>
   apiError(409, "republish_needed", "a picture of the tour's published version is missing, so it cannot be moved; unpublish the tour, then publish it again");
 const republish = () =>
   apiError(409, "republish_needed", "the tour's published version cannot be moved as it is; publish the tour again, then send this change again");
-const progress = (done: number, total: number) => json(202, { status: "switching", done, total });
+/** Which way a move goes, in the API's words: to "public", or to "restricted" (the private store). */
+type Direction = "public" | "restricted";
+const directionOf = (target: "public" | "private"): Direction => (target === "public" ? "public" : "restricted");
+const progress = (done: number, total: number, target: Direction) => json(202, { status: "switching", done, total, target });
+/** The `switching` field of an answer: null, or the move's progress and which way it goes. */
+const switchingOf = (sw: { copied: number; total: number; target: "public" | "private" } | null) => (sw === null ? null : { done: sw.copied, total: sw.total, target: directionOf(sw.target) });
 
 /** The PUT body, checked. `viewers` is null when the body leaves the list as it is. */
 type AccessBody = { access: Access; viewers: string[] | null };
@@ -357,7 +362,7 @@ async function readState(deps: Deps, auth: Auth, id: string): Promise<State | nu
 
 /** The answer of GET, and of a PUT that is done. */
 function settingAnswer(deps: Deps, access: Access, viewers: string[], sw: State["switch"]) {
-  return json(200, { access, viewers, limit: MAX_VIEWERS, can_restrict: canMailLinks(deps), switching: sw === null ? null : { done: sw.copied, total: sw.total } });
+  return json(200, { access, viewers, limit: MAX_VIEWERS, can_restrict: canMailLinks(deps), switching: switchingOf(sw) });
 }
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
@@ -608,7 +613,7 @@ async function clearTour(d: Deps, ws: string, id: string): Promise<boolean> {
  */
 async function finish(r: Run, st: State, list: string[], access: Access, total: number): Promise<Response> {
   const clean = await clearTour(r.d, r.auth.workspaceId, st.id);
-  if (!clean && isRestricted(access)) return progress(total, total);
+  if (!clean && isRestricted(access)) return progress(total, total, "restricted");
   return settingAnswer(r.d, access, list, null);
 }
 
@@ -698,7 +703,7 @@ async function drive(r: Run, st: State, list: string[], sw: NonNullable<State["s
   if (batch.length < left) {
     if (!(await markCopied(d, st.id, sw.id, written))) return ended(r, st, list, sw, written, finalAccess);
     if (!toPublic) await dropSources(d, st.id, sw.id, batch);
-    return progress(sw.total - left + batch.length, sw.total);
+    return progress(sw.total - left + batch.length, sw.total, directionOf(sw.target));
   }
 
   const audit = toPublic ? changeAudit(d, r.auth, st.id, st.access, "public", list.length, list.length, true) : null;
@@ -928,7 +933,7 @@ async function putAccess(r: Run, id: string, body: AccessBody): Promise<Response
     const strays = isRestricted(body.access) && (cross || st.stray > 0);
     if (strays || st.due > 0) {
       const clean = await clearTour(d, ws, id);
-      if (strays && !clean) return progress(0, Math.max(1, st.stray));
+      if (strays && !clean) return progress(0, Math.max(1, st.stray), "restricted");
     }
     return settingAnswer(d, body.access, list, null);
   }
@@ -951,7 +956,7 @@ export function accessRoutes(app: Hono, deps: Deps): void {
     if (st === null) return notFound();
     if (auth.session === undefined) {
       const sw = st.switch;
-      return json(200, { access: st.access, viewers_count: st.viewers.length, limit: MAX_VIEWERS, can_restrict: canMailLinks(deps), switching: sw === null ? null : { done: sw.copied, total: sw.total } });
+      return json(200, { access: st.access, viewers_count: st.viewers.length, limit: MAX_VIEWERS, can_restrict: canMailLinks(deps), switching: switchingOf(sw) });
     }
     return settingAnswer(deps, st.access, st.viewers, st.switch);
   });

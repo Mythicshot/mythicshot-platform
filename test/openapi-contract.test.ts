@@ -673,8 +673,8 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const big = await api.upload(a.token, small(COPY_BATCH + 1, "Big"));
     await api.publishAll(a.token, big.tour_id);
     const moving = await api.setAccess(a.session, big.tour_id, { access: "me" });
-    expect([moving.status, moving.json]).toEqual([202, { status: "switching", done: COPY_BATCH, total: COPY_BATCH + 1 }]);
-    expect((await api.access(a.token, big.tour_id)).json.switching).toEqual({ done: COPY_BATCH, total: COPY_BATCH + 1 });
+    expect([moving.status, moving.json]).toEqual([202, { status: "switching", done: COPY_BATCH, total: COPY_BATCH + 1, target: "restricted" }]);
+    expect((await api.access(a.token, big.tour_id)).json.switching).toEqual({ done: COPY_BATCH, total: COPY_BATCH + 1, target: "restricted" });
     refused(await api.setAccess(a.session, big.tour_id, { access: "public" }), 409, "access_switching");
     refused(await api.publish(a.token, big.tour_id), 409, "access_switching");
     const moved = await api.setAccess(a.session, big.tour_id, { access: "me" });
