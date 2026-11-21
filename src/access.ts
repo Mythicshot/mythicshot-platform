@@ -94,23 +94,21 @@
 // signed-in session alone (a token gets its count), never by another route, an audit row (which holds counts) or a log line, and a refusal of
 // a malformed address names its position only.
 import type { Hono } from "hono";
-import { noDisabledAccount, parseEmail } from "./accounts.ts";
-import { auditStatement } from "./audit.ts";
+import { noDisabledAccount } from "./accounts.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
-import { apiError, json, readCapped } from "./http.ts";
+import { apiError, json } from "./http.ts";
 import { canMailLinks, isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 import { COPY_BATCH, MissingSource, STALE_PUBLISH_MS, clearDuePage, copyOne, deleteKeys, keyList, liveKey, mime, nextBatch, randomHex, runLimited, typeOfKey, type Copy } from "./publish.ts";
+import * as viewing from "./viewing.ts";
+import { MAX_VIEWERS, isRestricted, readAccessBody, sameList, type Access, type AccessBody, type ListPlace } from "./viewing.ts";
 
-/** A tour's viewing setting. */
-export type Access = "public" | "people" | "me";
-export const ACCESS_SETTINGS: readonly Access[] = ["public", "people", "me"];
-/** The most addresses one tour's list holds. */
-export const MAX_VIEWERS = 200;
-/** The longest PUT body: 200 addresses of 254 characters, escaped, fit with room to spare. */
-export const ACCESS_BODY_BYTES = 65_536;
-/** The most entries a list may have before duplicates are collapsed: more is refused unread. */
-const MAX_ENTRIES = 1000;
+/** The settings, the list's limit and the body's cap: shared with shared items (src/viewing.ts). */
+export { ACCESS_BODY_BYTES, ACCESS_SETTINGS, MAX_VIEWERS, type Access } from "./viewing.ts";
+
+/** Where a tour's list is kept. */
+const TOUR_LIST: ListPlace = { list: "tour_viewer", key: "tour_id", owner: "tour" };
+
 /** Copies in flight at once, as a publish. */
 const COPIES_IN_FLIGHT = 4;
 /**
@@ -145,7 +143,6 @@ const SLUG = /^[a-z2-7]{10}$/;
 /** A restricted tour's live key, and the name the page uses for it after `v/`. */
 const PRIVATE_KEY = /^v\/([0-9a-f]{32}\.(?:png|jpg))$/;
 
-const isRestricted = (a: Access) => a !== "public";
 /** The publish_id of a switch to private's source rows: its old public pictures, until each is deleted. */
 const sourcesOf = (switchId: string) => "sws_" + switchId.slice(3);
 
@@ -242,22 +239,7 @@ export async function tourForServing(deps: Deps, ref: { slug: string } | { id: s
  */
 export async function mayView(deps: Deps, tour: { id: string }, provedEmail: string | null): Promise<boolean> {
   if (typeof tour?.id !== "string" || !TOUR_ID.test(tour.id)) return false;
-  const email = provedEmail === null ? null : parseEmail(provedEmail);
-  // An empty address matches no stored one (every stored address has at least 3 characters).
-  const asked = email ?? "";
-  const row = await deps.db.first<{ access: Access; listed: number; owner: number; enabled: number }>(
-    `SELECT t.access,
-            EXISTS (SELECT 1 FROM tour_viewer v WHERE v.tour_id = t.id AND v.email = ?) AS listed,
-            EXISTS (SELECT 1 FROM membership m JOIN user u ON u.id = m.user_id WHERE m.workspace_id = t.workspace_id AND u.email = ?) AS owner,
-            CASE WHEN ${noDisabledAccount("t.workspace_id")} THEN 1 ELSE 0 END AS enabled
-       FROM tour t WHERE t.id = ?`,
-    [asked, asked, tour.id],
-  );
-  if (row === null || row.enabled !== 1) return false;
-  if (row.access === "public") return true;
-  if (email === null) return false;
-  if (row.access === "people") return row.listed === 1 || row.owner === 1;
-  return row.owner === 1;
+  return viewing.mayViewIn(deps, TOUR_LIST, tour.id, provedEmail);
 }
 
 // ---- The API ----
@@ -265,7 +247,7 @@ export async function mayView(deps: Deps, tour: { id: string }, provedEmail: str
 const notFound = () => apiError(404, "not_found", "no such tour");
 const switching = () =>
   apiError(409, "access_switching", "who may view this tour is being changed to another setting; send that same change again until it is done, then this one");
-const cannotRestrict = () =>
+const cannotRestrictAnswer = () =>
   apiError(409, "cannot_restrict", "this site cannot send mail, so nobody could get a link to view a restricted tour; the tour stays as it is");
 const cancelled = () =>
   apiError(409, "switch_cancelled", "the change was stopped before it finished (the tour was unpublished or deleted meanwhile); send it again to apply it to the tour as it is now");
@@ -281,46 +263,6 @@ const directionOf = (target: "public" | "private"): Direction => (target === "pu
 const progress = (done: number, total: number, target: Direction) => json(202, { status: "switching", done, total, target });
 /** The `switching` field of an answer: null, or the move's progress and which way it goes. */
 const switchingOf = (sw: { copied: number; total: number; target: "public" | "private" } | null) => (sw === null ? null : { done: sw.copied, total: sw.total, target: directionOf(sw.target) });
-
-/** The PUT body, checked. `viewers` is null when the body leaves the list as it is. */
-type AccessBody = { access: Access; viewers: string[] | null };
-
-/**
- * Reads `{"access": ..., "viewers": [...]?}`. Every address must pass parseEmail; a refusal
- * names the entry's position, never an address. Duplicates are collapsed, then more than
- * MAX_VIEWERS is refused. Other fields are ignored.
- */
-async function readAccessBody(req: Request): Promise<AccessBody | Response> {
-  const bad = () => apiError(400, "bad_request", 'the body must be JSON such as {"access": "people", "viewers": ["ana@example.com"]}');
-  const raw = await readCapped(req, ACCESS_BODY_BYTES);
-  if (raw === "too_large") return apiError(413, "too_large", `the request is over ${ACCESS_BODY_BYTES} bytes`);
-  let body: unknown;
-  try {
-    body = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw));
-  } catch {
-    return bad();
-  }
-  if (body === null || typeof body !== "object" || Array.isArray(body)) return bad();
-  const o = body as Record<string, unknown>;
-  const access = Object.hasOwn(o, "access") ? o.access : undefined;
-  if (typeof access !== "string" || !(ACCESS_SETTINGS as readonly string[]).includes(access)) {
-    return apiError(400, "bad_access", "access must be one of public, people and me");
-  }
-  const given = Object.hasOwn(o, "viewers") ? o.viewers : undefined;
-  if (given === undefined || given === null) return { access: access as Access, viewers: null };
-  if (!Array.isArray(given)) return bad();
-  if (given.length > MAX_ENTRIES) return tooMany();
-  const seen = new Set<string>();
-  for (let i = 0; i < given.length; i++) {
-    const email = parseEmail(given[i]);
-    if (email === null) return apiError(400, "bad_viewer", `viewers[${i}] is not an email address; nothing was changed`);
-    seen.add(email);
-  }
-  if (seen.size > MAX_VIEWERS) return tooMany();
-  return { access: access as Access, viewers: [...seen].sort() };
-}
-
-const tooMany = () => apiError(400, "too_many_viewers", `a tour's list holds at most ${MAX_VIEWERS} addresses; nothing was changed`);
 
 /** What the two routes read of a tour: its setting, list, live version and switch. */
 type State = {
@@ -367,21 +309,11 @@ function settingAnswer(deps: Deps, access: Access, viewers: string[], sw: State[
   return json(200, { access, viewers, limit: MAX_VIEWERS, can_restrict: canMailLinks(deps), switching: switchingOf(sw) });
 }
 
-const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
-
 const OWNED = "SELECT id FROM tour WHERE id = ? AND workspace_id = ?";
 
 /** Replaces the tour's list with `list` (sorted, distinct, parsed), keeping the time an address that stays was added. */
 function viewerStatements(id: string, ws: string, list: string[], now: number): Stmt[] {
-  const text = JSON.stringify(list);
-  return [
-    { sql: `DELETE FROM tour_viewer WHERE tour_id IN (${OWNED}) AND email NOT IN (SELECT value FROM json_each(?))`, params: [id, ws, text] },
-    {
-      sql: `INSERT INTO tour_viewer (tour_id, email, created_at) SELECT t.id, j.value, ? FROM json_each(?) j JOIN tour t ON t.id = ? AND t.workspace_id = ?
-            ON CONFLICT (tour_id, email) DO NOTHING`,
-      params: [now, text, id, ws],
-    },
-  ];
+  return viewing.viewerStatements(TOUR_LIST, id, ws, list, now);
 }
 
 /** A publish in progress is cancelled as unpublish cancels one: its rows retired and due now, its job dropped, so it can never commit. */
@@ -399,17 +331,7 @@ function expediteRetired(id: string, ws: string, now: number): Stmt {
 
 /** The audit row of a change: the settings and the list's sizes, never an address. */
 function changeAudit(deps: Deps, auth: Auth, id: string, from: Access, to: Access, before: number, after: number, guard: boolean): Stmt {
-  return auditStatement(
-    deps,
-    {
-      event: "tour_access_changed",
-      userId: auth.session?.userId ?? null,
-      workspaceId: auth.workspaceId,
-      subject: id,
-      detail: { from, to, viewers_before: before, viewers: after, by: auth.session === undefined ? "token" : "session" },
-    },
-    guard ? { onlyAfterOneChange: true } : {},
-  );
+  return viewing.changeAudit(deps, auth, "tour_access_changed", id, from, to, before, after, guard);
 }
 
 /**
@@ -912,7 +834,7 @@ async function putAccess(r: Run, id: string, body: AccessBody): Promise<Response
 
     // Only making a public tour restricted needs mail; between the two restricted settings
     // nothing is loosened.
-    if (isRestricted(body.access) && !isRestricted(st.access) && !canMailLinks(d)) return cannotRestrict();
+    if (viewing.cannotRestrict(d, st.access, body.access)) return cannotRestrictAnswer();
     const cross = isRestricted(body.access) !== isRestricted(st.access);
 
     if (cross && st.live) {
@@ -1013,7 +935,7 @@ export function accessRoutes(app: Hono, deps: Deps): void {
     const d = meter.deps;
     const auth = await requireAuth(c.req.raw, d, { only: "session" });
     if (auth instanceof Response) return auth;
-    const body = await readAccessBody(c.req.raw);
+    const body = await readAccessBody(c.req.raw, "a tour's");
     if (body instanceof Response) return body;
     const id = c.req.param("id");
     if (!TOUR_ID.test(id)) return notFound();

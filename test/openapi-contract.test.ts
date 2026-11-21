@@ -482,9 +482,9 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const idFor = (path: string) => (path.includes("/uploads/") ? NO_UPLOAD : path.includes("/sessions/") ? "ses_" + "0".repeat(24) : path.includes("/workspaces/") ? NO_WORKSPACE : path.includes("/tokens/") ? "tok_" + "0".repeat(24) : NO_TOUR);
     const example = (op: Op) => op.path.replace("{id}", idFor(op.path)).replace("{step_id}", NO_STEP).replace("{n}", "1");
     // The one request that takes the viewer cookie refuses any token (its own test above); it takes no token or session at all.
-    const guarded = OPS.filter((op) => op.op.security.length > 0 && !op.op.security.some((s: Json) => "viewer" in s));
-    // All but health, the two sign-in requests, the two requests of an invite, the app's two requests while it connects and the five of a visitor.
-    expect(guarded).toHaveLength(OPS.length - 12);
+    const guarded = OPS.filter((op) => op.op.security.length > 0 && !op.op.security.some((s: Json) => "viewer" in s || "mediaViewer" in s));
+    // All but health, the two sign-in requests, the two requests of an invite, the app's two requests while it connects, and the five of a visitor for tours and the five for items.
+    expect(guarded).toHaveLength(OPS.length - 17);
     for (const op of guarded) {
       for (const token of [null, NO_TOKEN]) {
         const r = await api.call(op.method, example(op), { token });
@@ -1129,6 +1129,119 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     expect([gone.status, gone.text]).toEqual([401, '{"error":"unauthorized"}']);
   });
 
+  it("every answer of who may view a shared item, and of a visitor proving an address for one, is as documented", async () => {
+    const { deps, mail } = await makeDeps({ siteHost: "tours.example.com" });
+    // A fixed clock, as for the tours' visitors: the limiter's windows are fixed to the epoch.
+    deps.now = () => 1_800_000_000_000;
+    const api = client(deps);
+    const sessionOf = async (userId: string) => {
+      const made = (await redeemSignInCode(deps, await createSignInCode(deps, userId), null, null))!;
+      return { cookie: `${SESSION_COOKIE}=${made.secret}`, csrf: await csrfFor(made.secret) };
+    };
+    const a = await seedAccount(deps, { admin: true });
+    const b = await seedAccount(deps);
+    const sa = await sessionOf(a.userId);
+    const sb = await sessionOf(b.userId);
+    const share = async () => {
+      const made = await send(deps, "POST", "/api/v1/media", { token: a.token, headers: JSON_HEADERS, body: JSON.stringify({ kind: "image", content_type: "image/png", bytes: 3000, width: 20, height: 10 }) });
+      const id = made.json.id as string;
+      expect((await send(deps, "PUT", `/api/v1/media/${id}/parts/0`, { token: a.token, body: png(20, 10, 3000) as NonNullable<RequestInit["body"]> })).status).toBe(204);
+      const done = await send(deps, "POST", `/api/v1/media/${id}/commit`, { token: a.token });
+      return { id, link: done.json.link_id as string };
+    };
+    const item = await share();
+    const plain = await share();
+    const get = (opts: Parameters<typeof api.call>[2]) => api.call("GET", `/api/v1/media/${item.id}/access`, opts);
+    const put = (session: { cookie: string; csrf: string }, body: unknown, id = item.id) =>
+      api.call("PUT", `/api/v1/media/${id}/access`, {
+        body: typeof body === "string" ? body : JSON.stringify(body),
+        headers: { ...JSON_HEADERS, cookie: session.cookie, "x-csrf-token": session.csrf, origin: ORIGIN, "sec-fetch-site": "same-origin" },
+      });
+
+    // Reading: a token gets the count, a session the list; the other workspace and nobody are refused.
+    expect((await get({ token: a.token })).json).toEqual({ access: "public", viewers_count: 0, limit: 200, can_restrict: true });
+    expect((await get({ headers: { cookie: sa.cookie } })).json).toEqual({ access: "public", viewers: [], limit: 200, can_restrict: true });
+    expect((await get({ token: null })).status).toBe(401);
+    refused(await get({ token: b.token }), 404, "not_found");
+    refused(await put(sb, { access: "me" }), 404, "not_found");
+    expect((await api.call("PUT", `/api/v1/media/${item.id}/access`, { token: a.token, headers: JSON_HEADERS, body: '{"access":"me"}' })).status).toBe(401);
+
+    // The refusals of the body, which change nothing.
+    refused(await put(sa, "[]"), 400, "bad_request");
+    refused(await put(sa, { access: "friends" }), 400, "bad_access");
+    refused(await put(sa, { access: "people", viewers: ["ana@example.com", "not an address"] }), 400, "bad_viewer");
+    refused(await put(sa, { access: "people", viewers: Array.from({ length: 201 }, (_, i) => `v${i}@example.com`) }), 400, "too_many_viewers");
+    refused(await put(sa, `{"access":"people","viewers":["${"a".repeat(70_000)}"]}`), 413, "too_large");
+
+    // An item that changes under the request twice.
+    const db = deps.db;
+    let failures = 0;
+    deps.db = {
+      ...db,
+      batch: async (stmts) => {
+        if (failures < 2 && stmts.some((st) => st.sql.includes("UPDATE media SET access"))) {
+          failures++;
+          throw new Error("NOT NULL constraint failed: audit.at");
+        }
+        return db.batch(stmts);
+      },
+    };
+    refused(await put(sa, { access: "me" }), 409, "access_busy");
+    deps.db = db;
+    // Too large to be restricted here.
+    await deps.db.run("UPDATE media SET parts = 36 WHERE id = ?", [plain.id]);
+    refused(await put(sa, { access: "me" }, plain.id), 409, "too_large_to_restrict");
+    await deps.db.run("UPDATE media SET parts = 1 WHERE id = ?", [plain.id]);
+    // Done: restricted to one address.
+    expect((await put(sa, { access: "people", viewers: ["mara@example.com"] })).json).toEqual({ access: "people", viewers: ["mara@example.com"], limit: 200, can_restrict: true });
+    // A site that cannot mail refuses to restrict a public item.
+    const config = deps.config;
+    deps.config = { ...config, siteHost: null };
+    refused(await put(sa, { access: "me" }, plain.id), 409, "cannot_restrict");
+    deps.config = config;
+
+    // A visitor asking for a link on the media address (one address here), the same answer for everyone.
+    const page = { "content-type": JSON_TYPE, origin: ORIGIN };
+    const network = (address: string) => (d: Deps) => ({ fetch: (req: Request) => (setClientAddress(req, address), createApp(d).fetch(req)) });
+    const post = (path: string, body: unknown, more: Opts = {}) => api.call("POST", path, { ...more, body: typeof body === "string" ? body : JSON.stringify(body), headers: { ...page, ...more.headers } });
+    expect((await post("/api/v1/media-view/request", { email: "mara@example.com", path: `/i/${item.link}` })).json).toEqual({ ok: true });
+    expect((await post("/api/v1/media-view/request", { email: "bram@example.com", path: `/i/${item.link}` })).status).toBe(202);
+    refused(await post("/api/v1/media-view/request", "[]"), 400, "bad_request");
+    refused(await post("/api/v1/media-view/request", { email: "mara@example.com", path: `/i/${item.link}` }, { token: NO_TOKEN }), 400, "credentials_not_allowed");
+    refused(await post("/api/v1/media-view/request", { email: "mara@example.com", path: `/i/${item.link}` }, { headers: { origin: "https://evil.example.net" } }), 403, "bad_origin");
+    for (let i = 0; i < 10; i++) await post("/api/v1/media-view/request", { email: "bram@example.com", path: `/i/${plain.link}` }, { app: network("203.0.113.80") });
+    refused(await post("/api/v1/media-view/request", { email: "bram@example.com", path: `/i/${plain.link}` }, { app: network("203.0.113.80") }), 429, "rate_limited");
+    const code = (mail.sent.find((m) => m.to === "mara@example.com")?.text.match(/dpi_[0-9a-f]{40}/) ?? [""])[0];
+    expect(code).not.toBe("");
+
+    // Looking the code up and completing it.
+    expect((await post("/api/v1/media-view/check", { code })).json).toEqual({ email: "mara@example.com", path: `/i/${item.link}` });
+    refused(await post("/api/v1/media-view/check", "{"), 400, "bad_request");
+    refused(await post("/api/v1/media-view/check", { code }, { token: NO_TOKEN }), 400, "credentials_not_allowed");
+    refused(await post("/api/v1/media-view/check", { code }, { headers: { origin: "https://evil.example.net" } }), 403, "bad_origin");
+    refused(await post("/api/v1/media-view/check", { code: "dpi_" + "0".repeat(40) }), 404, "view_link_invalid");
+    refused(await post("/api/v1/media-view/complete", "{"), 400, "bad_request");
+    refused(await post("/api/v1/media-view/complete", { code }, { token: NO_TOKEN }), 400, "credentials_not_allowed");
+    refused(await post("/api/v1/media-view/complete", { code }, { headers: { origin: "https://evil.example.net" } }), 403, "bad_origin");
+    const done = await post("/api/v1/media-view/complete", { code });
+    expect(done.json).toEqual({ path: `/i/${item.link}` });
+    expect(done.headers.get("set-cookie")).toMatch(/^__Host-dp_media_viewer=dpk_[0-9a-f]{64};/);
+    refused(await post("/api/v1/media-view/complete", { code }), 404, "view_link_invalid");
+    for (let i = 0; i < 20; i++) await post("/api/v1/media-view/check", { code }, { app: network("203.0.113.81") });
+    refused(await post("/api/v1/media-view/check", { code }, { app: network("203.0.113.81") }), 429, "rate_limited");
+    refused(await post("/api/v1/media-view/complete", { code }, { app: network("203.0.113.81") }), 429, "rate_limited");
+
+    // The session and signing out.
+    const cookie = (done.headers.get("set-cookie") ?? "").split(";")[0];
+    expect((await api.call("GET", "/api/v1/media-view/session", { headers: { cookie } })).json).toEqual({ email: "mara@example.com" });
+    refused(await api.call("GET", "/api/v1/media-view/session", { token: NO_TOKEN, headers: { cookie } }), 400, "credentials_not_allowed");
+    refused(await api.call("POST", "/api/v1/media-view/signout", { token: NO_TOKEN, headers: { cookie, origin: ORIGIN } }), 400, "credentials_not_allowed");
+    refused(await api.call("POST", "/api/v1/media-view/signout", { headers: { cookie, origin: "https://evil.example.net" } }), 403, "bad_origin");
+    expect((await api.call("POST", "/api/v1/media-view/signout", { headers: { cookie, origin: ORIGIN } })).status).toBe(204);
+    const gone = await api.call("GET", "/api/v1/media-view/session", { headers: { cookie } });
+    expect([gone.status, gone.text]).toEqual([401, '{"error":"unauthorized"}']);
+  });
+
   it("every answer of shared items is as documented", async () => {
     const { deps, a, b } = await setup();
     const api = client(deps);
@@ -1435,6 +1548,7 @@ describe("the two 403s of a change made with a session, on each route that takes
       ["PATCH", `/api/v1/tokens/${TOKEN}`, { name: "Laptop" }],
       ["DELETE", `/api/v1/tokens/${TOKEN}`, undefined],
       ["PUT", `/api/v1/tours/tour_${"0".repeat(24)}/access`, { access: "me" }],
+      ["PUT", `/api/v1/media/med_${"0".repeat(24)}/access`, { access: "me" }],
     ];
     for (const [method, path, body] of routes) {
       const withBody = body === undefined ? {} : { body: JSON.stringify(body) };
@@ -1568,7 +1682,7 @@ describe("the error codes in the code", () => {
     };
     const inCode = new Set<string>();
     let calls = 0;
-    for (const file of ["tours.ts", "uploads.ts", "publish.ts", "access.ts"]) {
+    for (const file of ["tours.ts", "uploads.ts", "publish.ts", "access.ts", "viewing.ts", "media-access.ts"]) {
       const literal = [...source(file).matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
       // Every call names its status and code in place, so none escapes this reading.
       expect(literal.length, `${file}: an apiError call without a literal status and code`).toBe([...source(file).matchAll(/\bapiError\(/g)].length);
@@ -1650,7 +1764,7 @@ describe("the error codes in the code", () => {
     expect([...inCode]).toEqual(expect.arrayContaining(["404 view_link_invalid", "401 unauthorized", "403 bad_origin"]));
     // These fourteen are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/access.ts", "../src/account-removal.ts", "../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts"]);
+    expect(callers).toEqual(["../src/access.ts", "../src/account-removal.ts", "../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media-access.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts", "../src/viewing.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.
@@ -1695,6 +1809,7 @@ describe("the error codes in the code", () => {
         "PATCH /api/v1/tokens/{id}",
         "DELETE /api/v1/tokens/{id}",
         "PUT /api/v1/tours/{id}/access",
+        "PUT /api/v1/media/{id}/access",
       ].sort(),
     );
     for (const o of sessionChanges) {

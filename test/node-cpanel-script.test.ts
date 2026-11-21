@@ -134,7 +134,7 @@ ${r.stderr}`;
 
   it("the check's own program and statements, run with this Node.js on real databases: 0 before migration 0014 and with public tours only, else the restricted tours and the moves under way", async () => {
     const script = readFileSync(join(ROOT, "deploy/cpanel/cpanel.sh"), "utf8");
-    const program = /node -e '([^']*)' "\$db" restricted-check/.exec(script)?.[1];
+    const program = /node -e '([^']*)' "\$db" "\$marker"/.exec(script)?.[1];
     const hasSql = /^ACCESS_COLUMN_SQL="([^"]*)"$/m.exec(script)?.[1];
     const countSql = /^RESTRICTED_SQL="([^"]*)"$/m.exec(script)?.[1];
     expect([typeof program, typeof hasSql, typeof countSql]).toEqual(["string", "string", "string"]);
@@ -162,6 +162,62 @@ ${r.stderr}`;
       await db.run("INSERT INTO tour (id, workspace_id, title, slug, status, created_at, updated_at) VALUES ('tour_2', 'ws_1', 'U', 'bcdefghijk', 'draft', 1, 1)");
       await db.run(`INSERT INTO access_switch (tour_id, switch_id, target, data, total, created_at, touched_at) VALUES ('tour_2', 'sw_${"0".repeat(24)}', 'public', '{}', 0, 1, 1)`);
       expect(check(file)).toBe("2");
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/** The tests of the refusal to go back while a shared image or clip is restricted (stand-ins only). */
+const RESTRICTED_ITEM_TESTS = ["test_downgrade_below_media_access_is_refused_while_an_item_is_restricted", "test_update_refuses_the_way_back_when_an_item_is_restricted"];
+
+describe("the way back while a shared item is restricted", () => {
+  it("the Bash file has the tests of the refusal", () => {
+    for (const name of RESTRICTED_ITEM_TESTS) expect(readFileSync(join(ROOT, HARNESS), "utf8")).toMatch(new RegExp(`^${name}\\(\\) \\{$`, "m"));
+  });
+
+  it.skipIf("reason" in found)(`refuses the commands to go back and a downgrade below 0.1.47 while an item is restricted or the database cannot be read${"reason" in found ? ` (skipped: ${found.reason})` : ""}`, () => {
+    const r = spawnSync((found as { bash: string }).bash, [HARNESS, "--inside", ...RESTRICTED_ITEM_TESTS], { cwd: ROOT, encoding: "utf8", timeout: 280_000, windowsHide: true });
+    const output = `${r.stdout}
+${r.stderr}`;
+    for (const name of RESTRICTED_ITEM_TESTS) expect(output, name).toContain(`PASS  ${name}`);
+    expect(output).toMatch(new RegExp(`^${RESTRICTED_ITEM_TESTS.length} passed, 0 failed, 0 skipped$`, "m"));
+    expect(r.status, output).toBe(0);
+  }, 300_000);
+
+  it("the check's own program and statements, run with this Node.js on real databases: 0 before migration 0016 and with public items only, else the restricted items", async () => {
+    const script = readFileSync(join(ROOT, "deploy/cpanel/cpanel.sh"), "utf8");
+    const program = /node -e '([^']*)' "\$db" "\$marker"/.exec(script)?.[1];
+    const hasSql = /^MEDIA_ACCESS_COLUMN_SQL="([^"]*)"$/m.exec(script)?.[1];
+    const countSql = /^RESTRICTED_ITEMS_SQL="([^"]*)"$/m.exec(script)?.[1];
+    expect([typeof program, typeof hasSql, typeof countSql]).toEqual(["string", "string", "string"]);
+    expect(script).toContain('count_in_database restricted-items-check "$MEDIA_ACCESS_COLUMN_SQL" "$RESTRICTED_ITEMS_SQL"');
+    expect(/^MEDIA_ACCESS_SINCE=0\.1\.47$/m.test(script)).toBe(true);
+    const check = (db: string) => {
+      const r = spawnSync(process.execPath, ["-e", program!, db, "restricted-items-check", hasSql!, countSql!], { encoding: "utf8", windowsHide: true });
+      expect(r.status, r.stderr).toBe(0);
+      return r.stdout;
+    };
+    const migrations = fileURLToPath(new URL("../migrations/", import.meta.url));
+    const root = mkdtempSync(join(tmpdir(), "demo-platform-restricted-items-"));
+    const upTo15 = join(root, "upto15");
+    mkdirSync(upTo15);
+    for (const f of readdirSync(migrations).filter((f) => f.endsWith(".sql") && f < "0016")) copyFileSync(join(migrations, f), join(upTo15, f));
+    const file = join(root, "db.sqlite");
+    const db = new NodeDb(file);
+    try {
+      await migrate(db, upTo15);
+      await db.run("INSERT INTO workspace (id, name, created_at) VALUES ('ws_1', 'A', 1)");
+      const item = (id: string, link: string) =>
+        db.run(`INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, state, created_at) VALUES (?, 'ws_1', ?, 'image', 'image/png', 10, 1, 1, 1, 'online', 1)`, [id, link]);
+      await item("med_" + "1".repeat(24), "a".repeat(20));
+      expect(check(file)).toBe("0"); // the earlier schema: no restricted item can exist
+      await migrate(db, migrations);
+      expect(check(file)).toBe("0");
+      await db.run("UPDATE media SET access = 'me', private_link_id = link_id, link_id = ? WHERE id = ?", ["b".repeat(20), "med_" + "1".repeat(24)]);
+      expect(check(file)).toBe("1");
+      await item("med_" + "2".repeat(24), "c".repeat(20));
+      expect(check(file)).toBe("1");
     } finally {
       db.close();
     }

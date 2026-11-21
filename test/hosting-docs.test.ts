@@ -500,7 +500,7 @@ describe("the shared cPanel hosting guide", () => {
   it("every cpanel.sh command and option the guide names exists, and every one the script has is in the guide", () => {
     const { commands, flags } = vocabulary();
     expect([...commands].sort()).toEqual(["admin", "backup", "install", "status", "update"]);
-    expect([...flags].sort()).toEqual(["--allow-downgrade", "--app-domain", "--app-root", "--domain", "--dry-run", "--no-restricted-tours-checked-by-hand", "--node", "--yes"]);
+    expect([...flags].sort()).toEqual(["--allow-downgrade", "--app-domain", "--app-root", "--domain", "--dry-run", "--no-restricted-items-checked-by-hand", "--no-restricted-tours-checked-by-hand", "--node", "--yes"]);
     // After `admin`, the script takes only its own options; from the first other word on, every word is the admin command's.
     const ADMIN_OWN = ["--app-root", "--node", "--dry-run"];
     const named = new Set<string>();

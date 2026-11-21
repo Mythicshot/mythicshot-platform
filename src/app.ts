@@ -10,6 +10,7 @@ import { hostGate } from "./host-gate.ts";
 import { requestHost, roleOf } from "./hosts.ts";
 import { inviteRoutes } from "./invites.ts";
 import { mediaRoutes } from "./media.ts";
+import { mediaAccessRoutes } from "./media-access.ts";
 import { sharePageRoutes } from "./media-page.ts";
 import type { Deps } from "./ports.ts";
 import { pageRoutes } from "./page.ts";
@@ -22,7 +23,7 @@ import { tokenRoutes } from "./tokens.ts";
 import { tourRoutes } from "./tours.ts";
 import { uploadRoutes } from "./uploads.ts";
 import { usageRoutes } from "./usage.ts";
-import { viewerRoutes } from "./viewers.ts";
+import { mediaViewerRoutes, viewerRoutes } from "./viewers.ts";
 
 /** The route table and error handling. Routes reach data only through `deps`. */
 export function createApp(deps: Deps): Hono {
@@ -43,6 +44,7 @@ export function createApp(deps: Deps): Hono {
   docsRoutes(app, deps);
   uploadRoutes(app, deps);
   mediaRoutes(app, deps);
+  mediaAccessRoutes(app, deps);
   tourRoutes(app, deps);
   accessRoutes(app, deps);
   usageRoutes(app, deps);
@@ -53,6 +55,7 @@ export function createApp(deps: Deps): Hono {
   adminRoutes(app, deps);
   inviteRoutes(app, deps);
   viewerRoutes(app, deps);
+  mediaViewerRoutes(app, deps);
   accountRemovalRoutes(app, deps);
   pageRoutesForAccounts(app, deps);
   dashRoutes(app);

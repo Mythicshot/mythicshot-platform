@@ -28,7 +28,8 @@ import { SESSION_COOKIE, SESSION_MS, SIGNIN_CODE_MS } from "../sessions.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS, UPLOAD_MAX_AGE_MS } from "../uploads.ts";
 import { LARGEST_TOURS } from "../usage.ts";
 import { VERSION } from "../version.ts";
-import { VIEWER_CODE_MS, VIEWER_COOKIE, VIEWER_IDLE_MS, VIEWER_MAX_MS } from "../viewers.ts";
+import { MEDIA_VIEWER_COOKIE, VIEWER_CODE_MS, VIEWER_COOKIE, VIEWER_IDLE_MS, VIEWER_MAX_MS } from "../viewers.ts";
+import { RESTRICTED_MAX_BYTES } from "../media-access.ts";
 
 export type OpenApiParameter = { name: string; in: "path"; required: true; description: string; schema: Record<string, unknown> };
 export type OpenApiOperation = {
@@ -41,7 +42,7 @@ export type OpenApiOperation = {
    * cookie (either one, never both) for most; the session alone for the session's own requests;
    * the viewer cookie alone for the one request that says which address it proved.
    */
-  security: [] | [{ token: [] }, { session: [] }] | [{ session: [] }] | [{ viewer: [] }];
+  security: [] | [{ token: [] }, { session: [] }] | [{ session: [] }] | [{ viewer: [] }] | [{ mediaViewer: [] }];
   parameters?: OpenApiParameter[];
   requestBody?: { required: boolean; description?: string; content: Record<string, unknown> };
   responses: Record<string, unknown>;
@@ -53,7 +54,7 @@ export type OpenApiDoc = {
   tags: { name: string; description: string }[];
   paths: Record<string, Record<string, OpenApiOperation>>;
   components: {
-    securitySchemes: { token: { type: "http"; scheme: "bearer" }; session: { type: "apiKey"; in: "cookie"; name: string }; viewer: { type: "apiKey"; in: "cookie"; name: string } };
+    securitySchemes: { token: { type: "http"; scheme: "bearer" }; session: { type: "apiKey"; in: "cookie"; name: string }; viewer: { type: "apiKey"; in: "cookie"; name: string }; mediaViewer: { type: "apiKey"; in: "cookie"; name: string } };
     schemas: Record<string, unknown>;
     responses: Record<string, unknown>;
   };
@@ -116,6 +117,12 @@ export const UNDOCUMENTED_ROUTES: Readonly<Record<string, string>> = {
   "GET /r/:name/preview": "a shared clip's preview picture, for link previews and the clip's poster; not part of the token API",
   "GET /s/share.css": "the shared-item pages' own stylesheet",
   "GET /s/share.js": "the shared-item pages' own script",
+  "GET /i/:name/signout": "the page \"Not you?\" under a restricted image leads to, for people in a browser; it calls the media viewer sign-out request described here",
+  "GET /r/:name/signout": "the page \"Not you?\" under a restricted clip leads to, for people in a browser; it calls the media viewer sign-out request described here",
+  "GET /s/view": "the page a viewer link for an image or clip opens, for people in a browser; it calls the media viewer check and complete requests described here",
+  "GET /s/view.js": "the media viewer pages' own script",
+  "GET /s/view.css": "the media viewer pages' own stylesheet",
+  "GET /s/shared.css": "the stylesheet of the line under a restricted image or clip",
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": "the tour player's own files, loaded by the tour page",
   "GET /docs": "the documentation page itself",
   "GET /docs/:file{(?:viewer|docs)\\.[0-9a-f]{16}\\.(?:js|css)}": "the documentation page's own files",
@@ -189,6 +196,7 @@ const TOKEN = [{ token: [] }, { session: [] }] as [{ token: [] }, { session: [] 
 const SESSION = [{ session: [] }] as [{ session: [] }];
 /** The viewer cookie alone: the address a visitor proved on the tours address. */
 const VIEWER = [{ viewer: [] }] as [{ viewer: [] }];
+const MEDIA_VIEWER = [{ mediaViewer: [] }] as [{ mediaViewer: [] }];
 /** The caller guard's two refusals of a change made with a session (src/auth.ts), on each route that takes a session alone and changes something. */
 const SESSION_CHANGE_REFUSED = refusal("bad_origin: the request did not come from a page of this address. bad_csrf: the X-Csrf-Token header is missing or is not this session's anti-forgery value.", "bad_origin", "bad_csrf");
 const UNAUTHORIZED = { $ref: "#/components/responses/Unauthorized" };
@@ -201,8 +209,12 @@ const someDetail = (...codes: string[]): Schema => object(["error"], { error: { 
 const retryAfter = { "retry-after": { description: "Seconds until the count starts again.", schema: { type: "integer", minimum: 1 } } };
 const setCookie = (description: string) => ({ "set-cookie": { description, schema: { type: "string", pattern: `^${SESSION_COOKIE}=` } } });
 const setViewerCookie = (description: string) => ({ "set-cookie": { description, schema: { type: "string", pattern: `^${VIEWER_COOKIE}=` } } });
+const setMediaViewerCookie = (description: string) => ({ "set-cookie": { description, schema: { type: "string", pattern: `^${MEDIA_VIEWER_COOKIE}=` } } });
 /** A viewer code, as the request bodies carry it. */
 const viewerCode: Schema = { type: "string", pattern: "^dpv_[0-9a-f]{40}$", description: "The code of the viewer link, the part after # in its address." };
+const mediaViewerCode: Schema = { type: "string", pattern: "^dpi_[0-9a-f]{40}$", description: "The code of the viewer link for an image or clip, the part after # in its address." };
+const ITEM_PAGE_FIELD: Schema = { type: "string", pattern: "^/[ir]/[a-z2-7]{20}$", description: "The item's page: /i/<link_id> for an image, /r/<link_id> for a clip." };
+const ITEM_VIEWERS_FIELD: Schema = whole(`How many addresses the item's list holds (at most ${MAX_VIEWERS}). The addresses themselves are given by GET /api/v1/media/{id}/access alone.`);
 
 const tourId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The tour's id, as the tour list and an upload's commit give it.", schema: { type: "string", pattern: "^tour_[0-9a-f]{24}$" } };
 const uploadId: OpenApiParameter = { name: "id", in: "path", required: true, description: "The upload's id, from the answer that started it.", schema: { type: "string", pattern: "^up_[0-9a-f]{24}$" } };
@@ -400,6 +412,26 @@ function schemas(): Record<string, Schema> {
       },
       "Who may view the tour, as a token reads it: without the addresses.",
     ),
+    MediaAccess: object(
+      ["access", "viewers", "limit", "can_restrict"],
+      {
+        access: ACCESS_FIELD,
+        viewers: { type: "array", maxItems: MAX_VIEWERS, items: { type: "string" }, description: "The addresses on the item's list, in order, as the server wrote them (trimmed, lowercase). Kept when the setting is not people." },
+        limit: { type: "integer", const: MAX_VIEWERS, description: "The most addresses the list may hold." },
+        can_restrict: { type: "boolean", description: "Whether this site can send mail to a visitor of an image or clip, which people and me need: false means the item cannot be made restricted here (one that is stays so)." },
+      },
+      "Who may view the item.",
+    ),
+    MediaAccessForToken: object(
+      ["access", "viewers_count", "limit", "can_restrict"],
+      {
+        access: ACCESS_FIELD,
+        viewers_count: whole(`How many addresses the item's list holds (at most ${MAX_VIEWERS}); the addresses themselves are answered to a signed-in session only.`),
+        limit: { type: "integer", const: MAX_VIEWERS, description: "The most addresses the list may hold." },
+        can_restrict: { type: "boolean", description: "Whether this site can send mail, which making a public item people or me needs." },
+      },
+      "Who may view the item, as a token reads it: without the addresses.",
+    ),
     AccessBody: input(
       ["access"],
       {
@@ -514,7 +546,7 @@ function schemas(): Record<string, Schema> {
       path: { type: "string", description: "The item's public address as a path: /i/<link_id> for an image, /r/<link_id> for a clip." },
       link: { type: "string", description: "The item's public address in full, on the address for images and clips from the server's settings. When the settings name no address it is the same as path, to put after the server address." },
     }),
-    MediaItem: object(["id", "link_id", "kind", "title", "content_type", "bytes", "width", "height", "duration_ms", "created_at", "has_preview", "path", "link"], {
+    MediaItem: object(["id", "link_id", "kind", "title", "content_type", "bytes", "width", "height", "duration_ms", "created_at", "has_preview", "path", "link", "access", "viewers"], {
       id: { type: "string", pattern: "^med_[0-9a-f]{24}$" },
       link_id: { type: "string", pattern: "^[a-z2-7]{20}$" },
       kind: { type: "string", enum: ["image", "clip"] },
@@ -528,8 +560,10 @@ function schemas(): Record<string, Schema> {
       has_preview: { type: "boolean", description: "Whether a preview picture was sent." },
       path: { type: "string", description: "The public address as a path: /i/<link_id> or /r/<link_id>." },
       link: { type: "string", description: "The public address in full, from the server's settings; the same as path when they name no address." },
+      access: { ...ACCESS_FIELD, description: "Who may view the item: public (anyone with the link), people (the addresses on its list and the workspace's account) or me (the workspace's account alone)." },
+      viewers: ITEM_VIEWERS_FIELD,
     }),
-    MediaItemState: object(["id", "link_id", "kind", "title", "content_type", "bytes", "width", "height", "duration_ms", "created_at", "has_preview", "path", "link", "state"], {
+    MediaItemState: object(["id", "link_id", "kind", "title", "content_type", "bytes", "width", "height", "duration_ms", "created_at", "has_preview", "path", "link", "access", "viewers", "state"], {
       id: { type: "string", pattern: "^med_[0-9a-f]{24}$" },
       link_id: { type: "string", pattern: "^[a-z2-7]{20}$" },
       kind: { type: "string", enum: ["image", "clip"] },
@@ -543,6 +577,8 @@ function schemas(): Record<string, Schema> {
       has_preview: { type: "boolean", description: "Whether a preview picture was sent." },
       path: { type: "string", description: "The public address as a path: /i/<link_id> or /r/<link_id>." },
       link: { type: "string", description: "The public address in full, from the server's settings; the same as path when they name no address." },
+      access: { ...ACCESS_FIELD, description: "Who may view the item: public (anyone with the link), people (the addresses on its list and the workspace's account) or me (the workspace's account alone)." },
+      viewers: ITEM_VIEWERS_FIELD,
       state: { type: "string", enum: ["uploading", "online"], description: "uploading until the item is finished, then online." },
     }),
     MediaList: object(["items", "next"], {
@@ -580,6 +616,13 @@ function schemas(): Record<string, Schema> {
       slug: text(64, "The slug of the tour, as in its link /t/<slug>."),
     }),
     ViewerCode: input(["code"], { code: viewerCode }),
+    MediaViewerRequest: input(["email", "path"], {
+      email: text(254, "The visitor's address. Spaces around it are dropped and capitals do not count. Anything else answers the same, and nothing is sent."),
+      path: text(64, "The item's page, as in its link: /i/<link_id> or /r/<link_id>."),
+    }),
+    MediaViewerCode: input(["code"], { code: mediaViewerCode }),
+    MediaViewerFound: object(["email", "path"], { email: { type: "string", description: "The address the link was mailed to: the one the browser will prove." }, path: { ...ITEM_PAGE_FIELD, description: "The item's page the link was asked from." } }),
+    MediaViewerDone: object(["path"], { path: { ...ITEM_PAGE_FIELD, description: "The item's page the link was asked from, where the page goes next." } }),
     ViewerFound: object(["email", "slug"], { email: { type: "string", description: "The address the link was mailed to: the one the browser will prove." }, slug: { type: "string", pattern: "^[a-z2-7]{10}$", description: "The tour the link was asked for." } }),
     ViewerDone: object(["slug"], { slug: { type: "string", pattern: "^[a-z2-7]{10}$", description: "The tour the link was asked for, where the page goes next." } }),
     ViewerSession: object(["email"], { email: { type: "string", description: "The address this browser proved." } }),
@@ -1270,6 +1313,46 @@ function paths(): OpenApiDoc["paths"] {
         },
       },
     },
+    "/api/v1/media/{id}/access": {
+      get: {
+        tags: ["Items"],
+        summary: "Who may view a shared item",
+        description: "The item's setting and, to a signed-in session, its whole list of addresses (a token gets only how many there are, as viewers_count, so a token that leaked does not give the addresses away), the most the list may hold, and whether this site can make an item restricted (it needs mail).",
+        operationId: "getMediaAccess",
+        security: TOKEN,
+        parameters: [mediaId],
+        responses: { "200": answer("Who may view the item: with a session, the whole list; with a token, only how many addresses it holds.", { oneOf: [ref("MediaAccess"), ref("MediaAccessForToken")] }), "401": UNAUTHORIZED, "404": noMedia("") },
+      },
+      put: {
+        tags: ["Items"],
+        summary: "Change who may view a shared item",
+        description: `Sets public, people or me, and with viewers replaces the whole list (up to ${MAX_VIEWERS} addresses; you, the workspace's account, are always let in and need not be on it). Only a signed-in session may send it, with the anti-forgery header: a token is answered 401, so a token that leaked cannot make a restricted item public. ${NOT_FROM_THE_PAGE} Making a public item restricted needs a site that can send mail; between people and me it never does. The change is made at once and holds from the next request: nothing moves, as an item's file is only ever served by the server. A restricted item's page, file, download and preview picture answer only a browser that proved, on the address for images and clips, an address the item may be viewed by; everyone else gets a page that asks for an address, and no link preview. Its address stays the same. Restricting cannot take back a copy someone saved while it was public. An item of more than ${n(RESTRICTED_MAX_BYTES)} bytes cannot be restricted. Nothing is mailed to anyone.`,
+        operationId: "setMediaAccess",
+        security: SESSION,
+        parameters: [mediaId],
+        requestBody: { required: true, content: json(ref("AccessBody")) },
+        responses: {
+          "200": answer("Done: who may view the item now.", ref("MediaAccess")),
+          "400": refusal(
+            `bad_request: the body is not a JSON object, or viewers is not a list. bad_access: access is not public, people or me. bad_viewer: an entry of viewers is not an email address; the detail gives its position. too_many_viewers: more than ${MAX_VIEWERS} different addresses. Nothing was changed.`,
+            "bad_request",
+            "bad_access",
+            "bad_viewer",
+            "too_many_viewers",
+          ),
+          "401": UNAUTHORIZED,
+          "403": SESSION_CHANGE_REFUSED,
+          "404": noMedia(""),
+          "409": refusal(
+            `cannot_restrict: this site cannot send mail, so a public item cannot be made people or me. too_large_to_restrict: the item has more than ${n(RESTRICTED_MAX_BYTES)} bytes, the most a restricted item may have here. access_busy: the item changed while the request was decided; send it again. Nothing was changed.`,
+            "cannot_restrict",
+            "too_large_to_restrict",
+            "access_busy",
+          ),
+          "413": refusal(`The request body is over ${n(ACCESS_BODY_BYTES)} bytes.`, "too_large"),
+        },
+      },
+    },
     "/api/v1/media/{id}": {
       get: {
         tags: ["Items"],
@@ -1904,6 +1987,84 @@ function paths(): OpenApiDoc["paths"] {
         },
       },
     },
+    "/api/v1/media-view/request": {
+      post: {
+        tags: ["Viewers"],
+        summary: "Ask for a link to view a shared image or clip",
+        description: `For the page of an image or clip that is shared with a list of addresses, on the address for images and clips: mails the visitor a link that proves the address, when the path names an item shared with it and mail is on. The answer is the same \`202\` in every case, after the same work, so it tells nothing about the item or its list. The link works once and for ${VIEWER_CODE_MS / 60_000} minutes. Needs no credential, but must come from a page of the address it is sent to, as JSON; a token is refused. The limits of POST /api/v1/view/request are shared with this request: one address, one network, one workspace and the whole site get no more viewer links from the two together than from either alone.`,
+        operationId: "requestMediaViewerLink",
+        security: [],
+        requestBody: { required: true, content: json(ref("MediaViewerRequest")) },
+        responses: {
+          "202": answer("The same for every item and address.", ref("Ok")),
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token.", "bad_request", "credentials_not_allowed"),
+          "403": refusal("The request did not come from a page of this address: no Origin, another one, or the browser says it came from another site.", "bad_origin"),
+          "429": { description: "Too many requests from this network. Nothing was sent.", headers: retryAfter, content: json(bare("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/media-view/check": {
+      post: {
+        tags: ["Viewers"],
+        summary: "Look up a viewer link for an image or clip",
+        description: `For the page a viewer link for an image or clip opens: the address the link was mailed to and the item's page it was asked from. It changes nothing. Needs no credential, but must come from a page of the address it is sent to, as JSON; a token is refused. Every code that cannot be used gets the one answer view_link_invalid; a tour's code is one of them. A network may look up and complete codes ${LIMITS_VIEWER.codeNetwork.most} times in ${LIMITS_VIEWER.codeNetwork.windowMs / 60_000} minutes.`,
+        operationId: "checkMediaViewerLink",
+        security: [],
+        requestBody: { required: true, content: json(ref("MediaViewerCode")) },
+        responses: {
+          "200": answer("The link's address and item page.", ref("MediaViewerFound")),
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token.", "bad_request", "credentials_not_allowed"),
+          "403": refusal("The request did not come from a page of this address.", "bad_origin"),
+          "404": refusal("The link cannot be used: unknown, already used, expired or not a viewer code for an image or clip. They cannot be told apart.", "view_link_invalid"),
+          "429": { description: "Too many tries from this network. Nothing was looked at.", headers: retryAfter, content: json(bare("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/media-view/complete": {
+      post: {
+        tags: ["Viewers"],
+        summary: "Prove the address of a viewer link for an image or clip",
+        description: `Turns the code of a viewer link for an image or clip into a viewer session for the address it was mailed to, once, and sets the cookie ${MEDIA_VIEWER_COOKIE} on this address: a new session every time, which replaces the one that cookie held. It is not the tours address's viewer session, which it neither makes nor ends: an address proved for tours is proved once more for images and clips. Needs no credential, but must come from a page of the address it is sent to, as JSON; a token is refused. Every code that cannot be used gets the one answer view_link_invalid.`,
+        operationId: "completeMediaViewerLink",
+        security: [],
+        requestBody: { required: true, content: json(ref("MediaViewerCode")) },
+        responses: {
+          "200": { ...answer("The address is proved; the item's page to go to.", ref("MediaViewerDone")), headers: setMediaViewerCookie("The media viewer cookie: host-only, Secure, HttpOnly and SameSite=Lax.") },
+          "400": refusal("bad_request: the body is not a JSON object sent as application/json. credentials_not_allowed: the request carries a token.", "bad_request", "credentials_not_allowed"),
+          "403": refusal("The request did not come from a page of this address.", "bad_origin"),
+          "404": refusal("The link cannot be used: unknown, already used, expired or not a viewer code for an image or clip. They cannot be told apart.", "view_link_invalid"),
+          "429": { description: "Too many tries from this network. Nothing was looked at.", headers: retryAfter, content: json(bare("rate_limited")) },
+        },
+      },
+    },
+    "/api/v1/media-view/signout": {
+      post: {
+        tags: ["Viewers"],
+        summary: "End this browser's viewer session for images and clips",
+        description: "Ends the session of the browser's media viewer cookie and clears that cookie. A request without it answers the same 204 and sets nothing. Must come from a page of the address it is sent to; a token is refused. It never touches the tours address's viewer session or an account's session.",
+        operationId: "mediaViewerSignOut",
+        security: [],
+        responses: {
+          "204": empty("Signed out. With a media viewer cookie, the answer clears it."),
+          "400": refusal("credentials_not_allowed: the request carries a token.", "credentials_not_allowed"),
+          "403": refusal("The request did not come from a page of this address.", "bad_origin"),
+        },
+      },
+    },
+    "/api/v1/media-view/session": {
+      get: {
+        tags: ["Viewers"],
+        summary: "The address this browser proved for images and clips",
+        description: "For the pages of an image or clip to show whom the visitor views as: the address of the browser's live media viewer session. Needs the media viewer cookie, so it cannot be tried from the documentation page; a token is refused, and a request with both proves nothing. The tours address's viewer session and an account's session are no media viewer session.",
+        operationId: "getMediaViewerSession",
+        security: MEDIA_VIEWER,
+        responses: {
+          "200": answer("The proved address.", ref("ViewerSession")),
+          "400": refusal("credentials_not_allowed: the request carries a token.", "credentials_not_allowed"),
+          "401": answer("No live media viewer session: no such cookie, or one that is unknown, signed out or over. This answer has no detail.", bare("unauthorized")),
+        },
+      },
+    },
     "/healthz": {
       get: {
         tags: ["Server"],
@@ -1931,12 +2092,12 @@ export function openapi(): OpenApiDoc {
       { name: "Accounts", description: "Signing in with a link sent by mail, accepting an invite, the browser sessions of an account, and changing its email address. The site's own pages use these." },
       { name: "Connections", description: "Connecting the desktop app with a short code a signed-in person confirms, and the workspace's tokens: list, rename and revoke. The app's two requests take no credential; the rest take the session." },
       { name: "Admin", description: "For the site's admin alone: the site's storage in all, how each account uses its storage, each workspace's allowance, inviting people, and disabling, enabling and deleting an account. To anyone else these answer 404." },
-      { name: "Viewers", description: "A visitor proving an email address on the tours address, to view a tour shared with a list of addresses. No account and no token: the tour pages use these." },
+      { name: "Viewers", description: "A visitor proving an email address, to view a tour or a shared image or clip that is shared with a list of addresses: on the tours address for tours (/api/v1/view/), on the address for images and clips for those (/api/v1/media-view/), each with its own cookie. No account and no token: the pages use these." },
       { name: "Server", description: "Whether the server is up. Needs no token." },
     ],
     paths: paths(),
     components: {
-      securitySchemes: { token: { type: "http", scheme: "bearer" }, session: { type: "apiKey", in: "cookie", name: SESSION_COOKIE }, viewer: { type: "apiKey", in: "cookie", name: VIEWER_COOKIE } },
+      securitySchemes: { token: { type: "http", scheme: "bearer" }, session: { type: "apiKey", in: "cookie", name: SESSION_COOKIE }, viewer: { type: "apiKey", in: "cookie", name: VIEWER_COOKIE }, mediaViewer: { type: "apiKey", in: "cookie", name: MEDIA_VIEWER_COOKIE } },
       schemas: schemas(),
       responses: {
         Unauthorized: answer("The token or session is missing, malformed, unknown, expired or revoked.", ref("Unauthorized")),

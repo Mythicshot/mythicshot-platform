@@ -72,6 +72,7 @@ import { isUniqueViolation, type Config, type Deps, type Stmt } from "./ports.ts
 import { LIMITS_MEDIA, hitLimit, workspaceKey, type Limit } from "./rate.ts";
 import { checkImage, mediaInfo, type ImageType, type MediaType } from "./sniff.ts";
 import { ALLOWANCE_OF_SQL, USED_SQL, allowanceParams, storageFull, usageOf } from "./usage.ts";
+import type { Access } from "./viewing.ts";
 
 /** The longest request body (a part: every part but the last is exactly this long), and the most parts an item may have. */
 export { MAX_PARTS, PART_BYTES, mediaLimitsProblem };
@@ -116,7 +117,7 @@ const LINK_ATTEMPTS = 5;
 /** The part number a preview's claim row carries. */
 const PREVIEW = -1;
 
-const ITEM_ID = /^med_[0-9a-f]{24}$/;
+export const ITEM_ID = /^med_[0-9a-f]{24}$/;
 const PART_NUMBER = /^(0|[1-9][0-9]{0,2})$/;
 
 export type MediaKind = "image" | "clip";
@@ -179,7 +180,7 @@ function claimToken(): string {
   return newId("med").slice(4);
 }
 
-type ItemRow = {
+export type ItemRow = {
   id: string;
   link_id: string;
   kind: MediaKind;
@@ -192,6 +193,9 @@ type ItemRow = {
   title: string | null;
   state: "uploading" | "online" | "closing";
   created_at: number;
+  /** Who may view it (src/media-access.ts), and how many addresses its list holds. */
+  access: Access;
+  viewers: number;
   /** The current preview's type, its size and its claim, or null when the item has none. */
   preview_type: ImageType | null;
   preview_bytes: number | null;
@@ -200,11 +204,17 @@ type ItemRow = {
 
 /** The current preview claim of the item row `m` in scope, one column of it. */
 const currentPreview = (column: string) => `(SELECT o.${column} FROM media_object o WHERE o.media_id = m.id AND o.n = -1 AND o.current = 1)`;
-const ITEM_COLUMNS = `m.id, m.link_id, m.kind, m.content_type, m.bytes, m.parts, m.width, m.height, m.duration_ms, m.title, m.state, m.created_at,
+/**
+ * An item's columns. Its link id is its real one: a restricted item's is in private_link_id,
+ * and its link_id then holds a name nothing ever gives out (migration 0016), which no answer
+ * of this build carries.
+ */
+const ITEM_COLUMNS = `m.id, coalesce(m.private_link_id, m.link_id) AS link_id, m.kind, m.content_type, m.bytes, m.parts, m.width, m.height, m.duration_ms, m.title, m.state, m.created_at,
+  m.access, (SELECT count(*) FROM media_viewer v WHERE v.media_id = m.id) AS viewers,
   ${currentPreview("ext")} AS preview_type, ${currentPreview("bytes")} AS preview_bytes, ${currentPreview("claim")} AS preview_claim`;
 
 /** An item of this workspace that requests may still act on: not closing, and not left unfinished past MEDIA_MAX_AGE_MS. */
-async function loadItem(deps: Deps, auth: Auth, id: string): Promise<ItemRow | null> {
+export async function loadItem(deps: Deps, auth: Auth, id: string): Promise<ItemRow | null> {
   if (!ITEM_ID.test(id)) return null;
   const row = await deps.db.first<ItemRow>(`SELECT ${ITEM_COLUMNS} FROM media m WHERE m.id = ? AND m.workspace_id = ?`, [id, auth.workspaceId]);
   if (row === null || row.state === "closing") return null;
@@ -241,6 +251,8 @@ function itemOut(deps: Deps, row: ItemRow) {
     has_preview: row.preview_claim !== null,
     path: mediaPath(row),
     link: mediaLink(deps.config, row),
+    access: row.access,
+    viewers: row.viewers,
   };
 }
 
@@ -271,6 +283,9 @@ export async function removeClosing(deps: Deps, workspaceId: string, id: string)
   if (rows.length > 0) await deps.drafts.delete(rows.map((o) => objectKey(id, o)));
   const done = rows.filter((o) => o.stored_at !== null || o.claimed_at < floor).map((o) => o.claim);
   await deps.db.batch([
+    // Its list of who may view it goes at the first try: a closing item is served to nobody,
+    // and the row it names can then go with its last object (foreign keys never cascade).
+    { sql: "DELETE FROM media_viewer WHERE media_id IN (SELECT id FROM media WHERE id = ? AND workspace_id = ? AND state = 'closing')", params: [id, workspaceId] },
     {
       sql: "DELETE FROM media_object WHERE media_id IN (SELECT id FROM media WHERE id = ? AND workspace_id = ? AND state = 'closing') AND claim IN (SELECT value FROM json_each(?))",
       params: [id, workspaceId, JSON.stringify(done)],
@@ -576,6 +591,8 @@ function decodeCursor(cursor: string): { createdAt: number; id: string } | null 
 /** What the public serving routes need of an online item: its fields, and the private store's keys of its parts (in order) and preview. */
 export type OnlineItemFiles = {
   id: string;
+  /** Its workspace, for the viewer gate's opaque key (src/media-access.ts); never answered. */
+  workspaceId: string;
   kind: MediaKind;
   contentType: string;
   bytes: number;
@@ -585,6 +602,8 @@ export type OnlineItemFiles = {
   title: string | null;
   /** When the item went online (its commit), for the page's "shared" date. */
   sharedAt: number;
+  /** Who may view it: anything but `public` is served only past the viewer check (src/media-page.ts). */
+  access: Access;
   /** The keys in `deps.drafts` of parts 0 to parts - 1, in order: read and send them one after another. */
   parts: string[];
   /** The preview's key in `deps.drafts` and its type as read from its bytes, or null. */
@@ -602,11 +621,15 @@ export type OnlineItemFiles = {
  */
 export async function onlineItemFiles(deps: Deps, linkId: string): Promise<OnlineItemFiles | null> {
   const wellFormed = /^[a-z2-7]{20}$/.test(linkId);
-  const item = await deps.db.first<ItemRow & { online_at: number | null }>(
-    `SELECT ${ITEM_COLUMNS}, m.online_at FROM media m WHERE m.link_id = ? AND m.state = 'online'
+  const asked = wellFormed ? linkId : "";
+  // A public item by its link id; a restricted one by its real link id alone, which is in
+  // private_link_id (its link_id is a name nobody was given, and finds nothing here).
+  const item = await deps.db.first<ItemRow & { online_at: number | null; workspace_id: string }>(
+    `SELECT ${ITEM_COLUMNS}, m.online_at, m.workspace_id FROM media m
+      WHERE ((m.link_id = ? AND m.access = 'public') OR (m.private_link_id = ? AND m.access <> 'public')) AND m.state = 'online'
         AND NOT EXISTS (SELECT 1 FROM user u WHERE u.status = 'disabled'
                           AND (u.workspace_id = m.workspace_id OR u.id IN (SELECT ms.user_id FROM membership ms WHERE ms.workspace_id = m.workspace_id)))`,
-    [wellFormed ? linkId : ""],
+    [asked, asked],
   );
   // The second call is made for every input, with "" when there is no item, which finds nothing.
   const parts = await deps.db.all<{ n: number; claim: string }>("SELECT n, claim FROM media_object WHERE media_id = ? AND current = 1 AND n >= 0 ORDER BY n", [item?.id ?? ""]);
@@ -614,6 +637,7 @@ export async function onlineItemFiles(deps: Deps, linkId: string): Promise<Onlin
   if (parts.length !== item.parts || parts.some((p, i) => p.n !== i)) return null;
   return {
     id: item.id,
+    workspaceId: item.workspace_id,
     kind: item.kind,
     contentType: item.content_type,
     bytes: item.bytes,
@@ -622,6 +646,7 @@ export async function onlineItemFiles(deps: Deps, linkId: string): Promise<Onlin
     durationMs: item.duration_ms,
     title: item.title,
     sharedAt: item.online_at ?? item.created_at,
+    access: item.access,
     parts: parts.map((p) => objectKey(item.id, { n: p.n, claim: p.claim, ext: null })),
     preview: item.preview_claim === null || item.preview_type === null ? null : { key: objectKey(item.id, { n: PREVIEW, claim: item.preview_claim, ext: item.preview_type }), type: item.preview_type },
   };

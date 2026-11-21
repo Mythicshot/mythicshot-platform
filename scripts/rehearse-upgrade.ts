@@ -36,8 +36,11 @@
 // columns they had, the accounts tables and their backfill, SQLite's own checks, and the
 // list of applied migrations; the old build again on the migrated copy; then, on a fresh
 // copy, one tour restricted through the new build's API (restrictedWayBack) and the old
-// build started on it, which must serve nothing of that tour; then two new builds started at
-// the same moment on a fresh copy. The report is one line per check,
+// build started on it, which must serve nothing of that tour; then, on another fresh copy, one
+// shared item restricted the same way (restrictedItemWayBack: one is shared through the new
+// build's API first when token 1's workspace has none) and the old build started on it, which
+// must answer every address of that item as one that does not exist; then two new builds
+// started at the same moment on a fresh copy. The report is one line per check,
 // PASS or FAIL, with counts; the exit status is 1 when any check failed.
 //
 // The full rehearsal starts servers, so it is not part of npm test. The comparisons are
@@ -882,6 +885,140 @@ async function restrictedWayBack(args: Args, oldBuild: BuildInfo, newBuild: Buil
   }
 }
 
+/**
+ * Whether a build knows who may view a shared item (from 0.1.47), from its own compiled files:
+ * it has dist/media-access.js with the access routes. Such a build answers a restricted item
+ * with its gate; an older one knows nothing of the setting.
+ */
+export function knowsItemAccess(buildDir: string): boolean {
+  try {
+    return /\.put\(\s*["']\/api\/v1\/media\/:id\/access["']/.test(readFileSync(join(buildDir, "dist", "media-access.js"), "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/** A PNG header for width x height, padded to `total` bytes: what the item routes take as a PNG (they read the type and size from the first bytes). */
+function rehearsalPng(width: number, height: number, total: number): Uint8Array {
+  const be32 = (n: number) => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+  const head = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...be32(13), 0x49, 0x48, 0x44, 0x52, ...be32(width), ...be32(height), 8, 6, 0, 0, 0];
+  const out = new Uint8Array(total).fill(0x5a);
+  out.set(head);
+  return out;
+}
+
+const ITEM_EXT: Readonly<Record<string, string>> = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "video/mp4": "mp4" };
+
+/**
+ * The way back with a restricted shared item, on a fresh scratch copy. The new build (it
+ * migrates) restricts one online item of the first token's workspace through its own API, to
+ * `me`; when the workspace has none, it first shares a small image through the same API, and
+ * the report says so. Then the old build is started on that copy. An old build from before
+ * 0.1.47 knows nothing of the setting, which is the case that matters: the item's page, file,
+ * download and preview must each answer exactly as the same address of an item that does not
+ * exist (the item's link id is out of the column such a build looks it up by, migration 0016),
+ * and no answer may hold the file's bytes. An old build that knows the setting
+ * (knowsItemAccess) must answer each with its gate instead: 403, no-store, no ETag, and none of
+ * the file's bytes. The item's link and bytes are kept in memory only, never printed.
+ */
+async function restrictedItemWayBack(args: Args, oldBuild: BuildInfo, newBuild: BuildInfo, oldMode: Mode, work: string, tokens: string[], report: Report): Promise<void> {
+  const what = "way back with a restricted item";
+  const copy = join(work, "restricted-item");
+  copyData(args.data, copy);
+  const host = HOSTS.one.app;
+  const port = await freePort();
+  const r = spawnBuild(newBuild.dir, copy, "one", work, port, RESTRICT_SETTINGS);
+  let page = "";
+  let file = "";
+  let bytes: Uint8Array | null = null;
+  try {
+    try {
+      await waitReady(r, healthHosts("one"), healthRoles("one"));
+    } catch {
+      report.check(false, `${what}: the new build starts on a fresh copy to restrict an item`, r.err.slice(-3).map((l) => l.split(work).join("<scratch>")));
+      return;
+    }
+    const token = tokens[0];
+    type Item = { id: string; path: string; content_type: string };
+    let found: Item | undefined;
+    for (const kind of ["image", "clip"]) {
+      found ??= (jsonOf(await fetchAnswer(port, "GET", `/api/v1/media?kind=${kind}`, host, { token }))?.items as Item[] | undefined)?.[0];
+    }
+    if (found === undefined) {
+      // None to restrict: one is shared through the new build's API, on this scratch copy only.
+      const json = { "content-type": "application/json" };
+      const png = rehearsalPng(8, 8, 1200);
+      const made = await fetchAnswer(port, "POST", "/api/v1/media", host, { token, headers: json, body: JSON.stringify({ kind: "image", content_type: "image/png", bytes: png.length, width: 8, height: 8, title: "Rehearsal" }) });
+      const id = jsonOf(made)?.id;
+      const part = typeof id === "string" ? await fetchAnswer(port, "PUT", `/api/v1/media/${id}/parts/0`, host, { token, body: png }) : null;
+      const done = typeof id === "string" ? await fetchAnswer(port, "POST", `/api/v1/media/${id}/commit`, host, { token }) : null;
+      if (!report.check(made.status === 201 && part?.status === 204 && done?.status === 200, `${what}: token 1's workspace had no shared item, so one was shared through the new build's API`, [`the create answered ${made.status}, the part ${part?.status ?? "-"}, the commit ${done?.status ?? "-"}`])) return;
+      found = { id, path: jsonOf(done!)?.path, content_type: "image/png" };
+    }
+    page = found.path;
+    file = `${page}.${ITEM_EXT[found.content_type] ?? "png"}`;
+    const before = await fetchAnswer(port, "GET", file, host);
+    if (!report.check(before.status === 200 && before.body.length > 0, `${what}: the item's file is served while it is public (${before.body.length} bytes)`, [`the file answered ${before.status}`])) return;
+    bytes = before.body;
+    const session = await scratchSession(join(copy, "db.sqlite"), token);
+    if (session === null) {
+      report.check(false, `${what}: token 1's workspace has an account to sign in with`, ["it has none, so no session could change the item"]);
+      return;
+    }
+    const headers = { cookie: session.cookie, "x-csrf-token": session.csrf, origin: `http://${host}`, "sec-fetch-site": "same-origin", "content-type": "application/json" };
+    const a = await fetchAnswer(port, "PUT", `/api/v1/media/${found.id}/access`, host, { body: JSON.stringify({ access: "me" }), headers });
+    if (!report.check(a.status === 200 && jsonOf(a)?.access === "me", `${what}: the new build restricted one item of token 1 through its API`, [refusalLine(a)])) return;
+    const gate = await fetchAnswer(port, "GET", file, host);
+    if (!report.check(gate.status === 403 && !Buffer.from(gate.body).includes(Buffer.from(bytes)), `${what}: the new build answers its gate for the item's file, without its bytes`, [`the file answered ${gate.status}`])) return;
+  } finally {
+    await stopBuild(r);
+  }
+
+  const oldPort = await freePort();
+  const old = spawnBuild(oldBuild.dir, copy, oldMode, work, oldPort);
+  try {
+    try {
+      await waitReady(old, healthHosts(oldMode), healthRoles(oldMode));
+    } catch {
+      report.check(false, `${what}: the old build ${oldBuild.version} starts on that copy`, old.err.slice(-3).map((l) => l.split(work).join("<scratch>")));
+      return;
+    }
+    const media = HOSTS[oldMode].img ?? HOSTS[oldMode].tours;
+    const letter = page.slice(0, 3);
+    const unknownLink = "z".repeat(20);
+    const ext = file.slice(file.lastIndexOf("."));
+    const addresses: [string, string, string][] = [
+      ["page", page, `${letter}${unknownLink}`],
+      ["file", file, `${letter}${unknownLink}${ext}`],
+      ["download", `${page}/download`, `${letter}${unknownLink}/download`],
+      ["preview", `${page}/preview`, `${letter}${unknownLink}/preview`],
+    ];
+    const problems: string[] = [];
+    const holdsBytes = (x: Answer) => bytes !== null && Buffer.from(x.body).includes(Buffer.from(bytes));
+    if (knowsItemAccess(oldBuild.dir)) {
+      for (const [name, address] of addresses) {
+        const x = await fetchAnswer(oldPort, "GET", address, media);
+        if (x.status !== 403) problems.push(`the item's ${name} answered ${x.status}, not the gate`);
+        if (!/no-store/.test(x.headers["cache-control"] ?? "")) problems.push(`the item's ${name} may be stored by a cache`);
+        if (x.headers.etag !== undefined) problems.push(`the item's ${name} carries an ETag`);
+        if (holdsBytes(x)) problems.push(`the item's ${name} holds its file`);
+      }
+      report.check(problems.length === 0, `${what}: old build ${oldBuild.version} knows who may view an item, and answers its gate at all ${addresses.length} addresses with nothing of the item`, problems);
+      return;
+    }
+    let asUnknown = 0;
+    for (const [name, address, unknown] of addresses) {
+      const x = await fetchAnswer(oldPort, "GET", address, media);
+      const y = await fetchAnswer(oldPort, "GET", unknown, media);
+      if (x.status === y.status && Buffer.from(x.body).equals(Buffer.from(y.body)) && !holdsBytes(x)) asUnknown++;
+      else problems.push(`the item's ${name} answered ${x.status}, not as an item that does not exist`);
+    }
+    report.check(problems.length === 0, `${what}: old build ${oldBuild.version} serves nothing of it (${asUnknown} of ${addresses.length} addresses as an item that does not exist)`, problems);
+  } finally {
+    await stopBuild(old);
+  }
+}
+
 /** Runs the whole rehearsal and returns the exit status. */
 export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (line: string) => void): Promise<number> {
   const args = parseArgs(argv, env);
@@ -921,9 +1058,9 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
 
     // The old build against the new one: a JSON answer that only adds fields is allowed, and
     // named; a tour page that names the new build's player files is allowed, and counted.
-    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true, allowPlayerNames: true });
+    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true, allowPlayerNames: true, allowItemCache: true });
     addedCount = addedFieldCount(cmp);
-    report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.playerNames} differ only in the player's file names, ${cmp.addedFields} differ only by added fields, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
+    report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.playerNames} differ only in the player's file names, ${cmp.itemCache > 0 ? `${cmp.itemCache} shared item answers differ only in their cache rule, ` : ""}${cmp.addedFields} differ only by added fields, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
     for (const route of Object.keys(cmp.addedFieldsByRoute).sort()) report.line(`      added fields, ${route}: ${cmp.addedFieldsByRoute[route].join(", ")}`);
 
     // The player files the new build's tour pages name must be there: a page that names a
@@ -974,7 +1111,7 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
       // Nothing of the new build's allowances: the old build must answer as it did, but the date.
       const again = compareAnswers(old.answers, back.answers);
       const backProblems = identityProblems(again);
-      report.check(backProblems.length === 0, `way back: answers ${again.identical} identical to before the update, ${again.allowed + again.playerNames + again.added.length} allowed differences, ${again.problems.length} differ`, backProblems);
+      report.check(backProblems.length === 0, `way back: answers ${again.identical} identical to before the update, ${again.allowed + again.playerNames + again.itemCache + again.added.length} allowed differences, ${again.problems.length} differ`, backProblems);
       const s = compareStores(old.stores, back.stores);
       report.check(storesSame(s), `way back: stores ${s.files} files identical (${s.missing} missing, ${s.extra} extra, ${s.changed} changed)`);
       const keptMigrations = migrationProblems(back.endDb.migrations, newBuild.migrations);
@@ -987,6 +1124,8 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
 
     // --- the way back once a tour is restricted, on a fresh copy of the old data
     await restrictedWayBack(args, oldBuild, newBuild, modes.old, work, tokens, report);
+    // --- and once a shared item is restricted, on another fresh copy
+    await restrictedItemWayBack(args, oldBuild, newBuild, modes.old, work, tokens, report);
 
     // --- two new builds at the same moment on a fresh copy of the old data
     const race = join(work, "race");

@@ -346,6 +346,8 @@ By hand, the same is `npx wrangler d1 migrations apply demo-platform --remote --
 
 **How to tell it worked:** `/healthz` prints `{"ok":true}` and Mythicshot's Test connection works.
 
+Shared images and clips: from 0.1.47 their pages and files are sent with `Cache-Control: no-cache`, so a cache in front of the site (a tunnel's or a CDN's edge, a proxy) asks the site before it serves one again and a restricted, deleted or disabled item is not served from it. A copy such a cache stored under 0.1.46 or earlier can still be served for up to an hour after the update (a page for up to a minute); purge the cache after the update if an item must stop being seen at once. A browser that already loaded a file keeps it.
+
 ### Going back to an earlier version
 
 Going back to a version before 0.1.38 is refused once a tour is restricted: on cPanel, `cpanel.sh` refuses it (unless `--no-restricted-tours-checked-by-hand` states that someone checked by hand, and only when it cannot read the database). On this route nothing checks it for you before you deploy an earlier version: only the database stands in the way, whose triggers make an earlier version's publish or rename of a restricted tour fail instead of making it public. Version 0.1.38 brings who may view a tour. A version before it does not know that setting, so once any tour has been made `people` or `me`, or is being changed to or from that, never deploy an earlier version on the same database: it could show that tour to anyone.
@@ -354,6 +356,8 @@ Going back to a version before 0.1.38 is refused once a tour is restricted: on c
 > Do not go back to an earlier version once a tour is restricted; restore the backup taken before the update instead, which loses everything done on the site since it was taken.
 
 Find out first with `npx wrangler d1 execute demo-platform --remote --config wrangler.deploy.jsonc --command "SELECT (SELECT count(*) FROM tour WHERE access <> 'public') + (SELECT count(*) FROM access_switch) AS n"`: anything but `0` means restore (see [Back up and restore](#back-up-and-restore)), not go back. Restoring brings back the tours, links, accounts and settings as they were when the backup was taken; everything done since is lost.
+
+The same holds for a version before 0.1.47 once a shared image or clip is restricted to people or to its owner: such a version does not know who may view an item, answers a restricted item's link as one that does not exist, and could show the item to anyone through another link it would give its owner. Check with `npx wrangler d1 execute demo-platform --remote --config wrangler.deploy.jsonc --command "SELECT count(*) AS n FROM media WHERE access <> 'public'"`: anything but `0` means restore, not go back.
 
 ## Back up and restore
 

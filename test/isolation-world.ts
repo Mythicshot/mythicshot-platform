@@ -73,7 +73,7 @@ export type Ids = {
   /** An open upload that replaces the draft tour's chapter: step 1 reused, step 2 not sent. */
   replaceUpload: string;
   /** Shared items: an online image (with a preview), an online clip, and an unfinished image (its part and preview sent); each with its link id. */
-  media: { image: string; clip: string; uploading: string; imageLink: string; clipLink: string; uploadingLink: string };
+  media: { image: string; clip: string; uploading: string; imageLink: string; clipLink: string; uploadingLink: string; restricted: string; restrictedLink: string };
   /**
    * The manifest steps of the two open uploads and of the draft chapter as it is now, and
    * the declared shape of the unfinished item, to build pictures that would be accepted.
@@ -151,7 +151,7 @@ const sizes = (base: number) => ({
   restricted: [base + 50, base + 51],
   switching: Array.from({ length: 14 }, (_, i) => base + 60 + i),
   gone: [base + 30],
-  media: { image: base + 40, clip: base + 41, uploading: base + 42 },
+  media: { image: base + 40, clip: base + 41, uploading: base + 42, restricted: base + 43 },
 });
 
 /**
@@ -172,7 +172,7 @@ export function inventedIds(like?: Ids): Ids {
     switching: { ...tour(), publicName: name(), movedName: name() },
     upload: newId("up"),
     replaceUpload: newId("up"),
-    media: { image: newId("med"), clip: newId("med"), uploading: newId("med"), imageLink: newLinkId(), clipLink: newLinkId(), uploadingLink: newLinkId() },
+    media: { image: newId("med"), clip: newId("med"), uploading: newId("med"), imageLink: newLinkId(), clipLink: newLinkId(), uploadingLink: newLinkId(), restricted: newId("med"), restrictedLink: newLinkId() },
     pictures: like?.pictures ?? {
       upload: manifestOf(s.upload, "x", true).steps,
       replaceUpload: manifestOf(s.openReplace, "x").steps,
@@ -347,6 +347,20 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
   const image = await shareItem(deps, token, { kind: "image", content_type: "image/png", bytes: s.media.image, width: 64, height: 64, title: `${name} shared image` }, png(64, 64, s.media.image, fill), { preview: true, commit: true });
   const clip = await shareItem(deps, token, { kind: "clip", content_type: "image/gif", bytes: s.media.clip, width: 32, height: 32, duration_ms: 1200, title: `${name} shared clip` }, gif(32, 32, s.media.clip, fill), { preview: false, commit: true });
   const unfinished = await shareItem(deps, token, { kind: "image", content_type: "image/png", ...mediaSpec, title: `${name} unfinished item` }, mediaPart(mediaSpec, fill), { preview: true, commit: false });
+  // A restricted image, shared with the side's viewer address (migration 0016): its link is
+  // kept in private_link_id, and only the media viewer scope opens it.
+  const shut = await shareItem(deps, token, { kind: "image", content_type: "image/png", bytes: s.media.restricted, width: 64, height: 64, title: `${name} restricted image` }, png(64, 64, s.media.restricted, fill), { preview: true, commit: true });
+  deps.config = { ...config, siteHost: config.siteHost ?? "tours.example.com" };
+  must(
+    await send(deps, "PUT", `/api/v1/media/${shut.id}/access`, {
+      origin: appAddress,
+      body: JSON.stringify({ access: "people", viewers: [viewer] }),
+      headers: { cookie: session.cookie, origin: appAddress, "x-csrf-token": session.csrf, "sec-fetch-site": "same-origin", ...JSON_HEADERS },
+    }),
+    200,
+    "restricting an item",
+  );
+  deps.config = config;
 
   const tourIds = async (t: { tour_id: string; chapter_id: string }): Promise<TourIds & { sha256: string[] }> => {
     const slug = (await need(deps.db.first<{ slug: string }>("SELECT slug FROM tour WHERE id = ?", [t.tour_id]), "tour")).slug;
@@ -386,7 +400,7 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
     },
     upload,
     replaceUpload: second.json.upload_id,
-    media: { image: image.id, clip: clip.id, uploading: unfinished.id, imageLink: image.link, clipLink: clip.link, uploadingLink: unfinished.link },
+    media: { image: image.id, clip: clip.id, uploading: unfinished.id, imageLink: image.link, clipLink: clip.link, uploadingLink: unfinished.link, restricted: shut.id, restrictedLink: shut.link },
     pictures: { upload: uploading.steps, replaceUpload: openReplace.steps, draft: replaced.steps, media: mediaSpec },
     fill,
     session: "",
@@ -497,6 +511,8 @@ export const OWNED: Readonly<Record<string, string>> = {
   deleted_object: "tour_id IN (SELECT tour_id FROM tour_deletion WHERE workspace_id = ?)",
   media: "workspace_id = ?",
   media_object: "media_id IN (SELECT id FROM media WHERE workspace_id = ?)",
+  // Who may view a shared item (migration 0016): its list of addresses.
+  media_viewer: "media_id IN (SELECT id FROM media WHERE workspace_id = ?)",
   // A request to connect belongs to no workspace until it is confirmed, and then to the confirming one.
   connect_request: "workspace_id = ?",
   // A delete of the workspace's account that has started and not finished.
@@ -518,6 +534,9 @@ export const SHARED: Readonly<Record<string, string>> = {
   // design: they are not the account's, and src/account-removal.ts says so.
   viewer_code: "mailed viewer codes: an address, a tour's slug and the digest of a code; no workspace, account or tour row is named",
   viewer_session: "viewer sessions: an address that proved it reads its mail and the digest of the cookie's secret; no workspace or account is named",
+  // The media scope's viewers (migration 0016), on the media address: the same, for shared items.
+  media_viewer_code: "mailed viewer codes for shared items: an address, an item's page path and the digest of a code; no workspace, account or item row is named",
+  media_viewer_session: "viewer sessions for shared items: an address that proved it reads its mail and the digest of the cookie's secret; no workspace or account is named",
 };
 
 /**

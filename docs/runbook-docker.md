@@ -414,6 +414,14 @@ docker compose exec -T app node -e 'const { DatabaseSync } = process.getBuiltinM
 
 It prints a number: anything but `0` means restore, not go back.
 
+The same holds for a version before 0.1.47 once a shared image or clip is restricted to people or to its owner: such a version does not know who may view an item. It answers a restricted item's link as one that does not exist, but it could show the item to anyone through another link it would give its owner. Check before you go back below 0.1.47:
+
+```sh
+docker compose exec -T app node -e 'const { DatabaseSync } = process.getBuiltinModule("node:sqlite"); const db = new DatabaseSync("/data/db.sqlite", { readOnly: true }); console.log(db.prepare("SELECT count(*) AS n FROM media WHERE access <> ?").get("public").n); db.close();'
+```
+
+Anything but `0` means restore, not go back.
+
 ### Make yourself the admin
 
 The version with accounts brings sign-in with a link sent instead of a password, and the dashboard behind it. An updated site keeps working exactly as before, its tours, links and tokens unchanged, and nobody can sign in until the site has an admin. The admin is made once, by a command run in the app container, with the settings the app itself runs with; there is no web page for it, and the setup code plays no part in it.
@@ -627,6 +635,8 @@ Use this route when the server cannot take connections from the internet: a serv
 | DNS record | an A record you create, at any DNS provider | managed at Cloudflare, which must run the domain's DNS |
 | Containers | app, caddy | app, caddy, cloudflared |
 | Secrets in `.env` | the setup code | the setup code and the tunnel token |
+
+Shared images and clips: from 0.1.47 their pages and files are sent with `Cache-Control: no-cache`, so a cache in front of the site (a tunnel's or a CDN's edge, a proxy) asks the site before it serves one again and a restricted, deleted or disabled item is not served from it. A copy such a cache stored under 0.1.46 or earlier can still be served for up to an hour after the update (a page for up to a minute); purge the cache after the update if an item must stop being seen at once. A browser that already loaded a file keeps it.
 
 ### What to have ready for the tunnel
 
@@ -1186,6 +1196,7 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `account_enabled` | The admin enabled a disabled account again; the account is the admin, the subject the enabled account |
 | `account_deleted` | The admin's delete of a disabled account finished: the account, its workspace and everything in it are gone. The account is the admin who sent the last delete request, the workspace and the subject are the deleted workspace's and account's ids. Nothing else of the person is recorded, and the rows recorded about the account before stay |
 | `tour_access_changed` | Who may view a tour changed, or its list of addresses did; the subject is the tour, the account is the one signed in (none when a token made the change), and the detail holds the settings and the list's sizes, such as `{"from":"public","to":"people","viewers_before":0,"viewers":3,"by":"session"}`. Made public from a published tour, it is written when the move of its pictures finishes. No address is recorded |
+| `media_access_changed` | Who may view a shared image or clip changed, or its list of addresses did; the subject is the item, the account is the one signed in, and the detail holds the settings and the list's sizes, such as `{"from":"public","to":"people","viewers_before":0,"viewers":3,"by":"session"}`. It takes effect at the next request: nothing moves. No address is recorded |
 | `viewer_link_sent` | A link for a visitor to view a tour shared with their address was made to be mailed; the mail itself may still have failed. Only the subject is set, the link's own id: no account, workspace, tour or address is recorded |
 | `viewer_signin` | A visitor used such a link and this browser now views tours as that address; the subject is the viewer session. No account, workspace or address is recorded |
 

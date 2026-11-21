@@ -64,7 +64,7 @@ import { POLL_GAP_MS } from "../src/connect.ts";
 import { PAD_BUCKET } from "../src/signin.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { VIEW_GATE_HTML } from "../src/view-page.ts";
-import { VIEWER_CODE_MS, VIEWER_COOKIE } from "../src/viewers.ts";
+import { MEDIA_VIEWER_COOKIE, VIEWER_CODE_MS, VIEWER_COOKIE } from "../src/viewers.ts";
 import { ORIGIN, commit, logoPng, putStep, send, stepImage, type Call, type Json } from "./bundle.ts";
 import { OWNED, SHARED, TRY_BUCKETS, createReplace, dumpOf, inventedIds, manifestOf, mediaPart, namesIn, needlesOf, snapshotOf, tablesOf, world, type Ids, type Side, type World } from "./isolation-world.ts";
 
@@ -131,6 +131,13 @@ const theirCodes = (t: Ids): [string, string][] => [
 ];
 const uploadPath = (id: string, rest = "") => `/api/v1/uploads/${id}${rest}`;
 const mediaPath = (id: string, rest = "") => `/api/v1/media/${id}${rest}`;
+/** Each of the other workspace's shared items, in every state an item can be in. */
+const theirItems = (t: Ids): [string, string][] => [
+  ["their online image", t.media.image],
+  ["their online clip", t.media.clip],
+  ["their unfinished item", t.media.uploading],
+  ["their restricted image", t.media.restricted],
+];
 /** Each of the other workspace's tours, in every state a tour can be in. */
 const theirTours = (t: Ids): [string, string][] => [
   ["their published tour", t.published.tour],
@@ -187,6 +194,14 @@ const CASES: Record<string, Entry> = {
       { what: `${what}, made public with an empty list`, method: "PUT", path: tourPath(id, "/access"), json: { access: "public", viewers: [] }, only: "session" as const, expect: NO_TOUR },
       { what: `${what}, made restricted to the caller's address`, method: "PUT", path: tourPath(id, "/access"), json: { access: "people", viewers: ["intruder@example.com"] }, only: "session" as const, expect: NO_TOUR },
       { what: `${what}, its switch continued`, method: "PUT", path: tourPath(id, "/access"), json: { access: "me" }, only: "session" as const, expect: NO_TOUR },
+    ]),
+  // Who may view a shared item, and its list of addresses: the workspace's own data.
+  "GET /api/v1/media/:id/access": (t) => theirItems(t).map(([what, id]) => ({ what, method: "GET", path: mediaPath(id, "/access"), expect: NO_ITEM })),
+  "PUT /api/v1/media/:id/access": (t) =>
+    theirItems(t).flatMap(([what, id]) => [
+      { what: `${what}, made public with an empty list`, method: "PUT", path: mediaPath(id, "/access"), json: { access: "public", viewers: [] }, only: "session" as const, expect: NO_ITEM },
+      { what: `${what}, made restricted to the caller's address`, method: "PUT", path: mediaPath(id, "/access"), json: { access: "people", viewers: ["intruder@example.com"] }, only: "session" as const, expect: NO_ITEM },
+      { what: `${what}, made the owner's alone`, method: "PUT", path: mediaPath(id, "/access"), json: { access: "me" }, only: "session" as const, expect: NO_ITEM },
     ]),
   "DELETE /api/v1/sessions/:id": (t) => [
     { what: "the session they are signed in with", method: "DELETE", path: `/api/v1/sessions/${t.session}`, only: "session", expect: NO_SESSION },
@@ -276,7 +291,7 @@ const LISTS: Record<string, { path: string; holds: string; only?: "token" | "ses
  * picture, which src/restricted.ts serves to a proved address that may view it); the test "a
  * viewer cookie" checks that it opens there, and test/restricted.test.ts checks every case.
  */
-type Sample = { method: string; path: string; json?: unknown; headers?: Record<string, string>; viewer?: true };
+type Sample = { method: string; path: string; json?: unknown; headers?: Record<string, string>; viewer?: true; mediaViewer?: true };
 
 /**
  * Routes with no id that make something new in the caller's own workspace: what they make,
@@ -347,15 +362,25 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
   // account that is not disabled; every other link is the one 404 page.
   "GET /i/:name": {
     reason: "a shared image's page or file, for visitors: only an online item answers, by its random link id, never by its database id",
-    samples: (w) => [{ method: "GET", path: `/i/${w.a.ids.media.imageLink}` }, { method: "GET", path: `/i/${w.a.ids.media.imageLink}.png` }, { method: "GET", path: `/i/${w.a.ids.media.uploadingLink}` }, { method: "GET", path: `/i/${w.a.ids.media.image}` }, { method: "GET", path: `/i/${w.a.ids.media.clipLink}` }, { method: "GET", path: `/i/${inventedIds().media.imageLink}` }],
+    samples: (w) => [
+      { method: "GET", path: `/i/${w.a.ids.media.imageLink}` },
+      { method: "GET", path: `/i/${w.a.ids.media.imageLink}.png` },
+      { method: "GET", path: `/i/${w.a.ids.media.uploadingLink}` },
+      { method: "GET", path: `/i/${w.a.ids.media.image}` },
+      { method: "GET", path: `/i/${w.a.ids.media.clipLink}` },
+      { method: "GET", path: `/i/${inventedIds().media.imageLink}` },
+      // A restricted image: its fixed gate to everyone but a media viewer cookie of an address it may be viewed by.
+      { method: "GET", path: `/i/${w.a.ids.media.restrictedLink}`, mediaViewer: true },
+      { method: "GET", path: `/i/${w.a.ids.media.restrictedLink}.png`, mediaViewer: true },
+    ],
   },
   "GET /i/:name/download": {
     reason: "a shared image's file to save, for visitors: only an online item answers, by its random link id",
-    samples: (w) => [{ method: "GET", path: `/i/${w.a.ids.media.imageLink}/download` }, { method: "GET", path: `/i/${w.a.ids.media.uploadingLink}/download` }, { method: "GET", path: `/i/${inventedIds().media.imageLink}/download` }],
+    samples: (w) => [{ method: "GET", path: `/i/${w.a.ids.media.imageLink}/download` }, { method: "GET", path: `/i/${w.a.ids.media.uploadingLink}/download` }, { method: "GET", path: `/i/${inventedIds().media.imageLink}/download` }, { method: "GET", path: `/i/${w.a.ids.media.restrictedLink}/download`, mediaViewer: true }],
   },
   "GET /i/:name/preview": {
     reason: "a shared image's preview picture, for link previews: only an online item's, by its random link id",
-    samples: (w) => [{ method: "GET", path: `/i/${w.a.ids.media.imageLink}/preview` }, { method: "GET", path: `/i/${w.a.ids.media.uploadingLink}/preview` }, { method: "GET", path: `/i/${inventedIds().media.imageLink}/preview` }],
+    samples: (w) => [{ method: "GET", path: `/i/${w.a.ids.media.imageLink}/preview` }, { method: "GET", path: `/i/${w.a.ids.media.uploadingLink}/preview` }, { method: "GET", path: `/i/${inventedIds().media.imageLink}/preview` }, { method: "GET", path: `/i/${w.a.ids.media.restrictedLink}/preview`, mediaViewer: true }],
   },
   "GET /r/:name": {
     reason: "a shared clip's page or file, for visitors: only an online item answers, by its random link id, never by its database id",
@@ -371,6 +396,12 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
   },
   "GET /s/share.css": { reason: "the shared-item pages' stylesheet, fixed text", samples: () => [{ method: "GET", path: "/s/share.css" }] },
   "GET /s/share.js": { reason: "the shared-item pages' script, fixed text", samples: () => [{ method: "GET", path: "/s/share.js" }] },
+  "GET /i/:name/signout": { reason: "the page \"Not you?\" under a restricted image leads to, fixed text whatever the name; it signs out only on a press", samples: (w) => [{ method: "GET", path: `/i/${w.a.ids.media.restrictedLink}/signout` }] },
+  "GET /r/:name/signout": { reason: "the page \"Not you?\" under a restricted clip leads to, fixed text whatever the name; it signs out only on a press", samples: (w) => [{ method: "GET", path: `/r/${w.a.ids.media.clipLink}/signout` }] },
+  "GET /s/view": { reason: "the page a viewer link for an image or clip opens, fixed text; the code stays in the browser and goes to the API only in request bodies", samples: () => [{ method: "GET", path: "/s/view" }] },
+  "GET /s/view.js": { reason: "the media viewer pages' script, fixed text", samples: () => [{ method: "GET", path: "/s/view.js" }] },
+  "GET /s/view.css": { reason: "the media viewer pages' stylesheet, fixed text", samples: () => [{ method: "GET", path: "/s/view.css" }] },
+  "GET /s/shared.css": { reason: "the stylesheet of the line under a restricted image or clip, fixed text", samples: () => [{ method: "GET", path: "/s/shared.css" }] },
   "GET /docs": { reason: "the documentation page, the same for everyone", samples: () => [{ method: "GET", path: "/docs" }] },
   "GET /docs/:file{(?:viewer|docs)\\.[0-9a-f]{16}\\.(?:js|css)}": { reason: "the documentation page's own files", samples: () => [{ method: "GET", path: "/docs/viewer.0123456789abcdef.js" }] },
   "GET /docs/licences.txt": { reason: "licence notices, fixed text", samples: () => [{ method: "GET", path: "/docs/licences.txt" }] },
@@ -537,6 +568,12 @@ const VIEWER: Record<string, { reason: string }> = {
   "POST /api/v1/view/complete": { reason: "turns a 160-bit viewer code into a viewer session for the address it was mailed to; it reaches no workspace and no account" },
   "POST /api/v1/view/signout": { reason: "ends the browser's own viewer session, named by its cookie; nothing of any workspace or account" },
   "GET /api/v1/view/session": { reason: "the address the browser's own viewer cookie proved, and nothing else" },
+  // The same on the media address, for shared items (src/viewers.ts, MEDIA_VIEWERS): their own cookie and tables.
+  "POST /api/v1/media-view/request": { reason: "asks for a viewer link to a shared item: the same answer for every item and address, and a link goes only to an address the item's own list holds" },
+  "POST /api/v1/media-view/check": { reason: "shows the address and the item's page a viewer code was mailed for, to whoever holds the 160-bit code; it changes nothing and reads no workspace" },
+  "POST /api/v1/media-view/complete": { reason: "turns a 160-bit viewer code for an item into a media viewer session for the address it was mailed to; it reaches no workspace and no account" },
+  "POST /api/v1/media-view/signout": { reason: "ends the browser's own media viewer session, named by its cookie; nothing of any workspace or account" },
+  "GET /api/v1/media-view/session": { reason: "the address the browser's own media viewer cookie proved, and nothing else" },
 };
 
 type Tables = Record<string, Record<string, unknown>>;
@@ -812,7 +849,7 @@ describe("one workspace against another", () => {
     for (const n of invented) expect(names).not.toContain(n);
     for (const side of [w.a, w.b]) {
       const s = await snapshotOf(w.deps, side, w.keys);
-      for (const table of ["workspace", "user", "membership", "signin_method", "signin_code", "session", "email_change", "audit", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object", "media", "media_object", "tour_viewer", "access_switch"]) {
+      for (const table of ["workspace", "user", "membership", "signin_method", "signin_code", "session", "email_change", "audit", "api_token", "tour", "chapter", "step", "snapshot", "snapshot_object", "public_object", "publish_job", "replaced_object", "upload", "upload_step", "tour_deletion", "deleted_object", "media", "media_object", "tour_viewer", "access_switch", "media_viewer"]) {
         expect(s.rows[table].length, `${side.name} has no row in ${table}`).toBeGreaterThan(0);
       }
       // Every file a row names is there, but the one picture the publish in progress has not
@@ -1014,9 +1051,9 @@ describe("one workspace against another", () => {
     for (const [me, them] of [[w.a, w.b], [w.b, w.a]] as const) {
       const mine = JSON.parse(first[me === w.a ? "a" : "b"]["GET /api/v1/usage/largest by session"].body).largest as Json[];
       expect(mine.map((e) => e.id).sort()).toEqual(
-        [me.ids.published.tour, me.ids.draft.tour, me.ids.publishing.tour, me.ids.restricted.tour, me.ids.switching.tour, me.ids.media.image, me.ids.media.clip, me.ids.media.uploading].sort(),
+        [me.ids.published.tour, me.ids.draft.tour, me.ids.publishing.tour, me.ids.restricted.tour, me.ids.switching.tour, me.ids.media.image, me.ids.media.clip, me.ids.media.uploading, me.ids.media.restricted].sort(),
       );
-      const theirs = new Set([them.ids.published.tour, them.ids.draft.tour, them.ids.publishing.tour, them.ids.restricted.tour, them.ids.switching.tour, them.ids.media.image, them.ids.media.clip, them.ids.media.uploading]);
+      const theirs = new Set([them.ids.published.tour, them.ids.draft.tour, them.ids.publishing.tour, them.ids.restricted.tour, them.ids.switching.tour, them.ids.media.image, them.ids.media.clip, them.ids.media.uploading, them.ids.media.restricted]);
       for (const e of mine) expect(theirs.has(e.id as string), String(e.id)).toBe(false);
     }
 
@@ -1562,9 +1599,10 @@ describe("routes with no owner", () => {
     expect(statuses["POST /api/v1/signin/complete"]).toEqual([403]);
     expect(statuses["GET /"]).toEqual([302]);
     // A shared item answers only online, by its link id and under its own letter; the image has a preview, the clip none.
-    expect(statuses["GET /i/:name"]).toEqual([200, 200, 404, 404, 404, 404]);
-    expect(statuses["GET /i/:name/download"]).toEqual([200, 404, 404]);
-    expect(statuses["GET /i/:name/preview"]).toEqual([200, 404, 404]);
+    // The restricted image answers its fixed gate (403) on every one of its addresses: no caller here has a media viewer cookie.
+    expect(statuses["GET /i/:name"]).toEqual([200, 200, 404, 404, 404, 404, 403, 403]);
+    expect(statuses["GET /i/:name/download"]).toEqual([200, 404, 404, 403]);
+    expect(statuses["GET /i/:name/preview"]).toEqual([200, 404, 404, 403]);
     expect(statuses["GET /r/:name"]).toEqual([200, 200, 404, 404, 404]);
     expect(statuses["GET /r/:name/download"]).toEqual([200, 404]);
     expect(statuses["GET /r/:name/preview"]).toEqual([404, 404]);
@@ -1769,79 +1807,86 @@ describe("deleting an account", () => {
 });
 
 describe("a viewer cookie", () => {
-  it("changes no answer of any route but the viewer's own: every answer with a live viewer cookie is the answer without it, byte for byte", SLOW, async () => {
-    const w = await build();
-    const { deps, a, b } = w;
-    // A live viewer session for the first side's own address, made by the real completion: on
-    // a site with one address the viewer cookie and the account's session share the host,
-    // which is where one could most easily be taken for the other.
-    const code = "dpv_" + "c".repeat(40);
-    await deps.db.run("INSERT INTO viewer_code (id, email, slug, code_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)", [newId("vco"), a.email, a.ids.published.slug, await hashToken(code), deps.now(), deps.now() + VIEWER_CODE_MS]);
-    const done = await fire(deps, { method: "POST", path: "/api/v1/view/complete", json: { code } }, { token: null, headers: { "sec-fetch-site": "same-origin" }, page: true });
-    expect(done.status, done.text).toBe(200);
-    const viewer = done.headers.getSetCookie()[0].split(";")[0];
-    expect(viewer.startsWith(`${VIEWER_COOKIE}=dpw_`)).toBe(true);
-    expect((await fire(deps, { method: "GET", path: "/api/v1/view/session" }, { token: null, headers: { cookie: viewer } })).json).toEqual({ email: a.email });
+  for (const kind of ["tour", "media"] as const) {
+    it(`changes no answer of any route but the viewer's own: every answer with a live ${kind === "tour" ? "tours" : "media"} viewer cookie is the answer without it, byte for byte`, SLOW, async () => {
+      const w = await build();
+      const { deps, a, b } = w;
+      // A live viewer session for the first side's own address, made by the real completion: on
+      // a site with one address both viewer cookies and the account's session share the host,
+      // which is where one could most easily be taken for another.
+      const prefix = kind === "tour" ? "/api/v1/view" : "/api/v1/media-view";
+      const code = (kind === "tour" ? "dpv_" : "dpi_") + "c".repeat(40);
+      if (kind === "tour") await deps.db.run("INSERT INTO viewer_code (id, email, slug, code_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)", [newId("vco"), a.email, a.ids.published.slug, await hashToken(code), deps.now(), deps.now() + VIEWER_CODE_MS]);
+      else await deps.db.run("INSERT INTO media_viewer_code (id, email, path, code_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)", [newId("vcm"), a.email, `/i/${a.ids.media.restrictedLink}`, await hashToken(code), deps.now(), deps.now() + VIEWER_CODE_MS]);
+      const done = await fire(deps, { method: "POST", path: `${prefix}/complete`, json: { code } }, { token: null, headers: { "sec-fetch-site": "same-origin" }, page: true });
+      expect(done.status, done.text).toBe(200);
+      const viewer = done.headers.getSetCookie()[0].split(";")[0];
+      expect(viewer.startsWith(kind === "tour" ? `${VIEWER_COOKIE}=dpw_` : `${MEDIA_VIEWER_COOKIE}=dpk_`)).toBe(true);
+      expect((await fire(deps, { method: "GET", path: `${prefix}/session` }, { token: null, headers: { cookie: viewer } })).json).toEqual({ email: a.email });
 
-    /** The same credential with the viewer cookie added to whatever cookies the request already sends. */
-    const plus = (r: Req | Sample, c: Credential): Credential => {
-      const cookies = ["headers" in r ? r.headers?.cookie : undefined, c.headers?.cookie, viewer].filter((x): x is string => typeof x === "string");
-      return { ...c, headers: { ...c.headers, cookie: cookies.join("; ") } };
-    };
-    // A request that makes a request to connect answers new random codes each time: those alone are put aside.
-    const steady = (c: Call) => ({ ...seen(c), body: c.text.replace(/dpd_[0-9a-f]{40}/g, "dpd_…").replace(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/g, "XXXX-XXXX") });
-    const covered = new Set<string>();
-    const compare = async (key: string, what: string, r: Req | Sample, c: Credential) => {
-      w.tick();
-      const without = await fire(deps, r, c);
-      const withIt = await fire(deps, r, plus(r, c));
-      expect(steady(withIt), `${key}: ${what}`).toEqual(steady(without));
-      covered.add(key);
-    };
-    const nobody: Credential = { token: null };
-    const page: Credential = { token: null, headers: { "sec-fetch-site": "same-origin" }, page: true };
+      /** The same credential with the viewer cookie added to whatever cookies the request already sends. */
+      const plus = (r: Req | Sample, c: Credential): Credential => {
+        const cookies = ["headers" in r ? r.headers?.cookie : undefined, c.headers?.cookie, viewer].filter((x): x is string => typeof x === "string");
+        return { ...c, headers: { ...c.headers, cookie: cookies.join("; ") } };
+      };
+      // A request that makes a request to connect answers new random codes each time: those alone are put aside.
+      const steady = (c: Call) => ({ ...seen(c), body: c.text.replace(/dpd_[0-9a-f]{40}/g, "dpd_…").replace(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/g, "XXXX-XXXX") });
+      const covered = new Set<string>();
+      const compare = async (key: string, what: string, r: Req | Sample, c: Credential) => {
+        w.tick();
+        const without = await fire(deps, r, c);
+        const withIt = await fire(deps, r, plus(r, c));
+        expect(steady(withIt), `${key}: ${what}`).toEqual(steady(without));
+        covered.add(key);
+      };
+      const nobody: Credential = { token: null };
+      const page: Credential = { token: null, headers: { "sec-fetch-site": "same-origin" }, page: true };
 
-    // Ids in the path or the body: the other workspace's, by the token and by the session.
-    for (const { key, req } of everyCase(b.ids, a.ids)) for (const credential of CREDENTIALS) await compare(key, `${req.what} by ${credential.name}`, req, credential.of(a));
-    // The caller's own lists, by each credential each takes.
-    for (const [key, list] of Object.entries(LISTS)) {
-      for (const credential of CREDENTIALS) if (list.only === undefined || list.only === credential.name) await compare(key, `by ${credential.name}`, { method: "GET", path: list.path }, credential.of(a));
-    }
-    // Routes with no owner, by nobody and by the owner's session. A restricted tour's page and
-    // live picture open to the viewer cookie of the owner's own address, and to nothing else.
-    for (const [key, entry] of Object.entries(OPEN)) {
-      for (const sample of entry.samples(w)) {
-        for (const [who, c] of [["nobody", nobody], ["the session", BY_SESSION.of(a)]] as const) {
-          if (sample.viewer !== true) {
-            await compare(key, `${sample.path} by ${who}`, sample, c);
-            continue;
+      // Ids in the path or the body: the other workspace's, by the token and by the session.
+      for (const { key, req } of everyCase(b.ids, a.ids)) for (const credential of CREDENTIALS) await compare(key, `${req.what} by ${credential.name}`, req, credential.of(a));
+      // The caller's own lists, by each credential each takes.
+      for (const [key, list] of Object.entries(LISTS)) {
+        for (const credential of CREDENTIALS) if (list.only === undefined || list.only === credential.name) await compare(key, `by ${credential.name}`, { method: "GET", path: list.path }, credential.of(a));
+      }
+      // Routes with no owner, by nobody and by the owner's session. A restricted tour's page and
+      // live picture open to the tours viewer cookie of the owner's own address, a restricted
+      // item's routes to the media viewer cookie of it, and each to nothing else.
+      for (const [key, entry] of Object.entries(OPEN)) {
+        for (const sample of entry.samples(w)) {
+          for (const [who, c] of [["nobody", nobody], ["the session", BY_SESSION.of(a)]] as const) {
+            const opens = kind === "tour" ? sample.viewer === true : sample.mediaViewer === true;
+            if (!opens) {
+              await compare(key, `${sample.path} by ${who}`, sample, c);
+              continue;
+            }
+            const without = await fire(deps, sample, c);
+            const withIt = await fire(deps, sample, plus(sample, c));
+            const closed = kind === "media" || key === "GET /t/:slug" ? 403 : 404;
+            expect([without.status, withIt.status], `${key}: ${sample.path} by ${who}`).toEqual([closed, 200]);
           }
-          const without = await fire(deps, sample, c);
-          const withIt = await fire(deps, sample, plus(sample, c));
-          expect([without.status, withIt.status], `${key}: ${sample.path} by ${who}`).toEqual([key === "GET /t/:slug" ? 403 : 404, 200]);
         }
       }
-    }
-    // What makes or changes something: asked by nobody (and so refused), which changes nothing either way.
-    for (const [key, entry] of Object.entries(CREATES)) await compare(key, "by nobody", entry.sample(a), page);
-    for (const [key, entry] of Object.entries(SELF)) await compare(key, "by nobody", { method: "POST", path: entry.path, json: {} }, page);
-    // The admin's routes: those that only read, by the admin's session; every one by nobody.
-    for (const [key, entry] of Object.entries(ADMIN)) {
-      const r = entry.request(w);
-      await compare(key, "by nobody", r, page);
-      if (r.method === "GET") await compare(key, "by the admin", r, BY_SESSION.of(a));
-    }
-    // The app's two requests while it connects, and an invite looked up and accepted with a code nobody has; the real invite looked up.
-    await compare("POST /api/v1/connect/start", "by nobody", { method: "POST", path: "/api/v1/connect/start", json: { device_name: "Laptop" } }, nobody);
-    await compare("POST /api/v1/connect/start", "with a token", { method: "POST", path: "/api/v1/connect/start", json: { device_name: "Laptop" } }, BY_TOKEN.of(a));
-    await compare("POST /api/v1/connect/token", "by nobody", { method: "POST", path: "/api/v1/connect/token", json: { device_code: "dpd_" + "0".repeat(40) } }, nobody);
-    await compare("POST /api/v1/invite/check", "by nobody", { method: "POST", path: "/api/v1/invite/check", json: { code: w.invite.code } }, page);
-    await compare("POST /api/v1/invite/accept", "by nobody", { method: "POST", path: "/api/v1/invite/accept", json: { code: "dpi_" + "0".repeat(40), username: "newcomer" } }, page);
+      // What makes or changes something: asked by nobody (and so refused), which changes nothing either way.
+      for (const [key, entry] of Object.entries(CREATES)) await compare(key, "by nobody", entry.sample(a), page);
+      for (const [key, entry] of Object.entries(SELF)) await compare(key, "by nobody", { method: "POST", path: entry.path, json: {} }, page);
+      // The admin's routes: those that only read, by the admin's session; every one by nobody.
+      for (const [key, entry] of Object.entries(ADMIN)) {
+        const r = entry.request(w);
+        await compare(key, "by nobody", r, page);
+        if (r.method === "GET") await compare(key, "by the admin", r, BY_SESSION.of(a));
+      }
+      // The app's two requests while it connects, and an invite looked up and accepted with a code nobody has; the real invite looked up.
+      await compare("POST /api/v1/connect/start", "by nobody", { method: "POST", path: "/api/v1/connect/start", json: { device_name: "Laptop" } }, nobody);
+      await compare("POST /api/v1/connect/start", "with a token", { method: "POST", path: "/api/v1/connect/start", json: { device_name: "Laptop" } }, BY_TOKEN.of(a));
+      await compare("POST /api/v1/connect/token", "by nobody", { method: "POST", path: "/api/v1/connect/token", json: { device_code: "dpd_" + "0".repeat(40) } }, nobody);
+      await compare("POST /api/v1/invite/check", "by nobody", { method: "POST", path: "/api/v1/invite/check", json: { code: w.invite.code } }, page);
+      await compare("POST /api/v1/invite/accept", "by nobody", { method: "POST", path: "/api/v1/invite/accept", json: { code: "dpi_" + "0".repeat(40), username: "newcomer" } }, page);
 
-    // Every route was asked, but the viewer's own, which are the routes that read the cookie.
-    const routes = routeKeysOf(createApp({ config: { publicImageBase: "", setupCode: null } } as Deps));
-    expect(routes.filter((key) => !covered.has(key)).sort()).toEqual(Object.keys(VIEWER).sort());
-    // The viewer session is still there, and still the first side's address alone.
-    expect(await deps.db.all("SELECT email FROM viewer_session")).toEqual([{ email: a.email }]);
-  });
+      // Every route was asked, but the viewers' own, which are the routes that read the cookies.
+      const routes = routeKeysOf(createApp({ config: { publicImageBase: "", setupCode: null } } as Deps));
+      expect(routes.filter((key) => !covered.has(key)).sort()).toEqual(Object.keys(VIEWER).sort());
+      // The viewer session is still there, and still the first side's address alone.
+      expect(await deps.db.all(`SELECT email FROM ${kind === "tour" ? "viewer_session" : "media_viewer_session"}`)).toEqual([{ email: a.email }]);
+    });
+  }
 });

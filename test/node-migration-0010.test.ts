@@ -118,6 +118,9 @@ describe("migration 0010 on a 0.1.18 install", () => {
     try {
       const { a } = await writeSite(deps);
       await migrate(db, upTo10);
+      // A server applies every migration before it serves (src/node/migrate.ts), so the routes
+      // of this build meet the later ones too.
+      await migrate(db, MIGRATIONS_DIR);
       const json = { "content-type": "application/json" };
       const made = await send(deps, "POST", "/api/v1/media", { token: a.token, body: JSON.stringify({ kind: "image", content_type: "image/png", bytes: 3000, width: 20, height: 10 }), headers: json });
       expect(made.status, made.text).toBe(201);

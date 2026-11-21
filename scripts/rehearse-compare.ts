@@ -35,12 +35,23 @@ export type Recorded = { key: string; route: string; answer: Answer };
  *   the same, and the `etag` header (a hash of the body) is let follow only then, and
  *   only when each side's is its own page's by the server's rule (pageEtag). Such
  *   answers are counted apart, and no file name is ever printed.
+ * - from the old build to the new one only (never on the way back): in an answer of a
+ *   shared item's page, file, download or preview (ITEM_ROUTES), the `cache-control` header,
+ *   when the old value is exactly one of 0.1.46's two (ITEM_CACHE_BEFORE) and the new one is
+ *   exactly `no-cache` (ITEM_CACHE_AFTER), with every other header, the status and every byte
+ *   the same (itemCacheOnly). 0.1.47 stopped letting caches keep an item's answers, since an
+ *   item's address stays the same when it is restricted. Such answers are counted apart.
  * The API description's ETags would be a further entry, but the rehearsal records no
  * description answer: its text changes with every version by design.
  */
 export const IGNORED_HEADERS: readonly string[] = ["date"];
 export const VERSION_ROUTE = "GET /api/v1/me";
 export const PAGE_ROUTE = "GET /t/:slug";
+/** A shared item's page, file, download and preview, as the route table names them. */
+export const ITEM_ROUTES: readonly string[] = ["GET /i/:name", "GET /i/:name/download", "GET /i/:name/preview", "GET /r/:name", "GET /r/:name/download", "GET /r/:name/preview"];
+/** What 0.1.46 and earlier sent an item's answers with (a page, then a file or preview), and what 0.1.47 sends. */
+export const ITEM_CACHE_BEFORE: readonly string[] = ["public, max-age=60", "public, max-age=3600"];
+export const ITEM_CACHE_AFTER = "no-cache";
 
 /**
  * Routes a newer build may answer that an older one did not have. When the older build
@@ -59,6 +70,8 @@ export type AnswerComparison = {
   allowed: number;
   /** Tour pages that differ only in the player's file names (playerNamesOnly), when the comparison allows it. */
   playerNames: number;
+  /** Shared item answers that differ only in their cache-control, as itemCacheOnly allows, when the comparison allows it. */
+  itemCache: number;
   /**
    * Answers whose newer JSON body only adds object keys (see onlyAddedFields), when the
    * comparison allows it: the count, and per route the added field paths, each once.
@@ -214,7 +227,7 @@ export function playerFileProblems(name: string, a: Answer): string[] {
  */
 export function identityProblems(c: AnswerComparison): string[] {
   const out = [...c.problems, ...c.added.map((k) => `${k}: answered by one side only`)];
-  const allowed = c.allowed + c.playerNames + c.addedFields;
+  const allowed = c.allowed + c.playerNames + c.itemCache + c.addedFields;
   if (c.allowed > 0) out.push(`${c.allowed} answer(s) differ in the version`);
   if (allowed - c.allowed > 0) out.push(`${allowed - c.allowed} answer(s) differ in a way allowed only for a new build`);
   return out;
@@ -330,6 +343,18 @@ export function addedFieldCount(c: AnswerComparison): number {
   return Object.values(c.addedFieldsByRoute).reduce((n, paths) => n + paths.length, 0);
 }
 
+/**
+ * Whether two answers of a shared item's route differ only in `cache-control`, from exactly
+ * one of ITEM_CACHE_BEFORE to exactly ITEM_CACHE_AFTER: the same status, every other header
+ * the same (but the ignored ones), and every byte the same. False on any other route.
+ */
+export function itemCacheOnly(route: string, before: Answer, after: Answer): boolean {
+  if (!ITEM_ROUTES.includes(route)) return false;
+  const was = before.headers["cache-control"];
+  if (was === undefined || !ITEM_CACHE_BEFORE.includes(was) || after.headers["cache-control"] !== ITEM_CACHE_AFTER) return false;
+  return answerProblems({ ...before, headers: { ...before.headers, "cache-control": ITEM_CACHE_AFTER } }, after).length === 0;
+}
+
 /** Whether `a` is the plain not-found answer every build gives a route it does not have. */
 export function isPlainNotFound(a: Answer): boolean {
   return a.status === 404 && decoder.decode(a.body) === NOT_FOUND_BODY;
@@ -349,8 +374,8 @@ export function isPlainNotFound(a: Answer): boolean {
  * differs only in the player's file names is let through (playerNamesOnly) and counted
  * apart. Without it, such a page is a difference like any other.
  */
-export function compareAnswers(before: Recorded[], after: Recorded[], opts: { allowAddedFields?: boolean; allowPlayerNames?: boolean } = {}): AnswerComparison {
-  const result: AnswerComparison = { identical: 0, allowed: 0, playerNames: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] };
+export function compareAnswers(before: Recorded[], after: Recorded[], opts: { allowAddedFields?: boolean; allowPlayerNames?: boolean; allowItemCache?: boolean } = {}): AnswerComparison {
+  const result: AnswerComparison = { identical: 0, allowed: 0, playerNames: 0, itemCache: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] };
   const later = new Map(after.map((r) => [r.key, r]));
   const earlier = new Set(before.map((r) => r.key));
   for (const b of before) {
@@ -379,6 +404,10 @@ export function compareAnswers(before: Recorded[], after: Recorded[], opts: { al
     }
     if (opts.allowPlayerNames === true && playerNamesOnly(b.route, b.answer, a.answer)) {
       result.playerNames++;
+      continue;
+    }
+    if (opts.allowItemCache === true && itemCacheOnly(b.route, b.answer, a.answer)) {
+      result.itemCache++;
       continue;
     }
     const only = opts.allowAddedFields === true ? onlyAddedFields(swapped ?? b.answer, a.answer) : null;

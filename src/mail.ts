@@ -266,6 +266,48 @@ export function viewerMail(to: string, link: string, siteName: string = DEFAULT_
   };
 }
 
+/**
+ * The origin every viewer link for a shared item starts with, or null when the site has no
+ * configured address: the media address (the img address when it is set, else the tours
+ * address) in two- or three-address mode, else SITE_HOST, through normaliseHost as
+ * viewerLinkOrigin does. From configuration only, never from a request. With null, no viewer
+ * mail for an item may be sent, and no item may be restricted (src/media-access.ts).
+ */
+export function mediaViewerLinkOrigin(config: Config): string | null {
+  const hosts = config.hosts ?? null;
+  const media = hosts === null ? undefined : (hosts.img ?? hosts.tours);
+  const raw = typeof media === "string" && media !== "" ? media : config.siteHost;
+  const host = typeof raw === "string" ? normaliseHost(raw) : null;
+  return host === null ? null : originOf(host);
+}
+
+/** The link of one viewer code for an item: `<origin>/s/view#<code>`, on the media address. The same rules as `viewerLink`. */
+export function mediaViewerLink(origin: string, code: string): string {
+  if (!isOrigin(origin)) throw new Error("bad origin");
+  if (typeof code !== "string" || !CODE_CHARS.test(code)) throw new Error("bad code");
+  return `${origin}/s/view#${code}`;
+}
+
+/**
+ * The mail with a viewer link for a shared image or clip: viewerMail's words, about an image
+ * or clip instead of a tour (proposed wording). It names neither the item nor who shared it.
+ */
+export function mediaViewerMail(to: string, link: string, siteName: string = DEFAULT_SITE_NAME): Mail {
+  const name = siteNameOf(siteName);
+  return {
+    to,
+    subject: `Your link to a ${name} image or clip`,
+    text: [
+      "Open this link to view the image or clip that was shared with you:",
+      "",
+      link,
+      "",
+      "It works once and for 15 minutes. If you did not ask for it, ignore this mail: nothing happens without the link.",
+      "",
+    ].join("\n"),
+  };
+}
+
 /** A day as a mail writes it: the day of the month, the month's abbreviation and the year, in UTC, such as "27 Nov 2026". */
 export function mailDate(ms: number): string {
   const d = new Date(ms);

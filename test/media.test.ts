@@ -120,7 +120,7 @@ describe("an item's life", () => {
     expect(linkId.includes(id.slice(4, 14))).toBe(false);
 
     const item = await get(deps, token, id);
-    const fields = { id, link_id: linkId, kind: "image", title: "The new invoice screen", content_type: "image/png", bytes: 5000, width: 640, height: 480, duration_ms: null, created_at: expect.any(Number), has_preview: true, path: `/i/${linkId}`, link: `/i/${linkId}` };
+    const fields = { id, link_id: linkId, kind: "image", title: "The new invoice screen", content_type: "image/png", bytes: 5000, width: 640, height: 480, duration_ms: null, created_at: expect.any(Number), has_preview: true, path: `/i/${linkId}`, link: `/i/${linkId}`, access: "public", viewers: 0 };
     expect(item.json).toEqual({ ...fields, state: "online" });
     expect((await list(deps, token, "kind=image")).json).toEqual({ items: [fields], next: null });
     expect((await list(deps, token, "kind=clip")).json).toEqual({ items: [], next: null });
@@ -1030,7 +1030,7 @@ describe("the serving lookup", () => {
     expect((await commit(deps, token, id)).status).toBe(200);
     const files = await onlineItemFiles(deps, linkId);
     expect(files).toEqual({
-      id, kind: "clip", contentType: "video/mp4", bytes: CLIP.bytes, width: 1280, height: 720, durationMs: 12_000, title: null, sharedAt: expect.any(Number),
+      id, workspaceId: expect.stringMatching(/^ws_/), kind: "clip", contentType: "video/mp4", bytes: CLIP.bytes, width: 1280, height: 720, durationMs: 12_000, title: null, sharedAt: expect.any(Number), access: "public",
       parts: [expect.stringMatching(new RegExp(`^m/${id}/part-000\\.[0-9a-f]{24}$`)), expect.stringMatching(/part-001\./), expect.stringMatching(/part-002\./)],
       preview: { key: expect.stringMatching(new RegExp(`^m/${id}/preview\\.[0-9a-f]{24}\\.png$`)), type: "png" },
     });

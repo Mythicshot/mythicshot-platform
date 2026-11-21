@@ -150,6 +150,8 @@ fi
 # before the commands to go back are shown: answers STUB_RESTRICTED (0 unless set), the
 # number of restricted tours, and records nothing.
 if [ "${4:-}" = restricted-check ]; then printf '%s' "${STUB_RESTRICTED:-0}"; exit 0; fi
+# The same for the check of restricted shared images and clips: STUB_RESTRICTED_ITEMS (0 unless set).
+if [ "${4:-}" = restricted-items-check ]; then printf '%s' "${STUB_RESTRICTED_ITEMS:-0}"; exit 0; fi
 # Called as: node -e <program> <database> <copy>. The program text is not recorded.
 printf 'node[venv=%s umask=%s] %s <program> %s %s\n' "${STUB_VENV:-none}" "$(umask)" "$1" "$3" "$4" >>"$STUB_LOG"
 [ "${STUB_NODE_FAIL:-0}" != 1 ] || { echo "Error: database is locked" >&2; exit 1; }
@@ -889,6 +891,74 @@ test_downgrade_below_access_is_refused_while_a_tour_is_restricted() {
   # And with no restricted tour, an older version is allowed as before.
   STUB_RESTRICTED=0 cpanel_in "$T/older" "" update --yes --allow-downgrade
   expect "below 0.1.38, no restricted tour: allowed (stderr: $(cat "$ERR"))" test "$RC" = 0
+}
+
+test_downgrade_below_media_access_is_refused_while_an_item_is_restricted() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  cpanel_in "$T/new" "" update --yes
+  expect "the update to 0.2.0 works (stderr: $(cat "$ERR"))" test "$RC" = 0
+  # Down to a version that knows who may view a tour but not an item, with a restricted item: refused.
+  make_release "$T/older" 0.1.40
+  local before; before="$(snapshot)"
+  STUB_RESTRICTED_ITEMS=2 cpanel_in "$T/older" "" update --yes --allow-downgrade
+  expect "below 0.1.47: refused" test "$RC" != 0
+  expect "below 0.1.47: says not to go back" has "$OUT" "Do not go back to version 0.1.40"
+  expect "below 0.1.47: says why: the restricted items" has "$OUT" "2 shared image(s) or clip(s) here are restricted to people or to their owner"
+  expect "below 0.1.47: says nothing was changed" has "$ERR" "nothing was changed: version 0.1.40 is older than 0.1.47"
+  expect "below 0.1.47: names the backup instead" has "$OUT" "restore the backup taken before the update instead"
+  expect "below 0.1.47: nothing was changed" test "$(snapshot)" = "$before"
+  # Restricted tours do not matter to a version that knows them.
+  STUB_RESTRICTED=4 STUB_RESTRICTED_ITEMS=0 cpanel_in "$T/older" "" update --yes --allow-downgrade --dry-run
+  expect "to 0.1.40 with restricted tours only: not refused (stderr: $(cat "$ERR"))" test "$RC" = 0
+  # The database cannot be read and nobody checked by hand: refused, with the reason and the override.
+  STUB_RESTRICTED_ITEMS=unreadable cpanel_in "$T/older" "" update --yes --allow-downgrade
+  expect "unreadable: refused" test "$RC" != 0
+  expect "unreadable: says it could not check" has "$OUT" "Not going back to version 0.1.40: the database could not be checked for restricted images and clips"
+  expect "unreadable: names the override" has "$OUT" "--no-restricted-items-checked-by-hand"
+  expect "unreadable: the tours' override is not enough" hasnt "$OUT" "--no-restricted-tours-checked-by-hand"
+  expect "unreadable: nothing was changed" test "$(snapshot)" = "$before"
+  STUB_RESTRICTED_ITEMS=unreadable cpanel_in "$T/older" "" update --yes --allow-downgrade --no-restricted-tours-checked-by-hand
+  expect "unreadable, the tours' override: still refused" test "$RC" != 0
+  # Below 0.1.38 too: with no restricted tour but a restricted item, refused about the items.
+  make_release "$T/oldest" 0.1.1
+  STUB_RESTRICTED=0 STUB_RESTRICTED_ITEMS=1 cpanel_in "$T/oldest" "" update --yes --allow-downgrade
+  expect "below 0.1.38, an item: refused" test "$RC" != 0
+  expect "below 0.1.38, an item: says why" has "$OUT" "1 shared image(s) or clip(s) here are restricted"
+  expect "below 0.1.38, an item: names the version it is about" has "$ERR" "nothing was changed: version 0.1.1 is older than 0.1.47"
+  # 0.1.47 or newer knows who may view an item: allowed whatever the count.
+  make_release "$T/knows" 0.1.47
+  STUB_RESTRICTED_ITEMS=3 cpanel_in "$T/knows" "" update --yes --allow-downgrade
+  expect "to 0.1.47: allowed (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "to 0.1.47: in place" test "$(cat "$APP/VERSION")" = 0.1.47
+  # With the override the older version goes, and the warning says what was asserted.
+  STUB_RESTRICTED_ITEMS=unreadable cpanel_in "$T/older" "" update --yes --allow-downgrade --no-restricted-items-checked-by-hand
+  expect "override: allowed (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "override: the warning says what was asserted" has "$ERR" "says that you checked by hand that no shared image or clip is restricted"
+  cpanel "" backup --no-restricted-items-checked-by-hand
+  expect "the override goes with update only" test "$RC" = 2
+}
+
+test_update_refuses_the_way_back_when_an_item_is_restricted() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  STUB_RESTRICTED_ITEMS=2 STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "exit code non-zero" test "$RC" != 0
+  expect "says plainly not to go back" has "$OUT" "Do not go back to version 0.1.1"
+  expect "says why: the restricted items" has "$OUT" "2 shared image(s) or clip(s) here are restricted to people or to their owner"
+  expect "shows no command to go back" hasnt "$OUT" "To go back to the version that ran before"
+  expect "the check records nothing" hasnt "$LOG" "restricted-items-check"
+  # With no restricted item (nor tour) the commands are shown as before.
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  STUB_RESTRICTED_ITEMS=0 STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "no restricted item: the commands are shown" has "$OUT" "To go back to the version that ran before"
 }
 
 test_an_archive_before_access_is_checked_whatever_is_installed() {

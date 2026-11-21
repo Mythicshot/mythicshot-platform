@@ -50,6 +50,13 @@ What the old build must then answer depends on whether it can serve restricted t
 
 Either way the report gives one line with labels and counts, and a failure says only which kind of content it found, never the content.
 
+Then the way back with a restricted item, on another fresh copy: the new build restricts one online shared item of the first token's workspace to `me` through its own API, with the same placeholder mail settings. When the workspace has no item, the new build first shares a small image (an 8 by 8 PNG of 1,200 bytes, title "Rehearsal") through the same API, on the copy only, and the report says so in its own line. Before the restriction the new build must serve the item's file; after it, the new build must answer its gate for that file without the file's bytes. Then the old build is started on the copy. What it must answer depends on whether it knows who may view an item, which came in 0.1.47, read from its compiled files (`dist/media-access.js` with the route `PUT /api/v1/media/:id/access`):
+
+- An old build that does not know it: the item's page, file, download and preview must each answer exactly as the same address of an item that does not exist (status and body), and no answer may hold the file's bytes. Migration 0016 keeps a restricted item's link out of the column such a build looks items up by.
+- An old build that knows it: each of the four must answer `403` with `no-store`, no `etag`, and none of the file's bytes.
+
+The item's link and bytes are kept in memory only; the report gives labels and counts.
+
 The report is one line per check, PASS or FAIL with counts, and ends with `RESULT: PASS`, `RESULT: PASS, with N added fields to read above` or `RESULT: FAIL`. It never holds a token, an email address or a name from the data. The command exits with status 1 when a check fails, and with 0 for both kinds of pass.
 
 > [!WARNING]

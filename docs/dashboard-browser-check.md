@@ -1,4 +1,4 @@
-# Browser check of the dashboard: the bar, the Images, GIFs, Tours, Storage, Connections, Admin and Account pages, sharing a tour, invites and account actions, changing an email address, and restricted tours
+# Browser check of the dashboard: the bar, the Images, GIFs, Tours, Storage, Connections, Admin and Account pages, sharing a tour, invites and account actions, changing an email address, restricted tours, and restricted images and GIFs
 
 The tests run the dashboard's scripts against a stand-in document, and against the real app in the same process, but they cannot open a browser. This list is what a person goes through by hand before a dashboard page is called done: once in Chrome and once in Firefox, each with the developer tools open. Write down for each step whether it passed, and for anything that did not, what the page showed.
 
@@ -312,3 +312,19 @@ Set up the site with two addresses as in "Two addresses" of the sign-in pages' c
 ## Afterwards
 
 - [ ] Stop the server and remove each scratch data folder made in "Set up" (and in "Two addresses").
+
+## Restricted images and GIFs (0.1.47)
+
+The dashboard has no Sharing box for items yet (a later task): restrict one with the API, from the browser's console on a dashboard page of the app address, where the session cookie and the anti-forgery value are: `fetch("/api/v1/media/med_…/access", { method: "PUT", headers: { "content-type": "application/json", "x-csrf-token": <the value GET /api/v1/session answers as csrf> }, body: JSON.stringify({ access: "people", viewers: ["<a second address you read>"] }) })`. It answers `200` with the list. Use two browsers (or a private window), neither signed in on the media address.
+
+- [ ] The Images page still shows the item, its link unchanged. `GET /api/v1/media?kind=image` answers `"access": "people", "viewers": 1` for it.
+- [ ] Open the item's link in the second browser: "This image is shared with specific people", "Enter your email address. If the image is shared with you, we send you a link to open it. There is no password.", the field and "Send me a link". The page's title is "Shared with specific people"; nothing of the item (its title, size, picture) is anywhere in the page or its source. The same page answers the file link (`….png`), `/download` and `/preview`, status `403`, `Cache-Control: no-store`.
+- [ ] Paste the link into a chat app that shows link previews: the preview shows no picture and no title of the item.
+- [ ] Enter an address not on the list: "Check your mail" and "If this image is shared with <address>, a link is on its way. It works once and for 15 minutes." No mail arrives. Enter the listed address: the same words, and a mail "Your link to a Mythicshot image or clip", "Open this link to view the image or clip that was shared with you:", with a link to `<media address>/s/view#dpi_…`.
+- [ ] Open the mailed link: the address bar shows `/s/view` with nothing after it at once; the page says "Open the image or clip", "Press the button to view it in this browser as <address>." in bold and "Open it", and "This browser will remember your address for images and clips shared with you, for 30 days of use. It gives no access to anything else." Pressing it goes to the item's page, which shows the image and, above the footer, "Shared with you, <address> · Not you?". The file, download and preview answer `Cache-Control: private, no-store`, no `ETag`, `Cross-Origin-Resource-Policy: same-origin`.
+- [ ] Open the mailed link again: "This link no longer works", "A link works once and for 15 minutes. Open the link you were sent for the image or clip again and ask for a new one."
+- [ ] On a site with one or two addresses, open a restricted tour of the same list in the same browser: it asks for an address again (the proof for images does not open tours, and the other way round).
+- [ ] Remove the address with the API and reload the item's page: "This image is not shared with you", "You are viewing as <address>, and this image is shared with other people. If you were given this link, ask the person who sent it to add your address." and "Use another address", which signs the browser out of images and clips and shows the first page again. "Not you?" under an item leads to "Not you?", "Sign this browser out of images and clips shared with you, then enter your own address on the page you were sent." and "Use another address".
+- [ ] A GIF's and an MP4's pages say "clip" in the same places; the MP4 plays and seeks (its ranges answer after the check).
+- [ ] Try to embed the item's page or file in a page of another site (an `<iframe>` or an `<img>`): the browser refuses to show it.
+- [ ] Make the item public again with the API: the link shows the item to everyone at once, as before.
