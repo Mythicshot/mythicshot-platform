@@ -432,6 +432,21 @@ describe("the dashboard's pages and files", () => {
     expect(TOURS_JS).toContain('open.setAttribute("rel", "noopener noreferrer");');
   });
 
+  it("the one link to another site, the app's download page, is made in one place of the shared script, from a checked address, opening a new tab with no opener or referrer", () => {
+    // The page HTML holds no such link (the checks above): the shared script makes it, and only it sets that href.
+    expect(DASH_JS.match(/setAttribute\("href"/g)).toHaveLength(1);
+    expect(DASH_JS).toContain('a.setAttribute("href", download);');
+    expect(DASH_JS).toContain('a.setAttribute("target", "_blank");');
+    expect(DASH_JS).toContain('a.setAttribute("rel", "noopener noreferrer");');
+    expect(DASH_JS).toContain('if (download === "") return null;');
+    expect(DASH_JS).toContain("download = usableDownload(d.download_url);");
+    expect(DASH_JS).toContain('return typeof v === "string" && v.length <= DOWNLOAD_URL_MAX && DOWNLOAD_URL.test(v) ? v : "";');
+    // Two pages ask for it by its text only, and neither sets an href itself.
+    const users = DASH_PAGES.filter((p) => p.script.body.includes("Dash.downloadLink(")).map((p) => p.path);
+    expect(users.sort()).toEqual(["/account", "/connections"]);
+    for (const p of DASH_PAGES.filter((q) => users.includes(q.path))) expect(p.script.body, p.path).not.toMatch(/setAttribute\("href"|\.href\s*=/);
+  });
+
   it("the pages are usable with the keyboard and a screen reader, at phone width and in both colour schemes", () => {
     for (const s of PAGES) {
       const doc = new FakeDocument(s.body);

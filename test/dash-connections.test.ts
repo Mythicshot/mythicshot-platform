@@ -120,6 +120,10 @@ const TEXT: Record<string, string> = {
   // Invite mockup 7: the welcome of a new account, around its username.
   welcomeBefore: "Welcome, ",
   welcomeAfter: ". Your workspace is ready. Connect Mythicshot on your computer to start sharing: open Workspace in Mythicshot, press Sign in, and type the code it shows below.",
+  // Plan 2i: the welcome's last sentence when the session names a usable download page, "the download page" being the link.
+  downloadBefore: " Not installed yet? Get Mythicshot from ",
+  downloadLink: "the download page",
+  downloadAfter: ".",
 };
 
 const CLASS_NAMES = ["note plain", "btn sm quiet", "btn sm danger", "t name", "confirm-facts confirm-elsewhere confirm-warn", "confirm-facts confirm-warn"];
@@ -231,6 +235,8 @@ describe("the Connections page", () => {
     expect(TEXT.welcomeBefore + "mara" + TEXT.welcomeAfter).toBe(
       "Welcome, mara. Your workspace is ready. Connect Mythicshot on your computer to start sharing: open Workspace in Mythicshot, press Sign in, and type the code it shows below.",
     );
+    expect(TEXT.downloadBefore + TEXT.downloadLink + TEXT.downloadAfter).toBe(" Not installed yet? Get Mythicshot from the download page.");
+    expect(CONNECTIONS_JS).toContain('var link = Dash.downloadLink(TEXT.downloadLink, "");');
     // The welcome's place: the green note above the heading, empty and hidden until the script fills it.
     const welcome = doc.getElementById("connections-welcome")!;
     expect([welcome.tagName, welcome.className, welcome.hidden, welcome.children.length]).toEqual(["p", "note", true, 0]);

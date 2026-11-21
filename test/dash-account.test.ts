@@ -85,6 +85,9 @@ const ACCOUNT_WORDING = [
   "Change",
   MAIL_OFF_LINE,
   "Workspace",
+  // Plan 2i: the download card, hidden unless the session names a usable download page.
+  "Mythicshot for Windows",
+  "Get the installer from the download page. It shows the latest version and its checksum.",
   "Where you are signed in",
   "Sign out",
   "Sign out everywhere",
@@ -111,6 +114,7 @@ const ACCOUNT_TEXT: Record<string, string> = {
   badEmail: "That does not look like an email address.",
   sending: "Sending…",
   checkBefore: "Check ",
+  openDownload: "Open the download page",
 };
 
 /** Every text of the page a link opens, in order, hidden parts included. Proposed: all but mockup 8's third box. */
@@ -138,7 +142,7 @@ const EMAIL_TEXT: Record<string, string> = {
 };
 
 /** The strings with a space in the scripts that are not words for a person: class names. */
-const CLASS_NAMES = ["tag ok", "btn sm quiet", "row session"];
+const CLASS_NAMES = ["tag ok", "btn sm quiet", "row session", "btn quiet"];
 
 function scriptText(js: string): Record<string, string> {
   const block = /\n {2}var TEXT = \{\n([\s\S]*?)\n {2}\};\n/.exec(js);
@@ -249,6 +253,15 @@ describe("the Account page and the page an email-change link opens", () => {
     expect(doc.getElementById("sent-text")!.textContent).toBe("Open the link we sent there to finish. It works once and for 15 minutes. Until then you keep signing in with .");
     expect(doc.getElementById("sent-done")!.textContent).toBe("Done");
     expect([doc.getElementById("signout")!.textContent, doc.getElementById("signout-everywhere")!.textContent]).toEqual(["Sign out", "Sign out everywhere"]);
+    // The download card: above Where you are signed in, hidden until the script has a usable address, its link made by the shared script.
+    const card = doc.getElementById("download-card")!;
+    expect([card.className, card.hidden]).toEqual(["card", true]);
+    expect(doc.getElementById("h-download")!.textContent).toBe("Mythicshot for Windows");
+    expect(doc.getElementById("download-text")!.textContent).toBe("Get the installer from the download page. It shows the latest version and its checksum.");
+    expect(doc.getElementById("download-actions")!.children).toEqual([]);
+    expect(ACCOUNT_HTML.indexOf('id="download-card"')).toBeGreaterThan(ACCOUNT_HTML.indexOf('id="h-details"'));
+    expect(ACCOUNT_HTML.indexOf('id="download-card"')).toBeLessThan(ACCOUNT_HTML.indexOf('id="h-where"'));
+    expect(ACCOUNT_JS).toContain('var link = Dash.downloadLink(TEXT.openDownload, "btn quiet");');
     // The Change button and the mail-off line both start hidden: the session decides which shows.
     expect([doc.getElementById("email-change")!.hidden, doc.getElementById("email-off")!.hidden]).toEqual([true, true]);
     // The old account page's storage block lives on /storage now.

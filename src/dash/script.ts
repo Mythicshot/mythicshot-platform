@@ -8,12 +8,16 @@
 // and `hidden`, then hands the page { username, admin, workspace } and, for the Account
 // page, { named, email, sessionId, emailChange } (whether the account has a username, its
 // address, this session's id, and whether the address can be changed here), and for the
-// Admin page { accountId } (the account's own id, to know its own row). A page that
+// Admin page { accountId } (the account's own id, to know its own row), and for every
+// page { download } (whether the session named a usable address of the app's download
+// page, which Dash.downloadLink then links to). A page that
 // has something to say to a visitor who is not signed in passes a second function, which is
 // called instead of sending the visitor to /signin. Every request goes
 // through Dash.api: to this site only, with the browser's session for this address, no
 // referrer, and the X-Csrf-Token header on every change, as the account page sends it.
 // Nothing here writes to storage, to a cookie or to an address.
+import { DOWNLOAD_URL_MAX } from "../https-address.ts";
+
 export const DASH_JS = `var Dash = (function () {
   "use strict";
   var TEXT = {
@@ -25,6 +29,12 @@ export const DASH_JS = `var Dash = (function () {
   };
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   var csrf = "";
+  // The address of the app's download page, from the session's download_url, kept only
+  // when it is of the shape the server checks the setting against (STRICT_HTTPS_SHAPE and
+  // DOWNLOAD_URL_MAX in src/https-address.ts; a test holds them equal): else "".
+  var DOWNLOAD_URL = /^https:\\/\\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?\\/[A-Za-z0-9._~!$&'()*+,;=:@%\\/?-]*$/;
+  var DOWNLOAD_URL_MAX = ${DOWNLOAD_URL_MAX};
+  var download = "";
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -89,6 +99,27 @@ export const DASH_JS = `var Dash = (function () {
 
   function signedOut() {
     location.replace("/signin");
+  }
+
+  // ---- The app's download page ----
+
+  function usableDownload(v) {
+    return typeof v === "string" && v.length <= DOWNLOAD_URL_MAX && DOWNLOAD_URL.test(v) ? v : "";
+  }
+
+  // Dash.downloadLink(text, cls): a link to the app's download page with that text and
+  // class, opening a new tab with no opener and no referrer; null when the session named
+  // no usable address. The one link to another site the dashboard makes, and the one place
+  // its href is set.
+  function downloadLink(text, cls) {
+    if (download === "") return null;
+    var a = document.createElement("a");
+    if (cls) a.className = cls;
+    a.textContent = text;
+    a.setAttribute("href", download);
+    a.setAttribute("target", "_blank");
+    a.setAttribute("rel", "noopener noreferrer");
+    return a;
   }
 
   // ---- A question asked in the page ----
@@ -268,6 +299,7 @@ export const DASH_JS = `var Dash = (function () {
         return;
       }
       csrf = d.csrf;
+      download = usableDownload(d.download_url);
       var who = d.account;
       // Without a username the bar says Account, never the email address: people record their screens.
       var named = typeof who.username === "string" && who.username !== "";
@@ -284,12 +316,13 @@ export const DASH_JS = `var Dash = (function () {
         sessionId: typeof d.session.id === "string" ? d.session.id : "",
         accountId: typeof who.id === "string" ? who.id : "",
         emailChange: d.email_change === true,
+        download: download !== "",
       });
     }).then(null, function () {
       load.textContent = TEXT.failed;
     });
   }
 
-  return { api: api, errorOf: errorOf, failure: failure, formatBytes: formatBytes, dateOf: dateOf, signedOut: signedOut, start: start, question: question, TEXT: TEXT };
+  return { api: api, errorOf: errorOf, failure: failure, formatBytes: formatBytes, dateOf: dateOf, signedOut: signedOut, start: start, question: question, downloadLink: downloadLink, TEXT: TEXT };
 })();
 `;

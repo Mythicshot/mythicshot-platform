@@ -15,10 +15,12 @@
 //    or handed to whenSignedOut when the page passes one (the email-change link page does).
 //    Otherwise it fills the username and shows the Admin tab for an admin, and only then
 //    calls the function with { username, admin, workspace, named, email, sessionId,
-//    emailChange, accountId }: the name the bar shows ("Account" without a username), whether
+//    emailChange, accountId, download }: the name the bar shows ("Account" without a username), whether
 //    the session says admin, the workspace's name, whether the account has a username, its
 //    email address, this session's id, whether the site can change the address
-//    (email_change), and the account's own id.
+//    (email_change), the account's own id, and whether the session named a usable address of
+//    the app's download page (download_url), which Dash.downloadLink(text, cls) then links to
+//    (the dashboard's one link to another site, made in the shared script only).
 //    Inside it, Dash.api(method, path, body) sends every request (the session cookie, and
 //    the X-Csrf-Token header on every change; its answer carries the retry-after header as
 //    retryAfter), Dash.formatBytes and Dash.dateOf write sizes and dates as every page does

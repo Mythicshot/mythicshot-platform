@@ -7,6 +7,11 @@
 // textContent, so a username, a workspace's name, an address or a session's label can never
 // become markup.
 //
+// The download card (Plan 2i), between the details and the sessions: shown only when the
+// session names a usable address of the app's download page (download_url, checked again by
+// the shared script), with a link that opens it in a new tab; hidden otherwise, so without
+// the setting the page reads as before.
+//
 // Changing the email address, mockup 8's first two boxes: Change is shown only when the
 // session says the site can mail the link (email_change); otherwise one line under the
 // address says why. Change opens a question with the field for the new address; Send the
@@ -34,6 +39,11 @@ const ACCOUNT_MAIN = `  <div id="account-page">
       <div class="row"><span>Email address</span><span class="r"><span id="account-email"></span><button type="button" class="btn sm quiet" id="email-change" hidden>Change</button></span></div>
       <p class="hint" id="email-off" hidden>This site cannot send mail, so an email address cannot be changed here.</p>
       <div class="row"><span>Workspace</span><span class="r" id="account-workspace"></span></div>
+    </div>
+    <div class="card" id="download-card" hidden>
+      <h2 class="card-title" id="h-download" tabindex="-1">Mythicshot for Windows</h2>
+      <p class="sub" id="download-text">Get the installer from the download page. It shows the latest version and its checksum.</p>
+      <div class="two" id="download-actions"></div>
     </div>
     <div class="card">
       <h2 class="card-title" id="h-where" tabindex="-1">Where you are signed in</h2>
@@ -86,6 +96,7 @@ export const ACCOUNT_JS = `(function () {
     badEmail: "That does not look like an email address.",
     sending: "Sending…",
     checkBefore: "Check ",
+    openDownload: "Open the download page",
   };
   // What the page behind a box is, made inert while one is open.
   var BEHIND = ["dash-top", "account-page"];
@@ -278,9 +289,19 @@ export const ACCOUNT_JS = `(function () {
     });
   }
 
+  // The download card, only when the session named a usable address of the app's download
+  // page: the shared script checks it and makes the link (Dash.downloadLink).
+  function showDownload() {
+    var link = Dash.downloadLink(TEXT.openDownload, "btn quiet");
+    if (link === null) return;
+    $("download-actions").appendChild(link);
+    $("download-card").hidden = false;
+  }
+
   startPage();
   Dash.start(function (who) {
     current = who.sessionId;
+    showDownload();
     email = who.email;
     $("account-who").textContent = who.named ? TEXT.signedInAs + who.username : TEXT.signedIn;
     $("row-username").hidden = !who.named;
