@@ -1002,7 +1002,8 @@ describe("where the sign-in routes answer", () => {
     // these names), so a new route under such a name, a page or not, fails here until it is placed.
     const SIGNIN_PAGES = ["GET /signin", "GET /signin/link", "GET /signin/signin.css", "GET /signin/signin.js"];
     // The viewer's own sign-out and session (src/viewers.ts, test/viewers.test.ts) live on the tours address, under /api/v1/view/.
-    const VIEWER_KEYS = ["GET /api/v1/view/session", "POST /api/v1/view/signout"];
+    // So does the page "Not you?" under a restricted tour leads to (src/restricted.ts, test/view-pages.test.ts).
+    const VIEWER_KEYS = ["GET /api/v1/view/session", "POST /api/v1/view/signout", "GET /view/signout/:slug"];
     expect(routes.filter((key) => /\/(signin|signout|sessions?)\b/.test(key)).sort()).toEqual([...KEYS, ...SIGNIN_PAGES, ...VIEWER_KEYS].sort());
 
     const stored = await everythingStored(deps);

@@ -1108,7 +1108,8 @@ describe("sharing against the real app", () => {
     const now = await send(s.deps, "GET", `/api/v1/tours/${s.id}/access`, { token: s.owner.token });
     // A token reads the count only (the addresses are for the session, which the page shows on opening Sharing again below).
     expect(now.json).toEqual({ access: "people", viewers_count: 2, limit: 200, can_restrict: true, switching: null });
-    expect((await send(s.deps, "GET", `/t/${s.slug}`, { origin: "https://tours.example.com" })).status).toBe(404);
+    // A visitor who proved no address gets the gate, never the tour.
+    expect((await send(s.deps, "GET", `/t/${s.slug}`, { origin: "https://tours.example.com" })).status).toBe(403);
     // A token (the desktop app) cannot make it public: only the session can, and the page has no other credential.
     const byToken = await send(s.deps, "PUT", `/api/v1/tours/${s.id}/access`, { origin: APP, token: s.owner.token, body: JSON.stringify({ access: "public" }), headers: { "content-type": "application/json" } });
     expect(byToken.status).toBe(401);

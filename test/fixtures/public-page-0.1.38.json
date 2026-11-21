@@ -1,0 +1,62 @@
+{
+  "made_by": "0.1.38 (commit 860bf0f) src/page.ts renderPage and notFoundPage",
+  "snapshot": "{\"title\":\"Frozen <b>tour</b> & \\\"quotes\\\"   'apostrophe' </script>\",\"spotlight_dim\":60,\"theme\":{\"card_style\":\"dark\",\"accent\":\"#5dcaa5\",\"hotspot\":\"pulse\",\"progress_bar\":true,\"backdrop\":\"auto\",\"spotlight_soft\":true},\"zoom\":{\"enabled\":true,\"percent\":118},\"cover\":{\"title\":\"Cover <i>title</i>\",\"body\":\"Body & more\",\"button\":\"Start\",\"logo\":\"p/0000000000000000000000000000000a.png\"},\"cta\":{\"label\":\"Book a call\",\"url\":\"https://example.com/book?a=1&b=2\"},\"end\":{\"text\":\"The end.\",\"primary\":{\"label\":\"Start free\",\"url\":\"https://example.com/start\"},\"secondary\":null,\"replay\":true},\"autoplay\":{\"enabled\":false,\"seconds\":5},\"chapters\":[{\"id\":\"ch_x\",\"title\":\"First <chapter>\",\"description\":null,\"steps\":[{\"id\":\"st_000000000000000000000001\",\"image\":\"p/00000000000000000000000000000001.png\",\"width\":64,\"height\":64,\"click\":{\"x\":50,\"y\":50,\"size\":4},\"caption\":null,\"spotlight\":{\"x\":40,\"y\":30,\"w\":25,\"h\":12},\"notes\":[{\"kind\":\"text\",\"x\":12.5,\"y\":8,\"text\":\"Start <here>\",\"size\":4.17,\"color\":\"#ffffff\"}],\"card\":{\"title\":\"Card & title\",\"body\":\"One click.\\n**Try it**\",\"next_label\":\"Next\",\"anchor\":\"hotspot\",\"point\":null,\"placement\":\"auto\"},\"advance\":\"anywhere\",\"zoom\":false},{\"id\":\"st_000000000000000000000002\",\"image\":\"p/00000000000000000000000000000002.jpg\",\"width\":64,\"height\":64,\"click\":null,\"caption\":\"Caption\",\"spotlight\":null,\"notes\":[{\"kind\":\"bubble\",\"x\":55,\"y\":60,\"w\":30,\"h\":15.5,\"tail\":{\"x\":10,\"y\":25},\"text\":\"Bubble\",\"size\":3.33,\"color\":\"#1a1a1a\",\"fill\":\"#ffffff\"}],\"card\":null,\"advance\":\"hotspot\",\"zoom\":null,\"extra\":\"dropped\"}]}]}",
+  "cases": [
+    {
+      "base": "",
+      "kind": "page",
+      "status": 200,
+      "headers": {
+        "cache-control": "public, max-age=60",
+        "content-security-policy": "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'",
+        "content-type": "text/html; charset=utf-8",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff"
+      },
+      "etag": true,
+      "body": "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"color-scheme\" content=\"light dark\">\n<meta name=\"referrer\" content=\"no-referrer\">\n<title>Frozen &lt;b&gt;tour&lt;/b&gt; &amp; &quot;quotes&quot;   &#39;apostrophe&#39; &lt;/script&gt;</title>\n<link rel=\"stylesheet\" href=\"{{PLAYER_CSS}}\">\n<script src=\"{{PLAYER_JS}}\" defer></script>\n</head>\n<body>\n<main id=\"player\">\n<div class=\"fallback\">\n<h1>Frozen &lt;b&gt;tour&lt;/b&gt; &amp; &quot;quotes&quot;   &#39;apostrophe&#39; &lt;/script&gt;</h1>\n<noscript><p>This tour needs JavaScript to play. Turn it on in your browser to click through it.</p></noscript>\n</div>\n</main>\n<script type=\"application/json\" id=\"tour\">{\"base\":\"\",\"tour\":{\"title\":\"Frozen \\u003cb\\u003etour\\u003c/b\\u003e \\u0026 \\\"quotes\\\" \\u2028 'apostrophe' \\u003c/script\\u003e\",\"spotlight_dim\":60,\"theme\":{\"card_style\":\"dark\",\"accent\":\"#5dcaa5\",\"hotspot\":\"pulse\",\"progress_bar\":true,\"backdrop\":\"auto\",\"spotlight_soft\":true},\"zoom\":{\"enabled\":true,\"percent\":118},\"cover\":{\"title\":\"Cover \\u003ci\\u003etitle\\u003c/i\\u003e\",\"body\":\"Body \\u0026 more\",\"button\":\"Start\",\"logo\":\"p/0000000000000000000000000000000a.png\"},\"cta\":{\"label\":\"Book a call\",\"url\":\"https://example.com/book?a=1\\u0026b=2\"},\"end\":{\"text\":\"The end.\",\"primary\":{\"label\":\"Start free\",\"url\":\"https://example.com/start\"},\"secondary\":null,\"replay\":true},\"autoplay\":{\"enabled\":false,\"seconds\":5},\"chapters\":[{\"title\":\"First \\u003cchapter\\u003e\",\"description\":null,\"steps\":[{\"id\":\"st_000000000000000000000001\",\"image\":\"p/00000000000000000000000000000001.png\",\"width\":64,\"height\":64,\"click\":{\"x\":50,\"y\":50,\"size\":4},\"caption\":null,\"spotlight\":{\"x\":40,\"y\":30,\"w\":25,\"h\":12},\"notes\":[{\"kind\":\"text\",\"x\":12.5,\"y\":8,\"text\":\"Start \\u003chere\\u003e\",\"size\":4.17,\"color\":\"#ffffff\"}],\"card\":{\"title\":\"Card \\u0026 title\",\"body\":\"One click.\\n**Try it**\",\"next_label\":\"Next\",\"anchor\":\"hotspot\",\"point\":null,\"placement\":\"auto\"},\"advance\":\"anywhere\",\"zoom\":false},{\"id\":\"st_000000000000000000000002\",\"image\":\"p/00000000000000000000000000000002.jpg\",\"width\":64,\"height\":64,\"click\":null,\"caption\":\"Caption\",\"spotlight\":null,\"notes\":[{\"kind\":\"bubble\",\"x\":55,\"y\":60,\"w\":30,\"h\":15.5,\"tail\":{\"x\":10,\"y\":25},\"text\":\"Bubble\",\"size\":3.33,\"color\":\"#1a1a1a\",\"fill\":\"#ffffff\"}],\"card\":null,\"advance\":\"hotspot\",\"zoom\":null}]}]}}</script>\n</body>\n</html>\n"
+    },
+    {
+      "base": "",
+      "kind": "not found",
+      "status": 404,
+      "headers": {
+        "cache-control": "no-store",
+        "content-security-policy": "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'",
+        "content-type": "text/html; charset=utf-8",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff"
+      },
+      "etag": false,
+      "body": "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"color-scheme\" content=\"light dark\">\n<meta name=\"referrer\" content=\"no-referrer\">\n<title>Tour not available</title>\n<link rel=\"stylesheet\" href=\"{{PLAYER_CSS}}\">\n</head>\n<body>\n<main id=\"player\">\n<div class=\"fallback\">\n<h1>This tour isn&#39;t available</h1>\n<p>The link may be mistyped, or the tour may have been taken down.</p>\n</div>\n</main>\n</body>\n</html>\n"
+    },
+    {
+      "base": "https://pictures.example.net/",
+      "kind": "page",
+      "status": 200,
+      "headers": {
+        "cache-control": "public, max-age=60",
+        "content-security-policy": "default-src 'none'; img-src https://pictures.example.net; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'",
+        "content-type": "text/html; charset=utf-8",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff"
+      },
+      "etag": true,
+      "body": "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"color-scheme\" content=\"light dark\">\n<meta name=\"referrer\" content=\"no-referrer\">\n<title>Frozen &lt;b&gt;tour&lt;/b&gt; &amp; &quot;quotes&quot;   &#39;apostrophe&#39; &lt;/script&gt;</title>\n<link rel=\"stylesheet\" href=\"{{PLAYER_CSS}}\">\n<script src=\"{{PLAYER_JS}}\" defer></script>\n</head>\n<body>\n<main id=\"player\">\n<div class=\"fallback\">\n<h1>Frozen &lt;b&gt;tour&lt;/b&gt; &amp; &quot;quotes&quot;   &#39;apostrophe&#39; &lt;/script&gt;</h1>\n<noscript><p>This tour needs JavaScript to play. Turn it on in your browser to click through it.</p></noscript>\n</div>\n</main>\n<script type=\"application/json\" id=\"tour\">{\"base\":\"https://pictures.example.net\",\"tour\":{\"title\":\"Frozen \\u003cb\\u003etour\\u003c/b\\u003e \\u0026 \\\"quotes\\\" \\u2028 'apostrophe' \\u003c/script\\u003e\",\"spotlight_dim\":60,\"theme\":{\"card_style\":\"dark\",\"accent\":\"#5dcaa5\",\"hotspot\":\"pulse\",\"progress_bar\":true,\"backdrop\":\"auto\",\"spotlight_soft\":true},\"zoom\":{\"enabled\":true,\"percent\":118},\"cover\":{\"title\":\"Cover \\u003ci\\u003etitle\\u003c/i\\u003e\",\"body\":\"Body \\u0026 more\",\"button\":\"Start\",\"logo\":\"p/0000000000000000000000000000000a.png\"},\"cta\":{\"label\":\"Book a call\",\"url\":\"https://example.com/book?a=1\\u0026b=2\"},\"end\":{\"text\":\"The end.\",\"primary\":{\"label\":\"Start free\",\"url\":\"https://example.com/start\"},\"secondary\":null,\"replay\":true},\"autoplay\":{\"enabled\":false,\"seconds\":5},\"chapters\":[{\"title\":\"First \\u003cchapter\\u003e\",\"description\":null,\"steps\":[{\"id\":\"st_000000000000000000000001\",\"image\":\"p/00000000000000000000000000000001.png\",\"width\":64,\"height\":64,\"click\":{\"x\":50,\"y\":50,\"size\":4},\"caption\":null,\"spotlight\":{\"x\":40,\"y\":30,\"w\":25,\"h\":12},\"notes\":[{\"kind\":\"text\",\"x\":12.5,\"y\":8,\"text\":\"Start \\u003chere\\u003e\",\"size\":4.17,\"color\":\"#ffffff\"}],\"card\":{\"title\":\"Card \\u0026 title\",\"body\":\"One click.\\n**Try it**\",\"next_label\":\"Next\",\"anchor\":\"hotspot\",\"point\":null,\"placement\":\"auto\"},\"advance\":\"anywhere\",\"zoom\":false},{\"id\":\"st_000000000000000000000002\",\"image\":\"p/00000000000000000000000000000002.jpg\",\"width\":64,\"height\":64,\"click\":null,\"caption\":\"Caption\",\"spotlight\":null,\"notes\":[{\"kind\":\"bubble\",\"x\":55,\"y\":60,\"w\":30,\"h\":15.5,\"tail\":{\"x\":10,\"y\":25},\"text\":\"Bubble\",\"size\":3.33,\"color\":\"#1a1a1a\",\"fill\":\"#ffffff\"}],\"card\":null,\"advance\":\"hotspot\",\"zoom\":null}]}]}}</script>\n</body>\n</html>\n"
+    },
+    {
+      "base": "https://pictures.example.net/",
+      "kind": "not found",
+      "status": 404,
+      "headers": {
+        "cache-control": "no-store",
+        "content-security-policy": "default-src 'none'; img-src https://pictures.example.net; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'",
+        "content-type": "text/html; charset=utf-8",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff"
+      },
+      "etag": false,
+      "body": "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"color-scheme\" content=\"light dark\">\n<meta name=\"referrer\" content=\"no-referrer\">\n<title>Tour not available</title>\n<link rel=\"stylesheet\" href=\"{{PLAYER_CSS}}\">\n</head>\n<body>\n<main id=\"player\">\n<div class=\"fallback\">\n<h1>This tour isn&#39;t available</h1>\n<p>The link may be mistyped, or the tour may have been taken down.</p>\n</div>\n</main>\n</body>\n</html>\n"
+    }
+  ]
+}

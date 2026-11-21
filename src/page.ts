@@ -5,7 +5,8 @@
 // Only the snapshot is ever read here, never the draft. An unknown slug, a draft tour, an
 // unpublished tour, a tour of a workspace with a disabled account, a tour whose viewing
 // setting is not 'public' (src/access.ts) and a broken snapshot row all run the same single query and answer the same 404 page, so the answer says
-// nothing about which it was. The page is cached for a minute (PAGE_CACHE), so a page
+// nothing about which it was. Only then is a restricted tour looked for (src/restricted.ts),
+// which answers its own pages, or this same 404 page for one that cannot be served. The page is cached for a minute (PAGE_CACHE), so a page
 // fetched just before its account was disabled can still be shown from a cache that long.
 //
 // Untrusted text reaches this page in two places, and neither can become markup: the
@@ -179,7 +180,8 @@ const SLUG = /^[a-z2-7]{10}$/;
  */
 const PAGE_SQL_BEFORE_ACCOUNTS = "SELECT s.data FROM snapshot s JOIN tour t ON t.id = s.tour_id WHERE t.slug = ? AND t.status = 'published'";
 // A tour whose setting is not 'public' (src/access.ts) is not found here either, from the
-// moment its setting changes: its page is served only by the route that checks the viewer.
+// moment its setting changes: its page is served only by the route that checks the viewer
+// (src/restricted.ts), which this route asks only after this lookup found nothing.
 const PAGE_SQL = `${PAGE_SQL_BEFORE_ACCOUNTS} AND t.access = 'public' AND ${noDisabledAccount("t.workspace_id")}`;
 
 const HTML_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -237,8 +239,15 @@ const HEAD = `<meta charset="utf-8">
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">`;
 
+/**
+ * What a restricted tour's page adds to the document (src/restricted.ts): `head` after the
+ * player's stylesheet, `afterMain` after the player's element, each ending in a newline.
+ * Without them the page is the public page, byte for byte.
+ */
+export type PageExtra = { head?: string; afterMain?: string };
+
 /** The page for a published snapshot. Byte-for-byte the same on both targets. */
-export function pageHtml(tour: PageTour, base: string): string {
+export function pageHtml(tour: PageTour, base: string, extra: PageExtra = {}): string {
   const title = escapeHtml(tour.title);
   return `<!doctype html>
 <html lang="en">
@@ -246,7 +255,7 @@ export function pageHtml(tour: PageTour, base: string): string {
 ${HEAD}
 <title>${title}</title>
 <link rel="stylesheet" href="${PLAYER_CSS_PATH}">
-<script src="${PLAYER_JS_PATH}" defer></script>
+${extra.head ?? ""}<script src="${PLAYER_JS_PATH}" defer></script>
 </head>
 <body>
 <main id="player">
@@ -255,7 +264,7 @@ ${HEAD}
 <noscript><p>This tour needs JavaScript to play. Turn it on in your browser to click through it.</p></noscript>
 </div>
 </main>
-<script type="application/json" id="tour">${scriptJson({ base: normaliseBase(base), tour } satisfies PageData)}</script>
+${extra.afterMain ?? ""}<script type="application/json" id="tour">${scriptJson({ base: normaliseBase(base), tour } satisfies PageData)}</script>
 </body>
 </html>
 `;
@@ -349,7 +358,13 @@ function parseTour(data: string): PageTour {
   return pageTour(parsed);
 }
 
-export function pageRoutes(app: Hono, deps: Deps): void {
+/**
+ * What the page asks when its one public lookup finds nothing: the answer for a restricted
+ * tour (src/restricted.ts, `restrictedAnswer`), or null for the not-found page.
+ */
+export type RestrictedAnswer = (req: Request, deps: Deps, slug: string) => Promise<Response | null>;
+
+export function pageRoutes(app: Hono, deps: Deps, restricted?: RestrictedAnswer): void {
   // The player's script and stylesheet: generated into src/player/assets.ts, so both
   // targets serve the same bytes with the same headers and no static-file setup.
   app.get("/:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}", (c) => playerFile(c.req.path, c.req.header("if-none-match")) ?? c.notFound());
@@ -362,7 +377,8 @@ export function pageRoutes(app: Hono, deps: Deps): void {
       () => deps.db.first<{ data: string }>(PAGE_SQL, [slug]),
       () => deps.db.first<{ data: string }>(PAGE_SQL_BEFORE_ACCOUNTS, [slug]),
     );
-    if (row === null) return notFoundPage(base);
+    // Not a public tour: perhaps a restricted one, which only src/restricted.ts may serve.
+    if (row === null) return (restricted === undefined ? null : await restricted(c.req.raw, deps, slug)) ?? notFoundPage(base);
     let tour: PageTour;
     try {
       tour = parseTour(row.data);
