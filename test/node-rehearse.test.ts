@@ -17,7 +17,10 @@ import {
   compareAnswers,
   compareRows,
   compareStores,
+  identityProblems,
   migrationProblems,
+  playerFileProblems,
+  playerFilesIn,
   playerNamesOnly,
   storesSame,
   usageFromRows,
@@ -29,6 +32,7 @@ import {
 } from "../scripts/rehearse-compare.ts";
 import {
   buildModes,
+  checkPlayerFiles,
   CLIENT_ADDRESS,
   errorLineProblems,
   fetchAnswer,
@@ -340,8 +344,6 @@ describe("tour pages that differ only in the player's file names", () => {
     expect(page()[0].answer.headers.etag).not.toBe(page({ js: JS_B })[0].answer.headers.etag);
     expect(compareAnswers(page(), page({ js: JS_B, css: CSS_B }), NEW).playerNames).toBe(1);
     expect(compareAnswers(page(), page({ css: CSS_B }), NEW).playerNames).toBe(1);
-    // The same etag on both sides is allowed too.
-    expect(compareAnswers(page({ etag: '"x"' }), page({ js: JS_B, etag: '"x"' }), NEW).playerNames).toBe(1);
     for (const name of [JS_A, JS_B, CSS_A, CSS_B]) expect(JSON.stringify(c)).not.toContain(name.slice(8, 24));
     // The not-found page names the stylesheet in the same tag.
     const notFound = (css: string) => [rec("token 1: tour 2 page", "GET /t/:slug", answer(404, NOT_FOUND_HTML.replace(PLAYER_CSS_PATH, css), { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }))];
@@ -362,6 +364,26 @@ describe("tour pages that differ only in the player's file names", () => {
     expect(fails(page({ etag: '"a"' }), page({ etag: null }))).toBe("token 1: tour 1 page: header etag missing");
     // An etag on one side only, beside changed names.
     expect(fails(page(), page({ js: JS_B, etag: null }))).toMatch(/header etag missing/);
+  });
+
+  it("with changed names, each side's etag must be its own page's, by the server's rule (a quoted SHA-256 of the page, 32 hex digits)", () => {
+    const oldPage = page();
+    const oldEtag = oldPage[0].answer.headers.etag;
+    // The correct pair: each etag the hash of its own body.
+    expect(oldEtag).toBe(etagOf(pageBody()));
+    expect(compareAnswers(oldPage, page({ js: JS_B }), NEW).playerNames).toBe(1);
+    // A stale etag on the new side: the old page's, kept for a changed page.
+    expect(fails(oldPage, page({ js: JS_B, etag: oldEtag }))).toMatch(/^token 1: tour 1 page: body differs/);
+    // A fixed etag on both sides, the same or not.
+    expect(fails(page({ etag: '"x"' }), page({ js: JS_B, etag: '"x"' }))).toMatch(/body differs/);
+    expect(fails(page({ etag: '"x"' }), page({ js: JS_B, etag: '"y"' }))).toMatch(/header etag differs/);
+    // A wrong etag on the old side only (here the new page's), the new one right.
+    expect(fails(page({ etag: etagOf(pageBody({ js: JS_B })) }), page({ js: JS_B }))).toMatch(/^token 1: tour 1 page: body differs/);
+    expect(fails(page({ etag: '"x"' }), page({ js: JS_B }))).toMatch(/header etag differs/);
+    // The same hash written another way: weak, unquoted, capitals, or the whole 64 digits.
+    const hex = etagOf(pageBody({ js: JS_B })).slice(1, -1);
+    const full = createHash("sha256").update(pageBody({ js: JS_B })).digest("hex");
+    for (const etag of [`W/"${hex}"`, hex, `"${hex.toUpperCase()}"`, `"${full}"`]) expect(fails(oldPage, page({ js: JS_B, etag })), etag).toMatch(/body differs/);
   });
 
   it("a changed picture address, title or step text fails, with or without a changed player name", () => {
@@ -958,5 +980,74 @@ describe("the way back with a restricted tour", () => {
       expect(refusalLine(answer(409, body)), body).toBe("the change answered 409");
     }
     expect(refusalLine(answer(500, "<html>"))).toBe("the change answered 500");
+  });
+});
+
+describe("the way back and the two new builds demand identity", () => {
+  const me = (v: string) => [rec("token 1: workspace (one address)", "GET /api/v1/me", answer(200, `{"workspace":"Acme","version":"${v}"}`))];
+  const usage = (a: Answer) => [rec("token 1: usage (one address)", "GET /api/v1/usage", a)];
+
+  it("the same answers but the date pass", () => {
+    expect(identityProblems(compareAnswers(site(), site({ date: "Fri, 20 Nov 2026 11:11:11 GMT" })))).toEqual([]);
+  });
+
+  it("a route answered by one side only, another version or any other difference fails", () => {
+    const added = compareAnswers(usage(answer(404, '{"error":"not_found"}')), usage(answer(200, '{"used_bytes":1}')));
+    expect(added.problems).toEqual([]);
+    expect(identityProblems(added)).toEqual(["token 1: usage (one address): answered by one side only"]);
+    expect(identityProblems(compareAnswers(me("0.1.45"), me("0.1.46")))).toEqual(["1 answer(s) differ in the version"]);
+    expect(identityProblems(compareAnswers(site(), site({ pictures: 1 })))).toEqual(["token 1: tour 1 picture 2: missing after"]);
+  });
+});
+
+describe("the new build's player files", () => {
+  const JS = "/player.399e3f2c7b7c723a.js";
+  const CSS = "/player.b5cf31940e7c03b2.css";
+  const html = (head: string) => enc.encode(`<!doctype html>\n<head>\n${head}\n</head>\n`);
+  const tags = `<link rel="stylesheet" href="${CSS}">\n<script src="${JS}" defer></script>`;
+
+  it("the names come from the page's own two tags only, each once", () => {
+    expect(playerFilesIn(html(tags))).toEqual([CSS, JS]);
+    expect(playerFilesIn(enc.encode(NOT_FOUND_HTML))).toEqual([PLAYER_CSS_PATH]);
+    // A name outside the server's tags, or in a tag written another way, is not one.
+    expect(playerFilesIn(html(`<a href="${JS}">x</a><script src="${JS}"></script>`))).toEqual([]);
+    expect(playerFilesIn(new Uint8Array([0xff, 0xfe]))).toEqual([]);
+  });
+
+  it("each file must answer 200 with its own type", () => {
+    const file = (status: number, type: string): Answer => ({ status, headers: { "content-type": type }, body: new Uint8Array() });
+    expect(playerFileProblems(JS, file(200, "text/javascript; charset=utf-8"))).toEqual([]);
+    expect(playerFileProblems(CSS, file(200, "text/css; charset=utf-8"))).toEqual([]);
+    expect(playerFileProblems(JS, file(404, "application/json"))).toEqual(["answered 404", "content type is not the script's"]);
+    expect(playerFileProblems(CSS, file(200, "text/javascript"))).toEqual(["content type is not the stylesheet's"]);
+    expect(playerFileProblems(JS, file(200, "text/javascriptx"))).toEqual(["content type is not the script's"]);
+  });
+
+  it("asks each distinct file the new build's tour pages name, on the tours address, and names none in its problems", async () => {
+    const seen: string[] = [];
+    const server = createServer((req, res) => {
+      seen.push(`${req.headers.host} ${req.url}`);
+      if (req.url === JS) {
+        res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
+        return res.end("x");
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end('{"error":"not_found"}');
+    });
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    const a = server.address();
+    const port = typeof a === "object" && a !== null ? a.port : 0;
+    const pageRec = (key: string, body: Uint8Array, status = 200) => rec(key, "GET /t/:slug", { status, headers: { "content-type": "text/html; charset=utf-8" }, body });
+    try {
+      const answers = [pageRec("token 1: tour 1 page", html(tags)), pageRec("token 1: tour 2 page", html(tags)), pageRec("token 1: tour 3 page", enc.encode(NOT_FOUND_HTML), 404), rec("x", "GET /p/:name", answer(200, tags, { "content-type": "text/html" }))];
+      const r = await checkPlayerFiles(port, "tours.example.com", answers);
+      expect(r.files).toBe(2);
+      expect(r.problems).toEqual(["stylesheet 1: answered 404, content type is not the stylesheet's"]);
+      expect(seen.sort()).toEqual([`tours.example.com ${CSS}`, `tours.example.com ${JS}`].sort());
+      expect(JSON.stringify(r)).not.toContain("b5cf3194");
+      expect((await checkPlayerFiles(port, "tours.example.com", [])).files).toBe(0);
+    } finally {
+      server.close();
+    }
   });
 });
