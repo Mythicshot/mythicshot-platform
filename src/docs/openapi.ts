@@ -841,9 +841,13 @@ function schemas(): Record<string, Schema> {
         ),
         terms: orNull(
           object(
-            ["version", "agreed_at"],
-            { version: { type: "string", description: "The label of the version of the site's terms the account agreed to last. Show it as text." }, agreed_at: whole("When it agreed to it, in milliseconds since 1970.") },
-            "The account's newest agreement to the site's terms: the version's label and the time, nothing else. null when it has agreed to none (the Admin page says Not yet).",
+            ["version", "agreed_at", "current"],
+            {
+              version: { type: "string", description: "The label of the version of the site's terms the account agreed to last. Show it as text." },
+              agreed_at: whole("When it agreed to it, in milliseconds since 1970."),
+              current: { type: "boolean", description: "true when that is the site's current terms; false when the account agreed only to an older version and has not agreed to the current one yet." },
+            },
+            "The account's newest agreement to the site's terms: the version's label, the time and whether it is to the current terms, nothing else. null when it has agreed to none (the Admin page says Not yet).",
           ),
         ),
       },
@@ -862,12 +866,12 @@ function schemas(): Record<string, Schema> {
         id: { type: "string", pattern: "^trm_[0-9a-f]{24}$", description: "The version's id, which POST /api/v1/terms/agree takes." },
         title: text(TERMS_LIMITS.titleChars, "The terms' title.", 1),
         version: text(TERMS_LIMITS.versionChars, "The version's label, free text such as a date.", 1),
-        points: { type: "array", minItems: 1, maxItems: TERMS_LIMITS.points, items: text(TERMS_LIMITS.pointChars, "One main point.", 1), description: "The main points: a summary. The full terms in body are what is agreed to." },
+        points: { type: "array", maxItems: TERMS_LIMITS.points, items: text(TERMS_LIMITS.pointChars, "One main point.", 1), description: "The main points: a summary. The full terms in body are what is agreed to." },
         links: { type: "array", maxItems: TERMS_LIMITS.links, items: ref("TermsLink"), description: "Pages the site offers the terms as, if any." },
         body: { type: "array", minItems: 1, items: ref("TermsBlock"), description: "The full terms, block by block." },
         published_at: whole("When the version was published, in milliseconds since 1970."),
       },
-      "One version of the site's terms, exactly as it was published; a version is never changed. Every text is the site's own: show it as text, never as markup.",
+      "One version of the site's terms, exactly as it was published; a version is never changed. Every text is the site's own: show it as text, never as markup. A version is checked when it is published; read back, a link today's rule refuses is left out, and the texts are as stored.",
     ),
     TermsAgreement: object(
       ["terms_id", "version", "agreed_at"],
@@ -903,7 +907,8 @@ function schemas(): Record<string, Schema> {
       },
       "The site's storage in all. Three numbers, nothing of any workspace.",
     ),
-    AdminAccountList: object(["accounts", "next"], {
+    AdminAccountList: object(["accounts", "next", "current_terms"], {
+      current_terms: orNull(object(["version"], { version: { type: "string", description: "Its label. Show it as text." } }, "The site's current terms: the newest version published.")),
       accounts: { type: "array", maxItems: ADMIN_PAGE, description: `The accounts, in the order they were made, at most ${ADMIN_PAGE}.`, items: ref("AdminAccount") },
       next: { type: ["string", "null"], pattern: "^[A-Za-z0-9_-]{20,100}$", description: "The cursor to ask for the next page with, as ?after=<cursor>: opaque text, to be sent back as it is. An account deleted since does not cut the list short. null on the last page." },
     }),

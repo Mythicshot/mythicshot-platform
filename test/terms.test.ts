@@ -162,13 +162,17 @@ describe("agreeing", () => {
       const headers: Record<string, string> = { cookie: s.cookie, "x-csrf-token": s.csrf, origin: ORIGIN, "sec-fetch-site": "same-origin", ...(type === null ? {} : { "content-type": type }) };
       const r = await send(w.deps, "POST", "/api/v1/terms/agree", { headers, body: JSON.stringify({ terms: id }) });
       expect([r.status, r.json], String(type)).toEqual([400, { error: "bad_request", detail: 'the body must be JSON such as {"terms": "trm_…"}, the id of the terms shown, with nothing else in it' }]);
-      const email = await send(w.deps, "POST", "/api/v1/account/email", { headers, body: JSON.stringify({ email: "x@example.com" }) });
-      expect([email.status, email.json?.error], String(type)).toEqual([400, "bad_request"]);
     }
     expect(await rows(w.deps, "terms_agreement")).toEqual([]);
     // The account is the session's, whatever else is sent: the admin, who sent nothing, has not agreed.
     expect((await agree(w.deps, s, id)).status).toBe(204);
     expect((await rows(w.deps, "terms_agreement")).map((r) => r.user_id)).toEqual([w.member.userId]);
+    // Now agreed, typing a computer's short code (another session change with a JSON body) refuses the same labels the same way.
+    for (const type of [null, "text/plain"]) {
+      const headers: Record<string, string> = { cookie: s.cookie, "x-csrf-token": s.csrf, origin: ORIGIN, "sec-fetch-site": "same-origin", ...(type === null ? {} : { "content-type": type }) };
+      const lookup = await send(w.deps, "POST", "/api/v1/connect/lookup", { headers, body: JSON.stringify({ user_code: "ABCD-EFGH" }) });
+      expect([lookup.status, lookup.json?.error], String(type)).toEqual([400, "bad_request"]);
+    }
     const adminSession = await signIn(w.deps, w.admin.userId);
     expect((await ask(w.deps, adminSession, "GET", "/api/v1/terms")).json.required).toBe(true);
   });
@@ -361,7 +365,7 @@ describe("what is kept", () => {
     await expect(w.deps.db.run("DELETE FROM terms_version WHERE id = ?", [id])).rejects.toThrow(/never deleted/);
     const read = await parseTerms(new TextEncoder().encode(fileOf("1")));
     if (!read.ok) throw new Error(read.reason);
-    expect(await publishTerms(w.deps, read)).toEqual({ ok: false, problem: "same", id });
+    expect(await publishTerms(w.deps, read)).toEqual({ ok: false, problem: "same", version: { seq: 1, id } });
     expect((await showTerms(w.deps, id))?.answer.title).toBe("Site terms");
     expect(await w.deps.db.all("SELECT id FROM terms_version")).toHaveLength(1);
   });

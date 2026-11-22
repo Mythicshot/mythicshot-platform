@@ -426,11 +426,18 @@ The server command is never held back, so a site whose admin has not agreed can 
 
 ### What is stored
 
-For each agreement, the account, the version and the date and time, and nothing else: no network address and no browser, as the site stores neither on accounts. The audit record gets `terms_agreed` with the account's and the version's ids. The Account page says "You agreed to the terms of <version> on <date>." with "Read them", which opens that version read-only; the Admin page and the admin API's list of accounts give each account's version and date, or "Not yet". Deleting an account removes its agreements; the audit rows stay, ids only, as for everything else.
+For each agreement, the account, the version and the date and time, and nothing else: no network address and no browser, as the site stores neither on accounts. The audit record gets `terms_agreed` with the account's and the version's ids. The Account page says "You agreed to the terms of <version> on <date>." with "Read them", which opens that version read-only; the Admin page and the admin API's list of accounts give each account's version and date, or "Not yet". On the Admin page the Terms column shows on a site that has published terms; an account that agreed only to an older version reads "Not yet", with "Agreed to <older version> on <date>" under it, and the API marks each agreement `current` or not and names the site's `current_terms`. Deleting an account removes its agreements; the audit rows stay, ids only, as for everything else.
 
 ### What the terms leave alone
 
 Connected computers keep working: an API token is never held back by the terms, whatever the account's state, and every request made with a token answers exactly as before. Connecting a computer needs a signed-in browser, so nobody connects one without having agreed once; after the terms change, a computer already connected is not cut off. Visitors of shared tours, images and clips never see the terms: nothing on the tours address or the address for images changes, and viewer sessions are not affected.
+
+### Accepted, and said here
+
+- A request that the terms hold back still records that the session was used, as every session request does.
+- A computer whose connection was approved before new terms were published can still collect it within the code's 10 minutes.
+- Two publishes at the same moment: one wins, and the other prints one line saying so and changes nothing.
+- On a site without terms nothing visible changes, but the dashboard's static files and the admin API's list of accounts (`terms: null` on each account, `current_terms: null`) differ from before.
 
 ## The dashboard
 

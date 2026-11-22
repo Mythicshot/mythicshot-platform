@@ -300,6 +300,8 @@ export const ADMIN_JS = `(function () {
     joined: "Joined",
     terms: "Terms",
     notYet: "Not yet",
+    agreedToBefore: "Agreed to ",
+    agreedToMiddle: " on ",
   };
   var ACCOUNTS = "/api/v1/admin/accounts";
   var WORKSPACES = "/api/v1/admin/workspaces/";
@@ -334,6 +336,8 @@ ${SIZE_JS}
   var standard = null;
   // The accounts shown, how many pages of the list they are, and the cursor of the page after them.
   var shown = [];
+  // Whether the site has published terms: the list's current_terms, which the Terms column follows.
+  var siteTerms = false;
   var pages = 0;
   var next = null;
   // Each account's More button, by workspace id, to give focus back after the list is rebuilt.
@@ -544,6 +548,7 @@ ${SIZE_JS}
       return pageOf(after).then(function (res) {
         if (!listed(res)) return res;
         got = got.concat(usable(res.data.accounts));
+        if (count === 0) siteTerms = res.data.current_terms !== null && typeof res.data.current_terms === "object";
         count++;
         cursor = cursorOf(res.data.next);
         return cursor !== null && count < want ? step(cursor) : true;
@@ -726,13 +731,22 @@ ${SIZE_JS}
     tr.appendChild(labelled(el("td", "n allowance", limit !== null ? Dash.formatBytes(limit) : TEXT.none), TEXT.allowance));
     // The day the account was made, with the year, as the invites set's mockup 1 shows it.
     tr.appendChild(labelled(el("td", "joined", Dash.dateOf(a.created_at, true)), TEXT.joined));
-    // The site's terms: the version the account agreed to last and when, or "Not yet".
+    // The site's terms: the current version and when it was agreed to; "Not yet" otherwise,
+    // with an agreement to an older version under it, so an old one never reads as current.
     var terms = labelled(el("td", "terms"), TEXT.terms);
     var agreed = a.terms !== null && typeof a.terms === "object" && typeof a.terms.version === "string" && typeof a.terms.agreed_at === "number" ? a.terms : null;
-    if (agreed === null) terms.appendChild(el("span", "d", TEXT.notYet));
-    else {
+    if (agreed !== null && agreed.current === true) {
       terms.appendChild(el("span", "name", agreed.version));
       terms.appendChild(el("div", "d", Dash.dateOf(agreed.agreed_at, true)));
+    } else {
+      terms.appendChild(el("span", "d", TEXT.notYet));
+      if (agreed !== null) {
+        var older = el("div", "d");
+        older.appendChild(document.createTextNode(TEXT.agreedToBefore));
+        older.appendChild(el("span", "name", agreed.version));
+        older.appendChild(document.createTextNode(TEXT.agreedToMiddle + Dash.dateOf(agreed.agreed_at, true)));
+        terms.appendChild(older);
+      }
     }
     tr.appendChild(terms);
 
@@ -755,11 +769,9 @@ ${SIZE_JS}
     var rows = $("admin-rows");
     rows.textContent = "";
     for (var i = 0; i < shown.length; i++) rows.appendChild(row(shown[i], i));
-    // The Terms column only once an account shown has agreed to the site's terms: on a site
-    // with terms the admin has (no session gets this far without agreeing), and on a site
-    // without, nobody has, so the list reads as before.
-    var agreements = shown.some(function (a) { return a !== null && typeof a === "object" && a.terms !== null && typeof a.terms === "object"; });
-    $("accounts-table").className = agreements ? "accounts" : "accounts no-terms";
+    // The Terms column only on a site that has published terms (the list's current_terms): a
+    // site without reads as before.
+    $("accounts-table").className = siteTerms ? "accounts" : "accounts no-terms";
     $("admin-more").hidden = next === null;
     syncRows();
     if (hadWs !== null && moreOf[hadWs] !== undefined) moreOf[hadWs].focus();

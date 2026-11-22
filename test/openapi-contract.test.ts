@@ -1563,7 +1563,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     expect((await agree({ terms: published.id })).status).toBe(204);
     expect((await api.call("GET", "/api/v1/terms/agreed", { headers: { cookie } })).json.terms.id).toBe(published.id);
     expect((await api.call("GET", "/api/v1/session", { headers: { cookie } })).json.terms_agreed).toEqual({ version: "1", agreed_at: 1_800_000_000_000 });
-    expect((await api.call("GET", "/api/v1/admin/accounts", { headers: { cookie } })).json.accounts[0].terms).toEqual({ version: "1", agreed_at: 1_800_000_000_000 });
+    expect((await api.call("GET", "/api/v1/admin/accounts", { headers: { cookie } })).json.accounts[0].terms).toEqual({ version: "1", agreed_at: 1_800_000_000_000, current: true });
     for (const path of ["/api/v1/terms", "/api/v1/terms/agreed"]) refused(await api.call("GET", path, { token: admin.token }), 401, "unauthorized");
     refused(await api.call("POST", "/api/v1/terms/agree", { token: admin.token, headers: { "content-type": JSON_TYPE }, body: JSON.stringify({ terms: published.id }) }), 401, "unauthorized");
   });

@@ -1277,7 +1277,7 @@ describe("one workspace against another", () => {
     const rows = await w.deps.db.all<{ user_id: string }>("SELECT user_id FROM terms_agreement ORDER BY user_id");
     expect(rows.map((r) => r.user_id).sort()).toEqual([w.a.userId, w.b.userId].sort());
     const list = await fire(w.deps, { method: "GET", path: "/api/v1/admin/accounts" }, BY_SESSION.of(w.a));
-    for (const account of list.json.accounts) expect(Object.keys(account.terms).sort()).toEqual(["agreed_at", "version"]);
+    for (const account of list.json.accounts) expect(Object.keys(account.terms).sort()).toEqual(["agreed_at", "current", "version"]);
     expect(list.text).not.toContain(published.id);
     expect(w.writes()).toEqual([]);
   });

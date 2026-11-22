@@ -44,10 +44,11 @@
 import type { Hono } from "hono";
 import { auditStatement } from "./audit.ts";
 import { requireAuth } from "./auth.ts";
-import { apiError, json, noContent, readCapped } from "./http.ts";
+import { apiError, json, noContent } from "./http.ts";
 import { httpsAddressFrom } from "./https-address.ts";
 import { isNotNullViolation, type Deps } from "./ports.ts";
 import { csrfFor, readSessionCookie } from "./sessions.ts";
+import { ownJsonBody } from "./signin.ts";
 
 /** The caps of a terms file, all checked by parseTerms. Characters are Unicode code points. */
 export const TERMS_LIMITS = {
@@ -145,7 +146,7 @@ function valueOf(line: string, key: string): string | null {
  * The blocks of the full terms, from its lines (already checked for characters and trimmed),
  * or the refusal. `first` is the file's line number of lines[0].
  */
-function blocksOf(lines: readonly string[], first: number): { ok: true; blocks: TermsBlock[] } | { ok: false; reason: string } {
+function blocksOf(lines: readonly string[], first: number, stored = false): { ok: true; blocks: TermsBlock[] } | { ok: false; reason: string } {
   const blocks: TermsBlock[] = [];
   let paragraph: string[] | null = null;
   let list: string[] | null = null;
@@ -162,15 +163,18 @@ function blocksOf(lines: readonly string[], first: number): { ok: true; blocks: 
       close();
       continue;
     }
-    if (line === "#" || line.startsWith("# ")) {
+    // A stored body was checked when it was published; read back, nothing in it is refused: a
+    // line a later rule would refuse (an empty heading or bullet) is text, and no length counts.
+    const emptyMark = stripSpaces(line.slice(1)) === "";
+    if ((line === "#" || line.startsWith("# ")) && !(stored && emptyMark)) {
       const text = stripSpaces(line.slice(1));
       if (text === "") return { ok: false, reason: lineSays(at, TERMS_FILE_SAYS.emptyHeading) };
-      if (chars(text) > TERMS_LIMITS.headingChars) return { ok: false, reason: lineSays(at, TERMS_FILE_SAYS.longHeading) };
+      if (!stored && chars(text) > TERMS_LIMITS.headingChars) return { ok: false, reason: lineSays(at, TERMS_FILE_SAYS.longHeading) };
       close();
       blocks.push({ kind: "heading", text });
       continue;
     }
-    if (line === "-" || line.startsWith("- ")) {
+    if ((line === "-" || line.startsWith("- ")) && !(stored && emptyMark)) {
       const text = stripSpaces(line.slice(1));
       if (text === "") return { ok: false, reason: lineSays(at, TERMS_FILE_SAYS.emptyBullet) };
       if (paragraph !== null) close();
@@ -185,13 +189,15 @@ function blocksOf(lines: readonly string[], first: number): { ok: true; blocks: 
 }
 
 /**
- * The blocks of a stored body (TermsFile.body). Throws for a body parseTerms would not have
- * stored, which only a changed database can hold.
+ * The blocks of a stored body (TermsFile.body). Never refuses: a version is kept as it was
+ * published and checked then, so a line a later, stricter rule would refuse is read as text
+ * (the pages write every text with textContent alone). A body that reads as nothing is one
+ * paragraph of its own text.
  */
 export function termsBlocks(body: string): TermsBlock[] {
-  const read = blocksOf(body.split("\n"), 1);
-  if (!read.ok || read.blocks.length === 0) throw new Error("terms: a stored body that does not read");
-  return read.blocks;
+  const read = blocksOf(body.split("\n").map(stripSpaces), 1, true);
+  if (read.ok && read.blocks.length > 0) return read.blocks;
+  return [{ kind: "paragraph", text: body }];
 }
 
 /**
@@ -345,23 +351,36 @@ const VERSION_COLUMNS = "id, seq, title, version_label, points, links, body, sha
 /** One version as the API answers it: its id, title, label, main points, links, the full terms as blocks, and when it was published. */
 export type TermsAnswer = { id: string; title: string; version: string; points: string[]; links: TermsLink[]; body: TermsBlock[]; published_at: number };
 
-function listOfText(raw: string): string[] {
-  const v: unknown = JSON.parse(raw);
-  if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) throw new Error("terms: a stored list that does not read");
-  return v as string[];
+/** A stored JSON list, or an empty one for text that is not one (only a changed database holds such text). */
+function storedList(raw: string): unknown[] {
+  try {
+    const v: unknown = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
 }
 
+/** The stored main points: every text as it was published; anything that is not text is left out. */
+function listOfText(raw: string): string[] {
+  return storedList(raw).filter((x): x is string => typeof x === "string");
+}
+
+/**
+ * The stored links, each checked again on the way out by today's rule: only an address of the
+ * strict shape is ever handed on. A link that fails it (a later release may tighten the rule,
+ * and a version is never changed) is left out, never an error: the rest of the version is still
+ * served and can still be agreed to.
+ */
 function listOfLinks(raw: string): TermsLink[] {
-  const v: unknown = JSON.parse(raw);
-  if (!Array.isArray(v)) throw new Error("terms: stored links that do not read");
-  return v.map((x: unknown) => {
+  const out: TermsLink[] = [];
+  for (const x of storedList(raw)) {
     const l = x as { label?: unknown; url?: unknown } | null;
-    if (l === null || typeof l !== "object" || typeof l.label !== "string" || typeof l.url !== "string") throw new Error("terms: stored links that do not read");
-    // Checked again on the way out: only an address of the strict shape is ever handed on.
+    if (l === null || typeof l !== "object" || typeof l.label !== "string" || l.label === "" || typeof l.url !== "string") continue;
     const url = httpsAddressFrom(l.url, { maxChars: TERMS_LIMITS.linkUrlChars, strict: true });
-    if (url === null) throw new Error("terms: stored links that do not read");
-    return { label: l.label, url };
-  });
+    if (url !== null) out.push({ label: l.label, url });
+  }
+  return out;
 }
 
 function answerOf(row: VersionRow): TermsAnswer {
@@ -377,24 +396,34 @@ function newTermsId(): string {
 
 /** True for the database's refusal of a second version with the same content. */
 function isSameContent(err: unknown): boolean {
+  return refusedFor(err, "sha256");
+}
+
+/** True for the database's refusal of a second version with the same number: two publishes at the same moment. */
+function isSameNumber(err: unknown): boolean {
+  return refusedFor(err, "seq");
+}
+
+function refusedFor(err: unknown, column: string): boolean {
   for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
-    if (/\bUNIQUE constraint failed: terms_version\.sha256\b/.test(e.message)) return true;
+    if (new RegExp(`\\bUNIQUE constraint failed: terms_version\\.${column}\\b`).test(e.message)) return true;
   }
   return false;
 }
 
 /**
  * Adds a file parseTerms read as the newest version, or says why not: "same" when a version
- * with the same canonical content exists (nothing is written). One read and one write; the
- * write takes the next seq in the same statement, and the database's unique digest decides
- * between two publishes of one file at once.
+ * with the same canonical content exists, with its number and id when it can be read; "busy"
+ * when another version took the next number at the same moment. Nothing is written either way.
+ * One read and one write; the write takes the next seq in the same statement, and the
+ * database's unique digest and number decide between two publishes at once.
  */
 export async function publishTerms(
   deps: Deps,
   file: { terms: TermsFile; sha256: string },
-): Promise<{ ok: true; id: string; seq: number } | { ok: false; problem: "same"; id: string | null }> {
-  const same = await deps.db.first<{ id: string }>("SELECT id FROM terms_version WHERE sha256 = ?", [file.sha256]);
-  if (same !== null) return { ok: false, problem: "same", id: same.id };
+): Promise<{ ok: true; id: string; seq: number } | { ok: false; problem: "same"; version: { seq: number; id: string } | null } | { ok: false; problem: "busy" }> {
+  const same = await deps.db.first<{ id: string; seq: number }>("SELECT id, seq FROM terms_version WHERE sha256 = ?", [file.sha256]);
+  if (same !== null) return { ok: false, problem: "same", version: { seq: same.seq, id: same.id } };
   const id = newTermsId();
   const t = file.terms;
   try {
@@ -409,7 +438,8 @@ export async function publishTerms(
       deps.now(),
     ]);
   } catch (err) {
-    if (isSameContent(err)) return { ok: false, problem: "same", id: null };
+    if (isSameContent(err)) return { ok: false, problem: "same", version: null };
+    if (isSameNumber(err)) return { ok: false, problem: "busy" };
     throw err;
   }
   const row = await deps.db.first<{ seq: number }>("SELECT seq FROM terms_version WHERE id = ?", [id]);
@@ -435,8 +465,6 @@ export async function showTerms(deps: Deps, id: string): Promise<{ answer: Terms
 
 // ---- The session requests of the terms screen ----
 
-/** The longest body POST /api/v1/terms/agree reads: `{"terms":"trm_<24 hex>"}` is 37 bytes. */
-const MAX_AGREE_BYTES = 256;
 const TERMS_ID = /^trm_[0-9a-f]{24}$/;
 const NEEDS_TERMS = 'the body must be JSON such as {"terms": "trm_…"}, the id of the terms shown, with nothing else in it';
 
@@ -499,7 +527,8 @@ export function termsRoutes(app: Hono, deps: Deps): void {
   });
 
   /**
-   * "I agree": `{"terms": "<the id of the version shown>"}` and nothing else. Records, for the
+   * "I agree": `{"terms": "<the id of the version shown>"}` and nothing else, sent as
+   * application/json (ownJsonBody, the rule every session change's JSON body has). Records, for the
    * caller's own account only, that it agreed to that version now, only while it is still the
    * current one: a version that is not (a newer one was published meanwhile, an older or
    * unknown id, a site with none) is 409 `terms_changed` and nothing is written. Agreeing again
@@ -519,15 +548,10 @@ export function termsRoutes(app: Hono, deps: Deps): void {
     if (auth.session === undefined) return unauthorized();
     const userId = auth.session.userId;
 
-    const raw = await readCapped(req, MAX_AGREE_BYTES);
-    if (raw === "too_large") return apiError(400, "bad_request", NEEDS_TERMS);
-    let body: unknown;
-    try {
-      body = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw));
-    } catch {
-      return apiError(400, "bad_request", NEEDS_TERMS);
-    }
-    if (body === null || typeof body !== "object" || Array.isArray(body)) return apiError(400, "bad_request", NEEDS_TERMS);
+    // The shared rule of a session change's body (src/signin.ts): this address, a page of it,
+    // labelled application/json, a JSON object of at most MAX_BODY_BYTES.
+    const body = await ownJsonBody(req, deps, NEEDS_TERMS);
+    if (body instanceof Response) return body;
     // The one field and nothing else: no account, no time, nothing the server takes from the session.
     if (Object.keys(body).some((k) => k !== "terms")) return apiError(400, "bad_request", NEEDS_TERMS);
     const shown = (body as Record<string, unknown>).terms;

@@ -227,7 +227,7 @@ describe("the admin's list of accounts", () => {
     }
     // A cursor past every account lists nobody.
     const nobody = await ask(deps, "GET", `${ACCOUNTS}?after=${encodeAccountCursor(Number.MAX_SAFE_INTEGER, `usr_${"0".repeat(24)}`)}`, { headers });
-    expect(nobody.json).toEqual({ accounts: [], next: null });
+    expect(nobody.json).toEqual({ accounts: [], next: null, current_terms: null });
 
     // The account a cursor was made from is deleted between two pages: the next page is the rest all the same.
     const cursorAccount = pages[0].accounts[99].id as string;

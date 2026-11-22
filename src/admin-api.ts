@@ -77,13 +77,15 @@ function notFound(): Response {
 }
 
 /**
- * The account's newest agreement to the site's terms (src/terms.ts), as two columns of the
- * list's one read: the version's label and when it was agreed to, both null for "Not yet".
+ * The account's newest agreement to the site's terms (src/terms.ts), as columns of the list's
+ * one read: the version's label and when it was agreed to, both null for "Not yet", and whether
+ * the account has agreed to the current version (1) or only to older ones (0).
  * Both pick the same row: by the time, then by the version's order. Only the label and the
  * time: never the terms' text, never anything of how the account agreed.
  */
 const NEWEST_AGREEMENT_COLUMNS = `(SELECT t.version_label FROM terms_agreement a JOIN terms_version t ON t.id = a.terms_id WHERE a.user_id = p.id ORDER BY a.agreed_at DESC, t.seq DESC LIMIT 1) AS terms_version,
-              (SELECT a.agreed_at FROM terms_agreement a JOIN terms_version t ON t.id = a.terms_id WHERE a.user_id = p.id ORDER BY a.agreed_at DESC, t.seq DESC LIMIT 1) AS terms_agreed_at`;
+              (SELECT a.agreed_at FROM terms_agreement a JOIN terms_version t ON t.id = a.terms_id WHERE a.user_id = p.id ORDER BY a.agreed_at DESC, t.seq DESC LIMIT 1) AS terms_agreed_at,
+              EXISTS (SELECT 1 FROM terms_agreement a WHERE a.user_id = p.id AND a.terms_id = (SELECT id FROM terms_version ORDER BY seq DESC LIMIT 1)) AS terms_current`;
 
 /** The numbers of one workspace, in the shape GET /api/v1/usage gives them. */
 function numbers(u: Usage) {
@@ -158,6 +160,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       gifs: number;
       terms_version: string | null;
       terms_agreed_at: number | null;
+      terms_current: number | null;
     };
     // One read. The page of accounts is chosen first, one more than a page to tell whether
     // another follows; then each account's numbers, with the account's own usage SQL, over
@@ -189,7 +192,14 @@ export function adminRoutes(app: Hono, deps: Deps): void {
     } catch (err) {
       // A database before the terms migration (0018) has no agreement: every account is "Not yet".
       if (!isBeforeTerms(err)) throw err;
-      rows = await list("NULL AS terms_version, NULL AS terms_agreed_at");
+      rows = await list("NULL AS terms_version, NULL AS terms_agreed_at, NULL AS terms_current");
+    }
+    // The site's current terms (the newest version), or null for a site that has published none.
+    let current: { version_label: string } | null = null;
+    try {
+      current = await deps.db.first<{ version_label: string }>("SELECT version_label FROM terms_version ORDER BY seq DESC LIMIT 1");
+    } catch (err) {
+      if (!isBeforeTerms(err)) throw err;
     }
     const page = rows.slice(0, ADMIN_PAGE);
     const accounts = page.map((r) => ({
@@ -204,10 +214,10 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       workspace_name: r.workspace_name,
       ...numbers(usageFromRow(r)),
       storage_allowance_bytes: r.own,
-      terms: r.terms_version === null || r.terms_agreed_at === null ? null : { version: r.terms_version, agreed_at: r.terms_agreed_at },
+      terms: r.terms_version === null || r.terms_agreed_at === null ? null : { version: r.terms_version, agreed_at: r.terms_agreed_at, current: r.terms_current === 1 },
     }));
     const last = page[page.length - 1];
-    return json(200, { accounts, next: rows.length > ADMIN_PAGE ? encodeAccountCursor(last.created_at, last.id) : null });
+    return json(200, { accounts, next: rows.length > ADMIN_PAGE ? encodeAccountCursor(last.created_at, last.id) : null, current_terms: current === null ? null : { version: current.version_label } });
   });
 
   /**

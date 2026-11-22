@@ -168,7 +168,9 @@ const SAID = {
 export const TERMS_SAID = {
   notRead: "The file could not be read. Nothing was changed.",
   refused: (reason: string) => `The terms were not published: ${reason}`,
-  same: (id: string | null) => (id === null ? "These terms are the same as a version already published. Nothing was changed." : `These terms are the same as version ${id}, already published. Nothing was changed.`),
+  same: (version: { seq: number; id: string } | null) =>
+    version === null ? "These terms are the same as a version already published. Nothing was changed." : `These terms are the same as version ${version.seq} (${version.id}), already published. Nothing was changed.`,
+  busy: "Another version of the terms was published at the same moment. Nothing was changed; run the command again.",
   published: (seq: number, id: string, label: string) => `Published version ${seq} of the terms, "${label}" (${id}).`,
   publishedNext: "From now on every account is asked to agree to it at its next sign-in or dashboard request. Connected computers keep working.",
   none: "No terms have been published. Nobody is asked to agree to anything.",
@@ -544,7 +546,7 @@ async function termsCommand(
     }
     const made = await publishTerms(deps, read);
     if (!made.ok) {
-      out(TERMS_SAID.same(made.id));
+      out(made.problem === "busy" ? TERMS_SAID.busy : TERMS_SAID.same(made.version));
       return 1;
     }
     out(forTerminal(TERMS_SAID.published(made.seq, made.id, read.terms.version)));
