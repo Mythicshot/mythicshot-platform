@@ -14,6 +14,7 @@ import { SETUP_CSS } from "../src/setup/page.ts";
 import { SIGNIN_CSS } from "../src/signin/page.ts";
 import { SHARED_CSS, VIEW_CSS } from "../src/view-page.ts";
 import { contrastTable } from "./brand-contrast.ts";
+import { isStageRule, rulesOf } from "./player-stage.ts";
 
 /** The brand's 25 colours, light and dark, as its tokens.json (version 1) gives them. */
 const BRAND: Record<string, [string, string]> = {
@@ -72,14 +73,6 @@ function literalsAfter(css: string, base: string): string[] {
   return values(css.slice(base.length)).filter((v) => LITERAL.test(v.value)).map((v) => v.line.trim());
 }
 
-/**
- * The tour player's stage and cards: the picture, its marks and the card, which are the
- * tour's own look (its accent and card style), written as 0.1.53 wrote them. They keep their
- * colours, so this is the one allow-list of colour literals; test/player-theme.test.ts holds
- * them to 0.1.53's bytes.
- */
-export const STAGE_PREFIXES = [".dp-card", ".dp-c-", ".dp-notch", ".dp-ghost", ".dp-btn", ".dp-logo", ".dp-p-", ".dp-actions", ".dp-ring", ".dp-bar", ".dp-scrim", ".dp-cta", ".dp-frame > .dp-cta", ".dp-menu > .dp-cta", ".dp-hole", ".dp-dim", ".dp-layer", ".dp-note", ".dp-bubble", ".dp-view", ".dp-shot", "@keyframes dp-"];
-export const isStageLine = (line: string) => STAGE_PREFIXES.some((p) => line.startsWith(p)) && !line.startsWith(".dp-card-");
 
 describe("the token source", () => {
   it("holds the brand's 25 colours with their light and dark values, and the platform's three, nothing else", () => {
@@ -138,9 +131,13 @@ describe("every stylesheet uses the one token set", () => {
 
   it("the player's stylesheet starts with the tokens, its chrome's per scheme, and Manrope; only the tour's own stage and cards keep colours", () => {
     expect(PLAYER_BASE_CSS).toBe(tokensCss() + schemeTokensCss('.dp[data-scheme="light"]', '.dp[data-scheme="dark"]') + MANROPE_FACE);
-    const found = literalsAfter(PLAYER_CSS, PLAYER_BASE_CSS);
-    expect(found.filter((l) => !isStageLine(l))).toEqual([]);
-    expect(found.length).toBeGreaterThan(5);
+    // The stage (test/player-stage.ts) is the tour's own look, as 0.1.53 drew it: the one
+    // allow-list of colour literals, which test/player-theme.test.ts holds to 0.1.53's bytes.
+    expect(PLAYER_CSS.startsWith(PLAYER_BASE_CSS)).toBe(true);
+    const rules = rulesOf(PLAYER_CSS.slice(PLAYER_BASE_CSS.length));
+    const coloured = (r: { body: string }) => values(`x{${r.body}}`).some((v) => LITERAL.test(v.value));
+    expect(rules.filter((r) => !isStageRule(r) && coloured(r)).map((r) => `${r.context} ${r.selector}`)).toEqual([]);
+    expect(rules.filter((r) => isStageRule(r) && coloured(r)).length).toBeGreaterThan(5);
   });
 
   it("the literal check finds colours in every form it should", () => {

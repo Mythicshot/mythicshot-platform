@@ -10,7 +10,6 @@
 // in a new tab with no opener and no referrer; colours pass the shared colour rule and
 // are set through the CSSOM, never as markup. Nothing is stored and nothing is sent: no
 // cookie, no storage, no network request but the tour's own images.
-import { GROUND } from "../brand-tokens.ts";
 import type { PageChapter, PageData, PageStep, PageTour } from "../page.ts";
 import { allSeen, canHit, hashFor, nextUnseen, parseHash, reduce, start, type Action, type Screen, type State } from "./state.ts";
 import { ctaCorner, hotspotBox, type Rect } from "./layout.ts";
@@ -203,9 +202,9 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
     // Compact follows Light's colours, as the recorder's preview does.
     const scheme = style() === "dark" ? "dark" : "light";
     root.dataset.scheme = scheme;
-    // "auto" is a calm tint of the page colour toward the accent: the brand's ground of the
-    // scheme (src/brand-tokens.ts). An explicit backdrop is the author's, and stays as set.
-    css.setProperty("--backdrop", backdrop ?? mix(scheme === "light" ? GROUND.light : GROUND.dark, accent, 0.06));
+    // "auto" is a calm tint of the page colour toward the accent. It is the tour's own look,
+    // so it keeps 0.1.53's two page colours and does not follow the brand.
+    css.setProperty("--backdrop", backdrop ?? mix(scheme === "light" ? "#eeede8" : "#131518", accent, 0.06));
   }
   applyScheme();
   root.classList.add("dp");

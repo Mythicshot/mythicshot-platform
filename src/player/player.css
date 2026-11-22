@@ -28,8 +28,11 @@ body { background: var(--ground); color: var(--text); font: 15px/1.5 var(--font-
 .dp[data-scheme="light"] { color-scheme: light; }
 .dp[data-scheme="dark"] { color-scheme: dark; }
 .dp :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-/* The stage is the tour's own look: 0.1.53's font, and focus in the tour's accent. */
-.dp-stage { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+/* The stage is the tour's own look, drawn as 0.1.53 drew it: its font, its text colour, the
+   frame's edge and shadow (--line, --shade) in the tour's card scheme, and focus in the tour's
+   accent. Only the chrome around it follows the brand. */
+.dp-stage { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; color: #e7e9ee; --line: rgba(255, 255, 255, .08); --shade: rgba(0, 0, 0, .34); }
+.dp[data-scheme="light"] .dp-stage { color: #1f232a; --line: rgba(20, 24, 32, .09); --shade: rgba(24, 28, 36, .14); }
 .dp-stage :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .dp button, .dp a { font: inherit; color: inherit; }
 .dp button { cursor: pointer; }
@@ -88,12 +91,12 @@ body { background: var(--ground); color: var(--text); font: 15px/1.5 var(--font-
 
 /* ---- Stage: the picture, its layer and the card ---- */
 .dp-stage { position: relative; display: inline-block; line-height: 0; }
-.dp-frame { position: relative; overflow: hidden; border-radius: 16px; isolation: isolate; box-shadow: var(--shadow-raised), 0 0 0 1px var(--line); }
+.dp-frame { position: relative; overflow: hidden; border-radius: 16px; isolation: isolate; box-shadow: 0 16px 46px var(--shade), 0 0 0 1px var(--line); }
 .dp-frame.anywhere { cursor: pointer; }
 .dp-view { position: relative; transform-origin: 0 0; transition: transform 550ms var(--ease); will-change: transform; }
 .dp-shot { display: block; max-width: calc(100vw - 32px); max-height: calc(100vh - 168px); max-height: calc(100dvh - 168px); }
 /* A missing or broken picture: a calm striped placeholder of the step's shape, as in the recorder's preview. */
-.dp-missing { display: flex; align-items: center; justify-content: center; padding: 16px; background: repeating-linear-gradient(135deg, var(--surface-raised) 0 14px, var(--surface) 14px 28px); color: var(--text-muted); font-size: 13px; line-height: 1.4; text-align: center; }
+.dp-missing { display: flex; align-items: center; justify-content: center; padding: 16px; background: #1b1f27 repeating-linear-gradient(135deg, rgba(255, 255, 255, .03) 0 14px, transparent 14px 28px); color: #8e97a8; font-size: 13px; line-height: 1.4; text-align: center; }
 .dp-dim { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; opacity: 0; contain: strict; transition: opacity 400ms var(--ease); }
 .dp-dim.on { opacity: 1; }
 .dp-hole { position: absolute; border-radius: 3px; }
