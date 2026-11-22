@@ -68,11 +68,12 @@ import { newId, newLinkId, requireAuth, type Auth } from "./auth.ts";
 import { mediaOrigin } from "./hosts.ts";
 import { MAX_PARTS, PART_BYTES, mediaLimitsProblem } from "./limits.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
-import { isUniqueViolation, type Config, type Deps, type Stmt } from "./ports.ts";
+import { isNotNullViolation, isUniqueViolation, type Config, type Deps, type Stmt } from "./ports.ts";
 import { LIMITS_MEDIA, hitLimit, workspaceKey, type Limit } from "./rate.ts";
 import { checkImage, mediaInfo, type ImageType, type MediaType } from "./sniff.ts";
 import { ALLOWANCE_OF_SQL, USED_SQL, allowanceParams, storageFull, usageOf } from "./usage.ts";
-import type { Access } from "./viewing.ts";
+import { itemCreationAccess } from "./media-access.ts";
+import { ACCESS_BODY_BYTES, creationAccess, hasAccessFields, type Access } from "./viewing.ts";
 
 /** The longest request body (a part: every part but the last is exactly this long), and the most parts an item may have. */
 export { MAX_PARTS, PART_BYTES, mediaLimitsProblem };
@@ -653,20 +654,33 @@ export async function onlineItemFiles(deps: Deps, linkId: string): Promise<Onlin
 }
 
 export function mediaRoutes(app: Hono, deps: Deps): void {
-  // Start an item. 201 {id, parts, part_bytes}.
+  // Start an item. 201 {id, parts, part_bytes}, and, when the request stated who may view
+  // it, `access` and `viewers` (how many addresses; never the addresses) after them.
   app.post("/api/v1/media", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
-    const raw = await readCapped(c.req.raw, CREATE_BODY_BYTES);
-    if (raw === "too_large") return apiError(413, "too_large", `the request is over ${CREATE_BODY_BYTES} bytes`);
+    // A body that states who may view the item may carry up to MAX_VIEWERS addresses, so it
+    // may be longer than CREATE_BODY_BYTES by up to ACCESS_BODY_BYTES; every other body is
+    // held to CREATE_BODY_BYTES exactly as before, with the same answer.
+    const overCap = () => apiError(413, "too_large", `the request is over ${CREATE_BODY_BYTES} bytes`);
+    const raw = await readCapped(c.req.raw, CREATE_BODY_BYTES + ACCESS_BODY_BYTES);
+    if (raw === "too_large") return overCap();
     let body: unknown;
     try {
       body = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw));
     } catch {
-      return apiError(400, "bad_request", "the body is not JSON");
+      return raw.byteLength > CREATE_BODY_BYTES ? overCap() : apiError(400, "bad_request", "the body is not JSON");
     }
+    if (raw.byteLength > CREATE_BODY_BYTES && !hasAccessFields(body)) return overCap();
     const d = parseCreate(body, deps.config);
     if (d instanceof Response) return d;
+    const asked = creationAccess(body as Record<string, unknown>, "an item's");
+    if (asked instanceof Response) return asked;
+    const parts = partsOf(d.bytes);
+    // Decided before anything is counted or written: a restricted setting this site or this
+    // item cannot have refuses the create, and nothing of it exists.
+    const stated = itemCreationAccess(deps, asked, parts);
+    if (stated instanceof Response) return stated;
 
     const limit = await hitLimit(deps, LIMITS_MEDIA.create, await workspaceKey(auth.workspaceId));
     if (limit.over) return tooMany(LIMITS_MEDIA.create, "started items", limit.retryAfterSeconds);
@@ -682,31 +696,42 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
     // as used: a create at the same moment sees this one's, so two can never pass together.
     // The row is written only when the workspace has no limit, or what it uses plus this
     // item's bytes is within its allowance. Parameters, in the order they stand in the
-    // text: the row's twelve values; the workspace id of USED_SQL; ALLOWANCE_OF_SQL's three;
-    // the item's bytes once more.
-    const parts = partsOf(d.bytes);
+    // text: the row's values; the workspace id of USED_SQL; ALLOWANCE_OF_SQL's three; the
+    // item's bytes once more. With a stated setting the row is written with it (and, when
+    // restricted, its link id kept apart), and the audit row and the list follow in the same
+    // batch: the audit row fails the batch unless the row was written.
     const now = deps.now();
     for (let attempt = 1; ; attempt++) {
       const id = newId("med");
-      let made: boolean;
-      try {
-        const r = await deps.db.run(
-          `INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, duration_ms, title, state, created_at)
-           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?
+      const access = stated === null ? null : attempt === 1 ? stated : itemCreationAccess(deps, asked, parts);
+      if (access instanceof Response) return access; // cannot happen: decided above, and nothing it reads changed
+      const insert: Stmt = {
+        sql: `INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, duration_ms, title, state, created_at${access === null ? "" : ", access, private_link_id"})
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?${access === null ? "" : ", ?, ?"}
              FROM (SELECT ${USED_SQL} AS used, ${ALLOWANCE_OF_SQL} AS allowance) r
             WHERE r.allowance IS NULL OR r.used + ? <= r.allowance`,
-          [
-            id, auth.workspaceId, newLinkId(), d.kind, d.contentType, d.bytes, parts, d.width, d.height, d.durationMs, d.title, now,
-            auth.workspaceId, ...allowanceParams(deps, auth.workspaceId), d.bytes,
-          ],
-        );
-        made = r.changes === 1;
+        params: [
+          id, auth.workspaceId, access === null ? newLinkId() : access.rowLinkId, d.kind, d.contentType, d.bytes, parts, d.width, d.height, d.durationMs, d.title, now,
+          ...(access === null ? [] : [access.access, access.privateLinkId]),
+          auth.workspaceId, ...allowanceParams(deps, auth.workspaceId), d.bytes,
+        ],
+      };
+      let made: boolean;
+      try {
+        if (access === null) {
+          made = (await deps.db.run(insert.sql, insert.params)).changes === 1;
+        } else {
+          await deps.db.batch([insert, ...access.after(deps, auth, id, now)]);
+          made = true;
+        }
       } catch (err) {
         // A link id (or, far less likely, an id) another item has: try again with fresh ones.
         if (isUniqueViolation(err) && attempt < LINK_ATTEMPTS) continue;
-        throw err;
+        // The audit row's guard: the allowance refused the row, so nothing was written.
+        if (access !== null && isNotNullViolation(err)) made = false;
+        else throw err;
       }
-      if (made) return json(201, { id, parts, part_bytes: PART_BYTES });
+      if (made) return json(201, { id, parts, part_bytes: PART_BYTES, ...(access === null ? (asked === null ? {} : { access: "public", viewers: 0 }) : { access: access.access, viewers: access.viewers }) });
       // A refused statement does not say why, so the usage is read. The storage answer is
       // given only when the item does not fit at the moment of the look; otherwise room
       // appeared in between (something was deleted at that moment) and the statement is

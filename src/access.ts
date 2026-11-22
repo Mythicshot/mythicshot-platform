@@ -276,21 +276,57 @@ type State = {
   stray: number;
   /** Retired pictures of the tour, of either store, whose time to be deleted has come. */
   due: number;
+  /** True when the tour has been published at least once (see `everPublished`). */
+  ever: boolean;
+  /**
+   * Read only for a first publish (readState's `creation`): true when the tour's setting and
+   * list were last written by THIS token at creation (tour.access_set_by, migration 0017), so
+   * no session and no other token has written either since.
+   */
+  ownCreation: boolean;
 };
 
+/**
+ * Whether the setting and list of the tour `t` were last written at creation by the token
+ * asking (one parameter: its id), read from the tour row itself: tour.access_set_by
+ * (migration 0017) holds the id of the token whose first publish set them, in the batch that
+ * set them, and every other write of the setting or the list (the access PUT, in each of its
+ * batches) empties it in the same batch. So nothing is ordered by time or looked up in the
+ * audit: the row says it, and a session's change or another token's ends it at once. A session
+ * asks with no token id, which matches nothing.
+ */
+// Limit: a list change made by a build before 0.1.51 on this database does not empty the mark (README, "Who may view a tour").
+export const OWN_CREATION = "(t.access_set_by IS NOT NULL AND t.access_set_by = ?)";
+
+/** Empties the mark of a setting written at creation (OWN_CREATION): every write of the setting or the list by the access PUT carries it. */
+function notSetAtCreation(id: string, ws: string): Stmt {
+  return { sql: "UPDATE tour SET access_set_by = NULL WHERE id = ? AND workspace_id = ? AND access_set_by IS NOT NULL", params: [id, ws] };
+}
+
+/**
+ * Whether a tour has been published at least once, over a tour row `t` in scope: it is
+ * published now (its status, published_at, a snapshot or a switch says so), or its
+ * ever_published mark is set (migration 0017: unpublish sets it in the batch that removes the
+ * rest of that evidence, and nothing clears it). A tour unpublished before migration 0017, or
+ * by an older build, left nothing behind and does not count. No parameter.
+ */
+const EVER_PUBLISHED = `(t.ever_published = 1 OR t.status = 'published' OR t.published_at IS NOT NULL
+   OR EXISTS (SELECT 1 FROM snapshot e WHERE e.tour_id = t.id) OR EXISTS (SELECT 1 FROM access_switch e WHERE e.tour_id = t.id))`;
+
 /** One call. Null for a tour that is not this workspace's. */
-async function readState(deps: Deps, auth: Auth, id: string): Promise<State | null> {
-  type Row = { id: string; access: Access; live: number; viewers: string; switch_id: string | null; target: "public" | "private" | null; total: number | null; copied: number; stray: number; due: number };
+async function readState(deps: Deps, auth: Auth, id: string, creation = false): Promise<State | null> {
+  type Row = { id: string; access: Access; live: number; viewers: string; switch_id: string | null; target: "public" | "private" | null; total: number | null; copied: number; stray: number; due: number; ever: number; own: number };
   const row = await deps.db.first<Row>(
     `SELECT t.id, t.access, s.tour_id IS NOT NULL AS live,
             (SELECT json_group_array(v.email) FROM tour_viewer v WHERE v.tour_id = t.id) AS viewers,
             w.switch_id, w.target, w.total,
             (SELECT count(*) FROM public_object o WHERE o.publish_id = w.switch_id AND o.tour_id = t.id AND o.state = 'pending' AND o.copied = 1) AS copied,
             (SELECT count(*) FROM public_object o WHERE o.tour_id = t.id AND o.state = 'retired' AND substr(o.image_key, 1, 2) = 'p/') AS stray,
-            (SELECT count(*) FROM public_object o WHERE o.tour_id = t.id AND o.state = 'retired' AND o.delete_after <= ?) AS due
+            (SELECT count(*) FROM public_object o WHERE o.tour_id = t.id AND o.state = 'retired' AND o.delete_after <= ?) AS due,
+            ${EVER_PUBLISHED} AS ever, ${creation ? OWN_CREATION : "0"} AS own
        FROM tour t LEFT JOIN snapshot s ON s.tour_id = t.id LEFT JOIN access_switch w ON w.tour_id = t.id
       WHERE t.id = ? AND t.workspace_id = ?`,
-    [deps.now(), id, auth.workspaceId],
+    creation ? [deps.now(), auth.tokenId, id, auth.workspaceId] : [deps.now(), id, auth.workspaceId],
   );
   if (row === null) return null;
   return {
@@ -301,6 +337,8 @@ async function readState(deps: Deps, auth: Auth, id: string): Promise<State | nu
     switch: row.switch_id === null ? null : { id: row.switch_id, target: row.target ?? "private", total: row.total ?? 0, copied: row.copied },
     stray: row.stray,
     due: row.due,
+    ever: row.ever === 1,
+    ownCreation: row.own === 1,
   };
 }
 
@@ -424,6 +462,7 @@ function startStatements(deps: Deps, auth: Auth, st: State, body: AccessBody, li
     params: [sw.id, now, JSON.stringify(sw.copies.map((c) => [c.to, c.from])), id, ws],
   });
   if (listChanged) stmts.push(...viewerStatements(id, ws, list, now));
+  stmts.push(notSetAtCreation(id, ws));
   return stmts;
 }
 
@@ -821,7 +860,7 @@ async function putAccess(r: Run, id: string, body: AccessBody): Promise<Response
       const same = toPublic ? body.access === "public" : body.access === st.access;
       if (!same && !cancel) return switching();
       if (listChanged) {
-        await d.db.batch([...viewerStatements(id, ws, list, now), changeAudit(d, auth, id, st.access, st.access, st.viewers.length, list.length, false)]);
+        await d.db.batch([...viewerStatements(id, ws, list, now), changeAudit(d, auth, id, st.access, st.access, st.viewers.length, list.length, false), notSetAtCreation(id, ws)]);
         st.viewers = list;
       }
       if (cancel) {
@@ -882,6 +921,7 @@ async function putAccess(r: Run, id: string, body: AccessBody): Promise<Response
       stmts.push(changeAudit(d, auth, id, st.access, st.access, st.viewers.length, list.length, false));
     }
     if (listChanged) stmts.push(...viewerStatements(id, ws, list, now));
+    if (stmts.length > 0) stmts.push(notSetAtCreation(id, ws));
     if (stmts.length > 0) {
       try {
         await d.db.batch(stmts);
@@ -902,6 +942,89 @@ async function putAccess(r: Run, id: string, body: AccessBody): Promise<Response
     return settingAnswer(d, body.access, list, null);
   }
   return busy();
+}
+
+// ---- The setting stated at a tour's first publish ----
+//
+// A token may state who may view a tour on the call that starts its FIRST publish
+// (POST /api/v1/tours/:id/publish, src/publish.ts), and only then: a token never changes the
+// setting of a tour that has been published (EVER_PUBLISHED, now or before, including one
+// unpublished since), nor one whose setting or list a session has already set. Such a tour is
+// unpublished, so changing its setting moves nothing: it is the one-batch change above
+// ("Nothing moves"), with the statements putAccess writes for it: the setting, the audit row
+// as its guard (marked `at: "creation"`), a publish in progress cancelled, every retired
+// picture due now, the list. They do not run on their own: the publish puts them at the head
+// of the batch that records its job (startPublish), so the setting and the publish that
+// follows from it are written together or not at all, and the job's own condition (the store
+// its keys are for must be the one the setting says) is read after the setting changed. So a
+// restricted first publish writes only `v/` keys, from its first object on, and is served
+// only as a restricted tour, from its commit on.
+
+/** What the first publish does with a stated setting. */
+export type FirstPublishPlan =
+  /** Refused, and nothing changed. */
+  | { kind: "refuse"; res: Response }
+  /** The tour already has exactly the stated setting and list: the publish is today's. */
+  | { kind: "same" }
+  /** The statements that set it, for the head of the publish's first batch, and what the answers then show. */
+  | { kind: "apply"; stmts: Stmt[]; access: Access; viewers: number };
+
+const publishedBefore = () =>
+  apiError(409, "already_published", "this tour has been published before, so who may view it can be changed in the dashboard only; publish without access and viewers to publish it as it is set");
+export const alreadySet = () =>
+  apiError(409, "access_already_set", "who may view this tour was already set in the dashboard; publish without access and viewers to publish it as it is set, or change it in the dashboard");
+
+/**
+ * Decides a setting stated at a tour's first publish, in ONE call (the state, as GET and PUT
+ * read it). Null for a tour that is not this workspace's. Refused with 409 already_published
+ * for a tour published before; "same" when the tour already has exactly that setting and list
+ * (a stated `public` with no addresses on a tour never set is that, so it equals leaving the
+ * fields out); refused with 409 access_already_set when its setting or list was set before
+ * (anything but `public` with an empty list); refused with cannot_restrict, as the PUT, when a
+ * restricted setting needs mail this site cannot send. Otherwise the statements, each guarded:
+ * the setting changes only while the tour is still unpublished, never published, `public`, with
+ * no list and no switch, and the audit row right after it undoes the batch unless it did.
+ * `viewers` left out keeps the list as it is (empty), as the PUT keeps it.
+ */
+export async function planFirstPublish(deps: Deps, auth: Auth, id: string, body: AccessBody): Promise<FirstPublishPlan | null> {
+  if (!TOUR_ID.test(id)) return null;
+  // One call, whatever is decided below: the state, with whether the last change on record
+  // was a token's own at creation. Every answer below follows from that one read, so a right
+  // and a wrong guess of a list cost the same calls and answer the same.
+  const st = await readState(deps, auth, id, true);
+  if (st === null) return null;
+  if (st.ever) return { kind: "refuse", res: publishedBefore() };
+  const list = body.viewers ?? st.viewers;
+  if (body.access === st.access) {
+    // The setting it has, with no list stated (or none on either side): the publish of today.
+    if (body.viewers === null || (body.viewers.length === 0 && st.viewers.length === 0)) return { kind: "same" };
+    // A stated list against a list the tour holds is compared only when this same token wrote
+    // that list at creation and nobody changed it since (a resend after a lost answer); a list
+    // set in the dashboard, or by another token, is never compared, so no token can test
+    // guesses of a list it did not send itself.
+    if (body.viewers.length > 0 && st.viewers.length > 0) return st.ownCreation && sameList(body.viewers, st.viewers) ? { kind: "same" } : { kind: "refuse", res: alreadySet() };
+  }
+  if (st.access !== "public" || st.viewers.length > 0 || st.switch !== null) return { kind: "refuse", res: alreadySet() };
+  if (viewing.cannotRestrict(deps, st.access, body.access)) return { kind: "refuse", res: cannotRestrictAnswer() };
+  const ws = auth.workspaceId;
+  const now = deps.now();
+  const stmts: Stmt[] = [
+    {
+      sql: `UPDATE tour SET access = ?, access_set_by = ? WHERE id = ? AND workspace_id = ? AND access = 'public' AND status = 'draft' AND published_at IS NULL AND ever_published = 0
+              AND NOT EXISTS (SELECT 1 FROM snapshot n WHERE n.tour_id = tour.id) AND NOT EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = tour.id)
+              AND NOT EXISTS (SELECT 1 FROM tour_viewer v WHERE v.tour_id = tour.id)`,
+      // The token that sets them, so its own resend can be told apart (OWN_CREATION); a
+      // session's creation sets no mark.
+      params: [body.access, auth.session === undefined ? auth.tokenId : null, id, ws],
+    },
+    viewing.changeAudit(deps, auth, "tour_access_changed", id, "public", body.access, 0, list.length, true, true),
+    // The publish starts afresh from the draft as it is now, in the store the setting says:
+    // whatever publish was in progress (of the public store) can never commit.
+    ...cancelPublish(id, ws, now),
+    ...(isRestricted(body.access) ? [expediteRetired(id, ws, now)] : []),
+    ...(list.length > 0 ? viewerStatements(id, ws, list, now) : []),
+  ];
+  return { kind: "apply", stmts, access: body.access, viewers: list.length };
 }
 
 export function accessRoutes(app: Hono, deps: Deps): void {

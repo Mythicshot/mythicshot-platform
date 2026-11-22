@@ -423,6 +423,8 @@ docker compose exec -T app node -e 'const { DatabaseSync } = process.getBuiltinM
 
 Anything but `0` means restore, not go back. An older version also cannot fully delete an item whose list of addresses holds one, whether the item is restricted now or was before (the list is kept when an item goes back to public): its delete stops serving the item and removes its files, but answers `500 cleanup_pending` every time and leaves the item's row, which 0.1.47 or later removes at the workspace's next share or when the delete is sent again.
 
+Going back below 0.1.51 has one more catch for tours whose first publish was started with a list and never finished: a change to the list made by the older version does not end the token's comparison of that list, so do not run an older version while such a publish is unfinished, and after coming forward again save each unpublished restricted tour's setting once in the dashboard (see [Who may view a tour](../README.md#who-may-view-a-tour) in the README).
+
 ### Make yourself the admin
 
 The version with accounts brings sign-in with a link sent instead of a password, and the dashboard behind it. An updated site keeps working exactly as before, its tours, links and tokens unchanged, and nobody can sign in until the site has an admin. The admin is made once, by a command run in the app container, with the settings the app itself runs with; there is no web page for it, and the setup code plays no part in it.

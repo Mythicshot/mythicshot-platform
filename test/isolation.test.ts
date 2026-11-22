@@ -185,6 +185,13 @@ const CASES: Record<string, Entry> = {
     { what: "their publish in progress, continued by its id", method: "POST", path: tourPath(t.publishing.tour, "/publish"), json: { publish_id: t.publishing.publishId }, expect: NO_TOUR },
     { what: "their publish in progress, named for the caller's own tour", method: "POST", path: tourPath(m.published.tour, "/publish"), json: { publish_id: t.publishing.publishId }, field: "publish_id", expect: NO_PUBLISH },
     { what: "their live publish, named for the caller's own tour", method: "POST", path: tourPath(m.published.tour, "/publish"), json: { publish_id: t.published.publishId }, field: "publish_id", expect: NO_PUBLISH },
+    // Who may view a tour, stated at its first publish (0.1.51): their tours, the never
+    // published draft among them, answer as no tour, and nothing of them changes.
+    ...theirTours(t).flatMap(([what, id]) => [
+      { what: `${what}, first published restricted to the caller's address`, method: "POST", path: tourPath(id, "/publish"), json: { access: "people", viewers: ["intruder@example.com"] }, expect: NO_TOUR },
+      { what: `${what}, first published as me`, method: "POST", path: tourPath(id, "/publish"), json: { access: "me" }, expect: NO_TOUR },
+      { what: `${what}, first published public with a list`, method: "POST", path: tourPath(id, "/publish"), json: { access: "public", viewers: ["intruder@example.com"] }, expect: NO_TOUR },
+    ]),
   ],
   "POST /api/v1/tours/:id/unpublish": (t) => theirTours(t).map(([what, id]) => ({ what, method: "POST", path: tourPath(id, "/unpublish"), expect: NO_TOUR })),
   // Who may view a tour, and its list of addresses: the workspace's own data.
@@ -297,10 +304,17 @@ type Sample = { method: string; path: string; json?: unknown; headers?: Record<s
  * Routes with no id that make something new in the caller's own workspace: what they make,
  * a request that makes it (`made` names the table the new row is in), and nothing more.
  */
-const CREATES: Record<string, { makes: string; sample: (side: Side) => Sample; made: string }> = {
+const CREATES: Record<string, { makes: string; sample: (side: Side) => Sample; more?: (side: Side, other: Side) => Sample[]; made: string }> = {
   "POST /api/v1/media": {
     makes: "starts a shared item in the caller's own workspace; the body names no workspace and no id",
     sample: (side) => ({ method: "POST", path: "/api/v1/media", json: { kind: "image", content_type: "image/png", bytes: 1234, width: 10, height: 10, title: `${side.name} new item` } }),
+    // Who may view it, stated at its create (0.1.51): the list names addresses, among them the
+    // other workspace's viewer and account, and still reaches nothing of that workspace. (This
+    // world cannot mail, so only public takes a list here; restricted creates are in the test
+    // "who may view, stated at a create or a first publish" below, on a site that can mail.)
+    more: (side, other) => [
+      { method: "POST", path: "/api/v1/media", json: { kind: "image", content_type: "image/png", bytes: 1234, width: 10, height: 10, title: `${side.name} listed item`, access: "public", viewers: [other.ids.restricted.viewer, other.email] } },
+    ],
     made: "media",
   },
 };
@@ -1163,20 +1177,76 @@ describe("one workspace against another", () => {
     for (const [mine, theirs] of directions(w)) {
       for (const credential of CREDENTIALS) {
         for (const [key, entry] of Object.entries(CREATES)) {
-          const before = await snapshotOf(w.deps, theirs, w.keys);
-          const had = (await snapshotOf(w.deps, mine, w.keys)).rows[entry.made].length;
-          w.tick();
-          const what = `${key} (as ${mine.name}, by ${credential.name})`;
-          const r = await fire(w.deps, entry.sample(mine), credential.of(mine));
-          expect(r.status, `${what}: ${r.text}`).toBe(201);
-          expect(await snapshotOf(w.deps, theirs, w.keys), `${what} changed something of ${theirs.name}`).toEqual(before);
-          expect((await snapshotOf(w.deps, mine, w.keys)).rows[entry.made].length, what).toBe(had + 1);
-          // The answer names nothing of the other workspace.
-          for (const n of namesIn(theirs.ids)) expect(r.text.includes(n), `${what} told ${n}`).toBe(false);
+          for (const [i, sample] of [entry.sample(mine), ...(entry.more?.(mine, theirs) ?? [])].entries()) {
+            const before = await snapshotOf(w.deps, theirs, w.keys);
+            const had = (await snapshotOf(w.deps, mine, w.keys)).rows[entry.made].length;
+            w.tick();
+            const what = `${key} #${i} (as ${mine.name}, by ${credential.name})`;
+            const r = await fire(w.deps, sample, credential.of(mine));
+            expect(r.status, `${what}: ${r.text}`).toBe(201);
+            expect(await snapshotOf(w.deps, theirs, w.keys), `${what} changed something of ${theirs.name}`).toEqual(before);
+            expect((await snapshotOf(w.deps, mine, w.keys)).rows[entry.made].length, what).toBe(had + 1);
+            // The answer names nothing of the other workspace.
+            for (const n of namesIn(theirs.ids)) expect(r.text.includes(n), `${what} told ${n}`).toBe(false);
+          }
         }
       }
     }
     expect(w.writes()).toEqual([]);
+  });
+
+  it("the fields of the cases that name the other workspace's tours are taken on the caller's own never-published tour, so their 404 is about whose the tour is", SLOW, async () => {
+    const w = await build({ siteHost: "tours.example.com" });
+    const [mine, theirs] = directions(w)[0];
+    const bodies = new Map<string, unknown>();
+    for (const r of CASES["POST /api/v1/tours/:id/publish"](theirs.ids, mine.ids)) {
+      const json = r.json as Record<string, unknown> | undefined;
+      if (json !== undefined && Object.hasOwn(json, "access")) bodies.set(JSON.stringify(json), json);
+    }
+    expect(bodies.size).toBe(3);
+    for (const [text, json] of bodies) {
+      const fresh = await send(w.deps, "POST", "/api/v1/uploads", { token: mine.token, body: JSON.stringify({ manifest: manifestOf([801], `${mine.name} own ${bodies.size}`), target: { kind: "new" } }), headers: JSON_HEADERS });
+      expect(fresh.status, fresh.text).toBe(201);
+      expect((await putStep(w.deps, mine.token, fresh.json.upload_id, 1, stepImage(manifestOf([801], "x").steps[0], 4))).status).toBe(204);
+      const committed = await commit(w.deps, mine.token, fresh.json.upload_id);
+      const before = await snapshotOf(w.deps, theirs, w.keys);
+      const r = await fire(w.deps, { method: "POST", path: tourPath(committed.json.tour_id, "/publish"), json }, BY_TOKEN.of(mine));
+      expect([r.status, r.json.access], `${text}: ${r.text}`).toEqual([200, (json as { access: string }).access]);
+      expect(await snapshotOf(w.deps, theirs, w.keys), text).toEqual(before);
+    }
+  });
+
+  it("who may view, stated at a create or a first publish on a site that can mail, reaches nothing of the other workspace", SLOW, async () => {
+    const w = await build({ siteHost: "tours.example.com" });
+    for (const [mine, theirs] of directions(w)) {
+      for (const credential of CREDENTIALS) {
+        const what = `(as ${mine.name}, by ${credential.name})`;
+        const before = await snapshotOf(w.deps, theirs, w.keys);
+        const listed = [theirs.ids.restricted.viewer, theirs.email];
+        const item = { kind: "image", content_type: "image/png", bytes: 1234, width: 10, height: 10 };
+        // The caller's own new tour, never published: its first publish may state who views it.
+        const fresh = await send(w.deps, "POST", "/api/v1/uploads", { token: mine.token, body: JSON.stringify({ manifest: manifestOf([800], `${mine.name} first published ${credential.name}`), target: { kind: "new" } }), headers: JSON_HEADERS });
+        expect(fresh.status, fresh.text).toBe(201);
+        const step = await putStep(w.deps, mine.token, fresh.json.upload_id, 1, stepImage(manifestOf([800], "x").steps[0], 3));
+        expect(step.status, step.text).toBe(204);
+        const committed = await commit(w.deps, mine.token, fresh.json.upload_id);
+        expect(committed.status, committed.text).toBe(201);
+        const answers: Call[] = [];
+        for (const json of [{ ...item, title: `${mine.name} restricted item`, access: "people", viewers: listed }, { ...item, title: `${mine.name} item for me`, access: "me" }]) {
+          w.tick();
+          answers.push(await fire(w.deps, { method: "POST", path: "/api/v1/media", json }, credential.of(mine)));
+          expect(answers.at(-1)!.status, `${what}: ${answers.at(-1)!.text}`).toBe(201);
+        }
+        w.tick();
+        answers.push(await fire(w.deps, { method: "POST", path: tourPath(committed.json.tour_id, "/publish"), json: { access: "people", viewers: listed } }, credential.of(mine)));
+        expect(answers.at(-1)!.status, `${what}: ${answers.at(-1)!.text}`).toBe(200);
+        expect(answers.at(-1)!.json).toMatchObject({ access: "people", viewers: 2 });
+        expect(await snapshotOf(w.deps, theirs, w.keys), `${what} changed something of ${theirs.name}`).toEqual(before);
+        // The addresses went on the caller's own lists, and no answer names anything of the other workspace.
+        expect((await w.deps.db.all<{ n: number }>("SELECT count(*) AS n FROM tour_viewer WHERE tour_id = ?", [committed.json.tour_id]))[0].n).toBe(2);
+        for (const r of answers) for (const n of [...namesIn(theirs.ids), ...listed]) expect(r.text.includes(n), `${what} told ${n}`).toBe(false);
+      }
+    }
   });
 
   it("changing an email address reaches nothing of the other workspace: its address answers as a free one, its code as one that never existed", SLOW, async () => {

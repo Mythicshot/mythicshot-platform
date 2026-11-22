@@ -1523,6 +1523,40 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     // `500 {"error":"misconfigured"}` is answered by the Cloudflare entry before the app
     // runs (test/worker-hosts.test.ts); no route answers it.
   });
+
+  it("who may view, stated by a token at an item's create and a tour's first publish, answers as documented", async () => {
+    // A site that can mail links, as restricting needs; clips as long as one answer can send.
+    const { deps } = await setup({ siteHost: "tours.example.com", mediaClipMaxBytes: 38 * 2_000_000 });
+    // Signing in needs a site with an admin: the owner is it.
+    const a = await seedAccount(deps, { admin: true });
+    const api = client(deps);
+    const create = (body: unknown) => api.call("POST", "/api/v1/media", { token: a.token, body: JSON.stringify(body), headers: JSON_HEADERS });
+    const image = { kind: "image", content_type: "image/png", bytes: 3000, width: 64, height: 48 };
+    // An item: created restricted, with and without a list; every refusal.
+    expect((await create({ ...image, access: "people", viewers: ["mara@example.com"] })).json).toMatchObject({ access: "people", viewers: 1 });
+    expect((await create({ ...image, access: "me" })).json).toMatchObject({ access: "me", viewers: 0 });
+    refused(await create({ ...image, access: "friends" }), 400, "bad_access");
+    refused(await create({ ...image, access: "people", viewers: ["not an address"] }), 400, "bad_viewer");
+    refused(await create({ ...image, access: "people", viewers: Array.from({ length: 201 }, (_, i) => `v${i}@example.com`) }), 400, "too_many_viewers");
+    refused(await create({ kind: "clip", content_type: "video/mp4", bytes: 36 * 2_000_000, width: 64, height: 48, duration_ms: 1000, access: "me" }), 409, "too_large_to_restrict");
+    // A tour: its first publish restricted, then every refusal.
+    const first = await api.upload(a.token, small(1, "First published restricted"));
+    expect((await api.publish(a.token, first.tour_id, { access: "people", viewers: ["mara@example.com"] })).json).toMatchObject({ access: "people", viewers: 1 });
+    refused(await api.publish(a.token, first.tour_id, { access: "me" }), 409, "already_published");
+    const draft = await api.upload(a.token, small(1, "Never published"));
+    refused(await api.publish(a.token, draft.tour_id, { access: "friends" }), 400, "bad_access");
+    refused(await api.publish(a.token, draft.tour_id, { access: "people", viewers: ["not an address"] }), 400, "bad_viewer");
+    refused(await api.publish(a.token, draft.tour_id, { access: "people", viewers: Array.from({ length: 201 }, (_, i) => `v${i}@example.com`) }), 400, "too_many_viewers");
+    const made = (await redeemSignInCode(deps, await createSignInCode(deps, a.userId), null, null))!;
+    const session = { cookie: `${SESSION_COOKIE}=${made.secret}`, csrf: await csrfFor(made.secret) };
+    expect((await api.setAccess(session, draft.tour_id, { access: "me" })).status).toBe(200);
+    refused(await api.publish(a.token, draft.tour_id, { access: "people" }), 409, "access_already_set");
+    // A site that cannot mail.
+    deps.mail = undefined;
+    refused(await create({ ...image, access: "me" }), 409, "cannot_restrict");
+    const other = await api.upload(a.token, small(1, "No mail"));
+    refused(await api.publish(a.token, other.tour_id, { access: "me" }), 409, "cannot_restrict");
+  });
 });
 
 describe("the two 403s of a change made with a session, on each route that takes a session alone", () => {

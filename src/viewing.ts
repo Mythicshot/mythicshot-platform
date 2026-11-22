@@ -36,7 +36,6 @@ export type AccessBody = { access: Access; viewers: string[] | null };
  */
 export async function readAccessBody(req: Request, what: string): Promise<AccessBody | Response> {
   const bad = () => apiError(400, "bad_request", 'the body must be JSON such as {"access": "people", "viewers": ["ana@example.com"]}');
-  const tooMany = () => apiError(400, "too_many_viewers", `${what} list holds at most ${MAX_VIEWERS} addresses; nothing was changed`);
   const raw = await readCapped(req, ACCESS_BODY_BYTES);
   if (raw === "too_large") return apiError(413, "too_large", `the request is over ${ACCESS_BODY_BYTES} bytes`);
   let body: unknown;
@@ -46,7 +45,18 @@ export async function readAccessBody(req: Request, what: string): Promise<Access
     return bad();
   }
   if (body === null || typeof body !== "object" || Array.isArray(body)) return bad();
-  const o = body as Record<string, unknown>;
+  return accessFields(body as Record<string, unknown>, what);
+}
+
+/**
+ * The two fields of a body that is already a JSON object, checked as readAccessBody checks
+ * them: `access` must be one of the three settings; `viewers`, when given and not null, a list
+ * of addresses that each pass parseEmail (a refusal names the position, never the address),
+ * collapsed, then at most MAX_VIEWERS. Other fields are not looked at.
+ */
+export function accessFields(o: Record<string, unknown>, what: string): AccessBody | Response {
+  const bad = () => apiError(400, "bad_request", 'the body must be JSON such as {"access": "people", "viewers": ["ana@example.com"]}');
+  const tooMany = () => apiError(400, "too_many_viewers", `${what} list holds at most ${MAX_VIEWERS} addresses; nothing was changed`);
   const access = Object.hasOwn(o, "access") ? o.access : undefined;
   if (typeof access !== "string" || !(ACCESS_SETTINGS as readonly string[]).includes(access)) {
     return apiError(400, "bad_access", "access must be one of public, people and me");
@@ -63,6 +73,31 @@ export async function readAccessBody(req: Request, what: string): Promise<Access
   }
   if (seen.size > MAX_VIEWERS) return tooMany();
   return { access: access as Access, viewers: [...seen].sort() };
+}
+
+/** True when a JSON object names either field with a value other than null. */
+export function hasAccessFields(o: unknown): boolean {
+  if (o === null || typeof o !== "object" || Array.isArray(o)) return false;
+  const r = o as Record<string, unknown>;
+  return (Object.hasOwn(r, "access") && r.access !== null) || (Object.hasOwn(r, "viewers") && r.viewers !== null);
+}
+
+/**
+ * The setting a token states when it creates something (a shared item's create, a tour's first
+ * publish): null when the body names neither field (or both are null), which means what it
+ * always meant, today's behaviour. Otherwise the fields as accessFields checks them, except
+ * that `viewers` without `access` is refused (bad_access) rather than taken as `public`, so a
+ * client that forgot the setting never gets a thing more open than it asked for.
+ */
+export function creationAccess(o: Record<string, unknown>, what: string): AccessBody | null | Response {
+  if (!hasAccessFields(o)) return null;
+  const access = Object.hasOwn(o, "access") ? o.access : undefined;
+  if (access === undefined || access === null) return apiError(400, "bad_access", "access must be given with viewers: one of public, people and me");
+  // `pad`: text of any content that a client adds so that the body is longer than an older
+  // server takes (1,024 bytes for a first publish, 4,096 for an item's create), which then
+  // refuses it whole instead of misreading it. It counts in the body's limit and is ignored.
+  if (Object.hasOwn(o, "pad") && o.pad !== null && typeof o.pad !== "string") return apiError(400, "bad_request", "pad must be text");
+  return accessFields(o, what);
 }
 
 export const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
@@ -88,11 +123,13 @@ export function viewerStatements(place: ListPlace, id: string, ws: string, list:
 }
 
 /**
- * The audit row of a change: the two settings and the list's sizes, never an address. With
+ * The audit row of a change: the two settings and the list's sizes, never an address (and,
+ * with `atCreation`, that it was stated at creation). With
  * `guard`, it also guards its batch (auditStatement's onlyAfterOneChange): placed right after
  * the statement that changes the setting, it undoes the batch unless that changed one row.
  */
-export function changeAudit(deps: Deps, auth: Auth, event: AuditEvent, id: string, from: Access, to: Access, before: number, after: number, guard: boolean): Stmt {
+export function changeAudit(deps: Deps, auth: Auth, event: AuditEvent, id: string, from: Access, to: Access, before: number, after: number, guard: boolean, atCreation = false): Stmt {
+  const by = auth.session === undefined ? "token" : "session";
   return auditStatement(
     deps,
     {
@@ -100,7 +137,12 @@ export function changeAudit(deps: Deps, auth: Auth, event: AuditEvent, id: strin
       userId: auth.session?.userId ?? null,
       workspaceId: auth.workspaceId,
       subject: id,
-      detail: { from, to, viewers_before: before, viewers: after, by: auth.session === undefined ? "token" : "session" },
+      // `at: "creation"` marks a setting stated when the thing was created (a shared item's
+      // create, a tour's first publish), which only a token's request does.
+      // A token is named by its id, never its secret.
+      detail: atCreation
+        ? { from, to, viewers_before: before, viewers: after, by, at: "creation", ...(auth.session === undefined ? { token_id: auth.tokenId } : {}) }
+        : { from, to, viewers_before: before, viewers: after, by },
     },
     guard ? { onlyAfterOneChange: true } : {},
   );

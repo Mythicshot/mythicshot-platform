@@ -362,6 +362,8 @@ Find out first with `npx wrangler d1 execute demo-platform --remote --config wra
 
 The same holds for a version before 0.1.47 once a shared image or clip is restricted to people or to its owner: such a version does not know who may view an item, answers a restricted item's link as one that does not exist, and could show the item to anyone through another link it would give its owner. On this route nothing checks it for you: before you deploy a version below 0.1.47, count the shared items whose setting is not `public` with `npx wrangler d1 execute demo-platform --remote --config wrangler.deploy.jsonc --command "SELECT count(*) AS n FROM media WHERE access <> 'public'"`: anything but `0` means restore, not go back. An older version also cannot fully delete an item whose list of addresses holds one, whether the item is restricted now or was before (the list is kept when an item goes back to public): its delete stops serving the item and removes its files, but answers `500 cleanup_pending` every time and leaves the item's row, which 0.1.47 or later removes at the workspace's next share or when the delete is sent again.
 
+Going back below 0.1.51 has one more catch for tours whose first publish was started with a list and never finished: a change to the list made by the older version does not end the token's comparison of that list, so do not run an older version while such a publish is unfinished, and after coming forward again save each unpublished restricted tour's setting once in the dashboard (see [Who may view a tour](../README.md#who-may-view-a-tour) in the README).
+
 ## Back up and restore
 
 | What | Where |
