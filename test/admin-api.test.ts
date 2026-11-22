@@ -28,8 +28,8 @@ const APP = "https://app.example.com";
 const MAX = 9007199254740991;
 
 /** The keys of each answer, exactly. */
-const LIST_KEYS = ["accounts", "next"];
-const ACCOUNT_KEYS = ["admin", "allowance_bytes", "counted", "created_at", "deleting", "email", "id", "over", "status", "storage_allowance_bytes", "tours", "used_bytes", "username", "workspace_id", "workspace_name"];
+const LIST_KEYS = ["accounts", "current_terms", "next"];
+const ACCOUNT_KEYS = ["admin", "allowance_bytes", "counted", "created_at", "deleting", "email", "id", "over", "status", "storage_allowance_bytes", "terms", "tours", "used_bytes", "username", "workspace_id", "workspace_name"];
 const COUNTED_KEYS = ["gifs", "images", "logos", "pictures", "uploads_in_progress"];
 const SUMMARY_KEYS = ["accounts", "standard_allowance_bytes", "used_bytes"];
 const SET_KEYS = ["allowance_bytes", "over", "storage_allowance_bytes", "used_bytes", "workspace_id"];
@@ -132,6 +132,8 @@ describe("the admin's list of accounts", () => {
         used_bytes: own.used_bytes,
         allowance_bytes: own.allowance_bytes,
         storage_allowance_bytes: null,
+        // The site's terms (0.1.53): nobody in this world has agreed to any.
+        terms: null,
         over: own.over,
         counted: own.counted,
       });
@@ -225,7 +227,7 @@ describe("the admin's list of accounts", () => {
     }
     // A cursor past every account lists nobody.
     const nobody = await ask(deps, "GET", `${ACCOUNTS}?after=${encodeAccountCursor(Number.MAX_SAFE_INTEGER, `usr_${"0".repeat(24)}`)}`, { headers });
-    expect(nobody.json).toEqual({ accounts: [], next: null });
+    expect(nobody.json).toEqual({ accounts: [], next: null, current_terms: null });
 
     // The account a cursor was made from is deleted between two pages: the next page is the rest all the same.
     const cursorAccount = pages[0].accounts[99].id as string;

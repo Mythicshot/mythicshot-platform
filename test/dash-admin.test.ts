@@ -86,6 +86,8 @@ const ADMIN_WORDING = [
   "Used",
   "Allowance",
   "Joined",
+  // 0.1.53: the site's terms, hidden on a site where no account has agreed to any (test/dash-terms.test.ts).
+  "Terms",
   "Actions",
   "Show more",
   "You see totals only. What is in another person's workspace is never shown here.",
@@ -223,10 +225,15 @@ const ADMIN_TEXT: Record<string, string> = {
   tooLong: "This is taking longer than expected. Open Delete again to carry on.",
   // The invites set's mockup 1: the day the account was made.
   joined: "Joined",
+  terms: "Terms",
+  notYet: "Not yet",
+  // New (review L5): an agreement to an older version, under "Not yet".
+  agreedToBefore: "Agreed to ",
+  agreedToMiddle: " on ",
 };
 
 /** The strings with a space in the script that are not words for a person: class names and lists of ids. */
-const CLASS_NAMES = ["btn sm quiet", "btn sm danger", "tag warn", "n tours", "n used", "n allowance", "mini over", "allow-warn allow-message", "allow-hint allow-message", "d name", "ws name", "t name", "d narrow-only", "note plain", "delete-text delete-warn"];
+const CLASS_NAMES = ["accounts", "accounts no-terms", "btn sm quiet", "btn sm danger", "tag warn", "n tours", "n used", "n allowance", "mini over", "allow-warn allow-message", "allow-hint allow-message", "d name", "ws name", "t name", "d narrow-only", "note plain", "delete-text delete-warn"];
 
 /** A script's TEXT object, read from the script's own text. */
 function scriptText(js: string): Record<string, string> {
@@ -509,7 +516,7 @@ describe("the Admin page and its script", () => {
     const typed = doc.getElementById("delete-input")!;
     expect([typed.getAttribute("type"), typed.getAttribute("autocomplete"), typed.getAttribute("autocapitalize"), typed.getAttribute("spellcheck")]).toEqual(["text", "off", "off", "false"]);
     // The empty headers have names a screen reader reads and the eye does not see.
-    expect(all.filter((e) => e.tagName === "th").map((th) => th.textContent)).toEqual(["Address", "Sent", "Works until", "Actions", "Account", "Workspace", "Tours", "Share", "Used", "Allowance", "Joined", "Actions"]);
+    expect(all.filter((e) => e.tagName === "th").map((th) => th.textContent)).toEqual(["Address", "Sent", "Works until", "Actions", "Account", "Workspace", "Tours", "Share", "Used", "Allowance", "Joined", "Terms", "Actions"]);
     for (const name of ["Share", "Actions", "Email address"]) for (const e of all.filter((x) => (x.tagName === "span" || x.tagName === "label") && x.textContent === name)) expect(e.className, name).toBe("vh");
     expect(all.filter((e) => e.tagName === "label").map((l) => l.getAttribute("for"))).toEqual(["invite-email", "allow-input", "delete-input"]);
     // Every element the script looks up by id is on the page.

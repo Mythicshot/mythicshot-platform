@@ -90,14 +90,17 @@
 #   update that is not the new version's fault, so no commands to go back are printed.
 #
 # The admin command. `admin` runs the site's own admin command (dist/node/admin.js:
-# first-admin, signin-link, change-email, mail-check, audit) in the installed app, beside
-# the running app:
+# first-admin, signin-link, change-email, mail-check, audit, terms) in the installed app,
+# beside the running app:
 # - Options of this script (--app-root, --node, --dry-run) go before the command's first
 #   argument; from there on every argument is the command's and reaches it unchanged.
 # - It runs `node app.cjs admin <arguments>` in the app folder, inside the app's Node.js
 #   environment. The startup file reads the settings file exactly as it does for the app
 #   and hands every setting to the command. This script reads only the DATA_DIR line, to
 #   check that the data folder is there, and prints no value from the file.
+# - The command is told the folder this script was run in (DEMO_PLATFORM_ADMIN_FROM), so a
+#   file named by a relative path, such as the terms of `admin terms publish terms.txt`, is
+#   found from there although the command runs in the app folder.
 # - It echoes nothing itself: what the command prints, a sign-in link among it, goes to
 #   this terminal only and to no log or file. Its exit code is the command's.
 # - The command changes the database only (in one transaction, beside the running app),
@@ -1407,14 +1410,16 @@ cmd_admin() {
     return 0
   fi
   printf '\n'
+  local FROM_DIR="$PWD"
   (
     umask 077
     set +eu
     # shellcheck source=/dev/null
     . "$ACTIVATE" >/dev/null || exit 1
     cd "$APP_DIR" || exit 1
-    # How the command was run, so that its usage text names it that way.
-    DEMO_PLATFORM_ADMIN_NAME="$SELF admin" exec node app.cjs admin "${ADMIN_ARGS[@]}"
+    # How the command was run, so that its usage text names it that way, and from where, so
+    # that a file named by a relative path is found where the person is.
+    DEMO_PLATFORM_ADMIN_NAME="$SELF admin" DEMO_PLATFORM_ADMIN_FROM="$FROM_DIR" exec node app.cjs admin "${ADMIN_ARGS[@]}"
   )
 }
 

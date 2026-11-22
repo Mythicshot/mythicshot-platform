@@ -35,10 +35,12 @@ describe("HOME_URL on Node", () => {
       const { deps } = await makeDeps(config);
       const health = await send(deps, "GET", "/healthz");
       expect([health.status, health.json], v).toEqual([200, { ok: true }]);
-      const page = await send(deps, "GET", "/tours");
-      expect(page.status, v).toBe(200);
-      expect(page.text, v).toContain(BRAND_PLAIN);
-      expect(page.text, v).not.toContain("made-up");
+      for (const path of ["/tours", "/terms"]) {
+        const page = await send(deps, "GET", path);
+        expect(page.status, `${v} ${path}`).toBe(200);
+        expect(page.text, `${v} ${path}`).toContain(BRAND_PLAIN);
+        expect(page.text, `${v} ${path}`).not.toContain("made-up");
+      }
     }
     expect(HOME_URL_UNUSABLE).not.toContain("made-up");
   });

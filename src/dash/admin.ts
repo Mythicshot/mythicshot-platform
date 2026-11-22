@@ -2,7 +2,9 @@
 // invites set's mockups 1 to 4: the summary line; the "Invite someone" card and the open
 // invites, each with Resend and Cancel; every account with its workspace, tour count, a
 // small usage bar, what it uses (with "Over" when it is over its allowance) and its
-// allowance, "Show more" while the list has another page; and each account's More menu:
+// allowance, the day it joined, the version of the site's terms it agreed to last and when
+// ("Not yet" without one; the column is hidden on a site with no terms), "Show more" while
+// the list has another page; and each account's More menu:
 // Set allowance (the question that sets one workspace's allowance, with the warning when
 // the new number is below what the workspace uses), Disable or Enable, and Delete.
 //
@@ -87,8 +89,8 @@ const ADMIN_MAIN = `  <section id="admin" aria-labelledby="h-page" hidden>
       <h2 class="card-title" id="h-accounts" tabindex="-1">Accounts</h2>
       <p class="note" id="admin-note" role="status" aria-live="polite" hidden></p>
       <p class="message" id="admin-message" role="status" aria-live="polite" hidden></p>
-      <table class="accounts">
-        <thead><tr><th scope="col">Account</th><th scope="col">Workspace</th><th scope="col" class="n">Tours</th><th scope="col" class="bar"><span class="vh">Share</span></th><th scope="col" class="n">Used</th><th scope="col" class="n">Allowance</th><th scope="col" class="joined">Joined</th><th scope="col"><span class="vh">Actions</span></th></tr></thead>
+      <table class="accounts no-terms" id="accounts-table">
+        <thead><tr><th scope="col">Account</th><th scope="col">Workspace</th><th scope="col" class="n">Tours</th><th scope="col" class="bar"><span class="vh">Share</span></th><th scope="col" class="n">Used</th><th scope="col" class="n">Allowance</th><th scope="col" class="joined">Joined</th><th scope="col" class="terms">Terms</th><th scope="col"><span class="vh">Actions</span></th></tr></thead>
         <tbody id="admin-rows"></tbody>
       </table>
     </div>
@@ -296,6 +298,10 @@ export const ADMIN_JS = `(function () {
     ownDelete: "You cannot delete your own account.",
     tooLong: "This is taking longer than expected. Open Delete again to carry on.",
     joined: "Joined",
+    terms: "Terms",
+    notYet: "Not yet",
+    agreedToBefore: "Agreed to ",
+    agreedToMiddle: " on ",
   };
   var ACCOUNTS = "/api/v1/admin/accounts";
   var WORKSPACES = "/api/v1/admin/workspaces/";
@@ -330,6 +336,8 @@ ${SIZE_JS}
   var standard = null;
   // The accounts shown, how many pages of the list they are, and the cursor of the page after them.
   var shown = [];
+  // Whether the site has published terms: the list's current_terms, which the Terms column follows.
+  var siteTerms = false;
   var pages = 0;
   var next = null;
   // Each account's More button, by workspace id, to give focus back after the list is rebuilt.
@@ -540,6 +548,7 @@ ${SIZE_JS}
       return pageOf(after).then(function (res) {
         if (!listed(res)) return res;
         got = got.concat(usable(res.data.accounts));
+        if (count === 0) siteTerms = res.data.current_terms !== null && typeof res.data.current_terms === "object";
         count++;
         cursor = cursorOf(res.data.next);
         return cursor !== null && count < want ? step(cursor) : true;
@@ -722,6 +731,24 @@ ${SIZE_JS}
     tr.appendChild(labelled(el("td", "n allowance", limit !== null ? Dash.formatBytes(limit) : TEXT.none), TEXT.allowance));
     // The day the account was made, with the year, as the invites set's mockup 1 shows it.
     tr.appendChild(labelled(el("td", "joined", Dash.dateOf(a.created_at, true)), TEXT.joined));
+    // The site's terms: the current version and when it was agreed to; "Not yet" otherwise,
+    // with an agreement to an older version under it, so an old one never reads as current.
+    var terms = labelled(el("td", "terms"), TEXT.terms);
+    var agreed = a.terms !== null && typeof a.terms === "object" && typeof a.terms.version === "string" && typeof a.terms.agreed_at === "number" ? a.terms : null;
+    if (agreed !== null && agreed.current === true) {
+      terms.appendChild(el("span", "name", agreed.version));
+      terms.appendChild(el("div", "d", Dash.dateOf(agreed.agreed_at, true)));
+    } else {
+      terms.appendChild(el("span", "d", TEXT.notYet));
+      if (agreed !== null) {
+        var older = el("div", "d");
+        older.appendChild(document.createTextNode(TEXT.agreedToBefore));
+        older.appendChild(el("span", "name", agreed.version));
+        older.appendChild(document.createTextNode(TEXT.agreedToMiddle + Dash.dateOf(agreed.agreed_at, true)));
+        terms.appendChild(older);
+      }
+    }
+    tr.appendChild(terms);
 
     var cell = el("td", "acts-cell");
     var acts = el("div", "acts");
@@ -742,6 +769,9 @@ ${SIZE_JS}
     var rows = $("admin-rows");
     rows.textContent = "";
     for (var i = 0; i < shown.length; i++) rows.appendChild(row(shown[i], i));
+    // The Terms column only on a site that has published terms (the list's current_terms): a
+    // site without reads as before.
+    $("accounts-table").className = siteTerms ? "accounts" : "accounts no-terms";
     $("admin-more").hidden = next === null;
     syncRows();
     if (hadWs !== null && moreOf[hadWs] !== undefined) moreOf[hadWs].focus();

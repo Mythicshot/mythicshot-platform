@@ -469,10 +469,14 @@ The line must be in `.env` and the container recreated: the command reads the se
 
 The recovery setting keeps the command from being a standing way in to the site. It is not a defence against someone who already controls the server: whoever can change `.env` or the data folder can change the site directly.
 
-The command also has `mail-check`, which says whether mail is set up without showing any setting, `change-email`, which changes an account's address while mail is off, and `audit`, which shows the last sign-ins and admin changes; `--help` lists them, and [Accounts and mail](#accounts-and-mail) uses each. Its usage text names it the way `DEMO_PLATFORM_ADMIN_NAME` says when a wrapper sets that, as `cpanel.sh admin` does; nothing else reads it. It runs beside the app without a restart and changes only the database: making the admin is one step that is written whole or not at all, and the link and its record in the audit follow it. It applies no database update itself.
+The command also has `mail-check`, which says whether mail is set up without showing any setting, `change-email`, which changes an account's address while mail is off, and `audit`, which shows the last sign-ins and admin changes; `--help` lists them, and [Accounts and mail](#accounts-and-mail) uses each. Its usage text names it the way `DEMO_PLATFORM_ADMIN_NAME` says when a wrapper sets that, as `cpanel.sh admin` does; nothing else reads it. `cpanel.sh admin` also sets `DEMO_PLATFORM_ADMIN_FROM` to the folder it was run in, so a file named by a relative path (`terms publish terms.txt`) is found there; the command reads it only for that, and only when it is an absolute path. It runs beside the app without a restart and changes only the database: making the admin is one step that is written whole or not at all, and the link and its record in the audit follow it. It applies no database update itself.
 
 > [!WARNING]
 > Never open the database with the server's `sqlite3` tool: an older one cannot read the platform's tables, so use the app's own commands, which run on the app's Node.js.
+
+### Publish the site's terms
+
+To ask everyone to agree to the site's terms before they use the dashboard (see [The site's terms](../README.md#the-sites-terms) in the README), write them in a plain-text file in the format of [docs/terms-example.txt](terms-example.txt) and hand it to the server command on standard input, from the stack's folder: `docker compose exec -T app node dist/node/admin.js terms publish - < terms.txt`. It prints `Published version 1 of the terms, …` and everyone, you included, is asked at their next sign-in or dashboard request; a file that breaks a rule is refused with one line naming the line, and nothing changes. `terms list` and `terms show <id>` read what was published. Connected computers keep working, and a site with no terms asks nothing.
 
 ### If the setup did not finish
 
@@ -1284,6 +1288,7 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `media_access_changed` | Who may view a shared image or clip changed, or its list of addresses did; the subject is the item, the account is the one signed in, and the detail holds the settings and the list's sizes, such as `{"from":"public","to":"people","viewers_before":0,"viewers":3,"by":"session"}`. It takes effect at the next request: nothing moves. No address is recorded |
 | `viewer_link_sent` | A link for a visitor to view a tour shared with their address was made to be mailed; the mail itself may still have failed. Only the subject is set, the link's own id: no account, workspace, tour or address is recorded |
 | `viewer_signin` | A visitor used such a link and this browser now views tours as that address; the subject is the viewer session. No account, workspace or address is recorded |
+| `terms_agreed` | The account agreed to the site's terms; the subject is the version of the terms. No network address or browser is recorded |
 
 ## Troubleshooting by symptom
 

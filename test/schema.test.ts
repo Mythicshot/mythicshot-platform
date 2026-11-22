@@ -13,7 +13,7 @@ const ACCOUNT_TABLES = ["audit", "membership", "rate_counter", "session", "signi
  * naming two items; they do nothing else: each body is one RAISE(ABORT, ...) and no statement
  * that writes.
  */
-const GUARD_TRIGGERS = ["media_link_names_one_insert", "media_link_names_one_update", "media_restricted_link_insert", "media_restricted_link_update", "restricted_tour_no_public_picture", "restricted_tour_no_public_picture_update", "restricted_tour_stub_insert", "restricted_tour_stub_update"];
+const GUARD_TRIGGERS = ["media_link_names_one_insert", "media_link_names_one_update", "media_restricted_link_insert", "media_restricted_link_update", "restricted_tour_no_public_picture", "restricted_tour_no_public_picture_update", "restricted_tour_stub_insert", "restricted_tour_stub_update", "terms_version_kept", "terms_version_never_deleted"];
 async function guardTriggers(deps: Deps): Promise<string[]> {
   const rows = await deps.db.all<{ name: string; sql: string }>("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name");
   for (const r of rows) {
@@ -52,6 +52,8 @@ const TABLES = [
   "snapshot",
   "snapshot_object",
   "step",
+  "terms_agreement",
+  "terms_version",
   "tour",
   "tour_deletion",
   "tour_viewer",

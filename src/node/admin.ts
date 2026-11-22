@@ -5,6 +5,9 @@
 //   node dist/node/admin.js change-email --username <name> --email <address>
 //   node dist/node/admin.js mail-check [--send-to <address>]
 //   node dist/node/admin.js audit [--last <n>]
+//   node dist/node/admin.js terms publish <file>      ("-" reads the file from standard input)
+//   node dist/node/admin.js terms list
+//   node dist/node/admin.js terms show <id>
 //
 // Without a command, `--email` with `--username` is first-admin and `--email` alone is
 // signin-link, which is how `./cpanel.sh admin --email … --username …` reads.
@@ -22,13 +25,14 @@
 // process's environment: app.cjs hands over what the settings file says (RECOVERY_LINKS),
 // and run as its own file the gate is what the environment of process 1 says, which in
 // the container is the app started from the stack's .env.
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEmail } from "../accounts.ts";
 import { claimFirstAdmin, setEmailOnServer, signInLinkFor, type ClaimProblem, type EmailSetProblem } from "../admin.ts";
 import type { Mailer } from "../mail.ts";
 import type { Deps, FileStore } from "../ports.ts";
+import { listTerms, parseTerms, publishTerms, showTerms, TERMS_LIMITS } from "../terms.ts";
 import { parseUsername } from "../usernames.ts";
 import { configFromEnv, mailFromEnv, NODE_SETTINGS } from "./config.ts";
 import { NodeDb } from "./db.ts";
@@ -39,7 +43,7 @@ import { SmtpError, smtpMailer, type SmtpSettings } from "./smtp.ts";
  * recovery gate: true lets the command print a link for an account that exists. Absent
  * means closed.
  */
-export type AdminOptions = { makeMailer?: (settings: SmtpSettings) => Mailer; recoveryLinks?: boolean };
+export type AdminOptions = { makeMailer?: (settings: SmtpSettings) => Mailer; recoveryLinks?: boolean; readStdin?: () => Promise<Uint8Array | "too_large"> };
 
 /** The name of the recovery setting. Only this file and the startup file use it. */
 const RECOVERY_SETTING = "RECOVERY_LINKS";
@@ -96,6 +100,8 @@ export function recoveryFromProcessOne(at: { pid: number; platform: NodeJS.Platf
 const ACCOUNTS_MIGRATION = "0008_accounts.sql";
 /** The migration that made the table of email changes, which change-email also writes. */
 const EMAIL_CHANGE_MIGRATION = "0009_email_change.sql";
+/** The migration that made the tables of the terms, which the terms commands read and write. */
+const TERMS_MIGRATION = "0018_terms.sql";
 
 /** How the usage names the command when nothing else is said: run as its own file. */
 const DIRECT_NAME = "node dist/node/admin.js";
@@ -123,6 +129,12 @@ const usage = (name: string): string[] => [
   "      Say whether mail is set up, without showing any setting. With --send-to, send one test mail.",
   "  audit [--last <n>]",
   "      Print the last n rows of the audit record, oldest first (default 20, at most 1000).",
+  "  terms publish <file>",
+  '      Publish the site\'s terms from a plain-text file (the format is in docs/terms-example.txt); "-" reads it from standard input. From then on every account is asked to agree to them before it uses the dashboard.',
+  "  terms list",
+  "      List every published version of the terms, oldest first, with how many accounts agreed to each.",
+  "  terms show <id>",
+  "      Print one version of the terms exactly as it was published.",
   "",
   "Without a command, --email with --username is first-admin, and --email alone is signin-link.",
 ];
@@ -152,6 +164,64 @@ const SAID = {
   auditEmpty: "The audit record is empty.",
 } as const;
 
+/** What the terms commands say: fixed lines, and functions for the lines that carry a version's number, id or label. */
+export const TERMS_SAID = {
+  notRead: "The file could not be read. Nothing was changed.",
+  refused: (reason: string) => `The terms were not published: ${reason}`,
+  same: (version: { seq: number; id: string } | null) =>
+    version === null ? "These terms are the same as a version already published. Nothing was changed." : `These terms are the same as version ${version.seq} (${version.id}), already published. Nothing was changed.`,
+  busy: "Another version of the terms was published at the same moment. Nothing was changed; run the command again.",
+  published: (seq: number, id: string, label: string) => `Published version ${seq} of the terms, "${label}" (${id}).`,
+  publishedNext: "From now on every account is asked to agree to it at its next sign-in or dashboard request. Connected computers keep working.",
+  none: "No terms have been published. Nobody is asked to agree to anything.",
+  row: (seq: number, id: string, at: number, label: string, agreed: number, current: boolean) =>
+    `${seq}  ${id}  ${new Date(at).toISOString()}  "${label}"  ${agreed === 1 ? "1 account agreed" : `${agreed} accounts agreed`}${current ? "  (current)" : ""}`,
+  notFound: "No version of the terms has that id.",
+  shown: (seq: number, at: number, sha256: string) => `Version ${seq} of the terms, published ${new Date(at).toISOString()}, SHA-256 ${sha256}:`,
+} as const;
+
+/**
+ * A line of stored text made safe for a terminal: every control character, line or paragraph
+ * separator and direction control becomes U+FFFD. parseTerms never stores one; this holds
+ * even for a database changed by other means.
+ */
+function forTerminal(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, "\ufffd");
+}
+
+/**
+ * The bytes of a terms file, at most TERMS_LIMITS.fileBytes: "-" is standard input. A relative
+ * path is taken from the folder the person ran cpanel.sh in when it says so
+ * (DEMO_PLATFORM_ADMIN_FROM, an absolute path), else from this process's own folder. null when
+ * there is no such file or it cannot be read; "too_large" past the cap.
+ */
+async function readTermsFile(file: string, env: NodeJS.ProcessEnv, opts: AdminOptions): Promise<Uint8Array | "too_large" | null> {
+  if (file === "-") return (opts.readStdin ?? readStdinCapped)();
+  const from = env.DEMO_PLATFORM_ADMIN_FROM;
+  const path = isAbsolute(file) || typeof from !== "string" || !isAbsolute(from) ? resolve(file) : resolve(from, file);
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return null;
+    if (st.size > TERMS_LIMITS.fileBytes) return "too_large";
+    const bytes = readFileSync(path);
+    return bytes.byteLength > TERMS_LIMITS.fileBytes ? "too_large" : new Uint8Array(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/** Standard input, read until it ends or passes TERMS_LIMITS.fileBytes. */
+async function readStdinCapped(): Promise<Uint8Array | "too_large"> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of process.stdin as AsyncIterable<Buffer>) {
+    total += chunk.byteLength;
+    if (total > TERMS_LIMITS.fileBytes) return "too_large";
+    chunks.push(chunk);
+  }
+  return new Uint8Array(Buffer.concat(chunks));
+}
+
 const REFUSED: Record<ClaimProblem, string> = {
   has_admin: "This site already has an admin. Nothing was changed.",
   not_set_up: "This site is not set up yet. Open the setup page first.",
@@ -176,7 +246,10 @@ type Parsed =
   | { kind: "first-admin"; email: string; username: string }
   | { kind: "signin-link"; email: string }
   | { kind: "mail-check"; sendTo: string | null }
-  | { kind: "audit"; last: number };
+  | { kind: "audit"; last: number }
+  | { kind: "terms-publish"; file: string }
+  | { kind: "terms-list" }
+  | { kind: "terms-show"; id: string };
 
 const COMMANDS = ["first-admin", "signin-link", "change-email", "mail-check", "audit"] as const;
 type Command = (typeof COMMANDS)[number];
@@ -192,6 +265,13 @@ const FLAGS: Record<Command | "", readonly string[]> = {
 /** The arguments as a command, or null for anything it does not take exactly. */
 function parseArgs(argv: readonly string[]): Parsed | null {
   if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help")) return { kind: "help" };
+  // The terms commands take words, not options: exactly these shapes and nothing more.
+  if (argv[0] === "terms") {
+    if (argv.length === 2 && argv[1] === "list") return { kind: "terms-list" };
+    if (argv.length === 3 && argv[1] === "show" && argv[2] !== "") return { kind: "terms-show", id: argv[2] };
+    if (argv.length === 3 && argv[1] === "publish" && argv[2] !== "" && (argv[2] === "-" || !argv[2].startsWith("-"))) return { kind: "terms-publish", file: argv[2] };
+    return null;
+  }
   let i = 0;
   let command: Command | "" = "";
   if (argv.length > 0 && (COMMANDS as readonly string[]).includes(argv[0])) {
@@ -347,6 +427,14 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
     }
     const deps: Deps = { db, drafts: NO_FILES, pub: NO_FILES, config, now: () => Date.now() };
 
+    if (parsed.kind === "terms-publish" || parsed.kind === "terms-list" || parsed.kind === "terms-show") {
+      if ((await db.first("SELECT 1 AS x FROM _migrations WHERE name = ?", [TERMS_MIGRATION])) === null) {
+        out(SAID.older);
+        return 1;
+      }
+      return await termsCommand(parsed, deps, env, out, opts);
+    }
+
     switch (parsed.kind) {
       case "first-admin": {
         // The owner is the oldest account of the workspace the setup row names (claimFirstAdmin).
@@ -430,6 +518,61 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
   } finally {
     db?.close();
   }
+}
+
+/**
+ * The three terms commands, on a database that has the terms tables. publish reads the file
+ * before anything else and writes one version in one statement (src/terms.ts); list and show
+ * only read. Each prints only its own fixed lines and the version's number, id, time, label and,
+ * for show, its text, made safe for the terminal.
+ */
+async function termsCommand(
+  parsed: { kind: "terms-publish"; file: string } | { kind: "terms-list" } | { kind: "terms-show"; id: string },
+  deps: Deps,
+  env: NodeJS.ProcessEnv,
+  out: (line: string) => void,
+  opts: AdminOptions,
+): Promise<number> {
+  if (parsed.kind === "terms-publish") {
+    const bytes = await readTermsFile(parsed.file, env, opts);
+    if (bytes === null) {
+      out(TERMS_SAID.notRead);
+      return 1;
+    }
+    const read = await parseTerms(bytes === "too_large" ? new Uint8Array(TERMS_LIMITS.fileBytes + 1) : bytes);
+    if (!read.ok) {
+      out(TERMS_SAID.refused(read.reason));
+      return 1;
+    }
+    const made = await publishTerms(deps, read);
+    if (!made.ok) {
+      out(made.problem === "busy" ? TERMS_SAID.busy : TERMS_SAID.same(made.version));
+      return 1;
+    }
+    out(forTerminal(TERMS_SAID.published(made.seq, made.id, read.terms.version)));
+    out(TERMS_SAID.publishedNext);
+    return 0;
+  }
+  if (parsed.kind === "terms-list") {
+    const rows = await listTerms(deps);
+    if (rows.length === 0) {
+      out(TERMS_SAID.none);
+      return 0;
+    }
+    for (const [i, r] of rows.entries()) out(forTerminal(TERMS_SAID.row(r.seq, r.id, r.published_at, r.version, r.agreed, i === rows.length - 1)));
+    return 0;
+  }
+  const found = await showTerms(deps, parsed.id);
+  if (found === null) {
+    out(TERMS_SAID.notFound);
+    return 1;
+  }
+  out(TERMS_SAID.shown(found.seq, found.answer.published_at, found.sha256));
+  out("");
+  const lines = found.canonical.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  for (const line of lines) out(forTerminal(line));
+  return 0;
 }
 
 /**

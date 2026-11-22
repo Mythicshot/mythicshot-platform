@@ -30,7 +30,7 @@ import { SESSION_AGE_SQL, lifetimesOf, sessionEndsAt, sessionParams } from "./li
 import { NO_MAIL, linkOrigin, signInLink, signInMail } from "./mail.ts";
 import { canMailLinks, deferOf, mailOf, type Deps, type Stmt } from "./ports.ts";
 import { LIMITS_SIGNIN, SITE_KEY, SITE_QUIET_KEY, hitLimit, networkKey, recipientKey, sweepCounters, type Limit } from "./rate.ts";
-import { clearedCookie, createSignInCodeFor, csrfFor, readSessionCookie, redeemSignInCode, revokeAll, revokeSession, sameOriginChange, sessionCookie, sessionHost, sweepSessions } from "./sessions.ts";
+import { clearedCookie, createSignInCodeFor, csrfFor, isBeforeTerms, readSessionCookie, redeemSignInCode, revokeAll, revokeSession, sameOriginChange, sessionCookie, sessionHost, sweepSessions } from "./sessions.ts";
 
 /** The longest body the two sign-in requests read: an address is at most 254 characters, a code 44. */
 export const MAX_BODY_BYTES = 2048;
@@ -197,6 +197,22 @@ async function linkJob(deps: Deps, job: LinkJob): Promise<void> {
   }
 }
 
+/** The session answer's one read; `/*terms*\/` is where the agreement's two columns go, or nothing. */
+const SESSION_ANSWER = `SELECT u.username, u.email, u.is_admin, w.name, s.created_at, s.expires_at/*terms*/
+         FROM session s
+         JOIN user u ON u.id = s.user_id
+         JOIN membership m ON m.user_id = u.id
+         JOIN workspace w ON w.id = m.workspace_id
+        WHERE s.id = ? AND s.user_id = ? AND w.id = ?`;
+
+/**
+ * The account's newest agreement to the site's terms (src/terms.ts): the version's label and
+ * when, both null for none. Both pick the same row: by the time, then by the version's order.
+ */
+const AGREED_COLUMNS = `,
+              (SELECT t.version_label FROM terms_agreement a JOIN terms_version t ON t.id = a.terms_id WHERE a.user_id = s.user_id ORDER BY a.agreed_at DESC, t.seq DESC LIMIT 1) AS terms_version,
+              (SELECT a.agreed_at FROM terms_agreement a JOIN terms_version t ON t.id = a.terms_id WHERE a.user_id = s.user_id ORDER BY a.agreed_at DESC, t.seq DESC LIMIT 1) AS terms_agreed_at`;
+
 /** The site's three sign-in lifetimes, in days, null where a limit is off, as the session answer gives them. */
 function limitsAnswer(deps: Deps): { session_max_days: number | null; connection_idle_days: number | null; connection_max_days: number | null } {
   const l = lifetimesOf(deps.config);
@@ -282,7 +298,13 @@ export function signinRoutes(app: Hono, deps: Deps): void {
     return withHeader(json(200, { ok: true }), "set-cookie", sessionCookie(made.secret));
   });
 
-  /** Who the session is: the account, its workspace, this session, the anti-forgery value a change needs, and whether the email address can be changed. Sets the cookie again. */
+  /**
+   * Who the session is: the account, its workspace, this session, the anti-forgery value a
+   * change needs, and whether the email address can be changed. Sets the cookie again. With
+   * an agreement to the site's terms on record, also `terms_agreed`: the version's label and
+   * when, for the Account page's line (read in the same one query); an account that has agreed
+   * to none, and so every account of a site without terms, gets the answer as before.
+   */
   app.get("/api/v1/session", async (c) => {
     const req = c.req.raw;
     const auth = await requireAuth(req, deps, { only: "session" });
@@ -290,16 +312,18 @@ export function signinRoutes(app: Hono, deps: Deps): void {
     // The cookie requireAuth accepted: exactly one, well formed.
     const secret = readSessionCookie(req);
     if (auth.session === undefined || secret === null) return unauthorized();
-    const row = await deps.db.first<{ username: string | null; email: string; is_admin: number; name: string; created_at: number; expires_at: number }>(
-      `SELECT u.username, u.email, u.is_admin, w.name, s.created_at, s.expires_at
-         FROM session s
-         JOIN user u ON u.id = s.user_id
-         JOIN membership m ON m.user_id = u.id
-         JOIN workspace w ON w.id = m.workspace_id
-        WHERE s.id = ? AND s.user_id = ? AND w.id = ?`,
-      [auth.session.id, auth.session.userId, auth.workspaceId],
-    );
+    type Row = { username: string | null; email: string; is_admin: number; name: string; created_at: number; expires_at: number; terms_version?: string | null; terms_agreed_at?: number | null };
+    const params = [auth.session.id, auth.session.userId, auth.workspaceId];
+    let row: Row | null;
+    try {
+      row = await deps.db.first<Row>(SESSION_ANSWER.replace("/*terms*/", AGREED_COLUMNS), params);
+    } catch (err) {
+      // A database before the terms migration (0018) has no agreement to name.
+      if (!isBeforeTerms(err)) throw err;
+      row = await deps.db.first<Row>(SESSION_ANSWER.replace("/*terms*/", ""), params);
+    }
     if (row === null) return unauthorized();
+    const agreed = typeof row.terms_version === "string" && typeof row.terms_agreed_at === "number" ? { terms_agreed: { version: row.terms_version, agreed_at: row.terms_agreed_at } } : {};
     const answer = json(200, {
       account: { id: auth.session.userId, username: row.username, email: row.email, admin: row.is_admin === 1 },
       workspace: { id: auth.workspaceId, name: row.name },
@@ -314,6 +338,7 @@ export function signinRoutes(app: Hono, deps: Deps): void {
       // The site's sign-in lifetimes in days (null: off), so the dashboard can say when a
       // connection ends without a request more.
       limits: limitsAnswer(deps),
+      ...agreed,
     });
     return withHeader(answer, "set-cookie", sessionCookie(secret));
   });
@@ -353,9 +378,9 @@ export function signinRoutes(app: Hono, deps: Deps): void {
     return ended ? noContent() : apiError(404, "not_found", "no such session");
   });
 
-  /** Ends this session and clears the cookie. */
+  /** Ends this session and clears the cookie. Open before the site's terms are agreed to (the terms screen's "Sign out"). */
   app.post("/api/v1/signout", async (c) => {
-    const auth = await requireAuth(c.req.raw, deps, { only: "session" });
+    const auth = await requireAuth(c.req.raw, deps, { only: "session", terms: "open" });
     if (auth instanceof Response) return auth;
     if (auth.session === undefined) return unauthorized();
     // False when another request ended it a moment ago: signed out all the same.
@@ -363,9 +388,9 @@ export function signinRoutes(app: Hono, deps: Deps): void {
     return withHeader(noContent(), "set-cookie", clearedCookie());
   });
 
-  /** Ends every session of the caller's account and clears the cookie. Tokens are untouched. */
+  /** Ends every session of the caller's account and clears the cookie. Tokens are untouched. Open before the site's terms are agreed to, as signing out is. */
   app.post("/api/v1/signout/everywhere", async (c) => {
-    const auth = await requireAuth(c.req.raw, deps, { only: "session" });
+    const auth = await requireAuth(c.req.raw, deps, { only: "session", terms: "open" });
     if (auth instanceof Response) return auth;
     if (auth.session === undefined) return unauthorized();
     await revokeAll(deps, auth.session.userId);

@@ -253,6 +253,8 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
 .accounts .d { color: var(--muted); font-size: 0.85rem; }
 .accounts td.used .tag { margin-left: 6px; }
 .accounts td.joined { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.accounts .terms .d { white-space: nowrap; }
+.accounts.no-terms th.terms, .accounts.no-terms td.terms { display: none; }
 .accounts .mini { min-width: 80px; }
 .accounts .mini i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent); }
 .accounts .mini.over i { background: var(--warn-bar); }
@@ -305,6 +307,8 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
 .address { color: var(--text); font-weight: 600; }
 .field-label { display: block; font-weight: 600; font-size: 0.9rem; margin: 12px 0 6px; }
 .dialog .hint { margin: 6px 0 8px; }
+.terms-agreed { margin: 0; padding: 11px 0 0; border-top: 1px solid var(--line); font-size: 0.93rem; }
+.terms-check { color: var(--ok-text); font-weight: 700; }
 .lone { max-width: 440px; margin: 26px auto 0; }
 .lone h1 { font-size: 1.15rem; margin: 0 0 8px; }
 .lone .sub { margin: 0 0 8px; }
@@ -338,5 +342,33 @@ h1 { font-size: 1.25rem; line-height: 1.3; font-weight: 650; margin: 0 0 4px; }
   .connections tr:last-child { padding-bottom: 0; }
   .connections td { padding: 0; border-top: 0; }
   .connections td.acts-cell { margin-top: 8px; }
+}
+
+/* The terms screen and the read-only terms (src/dash/terms.ts): one card on its own page. */
+.terms-page { max-width: 680px; margin: 0 auto; padding: 32px 16px; }
+.terms-card { padding: 22px; }
+.terms-kicker { margin: 0 0 4px; color: var(--muted); font-size: 0.86rem; }
+.terms-kicker:empty { display: none; }
+.terms-title { margin: 0 0 16px; }
+.terms-label { margin: 16px 0 6px; font-size: 0.95rem; font-weight: 650; }
+.terms-version { color: var(--muted); font-weight: 400; }
+.terms-points { margin: 0 0 8px; padding-left: 1.3em; }
+.terms-points li { margin: 0 0 4px; }
+.terms-note { margin: 0; color: var(--muted); font-size: 0.9rem; }
+.terms-box { height: 320px; max-height: 50vh; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 10px; background: var(--field); padding: 12px 14px; font-size: 0.92rem; }
+.terms-box:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.terms-box h3 { margin: 14px 0 6px; font-size: 0.95rem; font-weight: 650; }
+.terms-box h3:first-child { margin-top: 0; }
+.terms-box p { margin: 0 0 10px; }
+.terms-box ul { margin: 0 0 10px; padding-left: 1.3em; }
+.terms-box li { margin: 0 0 4px; }
+.terms-links { margin: 8px 0 0; font-size: 0.9rem; color: var(--muted); }
+.terms-card .message { margin: 12px 0 0; }
+.terms-actions { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+.terms-back { margin: 18px 0 0; font-size: 0.93rem; }
+@media (max-width: 480px) {
+  .terms-page { padding: 16px; }
+  .terms-card { padding: 16px; }
+  .terms-actions .btn { flex: 1 1 auto; }
 }
 `;

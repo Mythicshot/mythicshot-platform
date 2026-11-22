@@ -400,6 +400,45 @@ Until the invite pages come, the sign-in page says "Mythicshot is invite-only fo
 
 A tour can be shared with a list of email addresses instead of everyone with its link. A visitor then proves an address on the tours address (with one address, on that address) and gets no account: the tour's page asks for the address, the site mails a link that works once and for 15 minutes, and pressing the button on the page the link opens makes this browser a viewer of that address for 30 days of use, never longer than 180 days. The viewer's cookie, `__Host-dp_viewer`, is its own: it is never an account's session, opens nothing of the dashboard or the API, and an account's session is never a viewer. Asking for a link answers the same whatever the tour or the address, and a link goes only to an address the tour's own list holds. One address gets at most 3 viewer links in 15 minutes and 5 a day however many tours or networks ask, and at most 2 for one tour in 15 minutes. The tours of one workspace get at most 30 viewer mails an hour, on a cap of their own apart from sign-in's, so one workspace can never use up the mail of another; the whole site sends at most 1000 an hour, a backstop against a fault. Anyone who knows an address can use up that address's viewer links for the day by asking for them, which delays that person and nothing more. Disabling or deleting an account does not end the viewer sessions of the same address: a viewer is an address, not the account, and each tour decides by its own list. The requests are described at `/docs`; what a visitor sees is in "Restricted tours: what a visitor sees" above.
 
+## The site's terms
+
+A site can ask everyone who signs in to agree to its terms before they use the dashboard. Terms belong to each site: a site that has published none asks nothing of anyone, and everything works as before.
+
+### Publish terms
+
+Write the terms in a plain-text file (not HTML) and publish it with the server command, beside the running app:
+
+```sh
+node dist/node/admin.js terms publish terms.txt
+```
+
+On cPanel this is `./cpanel.sh admin terms publish terms.txt` ([the cPanel guide](docs/hosting/cpanel.md#publish-the-sites-terms)); with Docker the file is handed over on standard input, `docker compose exec -T app node dist/node/admin.js terms publish - < terms.txt` ([the Docker runbook](docs/runbook-docker.md#publish-the-sites-terms)). `terms list` lists every version published, oldest first, with how many accounts agreed to each, and `terms show <id>` prints one exactly as it was published. On Cloudflare there is no server command yet, as for the other admin commands, so terms cannot be published there yet ([the Cloudflare runbook](docs/runbook-cloudflare.md)).
+
+The file format, with a full example, is [docs/terms-example.txt](docs/terms-example.txt). Line by line: `title:` and `version:` (free text, such as a date), up to three `link: <label> | <https address>` lines, `main points:` followed by 1 to 12 lines starting with `- ` (each at most 300 characters), then `terms:` followed by the full terms (at most 200,000 bytes), where a line starting with `# ` is a heading, lines starting with `- ` are a list, and other lines are text, joined into a paragraph until a blank line. There is no markup: everything is shown as text, and the only links are the `link:` lines, each an https address with a host name, no user name or password and no `#` part. A file that breaks a rule is refused with one line that names the line, such as `line 4: this main point is empty.`; the same content as a version already published is refused too.
+
+Each version is kept exactly as it was published, so there is a record of what each person agreed to: a version is never changed or deleted, and publishing new terms adds a version.
+
+### Who is asked, and when
+
+Right after someone accepts an invite, and at the next sign-in or dashboard request of every existing account, the admin's too, the dashboard shows the terms screen: the title, the main points (a summary), the full terms in a box that scrolls, the links, and "Sign out" and "I agree". Until the account agrees to the current version, its session reaches nothing but that screen, the terms it agreed to before, and signing out: every dashboard page goes to the screen, and every API request made with the session answers `403 terms_required` and does nothing. That includes the page that approves connecting a computer. "Sign out" ends the session and leaves the account as it is. When the site publishes new terms, the screen comes back at each account's next request, with the new version; the older agreement stays on record. If newer terms are published while someone reads the screen, their "I agree" records nothing and the screen shows the new version.
+
+The server command is never held back, so a site whose admin has not agreed can always publish new terms.
+
+### What is stored
+
+For each agreement, the account, the version and the date and time, and nothing else: no network address and no browser, as the site stores neither on accounts. The audit record gets `terms_agreed` with the account's and the version's ids. The Account page says "You agreed to the terms of <version> on <date>." with "Read them", which opens that version read-only; the Admin page and the admin API's list of accounts give each account's version and date, or "Not yet". On the Admin page the Terms column shows on a site that has published terms; an account that agreed only to an older version reads "Not yet", with "Agreed to <older version> on <date>" under it, and the API marks each agreement `current` or not and names the site's `current_terms`. Deleting an account removes its agreements; the audit rows stay, ids only, as for everything else.
+
+### What the terms leave alone
+
+Connected computers keep working: an API token is never held back by the terms, whatever the account's state, and every request made with a token answers exactly as before. Connecting a computer needs a signed-in browser, so nobody connects one without having agreed once; after the terms change, a computer already connected is not cut off. Visitors of shared tours, images and clips never see the terms: nothing on the tours address or the address for images changes, and viewer sessions are not affected.
+
+### Accepted, and said here
+
+- A request that the terms hold back still records that the session was used, as every session request does.
+- A computer whose connection was approved before new terms were published can still collect it within the code's 10 minutes.
+- Two publishes at the same moment: one wins, and the other prints one line saying so and changes nothing.
+- On a site without terms nothing visible changes, but the dashboard's static files and the admin API's list of accounts (`terms: null` on each account, `current_terms: null`) differ from before.
+
 ## The dashboard
 
 The dashboard is the set of pages a signed-in person uses on the app address (or the one address). `/` sends a signed-in browser to the Tours page and anyone else to the sign-in page. Tours are recorded, edited and renamed in Mythicshot; the dashboard lists them, shares them, publishes and unpublishes them, and deletes them. Images and GIFs are shared from Mythicshot too; the dashboard lists them, shares their links, sets who can view them and deletes them.
@@ -410,7 +449,7 @@ The dashboard is the set of pages a signed-in person uses on the app address (or
 | GIFs, `/gifs` | The same for shared clips (GIFs and MP4s), with each clip's length in seconds |
 | Tours, `/tours` | Lists the workspace's tours, most recently changed first, each with its steps, size, the day it changed and whether it is published or has changes waiting. "Copy link" and "Open" for a published tour; "Publish", "Publish changes", "Unpublish" and "Delete". Delete asks first and cannot be undone; the recording on the computer is not touched |
 | Storage, `/storage` | What the workspace uses: against its allowance with a bar when it has one, with its numbers of images, GIFs and tours; what takes the room (tours, GIFs, images, logos, uploads in progress); and its largest items of every kind, each marked Tour, Image or GIF, with "Delete". A workspace over its allowance sees a warning |
-| Account, `/account` | The username, the email address and the workspace; with `DOWNLOAD_URL` set, a card "Mythicshot for Windows" linking to the app's download page (see [The app's download page](#the-apps-download-page)); where the account is signed in, with the sign-outs of [Sessions](#sessions); and, on a site whose mail is on, changing the email address (see [Changing an email address](#changing-an-email-address)). The username cannot be changed in this version |
+| Account, `/account` | The username, the email address and the workspace, and on a site with terms the version agreed to (see [The site's terms](#the-sites-terms)); with `DOWNLOAD_URL` set, a card "Mythicshot for Windows" linking to the app's download page (see [The app's download page](#the-apps-download-page)); where the account is signed in, with the sign-outs of [Sessions](#sessions); and, on a site whose mail is on, changing the email address (see [Changing an email address](#changing-an-email-address)). The username cannot be changed in this version |
 | Admin, `/admin` | For the site's admin only: inviting people and the open invites, every account and its storage, and each account's "More" menu: its workspace's allowance, disabling or enabling it, and deleting a disabled one. The tab is shown only to the admin, and everyone else gets "not found" from the routes behind it |
 
 ### The app's download page
@@ -423,7 +462,7 @@ Every dashboard page starts its top bar with the product's mark beside the name 
 
 ### What the admin sees
 
-The Admin page shows one line for the whole site (the number of accounts, what all workspaces use together, and the standard allowance) and one row per account: its username, email address, status and whether it is the admin, its workspace's name, its number of tours, the bytes it uses, its allowance and the day it joined. It never shows a tour's title, link, pictures or anything else in a workspace, and it has no way into one: the admin's own session reaches other workspaces only through these figures. The page says so itself: "You see totals only. What is in another person's workspace is never shown here."
+The Admin page shows one line for the whole site (the number of accounts, what all workspaces use together, and the standard allowance) and one row per account: its username, email address, status and whether it is the admin, its workspace's name, its number of tours, the bytes it uses, its allowance, the day it joined, and on a site with terms the version of them it agreed to last and when ("Not yet" without one). It never shows a tour's title, link, pictures or anything else in a workspace, and it has no way into one: the admin's own session reaches other workspaces only through these figures. The page says so itself: "You see totals only. What is in another person's workspace is never shown here."
 
 ### Allowances
 

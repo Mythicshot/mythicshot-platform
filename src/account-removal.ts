@@ -151,7 +151,7 @@ function stopPublishes(ws: string, now: number): Stmt[] {
  * row it fails, and the whole batch is undone). Then, children before parents (foreign keys
  * never cascade): its requests to connect the app, its tokens, sessions, sign-in codes,
  * email change and rate counters, the invites to its address and its name on the invites it
- * sent, its sign-in methods and membership, the account,
+ * sent, its agreements to the site's terms, its sign-in methods and membership, the account,
  * and the workspace. Everything here is named by the account's or the workspace's id, or by a
  * counter key made from them, so nothing of another workspace can be reached.
  */
@@ -189,6 +189,9 @@ async function finalStatements(deps: Deps, t: Target, adminId: string): Promise<
     { sql: "DELETE FROM email_change WHERE user_id = ?", params: [uid] },
     { sql: "DELETE FROM rate_counter WHERE key IN (SELECT value FROM json_each(?))", params: [JSON.stringify(keys)] },
     ...invites,
+    // Its agreements to the site's terms (migration 0018); the versions stay, as every
+    // version is kept, and so do the audit rows of the agreements, ids only.
+    { sql: "DELETE FROM terms_agreement WHERE user_id = ?", params: [uid] },
     { sql: "DELETE FROM signin_method WHERE user_id = ?", params: [uid] },
     { sql: "DELETE FROM membership WHERE user_id = ? AND workspace_id = ?", params: [uid, ws] },
     { sql: "DELETE FROM user WHERE id = ? AND status = 'disabled'", params: [uid] },

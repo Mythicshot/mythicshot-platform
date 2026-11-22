@@ -8,7 +8,7 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import { makeDeps } from "#harness";
 import { BRAND_PLAIN, MARK_PATH, brandHtml, withHome } from "../src/brand.ts";
 import { MARK_PNG } from "../src/dash/mark.ts";
-import { DASH_LINK_PAGES, DASH_PAGES } from "../src/dash/routes.ts";
+import { DASH_LINK_PAGES, DASH_PAGES, TERMS_PAGE } from "../src/dash/routes.ts";
 import { DASH_CSS } from "../src/dash/style.ts";
 import { UNDOCUMENTED_ROUTES } from "../src/docs/openapi.ts";
 import { HOST_RULES } from "../src/host-gate.ts";
@@ -53,7 +53,7 @@ const LINKED = '<p class="brand"><a href="https://www.example.com/" rel="noopene
 
 /** Every page on the app address that shows the brand, as served without the setting. */
 const BRANDED: { path: string; body: string }[] = [
-  ...[...DASH_PAGES, ...DASH_LINK_PAGES].map((p) => ({ path: p.path, body: p.html })),
+  ...[...DASH_PAGES, ...DASH_LINK_PAGES, TERMS_PAGE].map((p) => ({ path: p.path, body: p.html })),
   { path: "/signin", body: SIGNIN_HTML },
   { path: "/signin/link", body: LINK_HTML },
   { path: "/invite", body: INVITE_HTML },

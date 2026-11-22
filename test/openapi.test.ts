@@ -52,7 +52,7 @@ const PUBLIC = [
 /** The one operation that takes the viewer cookie alone (src/viewers.ts): which address the browser proved. */
 const VIEWER_ONLY = ["GET /api/v1/view/session", "GET /api/v1/media-view/session"];
 /** The operations that take a session and no token. */
-const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "POST /api/v1/connect/lookup", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id", "PUT /api/v1/tours/:id/access", "PUT /api/v1/media/:id/access"];
+const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "POST /api/v1/connect/lookup", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id", "PUT /api/v1/tours/:id/access", "PUT /api/v1/media/:id/access", "GET /api/v1/terms", "GET /api/v1/terms/agreed", "POST /api/v1/terms/agree"];
 /** The site admin's operations: an admin's session alone, and a 404 (never a 401) to everyone else. */
 const ADMIN_ONLY = [
   "GET /api/v1/admin/summary",
@@ -294,6 +294,9 @@ describe("the API description", () => {
       "Sign out everywhere",
       "Ask to change the email address",
       "Finish changing the email address",
+      "The site's terms and the account's agreement",
+      "The terms the account agreed to",
+      "Agree to the site's terms",
       "Ask to connect the app",
       "Ask for the app's token",
       "Look up a request by its short code",
