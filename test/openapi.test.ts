@@ -263,6 +263,8 @@ describe("the API description", () => {
       "Publish a tour, in steps",
       "Who may view a tour",
       "Change who may view a tour",
+      "List a tour's chapters",
+      "Reorder and remove a tour's chapters",
       "Unpublish a tour",
       "Get a draft step's image",
       "Start an upload",

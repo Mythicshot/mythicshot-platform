@@ -309,7 +309,9 @@ describe("replace: commit", { timeout: 60_000 }, () => {
     expect(done.json).toEqual({ tour_id: t.tour_id, chapter_id: t.chapter_id, steps: 2, publish: "draft" });
 
     const chapter = await chapterRow(deps, t.chapter_id);
-    expect(chapter).toEqual({ ...chapterBefore, revision: id, replaced_version: 2, replaced_from: 2 });
+    // And (migration 0019) the replace is the chapter's new upload time.
+    expect(chapter).toEqual({ ...chapterBefore, revision: id, replaced_version: 2, replaced_from: 2, uploaded_at: T0 + HOUR });
+    expect(chapterBefore.uploaded_at).toBe(T0);
     expect(chapter.title).toBe("Customer onboarding");
     expect(chapter.position).toBe(0);
     const steps = await stepRows(deps, t.chapter_id);

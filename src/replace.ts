@@ -60,8 +60,10 @@ export type ReplaceUpload = {
 /**
  * SQL that is true when the chapter `chapterId` of tour `tourId` (two SQL expressions) is
  * the tour's first: no chapter of the tour comes before it in the order a publish reads
- * them (position, then id). Chapters are never reordered or removed and a new one goes
- * last, so the answer for a chapter never changes.
+ * them (position, then id). A new chapter goes last, so only reordering or removing
+ * chapters (src/chapters.ts) changes the answer for a chapter; that change closes the open
+ * replaces of the chapters whose answer it changes, in the same batch, so a replace never
+ * commits with settings decided against another first chapter.
  */
 export function firstChapterSql(chapterId: string, tourId: string): string {
   return `NOT EXISTS (SELECT 1 FROM chapter fc JOIN chapter fo ON fo.tour_id = fc.tour_id AND (fo.position < fc.position OR (fo.position = fc.position AND fo.id < fc.id))
@@ -178,7 +180,7 @@ export function reusedStatement(workspaceId: string, uploadId: string, reused: R
  * With `up.settings` (the chapter is the tour's first) the tour's settings and logo are
  * replaced from the manifest too, and the previous logo is recorded for removal.
  */
-export function replaceStatements(deps: Deps, auth: Auth, up: ReplaceUpload, m: Manifest): Stmt[] {
+export function replaceStatements(deps: Deps, auth: Auth, up: ReplaceUpload, m: Manifest, stamped = true): Stmt[] {
   const now = deps.now();
   const ws = auth.workspaceId;
   const tourId = up.tour_id ?? "";
@@ -242,13 +244,14 @@ export function replaceStatements(deps: Deps, auth: Auth, up: ReplaceUpload, m: 
   // keeps the version of the first replace of a run: it stays when the chapter's previous
   // replace made the version just before this one, so nothing else changed the draft in
   // between, and starts again at this version otherwise. (Every right-hand side reads the
-  // row as it was before this statement.)
+  // row as it was before this statement.) With `stamped` the chapter also records when it
+  // was uploaded (migration 0019; chapterTimesMissing tells a database before it).
   const version = "(SELECT draft_version FROM tour WHERE id = ? AND workspace_id = ?)";
   stmts.push({
     sql: `UPDATE chapter SET revision = ?, replaced_version = ${version},
-                             replaced_from = CASE WHEN replaced_version = ${version} - 1 THEN replaced_from ELSE ${version} END
+                             replaced_from = CASE WHEN replaced_version = ${version} - 1 THEN replaced_from ELSE ${version} END${stamped ? ", uploaded_at = ?" : ""}
            WHERE id = ? AND tour_id IN (SELECT id FROM tour WHERE id = ? AND workspace_id = ?)`,
-    params: [up.id, tourId, ws, tourId, ws, tourId, ws, chapterId, tourId, ws],
+    params: [up.id, tourId, ws, tourId, ws, tourId, ws, ...(stamped ? [now] : []), chapterId, tourId, ws],
   });
   stmts.push({ sql: "DELETE FROM upload_step WHERE upload_id IN (SELECT id FROM upload WHERE id = ? AND workspace_id = ?)", params: [up.id, ws] });
   stmts.push({ sql: "DELETE FROM upload WHERE id = ? AND workspace_id = ?", params: [up.id, ws] });
@@ -295,9 +298,10 @@ export async function replaceAnswer(deps: Deps, auth: Auth, uploadId: string): P
  * from it. The files go from the drafts store first, then their rows, so a call cut off
  * in between leaves the rows and a later call deletes the same keys again (a key that is
  * already gone is not an error). Three calls at most. Housekeeping only: an error is
- * logged as fixed text and never thrown.
+ * logged as fixed text and never thrown. Answers how many keys it removed (0 after an
+ * error), so a caller with room left can tell whether a full page may have more behind it.
  */
-export async function clearReplaced(deps: Deps, workspaceId: string, tourId: string | null): Promise<void> {
+export async function clearReplaced(deps: Deps, workspaceId: string, tourId: string | null): Promise<number> {
   const free = "NOT EXISTS (SELECT 1 FROM publish_job j WHERE j.tour_id = replaced_object.tour_id AND j.draft_version < replaced_object.draft_version)";
   const owned = "tour_id IN (SELECT id FROM tour WHERE workspace_id = ?)";
   try {
@@ -306,12 +310,26 @@ export async function clearReplaced(deps: Deps, workspaceId: string, tourId: str
         ORDER BY tour_id <> ?, created_at, tour_id, image_key LIMIT ?`,
       [workspaceId, tourId ?? "", REPLACED_FILES_PER_CALL],
     );
-    if (rows.length === 0) return;
+    if (rows.length === 0) return 0;
     const keys = rows.map((r) => r.image_key);
     await deps.drafts.delete(keys);
     await deps.db.run(`DELETE FROM replaced_object WHERE image_key IN (SELECT value FROM json_each(?)) AND ${owned} AND ${free}`, [JSON.stringify(keys), workspaceId]);
+    return keys.length;
   } catch {
     // The error itself is not logged: it could carry anything a back end put in its message.
     console.error("replace: could not remove replaced pictures; will retry later");
+    return 0;
   }
+}
+
+/**
+ * True for the error of a statement naming chapter.uploaded_at on a database migration 0019
+ * has not reached (a build started before its migration ran): a commit then runs again
+ * without the time, as before.
+ */
+export function chapterTimesMissing(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
+    if (/(?:no such column: (?:chapter\.)?uploaded_at|has no column named uploaded_at)(?:$|:| at offset |\s)/.test(e.message)) return true;
+  }
+  return false;
 }

@@ -33,7 +33,7 @@ import { UPLOAD_MAX_AGE_MS } from "./limits.ts";
 import { LIMITS, parseManifest, type Manifest } from "./manifest.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 import { housekeeping } from "./publish.ts";
-import { chapterPictures, clearReplaced, findChapter, firstChapterSql, parseHashes, replaceAnswer, replaceStatements, replacedBytes, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
+import { chapterPictures, chapterTimesMissing, clearReplaced, findChapter, firstChapterSql, parseHashes, replaceAnswer, replaceStatements, replacedBytes, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, type ImageType } from "./sniff.ts";
 import { ALLOWANCE_OF_SQL, USED_SQL, allowanceParams, reservedFor, storageFull, usageOf } from "./usage.ts";
 
@@ -160,6 +160,26 @@ async function removeClosing(deps: Deps, workspaceId: string, row: Closing): Pro
 }
 
 /**
+ * Removes up to `limit` replaces of the tour `tourId` that are closing and replace one of
+ * `chapterIds` (the replaces a change of the tour's chapters closed, src/chapters.ts): their
+ * own files, then their rows, as an abort does. One call, then three per upload. What fails
+ * stays closed, and the sweep removes it once it is old. Never throws.
+ */
+export async function removeClosedReplaces(deps: Deps, workspaceId: string, tourId: string, chapterIds: string[], limit: number): Promise<void> {
+  if (chapterIds.length === 0 || limit < 1) return;
+  try {
+    const rows = await deps.db.all<Closing>(
+      "SELECT id, manifest, logo_key FROM upload WHERE workspace_id = ? AND tour_id = ? AND closing_at IS NOT NULL AND replaces_chapter_id IN (SELECT value FROM json_each(?)) ORDER BY created_at, id LIMIT ?",
+      [workspaceId, tourId, JSON.stringify(chapterIds), limit],
+    );
+    for (const row of rows) await removeClosing(deps, workspaceId, row);
+  } catch {
+    // The error itself is not logged: it could carry anything a back end put in its message.
+    console.error("chapters: could not remove a closed upload yet; the sweep removes it later");
+  }
+}
+
+/**
  * Closes every upload of the workspace older than UPLOAD_MAX_AGE_MS, in one statement, then
  * removes up to SWEEP_LIMIT of them (files and rows). Closing comes first and covers all of
  * them, however many there are and whether or not their files can be deleted: from then on
@@ -212,11 +232,18 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 const json01 = (v: unknown) => (v === null || v === undefined ? null : JSON.stringify(v));
 
-/** The commit's statements. Each insert of a tour or chapter takes a value only an open upload of this workspace supplies, so it fails (NOT NULL) once the upload is closing or gone. */
-function commitStatements(deps: Deps, auth: Auth, up: UploadRow, m: Manifest, tourId: string, slug: string): Stmt[] {
+/**
+ * The commit's statements. Each insert of a tour or chapter takes a value only an open upload of this workspace supplies, so it fails (NOT NULL) once the upload is closing or gone.
+ * With `stamped` the new chapter records when it was uploaded (migration 0019); without, on a
+ * database before it, as before.
+ */
+function commitStatements(deps: Deps, auth: Auth, up: UploadRow, m: Manifest, tourId: string, slug: string, stamped = true): Stmt[] {
   const now = deps.now();
   const chapterId = chapterIdFor(up.id);
   const openUpload = "FROM upload WHERE id = ? AND workspace_id = ? AND closing_at IS NULL";
+  const timeColumn = stamped ? ", uploaded_at" : "";
+  const timeValue = stamped ? ", ?" : "";
+  const time = stamped ? [now] : [];
   const stmts: Stmt[] = [];
   if (up.tour_id === null) {
     const logoType = m.cover?.logo ? extOf(m.cover.logo) : null;
@@ -232,15 +259,15 @@ function commitStatements(deps: Deps, auth: Auth, up: UploadRow, m: Manifest, to
       ],
     });
     stmts.push({
-      sql: `INSERT INTO chapter (id, tour_id, title, description, position) VALUES (?, (SELECT ? ${openUpload}), ?, NULL, 0)`,
-      params: [chapterId, tourId, up.id, auth.workspaceId, m.title],
+      sql: `INSERT INTO chapter (id, tour_id, title, description, position${timeColumn}) VALUES (?, (SELECT ? ${openUpload}), ?, NULL, 0${timeValue})`,
+      params: [chapterId, tourId, up.id, auth.workspaceId, m.title, ...time],
     });
   } else {
     stmts.push({
-      sql: `INSERT INTO chapter (id, tour_id, title, description, position)
+      sql: `INSERT INTO chapter (id, tour_id, title, description, position${timeColumn})
             VALUES (?, (SELECT t.id FROM upload u JOIN tour t ON t.id = u.tour_id WHERE u.id = ? AND u.workspace_id = ? AND u.closing_at IS NULL AND t.workspace_id = ?), ?, NULL,
-                    (SELECT coalesce(max(position) + 1, 0) FROM chapter WHERE tour_id = ?))`,
-      params: [chapterId, up.id, auth.workspaceId, auth.workspaceId, m.title, tourId],
+                    (SELECT coalesce(max(position) + 1, 0) FROM chapter WHERE tour_id = ?)${timeValue})`,
+      params: [chapterId, up.id, auth.workspaceId, auth.workspaceId, m.title, tourId, ...time],
     });
     stmts.push({
       sql: "UPDATE tour SET spotlight_dim = coalesce(spotlight_dim, ?), updated_at = ?, draft_version = draft_version + 1 WHERE id = ? AND workspace_id = ?",
@@ -262,6 +289,20 @@ function commitStatements(deps: Deps, auth: Auth, up: UploadRow, m: Manifest, to
   stmts.push({ sql: "DELETE FROM upload_step WHERE upload_id IN (SELECT id FROM upload WHERE id = ? AND workspace_id = ?)", params: [up.id, auth.workspaceId] });
   stmts.push({ sql: "DELETE FROM upload WHERE id = ? AND workspace_id = ?", params: [up.id, auth.workspaceId] });
   return stmts;
+}
+
+/**
+ * A commit's batch with the chapter's upload time, or, on a database migration 0019 has not
+ * reached (the batch then fails on the column and changes nothing), the same batch without
+ * it, as before. One call, two only on such a database.
+ */
+async function stampedBatch(deps: Deps, make: (stamped: boolean) => Stmt[]): Promise<void> {
+  try {
+    await deps.db.batch(make(true));
+  } catch (err) {
+    if (!chapterTimesMissing(err)) throw err;
+    await deps.db.batch(make(false));
+  }
 }
 
 /** Reads an image body for an upload: 413 over the cap, else the bytes. */
@@ -370,16 +411,26 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     const declared = takes && parsed.manifest.cover?.logo ? logoBytes : null;
     const wanted = reservedFor(parsed.manifest, takes, declared);
     const current = replaces === null || tourId === null ? null : replacedBytes(auth.workspaceId, tourId, replaces.chapterId, replaces.first);
+    // A replace is written only while its chapter is still the tour's and still is, or is not,
+    // the tour's first, as it was read above: a change of the tour's chapters (src/chapters.ts)
+    // that lands in between, which closes the open replaces it affects, cannot miss this one.
+    const stillAsRead =
+      replaces === null || tourId === null
+        ? null
+        : {
+            sql: `EXISTS (SELECT 1 FROM chapter sc WHERE sc.id = ? AND sc.tour_id = ?) AND (${firstChapterSql("?", "?")}) = ?`,
+            params: [replaces.chapterId, tourId, replaces.chapterId, tourId, replaces.first ? 1 : 0],
+          };
     const insert: Stmt = {
       sql: `INSERT INTO upload (id, workspace_id, tour_id, manifest, created_at, replaces_chapter_id, base_revision, logo_declared_bytes, reserved_bytes)
             SELECT ?, ?, ?, ?, ?, ?, ?, ?, r.reserved
               FROM (SELECT CAST(max(0, ? - ${current === null ? "0" : current.sql}) AS INTEGER) AS reserved, ${USED_SQL} AS used, ${ALLOWANCE_OF_SQL} AS allowance) r
              WHERE (SELECT count(*) FROM upload WHERE workspace_id = ? AND closing_at IS NULL AND created_at >= ?) < ?
-               AND (r.reserved = 0 OR r.allowance IS NULL OR r.used + r.reserved <= r.allowance)`,
+               AND (r.reserved = 0 OR r.allowance IS NULL OR r.used + r.reserved <= r.allowance)${stillAsRead === null ? "" : ` AND ${stillAsRead.sql}`}`,
       params: [
         id, auth.workspaceId, tourId, JSON.stringify(parsed.manifest), now, replaces?.chapterId ?? null, replaces?.revision ?? null, declared,
         wanted, ...(current?.params ?? []), auth.workspaceId, ...allowanceParams(deps, auth.workspaceId),
-        auth.workspaceId, floor, cap,
+        auth.workspaceId, floor, cap, ...(stillAsRead?.params ?? []),
       ],
     };
     const attempt = async (): Promise<boolean> => {
@@ -409,10 +460,14 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     };
     let made = await attempt();
     for (let tries = 1; !made; tries++) {
-      const state = await deps.db.first<{ open: number; held: number }>(
-        `SELECT (SELECT count(*) FROM upload WHERE workspace_id = ? AND closing_at IS NULL AND created_at >= ?) AS open, ${current === null ? "0" : current.sql} AS held`,
-        [auth.workspaceId, floor, ...(current?.params ?? [])],
+      const state = await deps.db.first<{ open: number; held: number; as_read: number }>(
+        `SELECT (SELECT count(*) FROM upload WHERE workspace_id = ? AND closing_at IS NULL AND created_at >= ?) AS open, ${current === null ? "0" : current.sql} AS held,
+                ${stillAsRead === null ? "1" : `(${stillAsRead.sql})`} AS as_read`,
+        [auth.workspaceId, floor, ...(current?.params ?? []), ...(stillAsRead?.params ?? [])],
       );
+      // The tour's chapters were reordered or removed since the chapter was read: its own
+      // answer, before the room and the cap are looked at. Nothing was written.
+      if (state !== null && state.as_read !== 1) return apiError(409, "chapter_changed", "the tour's chapters were reordered or removed while this upload was being created; start again");
       const needed = Math.max(0, wanted - (state?.held ?? 0));
       const usage = await usageOf(deps, auth.workspaceId);
       if (needed > 0 && usage.allowance !== null && usage.used + needed > usage.allowance) return storageFull(usage, needed);
@@ -621,7 +676,7 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
 
     if (up.replaces_chapter_id !== null) {
       try {
-        await deps.db.batch(replaceStatements(deps, auth, up, m));
+        await stampedBatch(deps, (stamped) => replaceStatements(deps, auth, up, m, stamped));
       } catch (err) {
         if (!isUniqueViolation(err) && !isNotNullViolation(err)) throw err;
         // Another commit of this upload may have won; then this one answers the same.
@@ -644,7 +699,8 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     for (let attempt = 1; ; attempt++) {
       const tourId = up.tour_id ?? newId("tour");
       try {
-        await deps.db.batch(commitStatements(deps, auth, up, m, tourId, newSlug()));
+        const slug = newSlug();
+        await stampedBatch(deps, (stamped) => commitStatements(deps, auth, up, m, tourId, slug, stamped));
         result.tour_id = tourId;
         break;
       } catch (err) {

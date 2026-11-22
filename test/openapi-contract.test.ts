@@ -234,6 +234,8 @@ function client(deps: Deps) {
     publish: (token: string | null, tourId: string, body?: unknown) => call("POST", `/api/v1/tours/${tourId}/publish`, body === undefined ? { token } : withJson(token, body)),
     unpublish: (token: string | null, tourId: string) => call("POST", `/api/v1/tours/${tourId}/unpublish`, { token }),
     access: (token: string | null, tourId: string) => call("GET", `/api/v1/tours/${tourId}/access`, { token }),
+    chapters: (token: string | null, tourId: string) => call("GET", `/api/v1/tours/${tourId}/chapters`, { token }),
+    setChapters: (token: string | null, tourId: string, body: unknown) => call("PUT", `/api/v1/tours/${tourId}/chapters`, withJson(token, body)),
     accessBySession: (session: { cookie: string; csrf: string }, tourId: string) => call("GET", `/api/v1/tours/${tourId}/access`, { headers: { cookie: session.cookie } }),
     /** Sent with a session (only a session may change who views a tour): its Cookie, anti-forgery value and this address as Origin. */
     setAccess: (session: { cookie: string; csrf: string }, tourId: string, body: unknown) =>
@@ -290,6 +292,8 @@ function client(deps: Deps) {
 
 const v2 = fixtures.v2 as Json;
 const v3 = fixtures.v3 as Json;
+/** A JSON body sent past client(), for a request a test makes while another is being answered. */
+const withJsonBody = (token: string, body: unknown) => ({ token, body: JSON.stringify(body), headers: JSON_HEADERS });
 
 /** A manifest of `n` small PNG steps. With different `pics` in upload(), the steps' bytes differ. */
 function small(n: number, title = "Small tour"): Json {
@@ -731,6 +735,43 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     refused(await api.setAccess(a.session, plain.tour_id, { access: "me" }), 409, "cannot_restrict");
     const kept = await api.access(a.token, draft.tour_id);
     expect([kept.json.access, kept.json.can_restrict]).toEqual(["people", false]);
+  });
+
+  it("every answer of a tour's chapters is as documented, and a replace refused because they changed", async () => {
+    const { deps, a, b } = await setup();
+    const api = client(deps);
+    const t = await api.upload(a.token, v3);
+    const second = await api.upload(a.token, small(2, "Second"), { kind: "chapter", tour_id: t.tour_id }, [5, 6]);
+    const theirs = await api.upload(b.token, small(1, "Theirs"), NEW, [7]);
+    const read = await api.chapters(a.token, t.tour_id);
+    expect(read.status).toBe(200);
+    expect(read.json.chapters.map((c: Json) => c.id)).toEqual([t.chapter_id, second.chapter_id]);
+    refused(await api.chapters(null, t.tour_id), 401, "unauthorized");
+    refused(await api.chapters(a.token, theirs.tour_id), 404, "not_found");
+    refused(await api.setChapters(null, t.tour_id, { revision: read.json.revision, chapters: [t.chapter_id] }), 401, "unauthorized");
+    refused(await api.setChapters(a.token, theirs.tour_id, { revision: read.json.revision, chapters: [t.chapter_id] }), 404, "not_found");
+    refused(await api.setChapters(a.token, t.tour_id, { revision: read.json.revision, chapters: [theirs.chapter_id] }), 404, "not_found");
+    refused(await api.setChapters(a.token, t.tour_id, { revision: read.json.revision, chapters: [] }), 400, "last_chapter");
+    refused(await api.setChapters(a.token, t.tour_id, { revision: read.json.revision, chapters: Array.from({ length: 401 }, (_, i) => "ch_" + String(i).padStart(24, "0")) }), 400, "too_many_chapters");
+    refused(await api.setChapters(a.token, t.tour_id, { revision: read.json.revision, chapters: [t.chapter_id, t.chapter_id] }), 400, "bad_request");
+    refused(await api.setChapters(a.token, t.tour_id, { revision: read.json.revision - 1, chapters: [t.chapter_id] }), 409, "tour_changed");
+    refused(await api.setChapters(a.token, t.tour_id, JSON.stringify({ revision: 1, chapters: [t.chapter_id], pad: "x".repeat(20_000) })), 413, "too_large");
+    const done = await api.setChapters(a.token, t.tour_id, { revision: read.json.revision, chapters: [second.chapter_id, t.chapter_id] });
+    expect(done.status, done.text).toBe(200);
+    expect(done.json.revision).toBe(read.json.revision + 1);
+    // A replace whose create read the chapter as the tour's first, while a change makes another first: 409 chapter_changed.
+    const real = deps.db.first.bind(deps.db);
+    let fired = false;
+    deps.db.first = async (sql: string, params?: unknown[]) => {
+      const row = await real(sql, params as never);
+      if (!fired && sql.includes("LEFT JOIN chapter c ON c.tour_id = t.id AND c.id = ?")) {
+        fired = true;
+        expect((await send(deps, "PUT", `/api/v1/tours/${t.tour_id}/chapters`, withJsonBody(a.token, { revision: done.json.revision, chapters: [t.chapter_id, second.chapter_id] }))).status).toBe(200);
+      }
+      return row as never;
+    };
+    refused(await api.create(a.token, small(1, "Late"), { kind: "replace", tour_id: t.tour_id, chapter_id: second.chapter_id }), 409, "chapter_changed");
+    expect(fired).toBe(true);
   });
 
   it("me has addresses only with two addresses, and health names the address it was asked on", async () => {
@@ -1760,7 +1801,7 @@ describe("the error codes in the code", () => {
     };
     const inCode = new Set<string>();
     let calls = 0;
-    for (const file of ["tours.ts", "uploads.ts", "publish.ts", "access.ts", "viewing.ts", "media-access.ts"]) {
+    for (const file of ["tours.ts", "uploads.ts", "publish.ts", "access.ts", "viewing.ts", "media-access.ts", "chapters.ts"]) {
       const literal = [...source(file).matchAll(/\bapiError\((\d{3}), "([a-z_]+)"/g)];
       // Every call names its status and code in place, so none escapes this reading.
       expect(literal.length, `${file}: an apiError call without a literal status and code`).toBe([...source(file).matchAll(/\bapiError\(/g)].length);
@@ -1849,7 +1890,7 @@ describe("the error codes in the code", () => {
     expect([...inCode]).toEqual(expect.arrayContaining(["409 terms_changed"]));
     // These are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/access.ts", "../src/account-removal.ts", "../src/admin-api.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media-access.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/terms.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts", "../src/viewing.ts"]);
+    expect(callers).toEqual(["../src/access.ts", "../src/account-removal.ts", "../src/admin-api.ts", "../src/chapters.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media-access.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/terms.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts", "../src/viewing.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.

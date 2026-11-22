@@ -195,6 +195,17 @@ const CASES: Record<string, Entry> = {
     ]),
   ],
   "POST /api/v1/tours/:id/unpublish": (t) => theirTours(t).map(([what, id]) => ({ what, method: "POST", path: tourPath(id, "/unpublish"), expect: NO_TOUR })),
+  // A tour's chapters (0.1.55): their tours answer as no tour; their chapters named in a change
+  // of the caller's own tour, at its right revision, answer as no chapter, and nothing of
+  // either tour changes (the caller's chapters are never removed for a list that is refused).
+  "GET /api/v1/tours/:id/chapters": (t) => theirTours(t).map(([what, id]) => ({ what, method: "GET", path: tourPath(id, "/chapters"), expect: NO_TOUR })),
+  "PUT /api/v1/tours/:id/chapters": (t, m) => [
+    ...theirTours(t).map(([what, id]) => ({ what, method: "PUT", path: tourPath(id, "/chapters"), json: { revision: t.draft.revision, chapters: [t.draft.chapter] }, expect: NO_TOUR })),
+    { what: "their draft tour, reordered with the caller's own chapter", method: "PUT", path: tourPath(t.draft.tour, "/chapters"), json: { revision: t.draft.revision, chapters: [m.draft.chapter] }, expect: NO_TOUR },
+    { what: "their chapter kept in the caller's own tour", method: "PUT", path: tourPath(m.draft.tour, "/chapters"), json: { revision: m.draft.revision, chapters: [m.draft.chapter, t.draft.chapter] }, expect: NO_CHAPTER },
+    { what: "their chapter alone in the caller's own tour, which would remove the caller's", method: "PUT", path: tourPath(m.draft.tour, "/chapters"), json: { revision: m.draft.revision, chapters: [t.draft.chapter] }, expect: NO_CHAPTER },
+    { what: "their published tour's chapter first in the caller's own published tour", method: "PUT", path: tourPath(m.published.tour, "/chapters"), json: { revision: m.published.revision, chapters: [t.published.chapter, m.published.chapter] }, expect: NO_CHAPTER },
+  ],
   // Who may view a tour, and its list of addresses: the workspace's own data.
   "GET /api/v1/tours/:id/access": (t) => theirTours(t).map(([what, id]) => ({ what, method: "GET", path: tourPath(id, "/access"), expect: NO_TOUR })),
   "PUT /api/v1/tours/:id/access": (t) =>
@@ -1226,6 +1237,31 @@ describe("one workspace against another", () => {
       const r = await fire(w.deps, { method: "POST", path: tourPath(committed.json.tour_id, "/publish"), json }, BY_TOKEN.of(mine));
       expect([r.status, r.json.access], `${text}: ${r.text}`).toEqual([200, (json as { access: string }).access]);
       expect(await snapshotOf(w.deps, theirs, w.keys), text).toEqual(before);
+    }
+  });
+
+  it("a change of the caller's own chapters, removing one with a replace open and pictures waiting, reaches nothing of the other workspace", SLOW, async () => {
+    const w = await build();
+    for (const [mine, theirs] of directions(w)) {
+      for (const credential of CREDENTIALS) {
+        const what = `(as ${mine.name}, by ${credential.name})`;
+        const tourId = mine.ids.draft.tour;
+        const read = await fire(w.deps, { method: "GET", path: tourPath(tourId, "/chapters") }, credential.of(mine));
+        expect(read.status, `${what}: ${read.text}`).toBe(200);
+        // A second chapter, so the first (with its open replace) can be removed.
+        const added = await send(w.deps, "POST", "/api/v1/uploads", { token: mine.token, body: JSON.stringify({ manifest: manifestOf([900], `${mine.name} added ${credential.name}`), target: { kind: "chapter", tour_id: tourId } }), headers: JSON_HEADERS });
+        expect(added.status, added.text).toBe(201);
+        expect((await putStep(w.deps, mine.token, added.json.upload_id, 1, stepImage(manifestOf([900], "x").steps[0], 5))).status).toBe(204);
+        const chapter = (await commit(w.deps, mine.token, added.json.upload_id)).json.chapter_id as string;
+        const now = (await fire(w.deps, { method: "GET", path: tourPath(tourId, "/chapters") }, credential.of(mine))).json;
+        const before = await snapshotOf(w.deps, theirs, w.keys);
+        w.tick();
+        const r = await fire(w.deps, { method: "PUT", path: tourPath(tourId, "/chapters"), json: { revision: now.revision, chapters: [chapter] } }, credential.of(mine));
+        expect(r.status, `${what}: ${r.text}`).toBe(200);
+        expect(r.json.chapters.map((c: Json) => c.id)).toEqual([chapter]);
+        expect(await snapshotOf(w.deps, theirs, w.keys), `${what} changed something of ${theirs.name}`).toEqual(before);
+        for (const needle of needlesOf(before)) expect(r.text, what).not.toContain(needle);
+      }
     }
   });
 

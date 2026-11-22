@@ -127,6 +127,9 @@ export const GUIDES: readonly Guide[] = [
         example: { curl: `curl -X DELETE ${GUIDE_ORIGIN}/api/v1/uploads/UPLOAD_ID ${AUTH}`, expect: 204 },
       },
     ],
+    closing: [
+      "To change the order of a tour's chapters, or remove one, use the dashboard's Chapters box, or read them with GET /api/v1/tours/TOUR_ID/chapters and send the ids to keep, in their new order, with the revision it gave, as PUT to the same address. A removed chapter's pictures are deleted for good, and visitors see the change only once the tour is published again.",
+    ],
   },
   {
     id: "errors-and-limits",
@@ -169,8 +172,11 @@ export const CODE_MEANINGS: Readonly<Record<string, string>> = {
   already_sent: "This step's image, or the logo, was already sent.",
   logo_not_used: "The upload goes into an existing tour, which keeps its logo; do not send one.",
   incomplete: "An image, the logo, or a part of a shared item has not been sent yet, or an item's parts do not add up to its declared bytes; nothing changed.",
-  chapter_changed: "Another upload replaced the chapter first; cancel this upload and start again.",
+  chapter_changed: "Another upload replaced the chapter first, or the tour's chapters were reordered or removed while a replace was being started; cancel this upload and start again.",
   publish_busy: "A publish of the tour is in progress or just starting; try again.",
+  tour_changed: "The tour changed since its chapters were read (an upload, a replace or another change of its chapters); read them again. Nothing was changed.",
+  last_chapter: "A tour keeps at least one chapter; to remove them all, delete the tour. Nothing was changed.",
+  too_many_chapters: "A change of a tour's chapters lists at most 400 ids. Nothing was changed.",
   publish_cancelled: "That publish was stopped before it finished; publish again to start over.",
   too_many_uploads: "The workspace has its number of open uploads; finish or cancel one. The retry-after header says how long to wait.",
   too_many_items: "The workspace started, or sent parts or previews of, as many shared items as it may in an hour, or too many sends of one item have not finished. The retry-after header says how long to wait.",
