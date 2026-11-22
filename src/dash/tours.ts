@@ -51,6 +51,19 @@
 // The Sharing box, its words and its script, with the More menu and the row's "Who can view",
 // are made by src/dash/sharing.ts, which the Images and GIFs pages use too; this page's
 // document and script are what they were before that module.
+//
+// The Chapters box (0.1.55, its approved mockup): "Chapters…" in every tour's More, after
+// Sharing, reads GET /api/v1/tours/<id>/chapters and opens a box like the Sharing box, one row
+// per chapter with Move up, Move down and Remove. Everything is edited in the page only: a
+// removed chapter is struck through and moved to the end (its button becomes Put back, which
+// puts it back where it was among the others), a moved one says so, the last chapter cannot be
+// removed, and a caution box says how many pictures a removal deletes. Save changes sends the
+// kept ids in order with the revision they were read at, once, as PUT .../chapters; Cancel,
+// Escape and the backdrop send nothing. A stale revision (409 tour_changed) reads the chapters
+// again and says nothing was saved; a lost answer reads them again too, and counts as saved
+// only when they are now exactly what was sent. However it ends, the list is read again, so a
+// published tour shows "Changes waiting". Chapter and tour titles are other people's text:
+// textContent only, each in its own bidi-isolated element.
 import { shareConstants, shareHelpers, shareHtml, shareListeners, shareMenu, shareQuestion, shareRepeatIds, shareScript, shareState, shareText, shareViewOf, type SharePage } from "./sharing.ts";
 import { dashHtml } from "./shell.ts";
 
@@ -85,7 +98,7 @@ const TOURS_MAIN = `  <div id="tours-page">
         <p>Record a tour in Mythicshot and choose Publish. It shows up here with a link to share.</p>
       </div>
     </div>
-    <p class="hint" id="tours-hint" hidden>"Changes waiting" means Mythicshot uploaded a newer version that visitors do not see yet. "More" holds: Sharing, Publish changes, Unpublish, Delete.</p>
+    <p class="hint" id="tours-hint" hidden>"Changes waiting" means Mythicshot uploaded a newer version that visitors do not see yet. "More" holds: Sharing, Chapters, Publish changes, Unpublish, Delete.</p>
     <p class="hint" id="tours-gate" hidden>Opening a restricted tour asks you for your email address too: the dashboard's sign-in does not carry over to the tour's address.</p>
   </section>
   </div>
@@ -100,7 +113,20 @@ const TOURS_MAIN = `  <div id="tours-page">
       </div>
     </div>
   </div>
-${shareHtml(TOUR_SHARING)}`;
+${shareHtml(TOUR_SHARING)}
+  <div class="backdrop" id="chapters-dialog" hidden>
+    <div class="dialog" id="chapters-box" role="dialog" aria-modal="true" aria-labelledby="chapters-title" aria-describedby="chapters-sub">
+      <h2 id="chapters-title" tabindex="-1"></h2>
+      <p class="sub" id="chapters-sub">Visitors see the chapters in this order.</p>
+      <ol class="chapters" id="chapters-list"></ol>
+      <p class="warn-box" id="chapters-warn" hidden></p>
+      <p class="message" id="chapters-message" role="status" aria-live="polite" hidden></p>
+      <div class="two">
+        <button type="button" class="btn quiet" id="chapters-cancel">Cancel</button>
+        <button type="button" class="btn" id="chapters-save">Save changes</button>
+      </div>
+    </div>
+  </div>`;
 
 /** The Tours page: the shell with the page's body and its own script. */
 export const TOURS_HTML = dashHtml({ title: "Tours", active: "tours", main: TOURS_MAIN, script: "/dash/tours.js" });
@@ -136,6 +162,27 @@ export const TOURS_JS = `(function () {
     emptyTour: "This tour has no steps, so it cannot be published.",
     publishBusy: "This tour is being published. Try again when that is done.",
     notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
+    chapters: "Chapters…",
+    chaptersBefore: 'Chapters of "',
+    chaptersAfter: '"',
+    moveUp: "Move up",
+    moveDown: "Move down",
+    upMark: "↑",
+    downMark: "↓",
+    removeChapter: "Remove",
+    putBack: "Put back",
+    movedUp: "moved up",
+    movedDown: "moved down",
+    uploaded: "uploaded ",
+    lastChapter: "A tour needs at least one chapter. Delete the tour instead.",
+    removingOneBefore: 'Removing "',
+    removingOneAfter: '" deletes its ',
+    removingBefore: "Removing ",
+    removingMany: " chapters deletes their ",
+    onePicture: "1 picture",
+    pictures: " pictures",
+    forGood: " for good. Visitors keep seeing the tour as it is until you publish.",
+    chaptersStale: "This tour changed while the box was open. The chapters were loaded again; nothing was saved.",
 ${shareText(TOUR_SHARING)}  };
   // A publish, unpublish or delete is driven by at most this many requests.
   var MAX_ROUNDS = 1000;
@@ -145,11 +192,24 @@ ${shareConstants(TOUR_SHARING)}  // How long Copy link reads Copied.
   var SLUG_SHOWN = 4;
   var TOUR_ID = /^tour_[0-9a-f]{24}$/;
   var TOUR_PATH = /^\\/t\\/[a-z0-9]{1,64}$/;
+  var CHAPTER_ID = /^ch_[0-9a-f]{24}$/;
   // What the page behind the question is, made inert while it is open.
   var BEHIND = ["dash-top", "tours-page"];
   // The question before a delete (Dash.question, src/dash/script.ts).
   var question = Dash.question({ backdrop: "delete-dialog", box: "delete-box", role: "alertdialog", title: "delete-title", message: "delete-message", behind: BEHIND, buttons: ["delete-keep", "delete-go"] });
-${shareQuestion(TOUR_SHARING)}
+${shareQuestion(TOUR_SHARING)}  // The Chapters box: its rows are made again on every change, so it gives Tab its own order.
+  var chaptersQ = Dash.question({
+    backdrop: "chapters-dialog",
+    box: "chapters-box",
+    role: "dialog",
+    title: "chapters-title",
+    message: "chapters-message",
+    behind: BEHIND,
+    buttons: ["chapters-cancel", "chapters-save"],
+    lock: "disabled",
+    order: chaptersOrder,
+  });
+
   var $ = function (id) { return document.getElementById(id); };
   var workspace = "";
   // The tours address's origin, from GET /api/v1/me; null until it is known, or when it cannot be used.
@@ -163,7 +223,13 @@ ${shareQuestion(TOUR_SHARING)}
   var moreOf = {};
   // Every button of every row, menus included, to disable while a change runs.
   var rowButtons = [];
-${shareState(TOUR_SHARING)}
+${shareState(TOUR_SHARING)}  // The Chapters box's subject while it is open: { id, title, revision, all (the chapters as
+  // read, in their order), order (the ids kept, in the order shown), removed (the ids marked
+  // for removal, in the order marked) }.
+  var chap = null;
+  // The row buttons of the Chapters box as last made, by chapter id: { up, down, remove }.
+  var chapterButtons = {};
+
   function el(tag, cls, text) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -181,7 +247,7 @@ ${shareState(TOUR_SHARING)}
     sayIn($("tours-message"), text);
   }
 
-${shareHelpers()}
+${shareHelpers(["chaptersQ"])}
   function busy(btn, on, label) {
     if (on) {
       btn.setAttribute("data-label", btn.textContent);
@@ -341,6 +407,7 @@ ${shareViewOf(TOUR_SHARING)}
     var items = [];
     // Only a published tour has something to share.
     if (published) items.push({ text: TEXT.sharing, kind: "share" });
+    items.push({ text: TEXT.chapters, kind: "chapters" });
     if (waiting) items.push({ text: TEXT.publishChanges, kind: "publish" });
     if (published) items.push({ text: TEXT.unpublish, kind: "unpublish" });
     items.push({ text: TEXT.remove, kind: "delete", danger: true });
@@ -485,8 +552,366 @@ ${shareViewOf(TOUR_SHARING)}
   }
 
 ${shareScript(TOUR_SHARING)}
+  // ---- The Chapters box ----
+
+  // The tour's chapters path: only for an id of the API's shape, and escaped.
+  function chaptersPath(id) {
+    if (typeof id !== "string" || !TOUR_ID.test(id)) throw new TypeError("id");
+    return "/api/v1/tours/" + encodeURIComponent(id) + "/chapters";
+  }
+
+  function isWhole(n) {
+    return typeof n === "number" && isFinite(n) && n >= 0 && Math.floor(n) === n;
+  }
+
+  // An answer of GET (or PUT) .../chapters as the page uses it, or null when it is not of the API's shape.
+  function chaptersOf(d) {
+    if (d === null || typeof d !== "object" || !isWhole(d.revision) || !Array.isArray(d.chapters)) return null;
+    var out = [];
+    for (var i = 0; i < d.chapters.length; i++) {
+      var c = d.chapters[i];
+      if (c === null || typeof c !== "object" || typeof c.id !== "string" || !CHAPTER_ID.test(c.id) || typeof c.title !== "string" || !isWhole(c.steps) || !isWhole(c.pictures)) return null;
+      if (c.uploaded_at !== null && !isWhole(c.uploaded_at)) return null;
+      out.push({ id: c.id, title: c.title, steps: c.steps, pictures: c.pictures, uploaded: c.uploaded_at });
+    }
+    return { revision: d.revision, chapters: out };
+  }
+
+  // Reads the tour's chapters: { status (0 when no answer came), res, list (null unless a usable 200) }.
+  function readChapters(id) {
+    return Dash.api("GET", chaptersPath(id)).then(function (res) {
+      return { status: res.status, res: res, list: res.status === 200 ? chaptersOf(res.data) : null };
+    }, function () {
+      return { status: 0, res: null, list: null };
+    });
+  }
+
+  function chapterOf(s, id) {
+    for (var i = 0; i < s.all.length; i++) if (s.all[i].id === id) return s.all[i];
+    return null;
+  }
+
+  function sameIds(a, b) {
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  // Whether anything was changed in the box: a chapter marked for removal, or another order.
+  function chaptersChanged(s) {
+    return s.removed.length > 0 || !sameIds(s.order, s.all.map(function (c) { return c.id; }));
+  }
+
+  // Where a kept chapter stood among the kept chapters as they were read: its place before any move.
+  function placeBefore(s, id) {
+    var kept = s.all.filter(function (c) { return s.order.indexOf(c.id) >= 0; });
+    for (var i = 0; i < kept.length; i++) if (kept[i].id === id) return i;
+    return -1;
+  }
+
+  function stepsText(n) {
+    return n === 1 ? TEXT.oneStep : n + TEXT.steps;
+  }
+
+  function picturesText(n) {
+    return n === 1 ? TEXT.onePicture : n + TEXT.pictures;
+  }
+
+  // One row: its number and title (struck through, with no number, when it is marked for
+  // removal), its steps and upload date, a note when it moved, and its buttons. at is its
+  // place among the kept chapters, -1 for one marked for removal.
+  function chapterRow(s, c, at, busy) {
+    var gone = at < 0;
+    var li = el("li", gone ? "ch gone" : "ch");
+    var nameId = "chapters-name-" + c.id;
+    var text = el("div", "ch-text");
+    var name = el("div", "ch-name");
+    name.setAttribute("id", nameId);
+    if (gone) name.appendChild(el("s", "name", c.title));
+    else fill(name, [(at + 1) + ". ", c.title]);
+    text.appendChild(name);
+    var d = el("div", "ch-d");
+    d.appendChild(el("span", "", stepsText(c.steps) + (c.uploaded !== null ? TEXT.dot + TEXT.uploaded + Dash.dateOf(c.uploaded) : "")));
+    if (!gone) {
+      var was = placeBefore(s, c.id);
+      if (was !== at) d.appendChild(el("span", "tag ch-moved", was > at ? TEXT.movedUp : TEXT.movedDown));
+    }
+    text.appendChild(d);
+    li.appendChild(text);
+    var acts = el("div", "ch-acts");
+    var made = { up: null, down: null, remove: null };
+    function button(cls, label, aria, onClick) {
+      var b = el("button", cls, label);
+      b.type = "button";
+      if (aria !== null) b.setAttribute("aria-label", aria);
+      b.setAttribute("aria-describedby", nameId);
+      noRepeat(b);
+      b.addEventListener("click", onClick);
+      acts.appendChild(b);
+      return b;
+    }
+    if (!gone) {
+      made.up = button("btn sm quiet ch-move", TEXT.upMark, TEXT.moveUp, function () { moveChapter(c.id, -1); });
+      made.up.disabled = busy || at === 0;
+      made.down = button("btn sm quiet ch-move", TEXT.downMark, TEXT.moveDown, function () { moveChapter(c.id, 1); });
+      made.down.disabled = busy || at === s.order.length - 1;
+      made.remove = button("btn sm quiet", TEXT.removeChapter, null, function () { removeChapter(c.id); });
+      made.remove.disabled = busy;
+      // The last chapter stays: the button is inert but focusable, announced as unavailable, and its title says why.
+      if (s.order.length <= 1) {
+        made.remove.setAttribute("aria-disabled", "true");
+        made.remove.setAttribute("title", TEXT.lastChapter);
+      }
+    } else {
+      made.remove = button("btn sm quiet", TEXT.putBack, null, function () { putBack(c.id); });
+      made.remove.disabled = busy;
+    }
+    li.appendChild(acts);
+    chapterButtons[c.id] = made;
+    return li;
+  }
+
+  // The box as \`chap\` says it is: the rows, the caution and Save changes.
+  function renderChapters() {
+    var s = chap;
+    if (s === null) return;
+    var busy = chaptersQ.isWorking();
+    var list = $("chapters-list");
+    list.textContent = "";
+    chapterButtons = {};
+    s.order.forEach(function (id, i) { list.appendChild(chapterRow(s, chapterOf(s, id), i, busy)); });
+    s.removed.forEach(function (id) { list.appendChild(chapterRow(s, chapterOf(s, id), -1, busy)); });
+    // What a removal deletes, while anything is marked for it.
+    var warn = $("chapters-warn");
+    var n = 0;
+    s.removed.forEach(function (id) { n += chapterOf(s, id).pictures; });
+    if (s.removed.length === 0) fill(warn, []);
+    else if (s.removed.length === 1) fill(warn, [TEXT.removingOneBefore, chapterOf(s, s.removed[0]).title, TEXT.removingOneAfter + picturesText(n) + TEXT.forGood]);
+    else fill(warn, [TEXT.removingBefore + s.removed.length + TEXT.removingMany + picturesText(n) + TEXT.forGood]);
+    warn.hidden = s.removed.length === 0;
+    $("chapters-box").setAttribute("aria-describedby", ["chapters-sub"].concat(s.removed.length === 0 ? [] : ["chapters-warn"]).join(" "));
+    $("chapters-cancel").disabled = busy;
+    $("chapters-save").disabled = busy || !chaptersChanged(s);
+  }
+
+  // The order Tab goes round the box in: every row's buttons that can be used, then Cancel and Save changes.
+  function chaptersOrder() {
+    var s = chap;
+    if (s === null) return [];
+    var out = [];
+    s.order.concat(s.removed).forEach(function (id) {
+      var b = chapterButtons[id];
+      if (b === undefined) return;
+      [b.up, b.down, b.remove].forEach(function (x) { if (x !== null) out.push(x); });
+    });
+    return out.concat([$("chapters-cancel"), $("chapters-save")]);
+  }
+
+  // The focus after a change in the box: the first of \`kinds\` of that chapter's row that can be used.
+  function focusChapter(id, kinds) {
+    var b = chapterButtons[id];
+    if (b === undefined) return;
+    for (var i = 0; i < kinds.length; i++) {
+      var x = b[kinds[i]];
+      if (x !== null && !x.disabled) { x.focus(); return; }
+    }
+  }
+
+  function editable() {
+    return chap !== null && !chaptersQ.isWorking();
+  }
+
+  function moveChapter(id, by) {
+    if (!editable()) return;
+    var s = chap;
+    var at = s.order.indexOf(id);
+    var to = at + by;
+    if (at < 0 || to < 0 || to >= s.order.length) return;
+    s.order[at] = s.order[to];
+    s.order[to] = id;
+    chaptersQ.say("");
+    renderChapters();
+    focusChapter(id, by < 0 ? ["up", "down", "remove"] : ["down", "up", "remove"]);
+  }
+
+  function removeChapter(id) {
+    if (!editable()) return;
+    var s = chap;
+    var at = s.order.indexOf(id);
+    if (at < 0 || s.order.length <= 1) return;
+    s.order.splice(at, 1);
+    s.removed.push(id);
+    chaptersQ.say("");
+    renderChapters();
+    focusChapter(id, ["remove"]);
+  }
+
+  // Put back where it was among the kept chapters, as near as the order now allows.
+  function putBack(id) {
+    if (!editable()) return;
+    var s = chap;
+    var at = s.removed.indexOf(id);
+    if (at < 0) return;
+    s.removed.splice(at, 1);
+    var was = 0;
+    for (var i = 0; i < s.all.length && s.all[i].id !== id; i++) if (s.order.indexOf(s.all[i].id) >= 0) was++;
+    s.order.splice(Math.min(was, s.order.length), 0, id);
+    chaptersQ.say("");
+    renderChapters();
+    focusChapter(id, ["remove"]);
+  }
+
+  // Chapters… in a tour's More: its chapters are read first, then the box opens.
+  function askChapters(t) {
+    if (working || anyOpen() || !TOUR_ID.test(t.id)) return;
+    var id = t.id;
+    working = true;
+    say("");
+    rowsDisabled(true);
+    readChapters(id).then(function (got) {
+      if (got.status === 401) { Dash.signedOut(); return; }
+      if (got.list !== null) {
+        working = false;
+        rowsDisabled(false);
+        openChapters(t, got.list);
+        return;
+      }
+      // Gone, or not readable: the list read again shows what is true.
+      return reload().then(function (r) {
+        working = false;
+        if (r === false) return;
+        if (r !== true) rowsDisabled(false);
+        var gone = got.status === 404 && r === true && moreOf[id] === undefined;
+        if (!gone) say(got.status === 0 ? Dash.TEXT.failed : Dash.failure(got.res));
+        focusTour(id);
+      });
+    });
+  }
+
+  // The chapters as read, with nothing edited.
+  function takeChapters(s, list) {
+    s.revision = list.revision;
+    s.all = list.chapters;
+    s.order = list.chapters.map(function (c) { return c.id; });
+    s.removed = [];
+  }
+
+  function openChapters(t, list) {
+    if (anyOpen()) return;
+    var id = t.id;
+    chap = { id: id, title: String(t.title), revision: 0, all: [], order: [], removed: [] };
+    takeChapters(chap, list);
+    fill($("chapters-title"), [TEXT.chaptersBefore, chap.title, TEXT.chaptersAfter]);
+    renderChapters();
+    // The focus starts on the first row's first button that can be used, else on Cancel.
+    var first = chap.order.length > 1 ? chapterButtons[chap.order[0]].down : null;
+    if (first !== null) first.setAttribute("id", "chapters-first");
+    var opened = chaptersQ.open({
+      focus: first !== null ? "chapters-first" : "chapters-cancel",
+      // Back to the tour's More, as the list shows it by then.
+      back: function () { return moreOf[id]; },
+      fallback: "h-page",
+      onClose: function () {
+        chap = null;
+        chapterButtons = {};
+        $("chapters-list").textContent = "";
+      },
+    });
+    if (first !== null) first.removeAttribute("id");
+    if (!opened) chap = null;
+  }
+
+  // Save changes: the kept ids in their order, with the revision they were read at, sent once.
+  function saveChapters() {
+    var s = chap;
+    if (s === null || chaptersQ.isWorking() || !chaptersChanged(s)) return;
+    var body = { revision: s.revision, chapters: s.order.slice() };
+    working = true;
+    chaptersQ.say("");
+    chaptersQ.busy(true, "chapters-save", TEXT.saving);
+    renderChapters();
+    Dash.api("PUT", chaptersPath(s.id), body).then(null, function () { return null; }).then(function (res) {
+      if (res !== null && res.status === 401) { Dash.signedOut(); return; }
+      if (chap !== s) return;
+      if (res !== null && res.status === 200 && chaptersOf(res.data) !== null) return chaptersSaved(s);
+      // Changed meanwhile, or a chapter (or the tour) is gone: the chapters read again tell
+      // which, and a tour that is gone closes the box.
+      if (res !== null && ((res.status === 409 && Dash.errorOf(res) === "tour_changed") || res.status === 404)) return chaptersAgain(s, [TEXT.chaptersStale]);
+      // No answer, a failure, or a 200 the page cannot read: what the tour holds now decides.
+      if (res === null || res.status >= 500 || res.status === 200) return chaptersLost(s, body);
+      chaptersEnd(s, [Dash.failure(res)]);
+    });
+  }
+
+  // Not saved: the box stays with the person's edits, and says why.
+  function chaptersEnd(s, parts) {
+    working = false;
+    chaptersQ.busy(false, "chapters-save");
+    renderChapters();
+    sayParts($("chapters-message"), parts);
+    $($("chapters-save").disabled ? "chapters-cancel" : "chapters-save").focus();
+  }
+
+  // Saved: the box closes and the list is read again, so a published tour shows "Changes waiting".
+  function chaptersSaved(s) {
+    return reload().then(function (r) {
+      if (r === false || chap !== s) return;
+      working = false;
+      chaptersQ.busy(false, "chapters-save");
+      chaptersQ.close(false);
+      say(r === true ? "" : TEXT.notReloaded);
+      focusTour(s.id);
+    });
+  }
+
+  // The tour is gone: the box closes, and the list read again shows it.
+  function chaptersGone(s) {
+    working = false;
+    chaptersQ.busy(false, "chapters-save");
+    chaptersQ.close(false);
+    return reload().then(function (r) {
+      if (r === false) return;
+      focusTour(s.id);
+    });
+  }
+
+  // The chapters read again with the edits dropped, and \`parts\` said; the list behind is read again too.
+  function chaptersAgain(s, parts) {
+    return Promise.all([readChapters(s.id), reload()]).then(function (got) {
+      var fresh = got[0];
+      if (fresh.status === 401) { Dash.signedOut(); return; }
+      if (got[1] === false || chap !== s) return;
+      if (fresh.status === 404) return chaptersGone(s);
+      if (fresh.list === null) return chaptersEnd(s, [fresh.status === 0 ? Dash.TEXT.failed : Dash.failure(fresh.res)]);
+      takeChapters(s, fresh.list);
+      working = false;
+      chaptersQ.busy(false, "chapters-save");
+      renderChapters();
+      sayParts($("chapters-message"), parts);
+      $("chapters-title").focus();
+    });
+  }
+
+  // No answer that says what happened: the chapters now exactly what was sent, at a newer
+  // revision, mean it was saved; the same revision means nothing was, and the edits stay;
+  // anything else is a change by someone else.
+  function chaptersLost(s, body) {
+    return readChapters(s.id).then(function (fresh) {
+      if (fresh.status === 401) { Dash.signedOut(); return; }
+      if (chap !== s) return;
+      if (fresh.status === 404) return chaptersGone(s);
+      if (fresh.list === null) return chaptersEnd(s, [Dash.TEXT.failed]);
+      var ids = fresh.list.chapters.map(function (c) { return c.id; });
+      if (fresh.list.revision !== s.revision && sameIds(ids, body.chapters)) return chaptersSaved(s);
+      if (fresh.list.revision === s.revision) return chaptersEnd(s, [Dash.TEXT.failed]);
+      return chaptersAgain(s, [TEXT.chaptersStale]);
+    });
+  }
+
   function startPage() {
-${shareListeners(TOUR_SHARING)}    [${shareRepeatIds(TOUR_SHARING)}, "delete-keep", "delete-go"].forEach(function (id) { noRepeat($(id)); });
+${shareListeners(TOUR_SHARING)}    $("chapters-cancel").addEventListener("click", function () { if (chap !== null) chaptersQ.dismiss(); });
+    $("chapters-save").addEventListener("click", saveChapters);
+    [${shareRepeatIds(TOUR_SHARING)}, "chapters-cancel", "chapters-save", "delete-keep", "delete-go"].forEach(function (id) { noRepeat($(id)); });
     $("delete-keep").addEventListener("click", function () { question.dismiss(); });
     $("delete-go").addEventListener("click", function () {
       if (asking === null || working) return;

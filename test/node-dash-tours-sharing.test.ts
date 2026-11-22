@@ -130,11 +130,11 @@ describe("the Tours list shows who can view each tour", () => {
     const narrow = (row: FakeElement) => row.all().find((e) => e.className === "narrow-only")!.textContent;
     expect(rows(tab).map((r) => narrow(r).split(" · ").slice(3).join(" · "))).toEqual(["Anyone with the link", "4 people", "1 person", "Nobody yet", "Only me", "", "", ""]);
     // Sharing… heads the More menu of a published tour only.
-    expect(rows(tab).map((r) => menuItems(r)[0].textContent)).toEqual(["Sharing…", "Sharing…", "Sharing…", "Sharing…", "Sharing…", "Delete", "Sharing…", "Sharing…"]);
+    expect(rows(tab).map((r) => menuItems(r)[0].textContent)).toEqual(["Sharing…", "Sharing…", "Sharing…", "Sharing…", "Sharing…", "Chapters…", "Sharing…", "Sharing…"]);
     // The line about opening a restricted tour shows because one is published.
     expect(tab.$("tours-gate").shown).toBe(true);
     expect(tab.$("tours-gate").textContent).toBe("Opening a restricted tour asks you for your email address too: the dashboard's sign-in does not carry over to the tour's address.");
-    expect(tab.$("tours-hint").textContent).toBe('"Changes waiting" means Mythicshot uploaded a newer version that visitors do not see yet. "More" holds: Sharing, Publish changes, Unpublish, Delete.');
+    expect(tab.$("tours-hint").textContent).toBe('"Changes waiting" means Mythicshot uploaded a newer version that visitors do not see yet. "More" holds: Sharing, Chapters, Publish changes, Unpublish, Delete.');
     // Open on a restricted tour is its link, as for any tour.
     expect(byText(rows(tab)[1], "Open").getAttribute("href")).toBe(`${APP}/t/k3f9abcdef`);
   });

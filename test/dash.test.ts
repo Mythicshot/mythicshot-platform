@@ -88,7 +88,7 @@ const TOURS_WORDING = [
   "Actions",
   "No tours yet",
   "Record a tour in Mythicshot and choose Publish. It shows up here with a link to share.",
-  '"Changes waiting" means Mythicshot uploaded a newer version that visitors do not see yet. "More" holds: Sharing, Publish changes, Unpublish, Delete.',
+  '"Changes waiting" means Mythicshot uploaded a newer version that visitors do not see yet. "More" holds: Sharing, Chapters, Publish changes, Unpublish, Delete.',
   // Proposed for the owner's approval (Plan 2h, task 4): the line under the table when a tour is restricted.
   "Opening a restricted tour asks you for your email address too: the dashboard's sign-in does not carry over to the tour's address.",
   "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.",
@@ -112,6 +112,10 @@ const TOURS_WORDING = [
   "Cancel",
   "Keep it restricted",
   "Make public",
+  // The Chapters box (0.1.55, its approved mockup).
+  "Visitors see the chapters in this order.",
+  "Cancel",
+  "Save changes",
 ];
 
 /** Every text the shared script puts on a page. */
@@ -153,6 +157,29 @@ const TOURS_TEXT: Record<string, string> = {
   emptyTour: "This tour has no steps, so it cannot be published.",
   publishBusy: "This tour is being published. Try again when that is done.",
   notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
+  // The Chapters box (0.1.55): the approved mockup's words, and (proposed for approval) the
+  // singular "1 picture" and the arrows the move buttons show beside their names.
+  chapters: "Chapters…",
+  chaptersBefore: 'Chapters of "',
+  chaptersAfter: '"',
+  moveUp: "Move up",
+  moveDown: "Move down",
+  upMark: "↑",
+  downMark: "↓",
+  removeChapter: "Remove",
+  putBack: "Put back",
+  movedUp: "moved up",
+  movedDown: "moved down",
+  uploaded: "uploaded ",
+  lastChapter: "A tour needs at least one chapter. Delete the tour instead.",
+  removingOneBefore: 'Removing "',
+  removingOneAfter: '" deletes its ',
+  removingBefore: "Removing ",
+  removingMany: " chapters deletes their ",
+  onePicture: "1 picture",
+  pictures: " pictures",
+  forGood: " for good. Visitors keep seeing the tour as it is until you publish.",
+  chaptersStale: "This tour changed while the box was open. The chapters were loaded again; nothing was saved.",
   // Who can view a tour: the mockups' words, and (marked) those proposed for the owner's approval.
   anyone: "Anyone with the link",
   onePerson: "1 person",
@@ -203,7 +230,7 @@ const TOURS_TEXT: Record<string, string> = {
 };
 
 /** The strings with a space in the scripts that are not words for a person: class names and a link's rel. */
-const CLASS_NAMES = ["btn sm", "btn sm quiet", "tag ok", "tag warn", "n size", "n when", "noopener noreferrer"];
+const CLASS_NAMES = ["btn sm", "btn sm quiet", "tag ok", "tag warn", "n size", "n when", "noopener noreferrer", "ch gone", "tag ch-moved", "btn sm quiet ch-move"];
 
 /** A script's TEXT object, read from the script's own text. */
 function scriptText(js: string): Record<string, string> {
@@ -494,8 +521,12 @@ describe("the dashboard's pages and files", () => {
     // Who can view: one path, built only from an id of the API's shape, escaped; read with GET and
     // changed with PUT and a JSON body, never with anything in the address.
     expect(TOURS_JS).toContain('if (typeof id !== "string" || !TOUR_ID.test(id)) throw new TypeError("id");\n    return "/api/v1/tours/" + encodeURIComponent(id) + "/access";');
-    expect([...TOURS_JS.matchAll(/Dash\.api\(([^)]*)\)/g)].map((m) => m[1]).sort()).toEqual(['"GET", "/api/v1/me"', '"GET", "/api/v1/tours"', '"GET", "/api/v1/usage"', '"GET", accessPath(id', '"PUT", path, body', "method, path, body"].sort());
+    expect([...TOURS_JS.matchAll(/Dash\.api\(([^)]*)\)/g)].map((m) => m[1]).sort()).toEqual(['"GET", "/api/v1/me"', '"GET", "/api/v1/tours"', '"GET", "/api/v1/usage"', '"GET", accessPath(id', '"PUT", path, body', "method, path, body", '"GET", chaptersPath(id', '"PUT", chaptersPath(s.id'].sort());
     expect(TOURS_JS.match(/accessPath\(/g)).toHaveLength(3);
+    // A tour's chapters: one path, the same way, read with GET and changed with PUT and a JSON body.
+    expect(TOURS_JS).toContain('if (typeof id !== "string" || !TOUR_ID.test(id)) throw new TypeError("id");\n    return "/api/v1/tours/" + encodeURIComponent(id) + "/chapters";');
+    expect(TOURS_JS).toContain('Dash.api("PUT", chaptersPath(s.id), body)');
+    expect(TOURS_JS.match(/chaptersPath\(/g)).toHaveLength(3);
     // Nothing is stored, no cookie is touched, and leaving a page goes only to /signin.
     const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location.href", "location.hash", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer"];
     for (const js of SCRIPTS) for (const api of forbidden) expect(js, api).not.toContain(api);
@@ -559,7 +590,7 @@ describe("the dashboard's pages and files", () => {
       for (const m of messages.filter((e) => e.id !== "dash-load")) expect(m.hidden, `${s.path} #${m.id}`).toBe(true);
       for (const h of all.filter((e) => e.tagName === "h1" || e.tagName === "h2")) expect(h.getAttribute("tabindex"), `${s.path} #${h.id}`).toBe("-1");
     }
-    expect(new FakeDocument(TOURS_HTML).root.all().filter((e) => /\bmessage\b/.test(e.className) && e.parent?.tagName !== "noscript").map((m) => m.id).sort()).toEqual(["delete-message", "share-add-message", "share-message", "tours-message"]);
+    expect(new FakeDocument(TOURS_HTML).root.all().filter((e) => /\bmessage\b/.test(e.className) && e.parent?.tagName !== "noscript").map((m) => m.id).sort()).toEqual(["chapters-message", "delete-message", "share-add-message", "share-message", "tours-message"]);
     expect(DASH_CSS).not.toMatch(/\.message \{[^}]*min-height/);
     // The last column's header has a name a screen reader reads and the eye does not see.
     expect(DASH_CSS).toMatch(/\.vh \{[^}]*position: absolute;[^}]*clip: rect\(0 0 0 0\);/);

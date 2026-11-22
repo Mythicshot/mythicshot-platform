@@ -4,9 +4,11 @@
 // markup and its script are made here, once, and each page puts them in its own document and
 // script. Every function returns text; nothing here runs in this process.
 //
-// The Tours page's document and script are exactly what they were before this module existed
-// (the tours page's tests run against them unchanged): each fragment below is the tour's own
-// text, with the few places where an item differs chosen by the page's SharePage.
+// The Tours page's document and script were exactly what they were before this module existed
+// (the tours page's tests ran against them unchanged): each fragment below is the tour's own
+// text, with the few places where an item differs chosen by the page's SharePage. Since
+// 0.1.55 the Tours page's menu also opens its Chapters box (src/dash/tours.ts), which counts
+// as an open box for anyOpen.
 //
 // What differs for an image or a clip (SharePage.moves false):
 // - Nothing moves. A tour's pictures are moved between stores when it is restricted or made
@@ -217,8 +219,12 @@ ${M(`  // The Sharing box's subject while it is open: { id, title, st (the state
 `)}`;
 }
 
-/** Helpers the box and the rows use: other people's text in a line, a held key, the open question, a pause. */
-export function shareHelpers(): string {
+/**
+ * Helpers the box and the rows use: other people's text in a line, a held key, the open question, a pause.
+ * `others` names the page's other boxes (Dash.question variables) that count as open too: the
+ * Tours page's Chapters box.
+ */
+export function shareHelpers(others: string[] = []): string {
   return `  // A line made of fixed text and other people's text, alternately: each of theirs (at the odd
   // places) in its own bidi-isolated element, so its letters cannot reorder the words around it.
   function fill(line, parts) {
@@ -240,7 +246,7 @@ export function shareHelpers(): string {
   }
 
   function anyOpen() {
-    return question.isOpen() || shareQ.isOpen();
+    return question.isOpen() || shareQ.isOpen()${others.map((q) => ` || ${q}.isOpen()`).join("")};
   }
 
   function pause(ms) {
@@ -252,7 +258,8 @@ export function shareHelpers(): string {
 /**
  * The More menu of a row: openTheMenu, closeMenu and moreMenu(t, i, items, titleId), whose
  * items are { text, kind, danger }. "delete" asks the page's ask(t), "share" opens the box;
- * on the Tours page any other kind is a change the page runs (change).
+ * on the Tours page "chapters" opens its Chapters box (askChapters) and any other kind is a
+ * change the page runs (change).
  */
 export function shareMenu(p: SharePage): string {
   const M = (tours: string, item = "") => (p.moves ? tours : item);
@@ -302,7 +309,8 @@ export function shareMenu(p: SharePage): string {
         closeMenu(true);
         if (item.kind === "delete") ask(t);
         else if (item.kind === "share") askShare(t);
-${M(`        else change(t, item.kind, btn);
+${M(`        else if (item.kind === "chapters") askChapters(t);
+        else change(t, item.kind, btn);
 `)}      });
       menu.appendChild(entry);
       m.entries.push(entry);

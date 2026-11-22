@@ -150,6 +150,19 @@ h1 { font-size: 20px; line-height: 28px; font-weight: 700; margin: 0 0 4px; }
 .progress::-webkit-progress-bar { background: var(--border); border-radius: var(--radius-pill); }
 .progress::-webkit-progress-value { background: var(--primary); border-radius: var(--radius-pill); }
 .progress::-moz-progress-bar { background: var(--primary); border-radius: var(--radius-pill); }
+/* Its Chapters box (the chapters mockup): one row per chapter, its buttons after its words, under them on a phone. */
+#chapters-box { max-width: 520px; max-height: 100%; overflow-y: auto; }
+.chapters { margin: 4px 0 8px; padding: 0; list-style: none; }
+.ch { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 0; border-top: 1px solid var(--border); }
+.ch:last-child { border-bottom: 1px solid var(--border); }
+.ch-text { flex: 1 1 200px; min-width: 0; }
+.ch-name { font-weight: 600; }
+.ch.gone .ch-name { color: var(--text-muted); font-weight: 400; }
+.ch-d { color: var(--text-muted); font-size: 13px; line-height: 18px; }
+.ch-moved { margin-left: 6px; }
+.ch-acts { display: flex; gap: 6px; flex: 0 0 auto; }
+.ch-move { min-width: var(--control-dense); padding: 8px 10px; }
+#chapters-warn { margin: 0 0 8px; }
 /* On a phone "Who can view" joins the details line, on the Tours page and the Images and GIFs pages alike. */
 @media (max-width: 720px) {
   .tours td.view, .media td.view { display: none; }
