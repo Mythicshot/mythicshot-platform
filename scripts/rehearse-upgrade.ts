@@ -1434,9 +1434,9 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
     // shared item's answer that changes only from 0.1.46's cache rule to no-cache is allowed, and counted.
     const cache = itemCachePolicy(knowsItemAccess(oldBuild.dir), oldBuild.version);
     if (cache.disagreement !== null) report.check(false, cache.disagreement);
-    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true, allowPlayerNames: true, allowItemCache: cache.allow });
+    const cmp = compareAnswers(old.answers, next.answers, { allowAddedFields: true, allowPlayerNames: true, allowItemCache: cache.allow, allowFontSrc: true });
     addedCount = addedFieldCount(cmp);
-    report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.playerNames} differ only in the player's file names, ${cmp.itemCache} shared item answers differ only in their cache rule, ${cmp.addedFields} differ only by added fields, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
+    report.check(cmp.problems.length === 0, `answers: ${cmp.identical} identical, ${cmp.allowed} differ only in the version, ${cmp.playerNames} differ only in the player's file names, ${cmp.itemCache} shared item answers differ only in their cache rule, ${cmp.fontSrc} pages' policies gained only font-src 'self', ${cmp.addedFields} differ only by added fields, ${cmp.added.length} new in this build, ${cmp.problems.length} differ`, cmp.problems);
     for (const route of Object.keys(cmp.addedFieldsByRoute).sort()) report.line(`      added fields, ${route}: ${cmp.addedFieldsByRoute[route].join(", ")}`);
     const verdict = itemCacheVerdict(old.answers, cmp.itemCache, !cache.allow, oldBuild.version);
     if (verdict.kind === "skip") report.line(`SKIP  ${verdict.text}`);
@@ -1490,7 +1490,7 @@ export async function rehearse(argv: string[], env: NodeJS.ProcessEnv, print: (l
       // Nothing of the new build's allowances: the old build must answer as it did, but the date.
       const again = compareAnswers(old.answers, back.answers);
       const backProblems = identityProblems(again);
-      report.check(backProblems.length === 0, `way back: answers ${again.identical} identical to before the update, ${again.allowed + again.playerNames + again.itemCache + again.added.length} allowed differences, ${again.problems.length} differ`, backProblems);
+      report.check(backProblems.length === 0, `way back: answers ${again.identical} identical to before the update, ${again.allowed + again.playerNames + again.itemCache + again.fontSrc + again.added.length} allowed differences, ${again.problems.length} differ`, backProblems);
       const s = compareStores(old.stores, back.stores);
       report.check(storesSame(s), `way back: stores ${s.files} files identical (${s.missing} missing, ${s.extra} extra, ${s.changed} changed)`);
       const keptMigrations = migrationProblems(back.endDb.migrations, newBuild.migrations);

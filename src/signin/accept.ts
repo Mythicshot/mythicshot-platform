@@ -33,7 +33,7 @@
 //   the invite was used in the first. Proposed wording. It offers the dashboard and nothing
 //   that would act on the account that is signed in.
 
-import { BRAND_PLAIN } from "../brand.ts";
+import { BRAND_PLAIN, FAVICON_LINKS } from "../brand.ts";
 
 export const INVITE_HTML = `<!doctype html>
 <html lang="en">
@@ -43,6 +43,7 @@ export const INVITE_HTML = `<!doctype html>
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
 <title>Your invite</title>
+${FAVICON_LINKS}
 <link rel="stylesheet" href="/signin/signin.css">
 <script src="/invite/invite.js" defer></script>
 </head>

@@ -1,6 +1,6 @@
 {
   "name": "demo-platform",
-  "version": "0.1.53",
+  "version": "0.1.54",
   "private": true,
   "description": "Hosted platform for interactive product tours, on Cloudflare or in a container.",
   "type": "module",
@@ -21,6 +21,7 @@
     "test:cpanel": "bash deploy/cpanel/test-cpanel.sh",
     "build:player": "node scripts/build-player.ts",
     "build:docs": "node scripts/build-docs.ts",
+    "build:brand": "node scripts/build-brand.ts",
     "setup:cloudflare": "node scripts/setup-cloudflare.ts",
     "package:cpanel": "node scripts/package-cpanel.ts",
     "sync:core": "node scripts/sync-core.ts",

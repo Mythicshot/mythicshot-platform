@@ -1,5 +1,5 @@
 // The product's mark beside the name, and the optional HOME_URL setting that makes the two
-// one link to the site's home page. The mark's route (/dash/mark.png: where it answers, its
+// one link to the site's home page. The mark's route (/dash/mark.svg: where it answers, its
 // headers, its bytes), the brand's exact markup with and without the setting on the
 // dashboard's pages, the sign-in pages and the invite page, the setting's validation table
 // and the Worker's var. The pages viewers of other people's content see are checked to be
@@ -7,7 +7,7 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { makeDeps } from "#harness";
 import { BRAND_PLAIN, MARK_PATH, brandHtml, withHome } from "../src/brand.ts";
-import { MARK_PNG } from "../src/dash/mark.ts";
+import { MARK_SMALL_SVG } from "../src/brand-assets.ts";
 import { DASH_LINK_PAGES, DASH_PAGES, TERMS_PAGE } from "../src/dash/routes.ts";
 import { DASH_CSS } from "../src/dash/style.ts";
 import { UNDOCUMENTED_ROUTES } from "../src/docs/openapi.ts";
@@ -36,7 +36,7 @@ const HOME = "https://www.example.com/";
 const HTML = "text/html; charset=utf-8";
 
 /** The pages' policy, written out: the mark is covered by its img-src 'self', and nothing about it changes. */
-const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const SECURITY: Record<string, string> = {
   "content-security-policy": POLICY,
   "x-frame-options": "DENY",
@@ -46,10 +46,12 @@ const SECURITY: Record<string, string> = {
   "cross-origin-opener-policy": "same-origin",
 };
 
+/** The wordmark, exactly: its picture for dark grounds, else the light one, named "Mythicshot". */
+const WORDMARK = '<picture><source srcset="/dash/wordmark-dark.png" media="(prefers-color-scheme: dark)"><img src="/dash/wordmark-light.png" alt="Mythicshot" width="153" height="24"></picture>';
 /** The brand without the setting, exactly: the mark, then the name, and no link. */
-const PLAIN = '<p class="brand"><img src="/dash/mark.png" alt="" width="24" height="24">Mythicshot</p>';
+const PLAIN = `<p class="brand"><img src="/dash/mark.svg" alt="" width="24" height="24">${WORDMARK}</p>`;
 /** The brand with HOME_URL=https://www.example.com/, exactly: the mark and the name as one link, same tab. */
-const LINKED = '<p class="brand"><a href="https://www.example.com/" rel="noopener noreferrer"><img src="/dash/mark.png" alt="" width="24" height="24">Mythicshot</a></p>';
+const LINKED = `<p class="brand"><a href="https://www.example.com/" rel="noopener noreferrer"><img src="/dash/mark.svg" alt="" width="24" height="24">${WORDMARK}</a></p>`;
 
 /** Every page on the app address that shows the brand, as served without the setting. */
 const BRANDED: { path: string; body: string }[] = [
@@ -136,7 +138,7 @@ describe("the brand", () => {
   it("is the mark and the name, without a link when no home page is set", () => {
     expect(BRAND_PLAIN).toBe(PLAIN);
     expect(brandHtml(null)).toBe(PLAIN);
-    expect(MARK_PATH).toBe("/dash/mark.png");
+    expect(MARK_PATH).toBe("/dash/mark.svg");
     for (const p of BRANDED) {
       expect(p.body.split(PLAIN).length - 1, p.path).toBe(1);
       expect(withHome(p.body, null), p.path).toBe(p.body);
@@ -153,10 +155,10 @@ describe("the brand", () => {
       const links = doc.body.all().filter((e) => e.tagName === "a" && e.getAttribute("href") === HOME);
       expect(links, p.path).toHaveLength(1);
       const a = links[0];
-      expect([a.parent?.className, a.getAttribute("rel"), a.hasAttribute("target"), a.textContent], p.path).toEqual(["brand", "noopener noreferrer", false, "Mythicshot"]);
-      // The image inside is decoration: an empty alt, so the link's accessible name is the name.
+      expect([a.parent?.className, a.getAttribute("rel"), a.hasAttribute("target"), a.textContent], p.path).toEqual(["brand", "noopener noreferrer", false, ""]);
+      // The mark is decoration (an empty alt) and the wordmark's alt is the name, so the link's accessible name is "Mythicshot".
       const img = a.all().filter((e) => e.tagName === "img");
-      expect(img.map((e) => [e.getAttribute("src"), e.getAttribute("alt"), e.getAttribute("width"), e.getAttribute("height")]), p.path).toEqual([["/dash/mark.png", "", "24", "24"]]);
+      expect(img.map((e) => [e.getAttribute("src"), e.getAttribute("alt"), e.getAttribute("width"), e.getAttribute("height")]), p.path).toEqual([["/dash/mark.svg", "", "24", "24"], ["/dash/wordmark-light.png", "Mythicshot", "153", "24"]]);
       expect(a.hasAttribute("aria-label") || a.hasAttribute("title"), p.path).toBe(false);
       // Nothing else on the page changed: its words are the same.
       expect(textNodes(doc.body), p.path).toEqual(textNodes(new FakeDocument(p.body).body));
@@ -165,7 +167,7 @@ describe("the brand", () => {
 
   it("escapes the address it writes", () => {
     expect(brandHtml("https://www.example.com/?a=1&b='x'")).toBe(
-      '<p class="brand"><a href="https://www.example.com/?a=1&amp;b=&#39;x&#39;" rel="noopener noreferrer"><img src="/dash/mark.png" alt="" width="24" height="24">Mythicshot</a></p>',
+      `<p class="brand"><a href="https://www.example.com/?a=1&amp;b=&#39;x&#39;" rel="noopener noreferrer"><img src="/dash/mark.svg" alt="" width="24" height="24">${WORDMARK}</a></p>`,
     );
     expect(brandHtml('https://x.example/"><b>')).not.toContain('"><b>');
   });
@@ -180,55 +182,57 @@ describe("the brand", () => {
       expect(css, what).toMatch(/\n\.brand \{[^}]*display: flex;[^}]*align-items: center;[^}]*gap: 8px;/);
       expect(css, what).toContain("\n.brand a { display: inline-flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; }");
       expect(css, what).toContain("\n.brand img { display: block; flex: none; }");
-      // The link's focus ring is the shared one every link has; nothing takes it away.
-      expect(css, what).toContain("\na:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; border-radius: 4px; }");
+      // The link's focus ring is the brand's one every control has; nothing takes it away.
+      expect(css, what).toContain("\n:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }");
       expect(css, what).not.toMatch(/\.brand[^{]*:focus/);
-      expect(css, what).not.toMatch(/url\(/);
+      // The only address in the stylesheets is the text font's, on the same address.
+      expect([...css.matchAll(/url\("([^"]+)"\)/g)].every((m) => m[1].startsWith("/fonts/manrope.")), what).toBe(true);
+      // The name is the wordmark's picture at its own size; should it fail to load, its alt shows in the wordmark's colour.
+      expect(css, what).toContain("\n.brand { font-size: 20px; line-height: 24px; font-weight: 700; color: var(--wordmark); }\n.brand picture { display: block; flex: none; }\n");
     }
   });
 });
 
 describe("the mark's file", () => {
-  it("answers on the app address with the dashboard's headers, a PNG and no database or storage call", async () => {
+  it("answers on the app address with the dashboard's headers but a picture's policy, an SVG and no database or storage call", async () => {
     const one = await makeDeps();
     const two = await makeDeps({ hosts: HOSTS });
     const three = await makeDeps({ hosts: THREE, homeUrl: HOME });
     for (const [deps, origin] of [[one.deps, "https://any.example.org"], [one.deps, "http://localhost:3000"], [two.deps, APP], [three.deps, APP]] as const) {
-      const r = await send(deps, "GET", "/dash/mark.png", { origin });
+      const r = await send(deps, "GET", "/dash/mark.svg", { origin });
       expect(r.status, origin).toBe(200);
-      expect(Object.fromEntries(r.headers.entries()), origin).toEqual({ ...SECURITY, "content-type": "image/png" });
+      expect(Object.fromEntries(r.headers.entries()), origin).toEqual({ ...SECURITY, "content-security-policy": "default-src 'none'; sandbox", "content-type": "image/svg+xml" });
       expect(r.bytes.length, origin).toBeGreaterThan(0);
-      expect([...r.bytes], origin).toEqual([...MARK_PNG]);
+      expect(r.text, origin).toBe(MARK_SMALL_SVG);
       expect(r.calls, origin).toBe(0);
       expect(r.headers.get("set-cookie"), origin).toBeNull();
     }
-    const head = await send(two.deps, "HEAD", "/dash/mark.png", { origin: APP });
-    expect([head.status, head.bytes.length, head.headers.get("content-type"), head.calls]).toEqual([200, 0, "image/png", 0]);
-    // A second answer is the same bytes: the file is not used up by the first.
-    expect([...(await send(two.deps, "GET", "/dash/mark.png", { origin: APP })).bytes]).toEqual([...MARK_PNG]);
+    const head = await send(two.deps, "HEAD", "/dash/mark.svg", { origin: APP });
+    expect([head.status, head.bytes.length, head.headers.get("content-type"), head.calls]).toEqual([200, 0, "image/svg+xml", 0]);
+    // A second answer is the same text: the file is not used up by the first.
+    expect((await send(two.deps, "GET", "/dash/mark.svg", { origin: APP })).text).toBe(MARK_SMALL_SVG);
   });
 
-  it("is the product's 64 by 64 mark, small", () => {
-    expect([...MARK_PNG.slice(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    const view = new DataView(MARK_PNG.buffer, MARK_PNG.byteOffset, MARK_PNG.byteLength);
-    expect([view.getUint32(16), view.getUint32(20)]).toEqual([64, 64]);
-    expect(MARK_PNG.length).toBeLessThan(10_000);
+  it("is the brand's small mark (the one for sizes below 48 pixels), as SVG, small", () => {
+    expect(MARK_SMALL_SVG.startsWith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img">')).toBe(true);
+    expect(MARK_SMALL_SVG.match(/<polygon /g)).toHaveLength(4);
+    expect(MARK_SMALL_SVG.length).toBeLessThan(1_000);
   });
 
   it("answers on the app address only, as the dashboard's other files do", async () => {
     const two = await makeDeps({ hosts: HOSTS });
     const three = await makeDeps({ hosts: THREE });
-    expect(HOST_RULES["GET /dash/mark.png"]).toBe("app");
+    expect(HOST_RULES["GET /dash/mark.svg"]).toBe("app");
     for (const deps of [two.deps, three.deps]) {
-      const onTours = await send(deps, "GET", "/dash/mark.png", { origin: TOURS });
+      const onTours = await send(deps, "GET", "/dash/mark.svg", { origin: TOURS });
       expect([onTours.status, onTours.text, onTours.calls, onTours.headers.get("location")]).toEqual([404, NOT_FOUND, 0, null]);
     }
-    const onImg = await send(three.deps, "GET", "/dash/mark.png", { origin: IMG });
+    const onImg = await send(three.deps, "GET", "/dash/mark.svg", { origin: IMG });
     expect([onImg.status, onImg.text, onImg.calls]).toEqual([404, NOT_FOUND, 0]);
-    const unknown = await send(two.deps, "GET", "/dash/mark.png", { origin: UNKNOWN });
+    const unknown = await send(two.deps, "GET", "/dash/mark.svg", { origin: UNKNOWN });
     expect([unknown.status, unknown.bytes.length, unknown.calls]).toEqual([421, 0, 0]);
     // Left out of the description with its reason, as the dashboard's other files are.
-    expect(UNDOCUMENTED_ROUTES["GET /dash/mark.png"]?.length ?? 0).toBeGreaterThan(10);
+    expect(UNDOCUMENTED_ROUTES["GET /dash/mark.svg"]?.length ?? 0).toBeGreaterThan(10);
   });
 });
 
@@ -327,8 +331,8 @@ describe("HOME_URL on Workers", () => {
       const env = { ...bindings(), HOME_URL: value };
       const signin = await e.default.fetch(new Request("https://app.example.com/signin"), env, {});
       expect([signin.status, await signin.text()], JSON.stringify(value)).toEqual([200, SIGNIN_HTML]);
-      const mark = await e.default.fetch(new Request("https://app.example.com/dash/mark.png"), env, {});
-      expect([mark.status, mark.headers.get("content-type")], JSON.stringify(value)).toEqual([200, "image/png"]);
+      const mark = await e.default.fetch(new Request("https://app.example.com/dash/mark.svg"), env, {});
+      expect([mark.status, mark.headers.get("content-type")], JSON.stringify(value)).toEqual([200, "image/svg+xml"]);
       await mark.arrayBuffer();
       const health = await e.default.fetch(new Request("https://app.example.com/healthz"), { ...env, DB: db }, {});
       expect([health.status, await health.text()], JSON.stringify(value)).toEqual([200, '{"ok":true}']);
@@ -359,14 +363,15 @@ describe("HOME_URL on Workers", () => {
   });
 });
 
-describe("the test exemption for the mark", () => {
+describe("the test exemption for the mark and the wordmark", () => {
   const page = (brand: string, extra = "") => `<!doctype html><html lang="en"><head><title>x</title></head><body><header>${brand}</header>${extra}</body></html>`;
   const marks = (html: string) => new FakeDocument(html).root.all().filter((e) => e.tagName === "img");
 
-  it("covers the mark exactly as the pages write it, plain and linked", () => {
+  it("covers the mark and the wordmark exactly as the pages write them, plain and linked", () => {
     for (const brand of [PLAIN, LINKED]) {
-      const [img] = marks(page(brand));
-      expect([isBrandMark(img), isBrandMarkAlt(img, "alt"), isBrandMarkAlt(img, "title")], brand).toEqual([true, true, false]);
+      const imgs = marks(page(brand));
+      expect(imgs.map((e) => e.getAttribute("src")), brand).toEqual(["/dash/mark.svg", "/dash/wordmark-light.png"]);
+      for (const img of imgs) expect([isBrandMark(img), isBrandMarkAlt(img, "alt"), isBrandMarkAlt(img, "title")], brand).toEqual([true, true, false]);
     }
   });
 
@@ -376,17 +381,32 @@ describe("the test exemption for the mark", () => {
       ["a title", page(PLAIN.replace('alt=""', 'alt="" title="logo"'))],
       ["words in the alt", page(PLAIN.replace('alt=""', 'alt="logo"'))],
       ["another size", page(PLAIN.replace('width="24"', 'width="25"'))],
-      ["another file", page(PLAIN.replace("/dash/mark.png", "/dash/other.png"))],
-      ["attributes in another order", page(PLAIN.replace('src="/dash/mark.png" alt=""', 'alt="" src="/dash/mark.png"'))],
-      ["outside the brand", page("<p>Mythicshot</p>", '<p><img src="/dash/mark.png" alt="" width="24" height="24"></p>')],
-      ["inside a link that is not the brand's", page("<p>Mythicshot</p>", '<p><a href="/x"><img src="/dash/mark.png" alt="" width="24" height="24"></a></p>')],
+      ["another file", page(PLAIN.replace("/dash/mark.svg", "/dash/other.png"))],
+      ["attributes in another order", page(PLAIN.replace('src="/dash/mark.svg" alt=""', 'alt="" src="/dash/mark.svg"'))],
+      ["outside the brand", page("<p>Mythicshot</p>", '<p><img src="/dash/mark.svg" alt="" width="24" height="24"></p>')],
+      ["inside a link that is not the brand's", page("<p>Mythicshot</p>", '<p><a href="/x"><img src="/dash/mark.svg" alt="" width="24" height="24"></a></p>')],
     ];
-    for (const [what, html] of cases) for (const img of marks(html)) expect([isBrandMark(img), isBrandMarkAlt(img, "alt")], what).toEqual([false, false]);
+    const wordmarkCases: [string, string][] = [
+      ["an onerror on the wordmark", page(PLAIN.replace('height="24"></picture>', 'height="24" onerror="x"></picture>'))],
+      ["other words in its alt", page(PLAIN.replace('alt="Mythicshot"', 'alt="Click here"'))],
+      ["another source", page(PLAIN.replace('srcset="/dash/wordmark-dark.png"', 'srcset="https://x.example/w.png"'))],
+      ["no source", page(PLAIN.replace(/<source[^>]*>/, ""))],
+      ["a second source", page(PLAIN.replace("<picture>", '<picture><source srcset="/x.png">'))],
+      ["its picture outside the brand", page("<p>Mythicshot</p>", `<p>${WORDMARK}</p>`)],
+      ["without its picture", page(PLAIN.replace(/<\/?picture>/g, "").replace(/<source[^>]*>/, ""))],
+    ];
+    for (const [what, html] of wordmarkCases) {
+      const word = marks(html).filter((e) => e.getAttribute("src") !== "/dash/mark.svg");
+      expect(word.length, what).toBeGreaterThan(0);
+      for (const img of word) expect([isBrandMark(img), isBrandMarkAlt(img, "alt")], what).toEqual([false, false]);
+    }
+    // The mark's cases: the wordmark beside it is untouched and stays covered.
+    for (const [what, html] of cases) for (const img of marks(html).filter((e) => e.getAttribute("src") !== "/dash/wordmark-light.png")) expect([isBrandMark(img), isBrandMarkAlt(img, "alt")], what).toEqual([false, false]);
     // A second mark, even a second whole brand, makes neither one the mark.
     const two = marks(page(PLAIN, PLAIN));
-    expect(two).toHaveLength(2);
+    expect(two).toHaveLength(4);
     for (const img of two) expect(isBrandMark(img)).toBe(false);
-    const extra = marks(page(PLAIN, '<p><img src="/dash/mark.png" alt="" width="24" height="24"></p>'));
-    for (const img of extra) expect(isBrandMark(img)).toBe(false);
+    const extra = marks(page(PLAIN, '<p><img src="/dash/mark.svg" alt="" width="24" height="24"></p>'));
+    for (const img of extra.filter((e) => e.getAttribute("src") === "/dash/mark.svg")) expect(isBrandMark(img)).toBe(false);
   });
 });

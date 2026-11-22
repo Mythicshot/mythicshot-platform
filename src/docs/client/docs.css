@@ -1,61 +1,37 @@
 /* The documentation page's own stylesheet: the header, "Get connected", the token box,
    the examples and the guides. The reference viewer brings its own stylesheet, loaded
    before this one; of the viewer, this file only takes away the two parts the page
-   replaces (see the end).
+   replaces (see the end), and in the dark scheme lets the page's ground show behind it.
 
-   Light and dark follow the system. The colours below are the page's; the viewer has its
-   own dark look, switched on by the class "dark-mode" on the html element, which the page
-   script sets from the same system setting. The dark background here is the viewer's
-   (#1c2022), so the two meet without a seam. */
-
-:root {
-  color-scheme: light dark;
-  --bg: #ffffff;
-  --fg: #1f2933;
-  --muted: #52606d;
-  --line: #d5dbe1;
-  --panel: #f4f6f8;
-  --code-bg: #eef1f4;
-  --link: #175cab;
-  --button-bg: #175cab;
-  --button-fg: #ffffff;
-  --ok: #1b6b3a;
-  --bad: #a3262c;
-  --focus: #175cab;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1c2022;
-    --fg: #e4e6e6;
-    --muted: #aab4bc;
-    --line: #3b4348;
-    --panel: #252b2e;
-    --code-bg: #2b3236;
-    --link: #8cc0ff;
-    --button-bg: #8cc0ff;
-    --button-fg: #10202f;
-    --ok: #7fd6a0;
-    --bad: #ffa0a0;
-    --focus: #8cc0ff;
-  }
-}
+   Light and dark follow the system. scripts/docs-bundle.ts puts the Mythicshot brand's
+   tokens and the Manrope font (src/brand-css.ts) before this file, and every colour below is
+   one of those tokens: no colour is written here (test/brand-tokens.test.ts). The viewer has
+   its own dark look, switched on by the class "dark-mode" on the html element, which the
+   page script sets from the same system setting. */
 
 [hidden] {
   display: none !important;
 }
 
 html {
-  background: var(--bg);
+  background: var(--ground);
+}
+
+/* In the dark scheme the viewer paints its own ground; the page's shows through instead, so
+   the two meet without a seam. Nothing else of the viewer's look changes. */
+html.dark-mode {
+  background: var(--ground);
+}
+
+html.dark-mode .swagger-ui {
+  background: transparent;
 }
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  font-size: 16px;
-  line-height: 1.5;
+  background: var(--ground);
+  color: var(--text);
+  font: 16px/26px var(--font-sans);
   overflow-wrap: break-word;
 }
 
@@ -75,13 +51,15 @@ body {
 }
 
 .page-header h1 {
-  font-size: 2rem;
-  line-height: 1.2;
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 40px;
   margin: 0 0 4px;
 }
 
 .own.page-header p {
-  color: var(--muted);
+  color: var(--text-muted);
   margin: 0 0 4px;
 }
 
@@ -90,15 +68,18 @@ body {
 }
 
 .own > h2 {
-  border-bottom: 1px solid var(--line);
-  font-size: 1.5rem;
-  line-height: 1.25;
+  border-bottom: 1px solid var(--border);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 32px;
   margin: 0 0 16px;
   padding-bottom: 8px;
 }
 
 .own h3 {
-  font-size: 1.1rem;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 28px;
   margin: 24px 0 8px;
 }
 
@@ -113,26 +94,27 @@ body {
 }
 
 .own a {
-  color: var(--link);
+  color: var(--accent-text);
+  text-underline-offset: 2px;
 }
 
-.own a:focus-visible,
-.own button:focus-visible,
-.own input:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
+.own a:hover {
+  text-decoration-thickness: 2px;
 }
+
+.own :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 .own code,
 .own pre {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  font-size: 0.9rem;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .own p code,
 .own td code {
-  background: var(--code-bg);
-  border-radius: 3px;
+  background: var(--selection);
+  border-radius: var(--radius-sm);
   padding: 1px 4px;
 }
 
@@ -148,15 +130,16 @@ body {
 .note,
 .answers,
 .legend {
-  color: var(--muted);
-  font-size: 0.9rem;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 20px;
 }
 
 /* The token box. */
 .token-box {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   margin: 0 0 16px;
   max-width: 46rem;
   padding: 16px;
@@ -164,8 +147,10 @@ body {
 
 .token-box label {
   display: block;
+  font-size: 13px;
   font-weight: 600;
-  margin-bottom: 8px;
+  line-height: 18px;
+  margin-bottom: 4px;
 }
 
 .token-row {
@@ -175,32 +160,46 @@ body {
 }
 
 .token-row input {
-  background: var(--bg);
-  border: 1px solid var(--muted);
-  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
   box-sizing: border-box;
-  color: var(--fg);
+  color: var(--text);
   flex: 1 1 16rem;
   font: inherit;
+  min-height: var(--control-dense);
   min-width: 0;
-  padding: 8px 10px;
+  padding: 6px 12px;
 }
 
 .own button {
-  background: var(--button-bg);
-  border: 1px solid var(--button-bg);
-  border-radius: 4px;
-  color: var(--button-fg);
+  background: var(--primary);
+  border: 1px solid var(--primary);
+  border-radius: var(--radius-md);
+  color: var(--on-primary);
   cursor: pointer;
   font: inherit;
+  font-size: 13px;
   font-weight: 600;
+  line-height: 18px;
+  min-height: var(--control-dense);
   padding: 8px 16px;
 }
 
+.own button:hover {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
+}
+
 .own button.quiet {
-  background: transparent;
-  border-color: var(--muted);
-  color: var(--fg);
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.own button.quiet:hover {
+  background: var(--ground);
+  border-color: var(--text-muted);
 }
 
 .token-box .note {
@@ -214,20 +213,20 @@ body {
 }
 
 .status.ok {
-  color: var(--ok);
+  color: var(--success-text);
 }
 
 .status.bad {
-  color: var(--bad);
+  color: var(--danger-text);
 }
 
 /* A command with its copy button. A long command wraps instead of scrolling sideways;
    copied, it is still one line. */
 .command {
   align-items: flex-start;
-  background: var(--code-bg);
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   display: flex;
   gap: 8px;
   margin: 8px 0;
@@ -243,9 +242,17 @@ body {
 }
 
 .own .command button {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text);
   flex: 0 0 auto;
-  font-size: 0.85rem;
-  padding: 4px 10px;
+  min-height: 32px;
+  padding: 6px 12px;
+}
+
+.own .command button:hover {
+  background: var(--ground);
+  border-color: var(--text-muted);
 }
 
 .guide-links {
@@ -265,14 +272,17 @@ body {
 
 .own th,
 .own td {
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border);
   padding: 6px 12px 6px 0;
   text-align: left;
   vertical-align: top;
 }
 
 .own th {
-  font-size: 0.9rem;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
 }
 
 .limits {
@@ -294,9 +304,9 @@ body {
 }
 
 .page-footer {
-  border-top: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 0.9rem;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 14px;
   margin-top: 48px;
   padding-bottom: 32px;
   padding-top: 16px;
@@ -304,7 +314,8 @@ body {
 
 @media (max-width: 600px) {
   .page-header h1 {
-    font-size: 1.6rem;
+    font-size: 26px;
+    line-height: 32px;
   }
 
   .command {

@@ -13,6 +13,7 @@
 // and the footer. Its script (src/docs/client/main.ts) adds the token box, the copy
 // buttons and the viewer.
 import type { Hono } from "hono";
+import { FAVICON_LINKS } from "../brand.ts";
 import { matchesEtag, PLAYER_FILE_IMMUTABLE } from "../page.ts";
 import type { Deps } from "../ports.ts";
 import { VERSION } from "../version.ts";
@@ -33,7 +34,7 @@ import { VIEWER_CSS, VIEWER_CSS_ETAG, VIEWER_CSS_PATH, VIEWER_JS, VIEWER_JS_ETAG
  * not be framed.
  */
 export const DOCS_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /** Five minutes, then a cheap 304 by ETag: a new version of the app shows up soon after an update. */
 export const DOCS_PAGE_CACHE = "public, max-age=300";
@@ -115,6 +116,7 @@ export function docsHtml(): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Mythicshot API documentation</title>
+${FAVICON_LINKS}
 <link rel="stylesheet" href="${VIEWER_CSS_PATH}">
 <link rel="stylesheet" href="${DOCS_CSS_PATH}">
 </head>

@@ -218,7 +218,7 @@ export function imageSource(base: string): string {
 }
 
 export function contentSecurityPolicy(base: string): string {
-  return `default-src 'none'; img-src ${imageSource(base)}; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'`;
+  return `default-src 'none'; img-src ${imageSource(base)}; style-src 'self'; font-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'`;
 }
 
 /**

@@ -3,6 +3,7 @@
 // preview tags, the file with ETag and Range, the one 404 for every link that does not
 // work, the call budget for the largest clip, and the addresses that answer.
 import { describe, expect, it, vi } from "vitest";
+import { MANROPE_PATH } from "../src/brand-assets.ts";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
 import { newId, newLinkId } from "../src/auth.ts";
 import { SUBREQUEST_BUDGET } from "../src/budget.ts";
@@ -21,7 +22,7 @@ const IMG = "https://img.example.com";
 const TOURS = "https://tours.example.com";
 const APP = "https://app.example.com";
 const ONLINE_AT = Date.UTC(2026, 10, 19, 15, 30); // 19 Nov 2026
-const PAGE_CSP = "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const PAGE_CSP = "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const FILE_CSP = "default-src 'none'; sandbox";
 
 type ItemSpec = {
@@ -531,7 +532,9 @@ describe("the pages' files and the addresses", () => {
       const again = await get(deps, path, { "if-none-match": r.headers.get("etag")! });
       expect(again.status).toBe(304);
     }
-    expect(SHARE_CSS).not.toMatch(/url\(|@import/);
+    expect(SHARE_CSS).not.toMatch(/@import/);
+    // The only url() is the brand's text font, served by this address.
+    expect([...SHARE_CSS.matchAll(/url\(([^)]*)\)/g)].map((m) => m[1])).toEqual([`"${MANROPE_PATH}"`]);
   });
 
   it("with IMG_HOST set they answer only there; with two addresses only on the tours address", SLOW, async () => {

@@ -9,15 +9,16 @@ import type { Config } from "./ports.ts";
 
 /**
  * Where a route answers with addresses configured. `any`: on every host, known or not.
- * `both`: on the tours and the app address. `tours`: on the tours address only, 404 on the
- * app address. `tours-redirect`: on the tours address, and the app address redirects
- * there. `app` and `app-redirect` are the same the other way round: on the app address
- * only, with 404 on the tours address, or a redirect from it. `media`: shared images and
- * clips, on the img address only when it is set, else on the tours address only (404
- * everywhere else, and never a redirect). On the img address every rule but `any` and
- * `media` is 404. In one-address mode every rule answers on the one address.
+ * `every`: on every configured address (tours, app and img), and 421 on any other host, as
+ * every rule but `any` is. `both`: on the tours and the app address. `tours`: on the tours
+ * address only, 404 on the app address. `tours-redirect`: on the tours address, and the app
+ * address redirects there. `app` and `app-redirect` are the same the other way round: on the
+ * app address only, with 404 on the tours address, or a redirect from it. `media`: shared
+ * images and clips, on the img address only when it is set, else on the tours address only
+ * (404 everywhere else, and never a redirect). On the img address every rule but `any`,
+ * `every` and `media` is 404. In one-address mode every rule answers on the one address.
  */
-export type HostRule = "any" | "both" | "tours" | "tours-redirect" | "app" | "app-redirect" | "media";
+export type HostRule = "any" | "every" | "both" | "tours" | "tours-redirect" | "app" | "app-redirect" | "media";
 
 /**
  * Where each rule answers, for the configured addresses: the roles whose address answers
@@ -26,6 +27,7 @@ export type HostRule = "any" | "both" | "tours" | "tours-redirect" | "app" | "ap
  */
 const PLACES: Readonly<Record<HostRule, { on: (hosts: Hosts) => readonly HostRole[]; redirectFrom?: HostRole }>> = {
   any: { on: () => HOST_ROLES },
+  every: { on: () => HOST_ROLES },
   both: { on: () => ["tours", "app"] },
   tours: { on: () => ["tours"] },
   "tours-redirect": { on: () => ["tours"], redirectFrom: "app" },
@@ -169,7 +171,9 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /dash/dash.css": "app",
   "GET /dash/dash.js": "app",
   // The product's mark, shown by the dashboard's pages and the sign-in and invite pages.
-  "GET /dash/mark.png": "app",
+  "GET /dash/mark.svg": "app",
+  "GET /dash/wordmark-dark.png": "app",
+  "GET /dash/wordmark-light.png": "app",
   "GET /images": "app",
   "GET /dash/images.js": "app",
   "GET /gifs": "app",
@@ -232,6 +236,13 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   // The description is public text beside the API it describes, on either address.
   "GET /api/v1/openapi.json": "both",
   "GET /api/v1/openapi.yaml": "both",
+
+  // The brand's files (src/brand-routes.ts), fixed and the same for everyone. The tab icon and
+  // Manrope, the text font, with its licence: every address has pages that use them.
+  "GET /favicon.svg": "every",
+  "GET /favicon.ico": "every",
+  "GET /fonts/:file{manrope(?:\\.[0-9a-f]{16})?\\.ttf}": "every",
+  "GET /fonts/manrope-OFL.txt": "every",
 };
 
 /** The answer to a host this install does not serve: 421 with nothing in it. */
@@ -250,7 +261,7 @@ function notHere(): Response {
  * matched together with a redirect rule answers 404 on the address that rule would
  * redirect from (without the img address, the app address) instead of redirecting.
  */
-const STRICTNESS: readonly HostRule[] = ["any", "both", "tours-redirect", "app-redirect", "tours", "app", "media"];
+const STRICTNESS: readonly HostRule[] = ["any", "every", "both", "tours-redirect", "app-redirect", "tours", "app", "media"];
 
 /**
  * The rule for this request: the strictest rule among every route it matched, the gate

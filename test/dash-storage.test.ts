@@ -6,6 +6,7 @@
 // when it runs is tested under Node in
 // test/node-dash-storage.test.ts.
 import { describe, expect, it } from "vitest";
+import { MANROPE_FACE } from "../src/brand-css.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { DASH_PAGES } from "../src/dash/routes.ts";
 import { DASH_JS } from "../src/dash/script.ts";
@@ -25,7 +26,7 @@ const APP = "https://app.example.com";
 const UNKNOWN = "https://evil.example.net";
 const NOT_FOUND = '{"error":"not_found"}';
 const BROWSER = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
-const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const SECURITY: Record<string, string> = {
   "content-security-policy": POLICY,
   "x-frame-options": "DENY",
@@ -254,7 +255,7 @@ describe("the Storage page", () => {
       ["/dash/dash.js", true, ""],
       ["/dash/storage.js", true, ""],
     ]);
-    expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")])).toEqual([["stylesheet", "/dash/dash.css"]]);
+    expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")])).toEqual([["icon", "/favicon.ico"], ["icon", "/favicon.svg"], ["stylesheet", "/dash/dash.css"]]);
     expect(all.filter((e) => e.tagName === "style" || e.tagName === "form")).toEqual([]);
     for (const e of all) {
       for (const [name, value] of e.attrs) {
@@ -270,8 +271,8 @@ describe("the Storage page", () => {
     expect([...STORAGE_JS.matchAll(/\.style\b[^;]*;/g)].map((m) => m[0])).toEqual(['.style.width = pct(share) + "%";', '.style.width = pct(share) + "%";']);
     // The stylesheet has the page's own part, with the warning colour for the bar that is over.
     expect(DASH_CSS).toContain("/* The Storage page. */");
-    expect(DASH_CSS).toContain(".meter.over .meter-fill { background: var(--warn-bar); }");
-    expect(DASH_CSS).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
+    expect(DASH_CSS).toContain(".meter.over .meter-fill { background: var(--caution-border); }");
+    expect(DASH_CSS.replace(MANROPE_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
   });
 
   it("keeps to this site: every request through Dash.api, the routes it may call, and leaving only for /signin", () => {

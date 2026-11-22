@@ -32,6 +32,7 @@ import {
   playerFilesIn,
   playerNamesOnly,
   storesSame,
+  withFontSrcOf,
   usageFromRows,
   usageProblems,
   type Answer,
@@ -144,7 +145,7 @@ describe("answers", () => {
 
   it("the same answers at another moment are identical: only the date header differs", () => {
     const c = compareAnswers(site(), site({ date: "Fri, 20 Nov 2026 11:11:11 GMT" }));
-    expect(c).toEqual({ identical: 6, allowed: 0, playerNames: 0, itemCache: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
+    expect(c).toEqual({ identical: 6, allowed: 0, playerNames: 0, itemCache: 0, fontSrc: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
   });
 
   it("a newer version in the workspace answer is the one allowed body difference, and content-length follows it", () => {
@@ -215,7 +216,7 @@ describe("answers that only add fields", () => {
 
   it("an added top-level key is allowed, counted apart and named by its path, and content-length follows it", () => {
     const c = compare(OLD, { ...OLD, images: 3 });
-    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 0, itemCache: 0, addedFields: 1, addedFieldsByRoute: { "GET /api/v1/usage": ["images"] }, added: [], problems: [] });
+    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 0, itemCache: 0, fontSrc: 0, addedFields: 1, addedFieldsByRoute: { "GET /api/v1/usage": ["images"] }, added: [], problems: [] });
   });
 
   it("an added nested key is allowed, named by its full path", () => {
@@ -391,7 +392,7 @@ describe("tour pages that differ only in the player's file names", () => {
 
   it("a page whose script name (or both names) changed is allowed, counted apart, its etag let follow, and no name is printed", () => {
     const c = compareAnswers(page(), page({ js: JS_B }), NEW);
-    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 1, itemCache: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
+    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 1, itemCache: 0, fontSrc: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
     expect(page()[0].answer.headers.etag).not.toBe(page({ js: JS_B })[0].answer.headers.etag);
     expect(compareAnswers(page(), page({ js: JS_B, css: CSS_B }), NEW).playerNames).toBe(1);
     expect(compareAnswers(page(), page({ css: CSS_B }), NEW).playerNames).toBe(1);
@@ -1644,5 +1645,72 @@ createServer((req, res) => {
       expect(c).toBe(1);
       expect(lines.at(-1)).toBe("RESULT: FAIL (the rehearsal could not start)");
     });
+  });
+});
+
+describe("pages whose policy only gained font-src 'self' (0.1.54, the brand's fonts)", () => {
+  // 0.1.54 serves the brand's fonts from the site itself, so each page's policy gains exactly
+  // `font-src 'self'` after `style-src 'self'`, and nothing else of it changes.
+  const OLD = {
+    tour: "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'",
+    share: "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    gate: "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  };
+  const gained = (csp: string) => csp.replace("style-src 'self'; ", "style-src 'self'; font-src 'self'; ");
+  const NEW = { allowAddedFields: true, allowPlayerNames: true, allowFontSrc: true };
+  const html = (csp: string, body = "<!doctype html><title>Acme</title>", extra: Record<string, string> = {}) => answer(200, body, { "content-type": "text/html; charset=utf-8", "content-security-policy": csp, ...extra });
+
+  it("an HTML answer whose policy gained exactly font-src 'self' after style-src is allowed from the old build to the new one, and counted apart", () => {
+    for (const [route, csp] of [["GET /t/:slug", OLD.tour], ["GET /i/:name", OLD.share], ["HEAD /r/:name", OLD.share], ["GET /t/:slug", OLD.gate]] as const) {
+      const c = compareAnswers([rec("k", route, html(csp))], [rec("k", route, html(gained(csp)))], NEW);
+      expect([c.fontSrc, c.problems], route).toEqual([1, []]);
+      expect(withFontSrcOf(html(csp), html(gained(csp)))?.headers["content-security-policy"], route).toBe(gained(csp));
+    }
+  });
+
+  it("with the player's file names changed as well, the tour page is let through once, counted with the player names", () => {
+    const tags = (h: string) => `<!doctype html><link rel="stylesheet" href="/player.${h}.css"><script src="/player.${h}.js" defer></script>`;
+    const body = (h: string) => tags(h);
+    const etag = (b: string) => `"${createHash("sha256").update(b).digest("hex").slice(0, 32)}"`;
+    const a = body("0123456789abcdef");
+    const b = body("fedcba9876543210");
+    const c = compareAnswers([rec("k", "GET /t/:slug", html(OLD.tour, a, { etag: etag(a) }))], [rec("k", "GET /t/:slug", html(gained(OLD.tour), b, { etag: etag(b) }))], NEW);
+    expect([c.playerNames, c.fontSrc, c.problems]).toEqual([1, 1, []]);
+  });
+
+  it("any other change to the policy fails: another directive, another place, another source, a second font-src, or one taken away", () => {
+    const bad = [
+      OLD.tour.replace("style-src 'self'; ", "style-src 'self'; font-src *; "),
+      OLD.tour.replace("style-src 'self'; ", "style-src 'self'; font-src 'self' data:; "),
+      OLD.tour.replace("script-src 'self'; ", "script-src 'self'; font-src 'self'; "),
+      OLD.tour.replace("default-src 'none'; ", "default-src 'none'; font-src 'self'; "),
+      gained(OLD.tour).replace("img-src 'self'", "img-src *"),
+      gained(OLD.tour).replace("; form-action 'none'", ""),
+      gained(OLD.tour) + "; font-src 'self'",
+      gained(OLD.tour).replace("style-src 'self'; ", "style-src 'self' 'unsafe-inline'; "),
+    ];
+    for (const csp of bad) {
+      const c = compareAnswers([rec("k", "GET /t/:slug", html(OLD.tour))], [rec("k", "GET /t/:slug", html(csp))], NEW);
+      expect([c.fontSrc, c.problems.length], csp).toEqual([0, 1]);
+    }
+    // A policy that had a font-src already is not this case.
+    const had = gained(OLD.tour);
+    expect(withFontSrcOf(html(had), html(gained(had)))).toBeNull();
+  });
+
+  it("only for HTML answers, only from the old build to the new one, and never with any other difference", () => {
+    const json = (csp: string) => answer(200, "{}", { "content-security-policy": csp });
+    expect(compareAnswers([rec("k", "GET /api/v1/me", json(OLD.gate))], [rec("k", "GET /api/v1/me", json(gained(OLD.gate)))], NEW).fontSrc).toBe(0);
+    for (const opts of [{}, { allowAddedFields: true, allowPlayerNames: true }]) {
+      const c = compareAnswers([rec("k", "GET /t/:slug", html(OLD.tour))], [rec("k", "GET /t/:slug", html(gained(OLD.tour)))], opts);
+      expect([c.fontSrc, c.problems], JSON.stringify(opts)).toEqual([0, ["k: header content-security-policy differs"]]);
+    }
+    const other = compareAnswers([rec("k", "GET /i/:name", html(OLD.share))], [rec("k", "GET /i/:name", html(gained(OLD.share), "<!doctype html><title>Acmf</title>"))], NEW);
+    expect([other.fontSrc, other.problems.length]).toEqual([0, 1]);
+    const header = compareAnswers([rec("k", "GET /i/:name", html(OLD.share))], [rec("k", "GET /i/:name", html(gained(OLD.share), undefined, { "x-frame-options": "SAMEORIGIN" }))], NEW);
+    expect([header.fontSrc, header.problems.length]).toEqual([0, 1]);
+    // The way back and the two new builds demand identity: a font-src difference is named.
+    const c = compareAnswers([rec("k", "GET /t/:slug", html(OLD.tour))], [rec("k", "GET /t/:slug", html(gained(OLD.tour)))], NEW);
+    expect(identityProblems(c)).toEqual(["1 answer(s) differ in a way allowed only for a new build"]);
   });
 });

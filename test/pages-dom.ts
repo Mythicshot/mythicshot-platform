@@ -4,7 +4,7 @@
 // text, a doctype and void elements. No page script, style or entity beyond the five
 // basic ones. It is not a browser: layout, focus rules and CSS are not modelled.
 
-const VOID = new Set(["meta", "link", "input", "br", "img", "hr"]);
+const VOID = new Set(["meta", "link", "input", "br", "img", "hr", "source"]);
 const ENTITIES: Record<string, string> = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" };
 
 export class FakeText {
@@ -293,11 +293,21 @@ export function textNodes(el: FakeElement, filter: (parent: FakeElement) => bool
       if (c instanceof FakeText) {
         const t = c.text.replace(/\s+/g, " ").trim();
         if (t !== "" && filter(node)) out.push(t);
+      } else if (c.tagName === "img") {
+        // An image's alt is its text: what a person reads in the picture, or hears, or sees when it cannot load
+        // (the wordmark's "Mythicshot"). A decorative image's empty alt is no text.
+        const alt = (c.getAttribute("alt") ?? "").replace(/\s+/g, " ").trim();
+        if (alt !== "" && filter(node)) out.push(alt);
       } else walk(c);
     }
   };
   walk(el);
   return out;
+}
+
+/** An element's text as a person takes it in: its text, with each image's alt in the image's place. */
+function seenText(el: FakeElement): string {
+  return el.children.map((c) => (c instanceof FakeText ? c.text : c.tagName === "img" ? c.getAttribute("alt") ?? "" : seenText(c))).join("");
 }
 
 /** What a person sees in the body now: the text of every shown element, block by block, as one line each. */
@@ -307,7 +317,7 @@ export function visibleText(doc: FakeDocument): string[] {
   for (const el of doc.body.all()) {
     if (!el.shown || !BLOCKS.has(el.tagName)) continue;
     // A row of a list: its parts in order, a button in it left to its own line.
-    const t = el.tagName === "li" ? textNodes(el, (p) => p.closest("button") === null).join(" | ") : el.textContent.replace(/\s+/g, " ").trim();
+    const t = el.tagName === "li" ? textNodes(el, (p) => p.closest("button") === null).join(" | ") : seenText(el).replace(/\s+/g, " ").trim();
     if (t !== "") out.push(t);
   }
   return out;

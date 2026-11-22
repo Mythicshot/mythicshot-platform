@@ -137,7 +137,10 @@ describe("the documentation build", () => {
     const gzipped = gzipSync(bytes, { level: 9 }).length;
     console.log(`Worker bundle: ${bytes.length} bytes, ${gzipped} gzipped`);
     expect(gzipped).toBeGreaterThan(10_000);
-    expect(gzipped).toBeLessThan(1_000_000);
+    // The limit keeps the Worker's script well inside Cloudflare's compressed size limit for a
+    // Worker, with room for the next releases: the whole script is sent on each deploy and
+    // loaded when an isolate starts, so every byte here is paid for on a cold start.
+    expect(gzipped, `the Worker's script is ${gzipped} bytes gzipped; the limit of 1,000,000 keeps it well inside Cloudflare's compressed Worker size limit and keeps cold starts quick: find what grew before raising it`).toBeLessThan(1_000_000);
   }, 60_000);
 
   it("the standalone preset and the source maps are not shipped", () => {

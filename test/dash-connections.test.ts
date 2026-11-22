@@ -27,7 +27,7 @@ const IMG = "https://img.example.com";
 const UNKNOWN = "https://evil.example.net";
 const NOT_FOUND = '{"error":"not_found"}';
 const BROWSER = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
-const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const SECURITY: Record<string, string> = {
   "content-security-policy": POLICY,
   "x-frame-options": "DENY",

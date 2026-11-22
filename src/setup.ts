@@ -88,7 +88,7 @@ const PAGE_HEADERS: Record<string, string> = {
   ...BASE_HEADERS,
   "content-type": "text/html; charset=utf-8",
   "content-security-policy":
-    "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   "x-frame-options": "DENY",
 };
 

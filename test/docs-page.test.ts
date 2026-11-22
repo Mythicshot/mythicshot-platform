@@ -13,6 +13,7 @@ import { DOCS_CSS, DOCS_CSS_ETAG, DOCS_CSS_PATH, DOCS_JS, DOCS_JS_ETAG, DOCS_JS_
 import { VIEWER_CSS, VIEWER_CSS_ETAG, VIEWER_CSS_PATH, VIEWER_JS, VIEWER_JS_ETAG, VIEWER_JS_PATH, VIEWER_LICENCES } from "../src/docs/viewer-assets.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { contentSecurityPolicy } from "../src/page.ts";
+import { MANROPE_FACE, PAGE_BASE_CSS } from "../src/brand-css.ts";
 import { VERSION } from "../src/version.ts";
 import { send, type Call } from "./bundle.ts";
 
@@ -92,7 +93,7 @@ describe("the documentation page", () => {
     expect(docsHtml()).toBe(docsHtml());
     expect((await send(deps, "GET", "/docs?x=1", { origin: "http://localhost:8787" })).text).toBe(r.text);
     const linked = [...r.text.matchAll(/(?:src|href)="([^"]*)"/g)].map((m) => m[1]).filter((l) => !l.startsWith("#"));
-    expect(linked.sort()).toEqual([...FILES.map((f) => f.path), "/docs/licences.txt", "/api/v1/openapi.json", "/api/v1/openapi.yaml"].sort());
+    expect(linked.sort()).toEqual([...FILES.map((f) => f.path), "/docs/licences.txt", "/api/v1/openapi.json", "/api/v1/openapi.yaml", "/favicon.ico", "/favicon.svg"].sort());
     // The only address in it is the examples' placeholder, which is no host at all.
     expect(r.text.split(GUIDE_ORIGIN).join("")).not.toMatch(/:\/\/|example\.|localhost/);
     expect(r.text).not.toMatch(/<style|style=|\son[a-z]+=|<script(?![^>]*\ssrc=)/i);
@@ -103,10 +104,10 @@ describe("the documentation page", () => {
   it("the page sends the docs policy, forbids framing and relaxes nothing", async () => {
     // The policy, exactly. A change here is a decision, not a refactoring.
     expect(DOCS_CSP).toBe(
-      "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     );
     const d = directives(DOCS_CSP);
-    expect(Object.keys(d)).toEqual(["default-src", "script-src", "style-src", "img-src", "connect-src", "base-uri", "form-action", "frame-ancestors"]);
+    expect(Object.keys(d)).toEqual(["default-src", "script-src", "style-src", "font-src", "img-src", "connect-src", "base-uri", "form-action", "frame-ancestors"]);
     // Scripts and style sheets come from this origin only: nothing inline, nothing evaluated.
     expect(d["script-src"]).toEqual(["'self'"]);
     expect(d["style-src"]).toEqual(["'self'"]);
@@ -137,7 +138,7 @@ describe("the documentation page", () => {
   });
 
   it("the tour page's policy is unchanged", () => {
-    expect(contentSecurityPolicy("")).toBe("default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'");
+    expect(contentSecurityPolicy("")).toBe("default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'");
     expect(contentSecurityPolicy("")).not.toBe(DOCS_CSP);
   });
 
@@ -502,13 +503,15 @@ describe("the documentation page's parts", () => {
       'meta charset="utf-8"',
       'meta name="viewport" content="width=device-width, initial-scale=1"',
       'meta name="referrer" content="no-referrer"',
+      'link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48"',
+      'link rel="icon" href="/favicon.svg" type="image/svg+xml"',
       `link rel="stylesheet" href="${VIEWER_CSS_PATH}"`,
       `link rel="stylesheet" href="${DOCS_CSS_PATH}"`,
       `script src="${VIEWER_JS_PATH}"`,
       `script src="${DOCS_JS_PATH}"`,
     ]);
     // Every src and href is one of the four hashed files, a place on this page, a description file or the notices.
-    const allowed = new Set([VIEWER_CSS_PATH, DOCS_CSS_PATH, VIEWER_JS_PATH, DOCS_JS_PATH, "/api/v1/openapi.json", "/api/v1/openapi.yaml", "/docs/licences.txt"]);
+    const allowed = new Set([VIEWER_CSS_PATH, DOCS_CSS_PATH, VIEWER_JS_PATH, DOCS_JS_PATH, "/api/v1/openapi.json", "/api/v1/openapi.yaml", "/docs/licences.txt", "/favicon.ico", "/favicon.svg"]);
     for (const m of html.matchAll(/\s(?:src|href|action|formaction|poster|srcset|data|ping|background)="([^"]*)"/g)) {
       expect(m[1].startsWith("#guide-") || allowed.has(m[1]), m[1]).toBe(true);
     }
@@ -523,7 +526,7 @@ describe("the documentation page's parts", () => {
     expect(html).not.toMatch(/javascript:|data:|blob:|<svg\b/i);
     expect(html).not.toMatch(/\starget=/);
     // Our stylesheet and script load nothing either.
-    expect(DOCS_CSS).not.toMatch(/url\(|@import|@font-face|expression\(/i);
+    expect(DOCS_CSS.replace(MANROPE_FACE, "")).not.toMatch(/url\(|@import|@font-face|expression\(/i);
     expect(DOCS_JS).not.toMatch(/import\(|importScripts|createElement\("(script|link|style|iframe|img)"\)|\.src\s*=|\.href\s*=/);
   });
 
@@ -811,9 +814,11 @@ describe("the documentation page beside the viewer", () => {
   /** Every selector of the stylesheet, media queries opened up. */
   const selectors = [...css.replace(/@media[^{]*\{/g, "").matchAll(/([^{}]+)\{/g)].flatMap((m) => m[1].split(",").map((s) => s.trim())).filter((s) => s !== "");
 
-  it("hides the viewer's own title block, its authorise bar and the lock buttons that open it, and nothing else of it", () => {
+  it("hides the viewer's own title block, its authorise bar and the lock buttons that open it, and nothing else of it but its ground", () => {
     const viewerRules = selectors.filter((s) => s.includes("swagger-ui"));
-    expect(viewerRules).toEqual([".swagger-ui .information-container", ".swagger-ui .scheme-container", ".swagger-ui .authorization__btn"]);
+    // The three it hides, and in the dark scheme its ground, made see-through so the page's shows (no other property).
+    expect(viewerRules).toEqual(["html.dark-mode .swagger-ui", ".swagger-ui .information-container", ".swagger-ui .scheme-container", ".swagger-ui .authorization__btn"]);
+    expect(css).toMatch(/\nhtml\.dark-mode \.swagger-ui \{\s*background: transparent;\s*\}/);
     expect(css).toMatch(/\.swagger-ui \.information-container,\s*\.swagger-ui \.scheme-container,\s*\.swagger-ui \.authorization__btn \{\s*display: none;\s*\}/);
     // The lock button on each request opens the viewer's token dialog, which the viewer
     // draws inside the hidden bar: left visible, the button would do nothing. The dialog
@@ -839,7 +844,7 @@ describe("the documentation page beside the viewer", () => {
     expect(css).not.toMatch(/visibility:\s*hidden|opacity:\s*0|height:\s*0|clip-path|text-indent/);
     // Every other rule is about our own blocks, so nothing here restyles the viewer: it is
     // under ".own", names a class or id only our markup has, or is the page itself.
-    const ours = /^(\.own\b|\.(page-header|page-footer|block|steps|note|answers|legend|token-box|token-row|status|command|guide-links|table-wrap|limits)\b|#reference\b|:root$|html$|body$|\[hidden\]$)/;
+    const ours = /^(\.own\b|\.(page-header|page-footer|block|steps|note|answers|legend|token-box|token-row|status|command|guide-links|table-wrap|limits)\b|#reference\b|:root$|html$|html\.dark-mode$|body$|\[hidden\]$|@font-face$)/;
     for (const s of selectors.filter((x) => !x.includes("swagger-ui"))) expect(ours.test(s), s).toBe(true);
     // And none of those class names is one the viewer's stylesheet uses.
     for (const name of ["own", "page-header", "page-footer", "block", "steps", "note", "answers", "legend", "token-box", "token-row", "status", "command", "guide-links", "table-wrap", "limits"]) {
@@ -854,17 +859,17 @@ describe("the documentation page beside the viewer", () => {
   });
 
   it("is light or dark as the system is, and switches the viewer's own dark look on with it", () => {
-    // Our colours are named once and given for both; nothing else in the stylesheet is a colour.
+    // The brand's colours, named once and given for both schemes (src/brand-tokens.ts); nothing else in the stylesheet is a colour.
+    expect(DOCS_CSS.startsWith(PAGE_BASE_CSS)).toBe(true);
     const light = /:root \{([^}]*)\}/.exec(css)![1];
     const dark = /@media \(prefers-color-scheme: dark\) \{\s*:root \{([^}]*)\}/.exec(css)![1];
-    const names = (block: string) => [...block.matchAll(/(--[a-z-]+):/g)].map((m) => m[1]);
-    expect(names(light).length).toBeGreaterThanOrEqual(8);
+    const names = (block: string) => [...block.matchAll(/(--[a-z-]+): #/g)].map((m) => m[1]);
+    expect(names(light).length).toBeGreaterThanOrEqual(25);
     expect(names(dark)).toEqual(names(light));
     expect(light).toContain("color-scheme: light dark");
-    const rest = css.replace(/:root \{[^}]*\}/g, "");
+    const rest = css.slice(css.indexOf("[hidden]"));
     expect(rest).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/);
-    for (const name of names(light)) expect(rest, name).toContain(`var(${name})`);
-    expect(css).toMatch(/body \{[^}]*background: var\(--bg\);[^}]*color: var\(--fg\);/);
+    expect(css).toMatch(/\nbody \{[^}]*background: var\(--ground\);[^}]*color: var\(--text\);/);
 
     // The viewer has a dark look of its own, keyed on a class on the html element; it does
     // not follow the system by itself, so the page script sets that class from the system's setting.
@@ -875,8 +880,8 @@ describe("the documentation page beside the viewer", () => {
     expect(DOCS_JS).toContain('matchMedia("(prefers-color-scheme: dark)")');
     expect(DOCS_JS).toContain("document.documentElement.classList.toggle(DARK, dark.matches)");
     expect(DOCS_JS).toContain('dark.addEventListener("change", apply)');
-    // Our dark background is the viewer's, so the two meet without a seam.
-    expect(dark).toContain("--bg: #1c2022;");
+    // In the dark scheme the viewer's own ground is see-through, so the page's brand ground runs behind it without a seam.
+    expect(css).toMatch(/\nhtml\.dark-mode \{\s*background: var\(--ground\);\s*\}/);
   });
 
   it("fits a phone and a keyboard: one column, long commands wrap, focus shows", () => {
@@ -888,7 +893,7 @@ describe("the documentation page beside the viewer", () => {
     // No fixed width anywhere: only max-width, and widths in percent.
     expect(css).not.toMatch(/[^-]width:\s*\d+(px|rem|em)/);
     // Keyboard: what can be focused shows it, in the page's order, with nothing taken out of it.
-    expect(css).toMatch(/\.own a:focus-visible,\s*\.own button:focus-visible,\s*\.own input:focus-visible \{\s*outline: 2px solid var\(--focus\);/);
+    expect(css).toContain(".own :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }");
     expect(css).not.toMatch(/outline:\s*(none|0)/);
     expect(docsHtml()).not.toMatch(/tabindex=/);
     expect(DOCS_JS).toContain('if (event.key === "Enter") void check();');

@@ -66,6 +66,8 @@ const admin = (method: string, path: string, body?: unknown): Row => ({ method, 
  * `media`. The sample link id is one nobody has, so an item route answers the 404 page
  * wherever it answers at all; the two files answer 200.
  */
+/** One of the brand's files that every address serves (rule `every`): the tab icon, Manrope and its licence. */
+const everywhere = (path: string): Row => ({ method: "GET", path, one: 200, tours: 200, app: 200, unknown: 421, img: 200 });
 const media = (path: string, status: number): Row => ({ method: "GET", path, one: status, tours: status, app: 404, unknown: 421, img: status, toursImg: 404 });
 const LINK = "abcdefghijklmnopqrst";
 /** A request of the media viewer scope: rule `media` too, with a method and a body. */
@@ -181,7 +183,14 @@ const ROWS: Record<string, Row> = {
   "GET /dash/tours.js": page("/dash/tours.js"),
   "GET /dash/dash.css": page("/dash/dash.css"),
   "GET /dash/dash.js": page("/dash/dash.js"),
-  "GET /dash/mark.png": page("/dash/mark.png"),
+  "GET /dash/mark.svg": page("/dash/mark.svg"),
+  "GET /dash/wordmark-dark.png": page("/dash/wordmark-dark.png"),
+  "GET /dash/wordmark-light.png": page("/dash/wordmark-light.png"),
+  // The brand's files (src/brand-routes.ts): the tab icon and Manrope on every address.
+  "GET /favicon.svg": everywhere("/favicon.svg"),
+  "GET /favicon.ico": everywhere("/favicon.ico"),
+  "GET /fonts/:file{manrope(?:\\.[0-9a-f]{16})?\\.ttf}": everywhere("/fonts/manrope.ttf"),
+  "GET /fonts/manrope-OFL.txt": everywhere("/fonts/manrope-OFL.txt"),
   "GET /images": page("/images"),
   "GET /dash/images.js": page("/dash/images.js"),
   "GET /gifs": page("/gifs"),
@@ -252,7 +261,10 @@ const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 /** The sign-in pages and their stylesheet and script, the invite page and its script, the dashboard's account pages (/account, /account/email), and the terms page. */
 const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account|invite|terms)(?:\/|$)/.test(k));
 /** The dashboard's other pages and every file under /dash/ (src/dash/). */
-const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:images|gifs|tours|storage|connections|admin|dash\/[a-z][a-z-]*\.(?:js|css|png))$/.test(k));
+const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:images|gifs|tours|storage|connections|admin|dash\/[a-z][a-z-]*\.(?:js|css|svg))$/.test(k));
+/** The brand's files every address serves (rule every), and its pictures only the app address serves (the mark and the wordmark). */
+const BRAND_EVERY_KEYS = KEYS.filter((k) => HOST_RULES[k] === "every");
+const BRAND_APP_KEYS = KEYS.filter((k) => k === "GET /dash/mark.svg" || k.startsWith("GET /dash/wordmark-"));
 const ROOT_KEY = "GET /";
 const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
 const DOCS_PAGE_KEY = "GET /docs";
@@ -371,7 +383,7 @@ describe("the host-routing matrix", () => {
     expect(DASH_KEYS.length).toBe(18);
     // Every dashboard page and its script is in one of the two lists, and nothing is in both.
     for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES, TERMS_PAGE]) for (const key of [`GET ${p.path}`, `GET ${p.script.path}`]) expect([PAGE_KEYS.includes(key), DASH_KEYS.includes(key)].filter(Boolean), key).toEqual([true]);
-    for (const key of ["GET /dash/dash.css", "GET /dash/dash.js", "GET /dash/mark.png"]) expect(DASH_KEYS, key).toContain(key);
+    for (const key of ["GET /dash/dash.css", "GET /dash/dash.js", "GET /dash/mark.svg"]) expect(DASH_KEYS, key).toContain(key);
     // 9, the two requests of an invite, the three requests that take a short code, the three of the token list, the change of who may view a tour or an item, and the three of the site's terms.
     expect(SESSION_KEYS.length).toBe(22);
     expect(ADMIN_KEYS.length).toBe(11);
@@ -383,7 +395,12 @@ describe("the host-routing matrix", () => {
     // The shared items' routes are the media routes, and the img address has them and health alone.
     expect(MEDIA_KEYS.length).toBe(19);
     expect(KEYS.filter((k) => HOST_RULES[k] === "media")).toEqual(MEDIA_KEYS);
-    for (const key of KEYS) if (key !== "GET /healthz" && !MEDIA_KEYS.includes(key)) expect(ROWS[key].img, key).toBe(404);
+    for (const key of KEYS) if (key !== "GET /healthz" && !MEDIA_KEYS.includes(key) && !BRAND_EVERY_KEYS.includes(key)) expect(ROWS[key].img, key).toBe(404);
+    for (const key of BRAND_EVERY_KEYS) expect([ROWS[key].one, ROWS[key].tours, ROWS[key].app, ROWS[key].img, ROWS[key].unknown], key).toEqual([200, 200, 200, 200, 421]);
+    expect(BRAND_APP_KEYS).toHaveLength(3);
+    for (const key of BRAND_APP_KEYS) expect(HOST_RULES[key], key).toBe("app");
+    // No font of the name: only Manrope is served.
+    expect(KEYS.filter((k) => k.startsWith("GET /fonts/"))).toEqual(["GET /fonts/:file{manrope(?:\\.[0-9a-f]{16})?\\.ttf}", "GET /fonts/manrope-OFL.txt"]);
   });
 
   it("one-address mode answers every route on any host as before", async () => {
@@ -411,12 +428,12 @@ describe("the host-routing matrix", () => {
     const answers = await column(deps, TOURS);
     expect(statuses(answers)).toEqual(expected("tours"));
     // As in one-address mode, except for the documentation page, which lives on the app address.
-    const onApp = [DOCS_PAGE_KEY, ROOT_KEY, ...DOCS_FILE_KEYS, ...SESSION_KEYS, ...ADMIN_KEYS, ...PAGE_KEYS, ...DASH_KEYS];
+    const onApp = [DOCS_PAGE_KEY, ROOT_KEY, ...DOCS_FILE_KEYS, ...SESSION_KEYS, ...ADMIN_KEYS, ...PAGE_KEYS, ...DASH_KEYS, ...BRAND_APP_KEYS];
     const without = (col: Record<string, number>) => Object.fromEntries(Object.entries(col).filter(([k]) => !onApp.includes(k)));
     expect(without(expected("tours"))).toEqual(without(expected("one")));
     expect(answers[DOCS_PAGE_KEY].headers.get("location")).toBe(APP + "/docs");
     expectRedirect(answers[ROOT_KEY], APP + "/", ROOT_KEY);
-    for (const key of [...DOCS_FILE_KEYS, ...SESSION_KEYS, ...ADMIN_KEYS, ...PAGE_KEYS, ...DASH_KEYS]) expectNotHere(answers[key], key);
+    for (const key of [...DOCS_FILE_KEYS, ...SESSION_KEYS, ...ADMIN_KEYS, ...PAGE_KEYS, ...DASH_KEYS, ...BRAND_APP_KEYS]) expectNotHere(answers[key], key);
     for (const key of DESCRIPTION_KEYS) expect(answers[key].status, key).toBe(200);
     for (const key of API_KEYS) expect(answers[key].json.error, key).toBe("unauthorized");
     expect(answers["GET /setup"].headers.get("content-type")).toBe("text/html; charset=utf-8");
@@ -540,10 +557,13 @@ describe("the host-routing matrix", () => {
       expect(answers[key].calls, key).toBe(2);
     }
     for (const key of KEYS) {
-      if (key === "GET /healthz" || MEDIA_KEYS.includes(key)) continue;
+      if (key === "GET /healthz" || MEDIA_KEYS.includes(key) || BRAND_EVERY_KEYS.includes(key)) continue;
       expectNotHere(answers[key], key);
       expect(answers[key].headers.get("location"), key).toBeNull();
     }
+    // The tab icon and the text font, which the shared items' pages use, with no call.
+    expect(BRAND_EVERY_KEYS.length).toBe(4);
+    for (const key of BRAND_EVERY_KEYS) expect([answers[key].status, answers[key].calls], key).toEqual([200, 0]);
     expect(answers["GET /healthz"].text).toBe('{"ok":true,"address":"img"}');
     expect(answers["GET /healthz"].headers.get("content-type")).toBe("application/json");
     // The media viewer's requests make their own calls (asking for a link counts and sweeps); every other route here makes none.
@@ -878,6 +898,10 @@ describe("the rule lookup", () => {
       ["both", "any", { tours: 200, app: 200, unknown: 421 }],
       ["tours-redirect", "any", { tours: 200, app: 308, unknown: 421 }],
       ["any", "any", { tours: 200, app: 200, unknown: 200 }],
+      // every: each configured address, and never an unknown host, as every rule but any.
+      ["every", "every", { tours: 200, app: 200, unknown: 421 }],
+      ["tours", "every", { tours: 200, app: 404, unknown: 421 }],
+      ["every", "any", { tours: 200, app: 200, unknown: 421 }],
       ["both", "both", { tours: 200, app: 200, unknown: 421 }],
     ];
     for (const [name, routes] of orders) {
@@ -891,7 +915,7 @@ describe("the rule lookup", () => {
         if (want.app === 404) expect(onApp.text, what).toBe(NOT_FOUND);
         if (want.app === 308) expect(onApp.location, what).toBe("https://tours.example.com/setup?x=1");
         // A request only the wide route matches keeps the wide route's own rule.
-        const alone = { any: 200, both: 200, tours: 404, "tours-redirect": 308, app: 200, "app-redirect": 200, media: 404 }[wideRule];
+        const alone = { any: 200, every: 200, both: 200, tours: 404, "tours-redirect": 308, app: 200, "app-redirect": 200, media: 404 }[wideRule];
         expect((await ask(app, APP, "/other")).status, what).toBe(alone);
       }
     }
@@ -919,7 +943,7 @@ describe("the rule lookup", () => {
         if (want.tours === 404) expect(onTours.text, what).toBe(NOT_FOUND);
         if (want.tours === 308) expect(onTours.location, what).toBe("https://app.example.com/setup?x=1");
         // A request only the wide route matches keeps the wide route's own rule.
-        const alone = { any: 200, both: 200, app: 404, "app-redirect": 308, tours: 200, "tours-redirect": 200, media: 200 }[wideRule];
+        const alone = { any: 200, every: 200, both: 200, app: 404, "app-redirect": 308, tours: 200, "tours-redirect": 200, media: 200 }[wideRule];
         expect((await ask(app, TOURS, "/other")).status, what).toBe(alone);
       }
     }
@@ -928,7 +952,7 @@ describe("the rule lookup", () => {
   it("two matched routes whose rules name different addresses are closed on both", async () => {
     const tours: HostRule[] = ["tours", "tours-redirect"];
     const apps: HostRule[] = ["app", "app-redirect"];
-    const aloneOnTours: Record<HostRule, number> = { any: 200, both: 200, tours: 200, "tours-redirect": 200, app: 404, "app-redirect": 308, media: 200 };
+    const aloneOnTours: Record<HostRule, number> = { any: 200, every: 200, both: 200, tours: 200, "tours-redirect": 200, app: 404, "app-redirect": 308, media: 200 };
     for (const [name, routes] of orders) {
       for (const a of tours) {
         for (const b of apps) {

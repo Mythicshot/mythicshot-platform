@@ -6,6 +6,7 @@
 // above all with the code a link carries. What the scripts do when they run is tested under
 // Node in test/node-dash-account.test.ts.
 import { describe, expect, it } from "vitest";
+import { MANROPE_FACE } from "../src/brand-css.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { ACCOUNT_EMAIL_HTML, ACCOUNT_EMAIL_JS } from "../src/dash/account-email.ts";
 import { ACCOUNT_HTML, ACCOUNT_JS } from "../src/dash/account.ts";
@@ -28,7 +29,7 @@ const APP = "https://app.example.com";
 const UNKNOWN = "https://evil.example.net";
 const NOT_FOUND = '{"error":"not_found"}';
 const BROWSER = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
-const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const SECURITY: Record<string, string> = {
   "content-security-policy": POLICY,
   "x-frame-options": "DENY",
@@ -375,7 +376,7 @@ describe("the Account page and the page an email-change link opens", () => {
         ["/dash/dash.js", true, ""],
         [p.script, true, ""],
       ]);
-      expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")]), p.path).toEqual([["stylesheet", "/dash/dash.css"]]);
+      expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")]), p.path).toEqual([["icon", "/favicon.ico"], ["icon", "/favicon.svg"], ["stylesheet", "/dash/dash.css"]]);
       expect(all.filter((e) => e.tagName === "style" || e.tagName === "form"), p.path).toEqual([]);
       for (const e of all) {
         for (const [name, value] of e.attrs) {
@@ -417,7 +418,7 @@ describe("the Account page and the page an email-change link opens", () => {
     expect([field.getAttribute("type"), field.getAttribute("autocomplete"), field.getAttribute("maxlength"), field.getAttribute("aria-describedby")]).toEqual(["email", "off", "254", "change-hint change-message"]);
     // The stylesheet has the pages' own part.
     expect(DASH_CSS).toContain("/* The Account page. */");
-    expect(DASH_CSS).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
+    expect(DASH_CSS.replace(MANROPE_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
     expect(DASH_CSS).not.toMatch(/overflow-x|100vw/);
   });
 });

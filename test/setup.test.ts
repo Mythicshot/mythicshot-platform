@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MANROPE_PATH } from "../src/brand-assets.ts";
 import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
 import { hashToken, requireAuth } from "../src/auth.ts";
@@ -513,7 +514,7 @@ describe("secrets and headers", () => {
     expect(r.headers.get("referrer-policy")).toBe("no-referrer");
     expect(r.headers.get("x-content-type-options")).toBe("nosniff");
     expect(r.headers.get("content-security-policy")).toBe(
-      "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     );
   });
 
@@ -563,7 +564,9 @@ describe("secrets and headers", () => {
     const css = await send(deps, "/setup/setup.css");
     expect(css.status).toBe(200);
     expect(css.headers.get("content-type")).toBe("text/css; charset=utf-8");
-    expect(css.text).not.toMatch(/@import|url\(/);
+    expect(css.text).not.toMatch(/@import/);
+    // The only url() is the brand's text font, served by this address.
+    expect([...css.text.matchAll(/url\(([^)]*)\)/g)].map((m) => m[1])).toEqual([`"${MANROPE_PATH}"`]);
     expect(css.text).toContain("prefers-color-scheme: dark");
   });
 });

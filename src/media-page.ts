@@ -111,7 +111,7 @@ export const SHARE_LOOKUP_CALLS = SERVE_LOOKUP_CALLS;
 export const MAX_PARTS_PER_ANSWER = MAX_SERVED_PARTS;
 
 /** The policy of every page, the 404 included: only this origin's files, no framing, no forms. */
-export const SHARE_PAGE_CSP = "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+export const SHARE_PAGE_CSP = "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 /** The policy of every file and preview: nothing runs, even if it is opened as a document. */
 export const SHARE_FILE_CSP = "default-src 'none'; sandbox";
 

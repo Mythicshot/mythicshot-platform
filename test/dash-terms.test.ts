@@ -21,7 +21,7 @@ import { BRAND_PLAIN } from "../src/brand.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
-const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const SECURITY = { "content-security-policy": POLICY, "x-frame-options": "DENY", "referrer-policy": "no-referrer", "cache-control": "no-store", "x-content-type-options": "nosniff", "cross-origin-opener-policy": "same-origin" };
 
 describe("the sentences", () => {
@@ -85,13 +85,15 @@ describe("the markup", () => {
     expect(textNodes(doc.head)).toEqual(["Terms"]);
     // The brand above the card, as every dashboard page has it (src/brand.ts), once.
     expect(TERMS_HTML.split(BRAND_PLAIN).length - 1).toBe(1);
-    expect(doc.root.all().filter((e) => e.tagName === "img").map((e) => isBrandMark(e))).toEqual([true]);
+    expect(doc.root.all().filter((e) => e.tagName === "img").map((e) => isBrandMark(e))).toEqual([true, true]);
     expect(textNodes(doc.body)).toEqual(["Mythicshot", "This page needs JavaScript.", "The main points", "This list is a summary. The full terms below are what you agree to.", "The full terms", "Sign out", "I agree", "Back to your account"]);
     const $ = (id: string) => doc.getElementById(id)!;
     // The box: a named region, reached with Tab and scrolled with the keys, and no trap: it is one stop.
     expect([$("terms-box").getAttribute("role"), $("terms-box").getAttribute("tabindex"), $("terms-box").getAttribute("aria-labelledby")]).toEqual(["region", "0", "h-full"]);
     expect(DASH_CSS).toMatch(/\.terms-box \{ height: 320px; max-height: 50vh; overflow-y: auto;/);
-    expect(DASH_CSS).toContain(".terms-box:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }");
+    // The box takes the focus ring every control has (the brand's, 2px with an offset), and no rule takes it away.
+    expect(DASH_CSS).toContain("\n:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }");
+    expect(DASH_CSS).not.toMatch(/\.terms-box:focus-visible/);
     expect($("h-full").textContent).toBe("The full terms ");
     expect($("terms-version").className).toBe("terms-version");
     // The card is labelled by the title, which takes the focus when it is shown.
@@ -104,7 +106,7 @@ describe("the markup", () => {
     expect(DASH_CSS).toContain("@media (max-width: 480px) {\n  .terms-page { padding: 16px; }");
     expect([$("terms-links").hidden, $("terms-actions").hidden, $("terms-back").hidden, $("terms-message").getAttribute("role")]).toEqual([true, true, true, "status"]);
     // Nothing from another site: the dashboard's stylesheet and the page's own script.
-    expect(doc.root.all().filter((e) => e.tagName === "link" || e.tagName === "script").map((e) => e.getAttribute("href") ?? e.getAttribute("src"))).toEqual(["/dash/dash.css", "/dash/terms.js"]);
+    expect(doc.root.all().filter((e) => e.tagName === "link" || e.tagName === "script").map((e) => e.getAttribute("href") ?? e.getAttribute("src"))).toEqual(["/favicon.ico", "/favicon.svg", "/dash/dash.css", "/dash/terms.js"]);
   });
 
   it("the Account page's line and the Admin page's column", () => {

@@ -318,7 +318,7 @@ describe("a restricted tour, for every visitor and every way of asking", () => {
     // The only scripts: the player's own file, and the data block (JSON, not run).
     expect([...html.matchAll(/<script\b[^>]*>/g)].map((m) => m[0])).toEqual([expect.stringMatching(/^<script src="\/player\.[0-9a-f]{16}\.js" defer>$/), '<script type="application/json" id="tour">']);
     expect([...html.matchAll(/<link\b[^>]*>/g)].map((m) => m[0])).toEqual([expect.stringMatching(/^<link rel="stylesheet" href="\/player\.[0-9a-f]{16}\.css">$/), '<link rel="stylesheet" href="/view/shared.css">']);
-    expect(RESTRICTED_PAGE_CSP).toBe("default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+    expect(RESTRICTED_PAGE_CSP).toBe("default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
     expect(RESTRICTED_PAGE_CSP).not.toContain("connect-src");
     expect(RESTRICTED_PAGE_CSP).not.toContain("unsafe");
     expect(() => restrictedPageHtml(tour, "../evil", "a@example.com")).toThrow();
@@ -494,7 +494,7 @@ describe("a database migrations have not reached", () => {
 });
 
 describe("public tours", () => {
-  it("answer the very bytes 0.1.38 answered for a fixed tour, apart from the player's file names (and so the ETag)", SLOW, async () => {
+  it("answer the very bytes 0.1.38 answered for a fixed tour, apart from the player's file names (and so the ETag) and the policy's font-src 'self' (0.1.54)", SLOW, async () => {
     const s = await site();
     const { deps, p } = s;
     await deps.db.run("UPDATE snapshot SET data = ? WHERE tour_id = ?", [FROZEN.snapshot, p.id]);
@@ -511,7 +511,10 @@ describe("public tours", () => {
         const headers = Object.fromEntries(r.headers.entries());
         const etag = headers.etag;
         delete headers.etag;
-        expect(headers, what).toEqual(c.headers);
+        // 0.1.54 serves the brand's fonts from the site: the policy gained font-src 'self' after style-src, and nothing else of it changed.
+        const policy = (c.headers as Record<string, string>)["content-security-policy"];
+        expect(policy, what).not.toContain("font-src");
+        expect(headers, what).toEqual({ ...c.headers, "content-security-policy": policy.replace("style-src 'self'; ", "style-src 'self'; font-src 'self'; ") });
         expect(etag !== undefined, what).toBe(c.etag);
         if (etag !== undefined) {
           // The same rule as before: the first 16 bytes of the body's SHA-256, quoted.

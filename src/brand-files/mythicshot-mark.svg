@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img">
+<title>Mythicshot</title>
+<polygon points="48.5,22.63 48.5,7.6 17.67,25.4" fill="#6D4AE8"/>
+<polygon points="51.5,22.63 51.5,7.6 82.33,25.4" fill="#6D4AE8"/>
+<polygon points="47.26,25.75 13.29,28.8 27.63,59.75" fill="#6D4AE8"/>
+<polygon points="52.74,25.75 86.71,28.8 72.37,59.75" fill="#6D4AE8"/>
+<polygon points="25.55,62.39 12.53,34.3 12.53,69.9" fill="#6D4AE8"/>
+<polygon points="74.45,62.39 87.47,34.3 87.47,69.9" fill="#6D4AE8"/>
+<polygon points="27.05,64.98 14.03,72.5 44.86,90.3" fill="#6D4AE8"/>
+<polygon points="72.95,64.98 85.97,72.5 55.14,90.3" fill="#6D4AE8"/>
+<polygon points="30.37,64.5 69.63,64.5 50,92.39" fill="#6D4AE8"/>
+<polygon points="50,27 69.92,61.5 30.08,61.5" fill="#F5B841"/>
+<circle cx="50" cy="50.8" r="9" fill="#16121C"/>
+<polygon points="53.2,48.95 50,47.1 46.8,48.95 46.8,52.65 50,54.5 53.2,52.65" fill="#F5B841"/>
+<line x1="53.2" y1="48.95" x2="57.34" y2="54.22" stroke="#F5B841" stroke-width="1.25" stroke-linecap="round"/>
+<line x1="50" y1="47.1" x2="56.64" y2="46.15" stroke="#F5B841" stroke-width="1.25" stroke-linecap="round"/>
+<line x1="46.8" y1="48.95" x2="49.29" y2="42.73" stroke="#F5B841" stroke-width="1.25" stroke-linecap="round"/>
+<line x1="46.8" y1="52.65" x2="42.66" y2="47.38" stroke="#F5B841" stroke-width="1.25" stroke-linecap="round"/>
+<line x1="50" y1="54.5" x2="43.36" y2="55.45" stroke="#F5B841" stroke-width="1.25" stroke-linecap="round"/>
+<line x1="53.2" y1="52.65" x2="50.71" y2="58.87" stroke="#F5B841" stroke-width="1.25" stroke-linecap="round"/>
+</svg>

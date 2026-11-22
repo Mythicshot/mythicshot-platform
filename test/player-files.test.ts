@@ -1,5 +1,6 @@
 // The player's script and stylesheet, served by the app on both targets.
 import { describe, expect, it } from "vitest";
+import { MANROPE_PATH } from "../src/brand-assets.ts";
 import { makeDeps } from "#harness";
 import { PLAYER_CSS, PLAYER_CSS_ETAG, PLAYER_CSS_PATH, PLAYER_JS, PLAYER_JS_ETAG, PLAYER_JS_PATH } from "../src/player/assets.ts";
 import { send } from "./bundle.ts";
@@ -76,6 +77,9 @@ describe("the player files", () => {
   });
 
   it("the stylesheet loads nothing from anywhere", () => {
-    expect(PLAYER_CSS).not.toMatch(/url\s*\(|@import|@font-face/i);
+    expect(PLAYER_CSS).not.toMatch(/@import/i);
+    // The one font face and the one url() are the brand's text font, served by this address: nothing else is loaded.
+    expect(PLAYER_CSS.match(/@font-face/g)).toHaveLength(1);
+    expect([...PLAYER_CSS.matchAll(/url\(([^)]*)\)/g)].map((m) => m[1])).toEqual([`"${MANROPE_PATH}"`]);
   });
 });

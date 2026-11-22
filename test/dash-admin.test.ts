@@ -6,6 +6,7 @@
 // under Node in test/node-dash-admin.test.ts: the Workers runtime runs no code from a
 // string, so on this target the parser's rule is pinned by its text.
 import { describe, expect, it } from "vitest";
+import { MANROPE_FACE } from "../src/brand-css.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { ADMIN_HTML, ADMIN_JS, SIZE_JS } from "../src/dash/admin.ts";
 import { DASH_PAGES } from "../src/dash/routes.ts";
@@ -25,7 +26,7 @@ const APP = "https://app.example.com";
 const UNKNOWN = "https://evil.example.net";
 const NOT_FOUND = '{"error":"not_found"}';
 const BROWSER = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
-const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const SECURITY: Record<string, string> = {
   "content-security-policy": POLICY,
   "x-frame-options": "DENY",
@@ -377,7 +378,7 @@ describe("the Admin page and its script", () => {
       ["/dash/dash.js", true, ""],
       ["/dash/admin.js", true, ""],
     ]);
-    expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")])).toEqual([["stylesheet", "/dash/dash.css"]]);
+    expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")])).toEqual([["icon", "/favicon.ico"], ["icon", "/favicon.svg"], ["stylesheet", "/dash/dash.css"]]);
     expect(all.filter((e) => e.tagName === "style")).toEqual([]);
     for (const e of all) {
       for (const [name, value] of e.attrs) {
@@ -391,7 +392,7 @@ describe("the Admin page and its script", () => {
     expect(ADMIN_JS).not.toMatch(/setAttribute\("(?:style|on[a-z]+|src|srcdoc|href)"/);
     expect(ADMIN_JS).not.toMatch(/\.on[a-z]+\s*=/);
     expect([...ADMIN_JS.matchAll(/\.style\b[^;]*/g)].map((m) => m[0])).toEqual(['.style.width = width + "%"', '.style.width = share + "%"']);
-    expect(DASH_CSS).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
+    expect(DASH_CSS.replace(MANROPE_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
   });
 
   it("the script keeps to this site and to the admin routes, and a member's page asks for nothing of them", () => {
@@ -528,8 +529,9 @@ describe("the Admin page and its script", () => {
     const own = DASH_CSS.slice(DASH_CSS.indexOf("/* The Admin page. */"));
     expect(DASH_CSS.indexOf("/* The Admin page. */")).toBeGreaterThan(DASH_CSS.indexOf("/* The Tours page. */"));
     expect(own).toContain(".accounts .mini { min-width: 80px; }");
-    expect(own).toContain(".accounts .mini.over i { background: var(--warn-bar); }");
-    expect(own).toContain(".warn-box { background: var(--warn-bg); color: var(--warn-text);");
+    expect(own).toContain(".accounts .mini.over i { background: var(--caution-border); }");
+    // A caution: an orange box with an edge and a warning sign, shared by every page.
+    expect(DASH_CSS).toContain(".warn-box, .over-box { position: relative; padding: 10px 12px 10px 40px; border: 1px solid var(--caution-border); border-radius: var(--radius-md); background: var(--caution-tint); color: var(--caution-text);");
     const phone = [...own.matchAll(/@media \(max-width: 720px\) \{\n([\s\S]*?)\n\}/g)].map((m) => m[1]).join("\n");
     expect(phone).toContain(".accounts, .accounts tbody, .accounts tr, .accounts td { display: block; }");
     expect(phone).toContain(".accounts thead { display: none; }");

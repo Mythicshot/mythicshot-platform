@@ -13,7 +13,8 @@
 // history never show it. The code then lives in one variable of the link page's own
 // function and leaves it once: in the JSON body of POST /api/v1/signin/complete, when the
 // button is pressed. Nothing here writes to storage, to a cookie or to an address.
-import { BRAND_PLAIN } from "../brand.ts";
+import { PAGE_BASE_CSS, WORDMARK_CSS } from "../brand-css.ts";
+import { BRAND_PLAIN, FAVICON_LINKS } from "../brand.ts";
 import { escapeHtml, type InviteContact } from "./invite.ts";
 
 export const SIGNIN_HTML = `<!doctype html>
@@ -24,6 +25,7 @@ export const SIGNIN_HTML = `<!doctype html>
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
 <title>Sign in</title>
+${FAVICON_LINKS}
 <link rel="stylesheet" href="/signin/signin.css">
 <script src="/signin/signin.js" defer></script>
 </head>
@@ -64,6 +66,7 @@ export const LINK_HTML = `<!doctype html>
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
 <title>Finish signing in</title>
+${FAVICON_LINKS}
 <link rel="stylesheet" href="/signin/signin.css">
 <script src="/signin/signin.js" defer></script>
 </head>
@@ -90,42 +93,13 @@ export const LINK_HTML = `<!doctype html>
 </html>
 `;
 
-export const SIGNIN_CSS = `:root {
-  color-scheme: light dark;
-  --bg: #f3f1ec;
-  --card: #fcfbf8;
-  --text: #2a2926;
-  --muted: #66625b;
-  --line: #e2ded5;
-  --field: #ffffff;
-  --accent: #3d6b5f;
-  --accent-text: #ffffff;
-  --accent-soft: rgba(61, 107, 95, 0.28);
-  --ok-bg: #e3efe8;
-  --ok-text: #2b5a47;
-  --warn: #a8620a;
-  --error: #a33a2c;
-  --shadow: 0 1px 2px rgba(40, 36, 28, 0.05), 0 8px 28px rgba(40, 36, 28, 0.07);
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #181a1c;
-    --card: #212427;
-    --text: #e6e3dc;
-    --muted: #a39f97;
-    --line: #353a3e;
-    --field: #1a1c1f;
-    --accent: #8dc1af;
-    --accent-text: #13221d;
-    --accent-soft: rgba(141, 193, 175, 0.3);
-    --ok-bg: #1d3128;
-    --ok-text: #a8d7c2;
-    --warn: #e6a855;
-    --error: #f0a093;
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 30px rgba(0, 0, 0, 0.25);
-  }
-}
-*, *::before, *::after { box-sizing: border-box; }
+/**
+ * The sign-in card's look, shared with the gate pages viewers of a restricted tour or item see
+ * (src/view-page.ts): the brand's tokens and Manrope, a card of 12px corners, fields and
+ * buttons 44px tall. The name at the top of those gate pages stands alone, without the mark,
+ * so it is set in Manrope here; only SIGNIN_CSS adds the wordmark style beside the mark.
+ */
+export const SIGNIN_CARD_CSS = `${PAGE_BASE_CSS}*, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
 body {
@@ -135,76 +109,80 @@ body {
   align-items: center;
   justify-content: center;
   padding: 32px 16px;
-  background: var(--bg);
+  background: var(--ground);
   color: var(--text);
-  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font: 16px/26px var(--font-sans);
 }
+::selection { background: var(--selection); color: var(--text); }
 .card {
   width: 100%;
   max-width: 440px;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  box-shadow: var(--shadow);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-raised);
   padding: 28px 28px 24px;
   overflow-wrap: anywhere;
 }
-.brand { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; font-size: 0.875rem; font-weight: 650; letter-spacing: 0.02em; color: var(--muted); }
+.brand { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; font-size: 15px; line-height: 22px; font-weight: 700; color: var(--text); }
 .brand a { display: inline-flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; }
+.brand a:hover { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 4px; }
 .brand img { display: block; flex: none; }
-h1 { font-size: 1.375rem; line-height: 1.3; font-weight: 650; margin: 0 0 8px; letter-spacing: -0.01em; }
+h1 { font-size: 24px; line-height: 32px; font-weight: 700; margin: 0 0 8px; }
 h1:focus, h2:focus { outline: none; }
-.lead { margin: 0 0 22px; color: var(--muted); }
+.lead { margin: 0 0 24px; color: var(--text-muted); }
 .address { color: var(--text); font-weight: 600; }
 .address.invited { font-weight: 700; }
 .field { margin-bottom: 8px; }
-label { display: block; font-size: 0.9rem; font-weight: 600; margin: 0 0 6px; }
+label { display: block; font-size: 13px; line-height: 18px; font-weight: 600; margin: 0 0 4px; }
 input[type="email"], input[type="text"] {
   width: 100%;
-  min-height: 44px;
+  min-height: var(--control-roomy);
   padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--field);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
   color: var(--text);
   font: inherit;
 }
-input[type="email"]:focus-visible, input[type="text"]:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-input[aria-invalid="true"] { border-color: var(--error); }
-.hint { margin: 6px 0 4px; color: var(--muted); font-size: 0.9rem; }
-.message { min-height: 2.9em; margin: 0 0 8px; color: var(--error); font-size: 0.9rem; line-height: 1.45; }
+input::placeholder { color: var(--text-muted); opacity: 1; }
+input[aria-invalid="true"] { border-color: var(--danger-border); box-shadow: inset 0 0 0 1px var(--danger-border); }
+.hint { margin: 6px 0 4px; color: var(--text-muted); font-size: 14px; line-height: 20px; }
+.message { min-height: 2.9em; margin: 0 0 8px; color: var(--danger-text); font-size: 14px; line-height: 20px; }
 noscript .message { min-height: 0; }
 button {
-  min-height: 44px;
+  min-height: var(--control-roomy);
   padding: 10px 18px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   font: inherit;
+  font-size: 15px;
   font-weight: 600;
+  line-height: 22px;
   cursor: pointer;
   border: 1px solid transparent;
-  transition: background-color 0.15s ease, opacity 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
-button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
-button.primary { background: var(--accent); color: var(--accent-text); }
-button.primary:hover:not(:disabled) { opacity: 0.9; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+button.primary { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+button.primary:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
 button.wide { width: 100%; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 button[aria-busy="true"] { cursor: progress; }
-a { color: var(--accent); text-underline-offset: 2px; }
-a:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; border-radius: 4px; }
-.small { margin: 18px 0 0; color: var(--muted); font-size: 0.9rem; }
+a { color: var(--accent-text); text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+a:focus-visible { border-radius: var(--radius-sm); }
+.small { margin: 18px 0 0; color: var(--text-muted); font-size: 14px; line-height: 20px; }
 @media (prefers-reduced-motion: reduce) {
   button { transition: none; }
 }
 @media (max-width: 480px) {
   body { align-items: flex-start; padding-top: 24px; }
-  .card { padding: 22px 18px 20px; border-radius: 14px; }
+  .card { padding: 24px 18px 20px; }
 }
 `;
+
+/** The sign-in pages' stylesheet: the card, then the wordmark's rules for the name beside the mark. */
+export const SIGNIN_CSS = `${SIGNIN_CARD_CSS}${WORDMARK_CSS}`;
 
 export const SIGNIN_JS = `(function () {
   "use strict";

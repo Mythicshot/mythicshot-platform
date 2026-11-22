@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { MARK_PNG } from "../src/dash/mark.ts";
+import { MARK_SMALL_SVG } from "../src/brand-assets.ts";
 import { HOME_URL_UNUSABLE } from "../src/https-address.ts";
 import { NODE_SETTINGS, configFromEnv } from "../src/node/config.ts";
 import { BRAND_PLAIN } from "../src/brand.ts";
@@ -67,10 +67,10 @@ describe("HOME_URL on Node", () => {
 });
 
 describe("the mark's file", () => {
-  it("is src/dash/mark.png in the repository, and the module carries exactly its bytes", () => {
-    const file = readFileSync(fileURLToPath(new URL("../src/dash/mark.png", import.meta.url)));
+  it("is the brand's small mark, src/brand-files/mythicshot-mark-small.svg, and the module carries exactly its text", () => {
+    const file = readFileSync(fileURLToPath(new URL("../src/brand-files/mythicshot-mark-small.svg", import.meta.url)));
     expect(file.length).toBeGreaterThan(0);
-    expect(Buffer.from(MARK_PNG).equals(file)).toBe(true);
+    expect(Buffer.from(MARK_SMALL_SVG, "utf8").equals(file)).toBe(true);
   });
 });
 

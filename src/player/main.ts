@@ -202,7 +202,8 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
     // Compact follows Light's colours, as the recorder's preview does.
     const scheme = style() === "dark" ? "dark" : "light";
     root.dataset.scheme = scheme;
-    // "auto" is a calm tint of the page colour toward the accent.
+    // "auto" is a calm tint of the page colour toward the accent. It is the tour's own look,
+    // so it keeps 0.1.53's two page colours and does not follow the brand.
     css.setProperty("--backdrop", backdrop ?? mix(scheme === "light" ? "#eeede8" : "#131518", accent, 0.06));
   }
   applyScheme();
