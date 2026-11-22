@@ -12,6 +12,7 @@ import type { Hosts } from "../src/hosts.ts";
 import { MAX_SERVED_PARTS, PART_BYTES, RESTRICTED_EXTRA_CALLS, RESTRICTED_SERVED_PARTS, SERVE_LOOKUP_CALLS } from "../src/limits.ts";
 import { RESTRICTED_MAX_BYTES } from "../src/media-access.ts";
 import { MEDIA_DENIED_HTML, MEDIA_GATE_HTML, MEDIA_LINK_HTML, MEDIA_SIGNOUT_HTML, MEDIA_VIEW_JS } from "../src/media-view-page.ts";
+import { SHARE_CSS, SHARE_CSS_PATH } from "../src/media-assets.ts";
 import { MEDIA_VIEWER_PAGE_HEADERS, RESTRICTED_FILE_CSP, RESTRICTED_SHARE_PAGE_HEADERS } from "../src/media-page.ts";
 import { mediaViewerMail } from "../src/mail.ts";
 import type { Deps } from "../src/ports.ts";
@@ -19,7 +20,7 @@ import { LIMITS_VIEWER } from "../src/rate.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { VIEW_JS } from "../src/view-page.ts";
 import { MEDIA_VIEWER_COOKIE, MEDIA_VIEWER_SAYS, VIEWER_CODE_MS, VIEWER_COOKIE } from "../src/viewers.ts";
-import { gif, mp4, png, send, type Call } from "./bundle.ts";
+import { gif, mp4, png, send, sha256Hex, type Call } from "./bundle.ts";
 import { FROZEN_MODES, frozenAnswer, frozenRequests, headersFor, seedFrozen, type FrozenAnswer } from "./items-frozen.ts";
 import FROZEN from "./fixtures/public-items-0.1.46.json" with { type: "json" };
 
@@ -587,14 +588,24 @@ describe("public items", () => {
     // say `no-cache`; every other byte, header and call is 0.1.46's. The pages' stylesheet and
     // script keep their hour, and the 404s and 416s their `no-store`.
     const OLD_VALUES = ["public, max-age=60", "public, max-age=3600"];
+    // And 0.1.54's: the pages' policy gained font-src 'self' after style-src (the brand's font is
+    // served by the site), and the pages' stylesheet is the brand's, a different text with its own ETag.
+    const SHARE_CSS_ETAG = `"${(await sha256Hex(new TextEncoder().encode(SHARE_CSS))).slice(0, 32)}"`;
+    const fonted = (old: FrozenAnswer): FrozenAnswer => {
+      const page = old.headers.some(([k, v]) => k === "content-security-policy" && v.includes("style-src 'self'; ") && !v.includes("font-src"));
+      if (!page) return old;
+      return { ...old, headers: old.headers.map(([k, v]) => [k, k === "content-security-policy" ? v.replace("style-src 'self'; ", "style-src 'self'; font-src 'self'; ") : v] as [string, string]) };
+    };
     const permitted = (r: { path: string }, old: FrozenAnswer): FrozenAnswer => {
+      if (r.path === SHARE_CSS_PATH) return { ...old, body: SHARE_CSS, headers: old.headers.map(([k, v]) => [k, k === "etag" ? SHARE_CSS_ETAG : v] as [string, string]) };
       const cc = old.headers.find(([k]) => k === "cache-control")?.[1];
-      if (!/^\/[ir]\//.test(r.path) || cc === undefined || !OLD_VALUES.includes(cc)) return old;
-      return { ...old, headers: old.headers.map(([k, v]) => [k, k === "cache-control" ? "no-cache" : v] as [string, string]) };
+      if (!/^\/[ir]\//.test(r.path) || cc === undefined || !OLD_VALUES.includes(cc)) return fonted(old);
+      return fonted({ ...old, headers: old.headers.map(([k, v]) => [k, k === "cache-control" ? "no-cache" : v] as [string, string]) });
     };
     for (const mode of FROZEN_MODES) {
       const changed = frozenRequests().filter((r, i) => permitted(r, frozen.modes[mode.name][i]) !== frozen.modes[mode.name][i]);
-      expect(changed.length, mode.name).toBe(59);
+      // 59 answers with the cache rule, and from 0.1.54 the pages' policy (the not-found and other-kind pages too) and the stylesheet.
+      expect(changed.length, mode.name).toBe(79);
     }
     for (const mode of FROZEN_MODES) {
       const { deps } = await makeDeps({ hosts: mode.hosts, ...(mode.siteHost ? { siteHost: mode.siteHost } : {}) });

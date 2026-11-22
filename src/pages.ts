@@ -20,7 +20,7 @@ import { LINK_HTML, SIGNIN_CSS, SIGNIN_JS, signinHtml } from "./signin/page.ts";
  */
 export const ACCOUNT_PAGE_HEADERS: Readonly<Record<string, string>> = {
   "content-security-policy":
-    "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   "x-frame-options": "DENY",
   "referrer-policy": "no-referrer",
   "cache-control": "no-store",
@@ -35,7 +35,7 @@ const HTML = "text/html; charset=utf-8";
  * sign-in page carries the invite line of the INVITE_CONTACT setting, made here from the
  * configuration when the page is asked for (a value that cannot be used gives the page
  * without a contact). The three pages' brand links to the site's home page when HOME_URL names one (src/brand.ts);
- * the mark they show is the dashboard's file, /dash/mark.png.
+ * the mark they show is the dashboard's file, /dash/mark.svg.
  */
 export function pageRoutesForAccounts(app: Hono, deps: Deps): void {
   const serve = (body: string, type: string) => () => new Response(body, { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": type } });

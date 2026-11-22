@@ -5,6 +5,7 @@
 // and of the sentences proposed beside them, and what the scripts' text may and may not
 // do. What the scripts do when they run is tested under Node in test/node-dash-media.test.ts.
 import { describe, expect, it } from "vitest";
+import { CINZEL_PATH, MANROPE_PATH } from "../src/brand-assets.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { DASH_PAGES } from "../src/dash/routes.ts";
 import { GIFS_HTML, GIFS_JS, IMAGES_HTML, IMAGES_JS } from "../src/dash/media.ts";
@@ -25,7 +26,7 @@ const IMG = "https://img.example.com";
 const UNKNOWN = "https://evil.example.net";
 const NOT_FOUND = '{"error":"not_found"}';
 const BROWSER = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
-const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const SECURITY: Record<string, string> = {
   "content-security-policy": POLICY,
   "x-frame-options": "DENY",
@@ -387,7 +388,9 @@ describe("the Images and GIFs pages", () => {
     expect(DASH_CSS).toContain("/* The Images and GIFs pages. */");
     // The play mark is drawn by the stylesheet, on a GIF's box only.
     expect(DASH_CSS).toMatch(/\.thumb\.play::after \{[^}]*content: "";/);
-    expect(DASH_CSS).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
+    expect(DASH_CSS).not.toMatch(/@import|https?:|\/\/|expression\(/i);
+    // The only url()s are the brand's two fonts, served by this address.
+    expect([...DASH_CSS.matchAll(/url\(([^)]*)\)/g)].map((m) => m[1])).toEqual([`"${MANROPE_PATH}"`, `"${CINZEL_PATH}"`]);
   });
 
   it("keep to this site: every request through Dash.api, the routes they may call, and leaving only for /signin", () => {

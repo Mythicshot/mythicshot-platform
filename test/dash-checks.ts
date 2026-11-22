@@ -33,11 +33,11 @@ export function expectPageShape(html: string, what: string, allowText: readonly 
 }
 
 /** The brand mark's attributes, exactly, in order (src/brand.ts). */
-const MARK_ATTRS: readonly (readonly [string, string])[] = [["src", "/dash/mark.png"], ["alt", ""], ["width", "24"], ["height", "24"]];
+const MARK_ATTRS: readonly (readonly [string, string])[] = [["src", "/dash/mark.svg"], ["alt", ""], ["width", "24"], ["height", "24"]];
 
 /**
  * Whether `e` is the brand's mark (src/brand.ts), the one image a page holds by itself: an
- * img whose attributes are exactly src="/dash/mark.png", alt="", width="24" and height="24",
+ * img whose attributes are exactly src="/dash/mark.svg", alt="", width="24" and height="24",
  * inside the element of class "brand" or inside that element's link, and the only such
  * image in its document. Anything more (another attribute such as onerror, another parent,
  * a second mark) is not the mark. The checks that nothing a page shows became markup skip
@@ -51,7 +51,7 @@ export function isBrandMark(e: FakeElement): boolean {
   if (p === null || !(p.className === "brand" || (p.tagName === "a" && p.parent?.className === "brand"))) return false;
   let root: FakeElement = e;
   while (root.parent !== null) root = root.parent;
-  return root.all().filter((x) => x.tagName === "img" && x.getAttribute("src") === "/dash/mark.png").length === 1;
+  return root.all().filter((x) => x.tagName === "img" && x.getAttribute("src") === "/dash/mark.svg").length === 1;
 }
 
 /**

@@ -5,6 +5,7 @@
 // may not do. What the scripts do when they run is tested under Node in
 // test/node-dash-pages.test.ts, against a stand-in document.
 import { describe, expect, it } from "vitest";
+import { CINZEL_FACE, MANROPE_FACE } from "../src/brand-css.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { DASH_LINK_PAGES, DASH_PAGES } from "../src/dash/routes.ts";
 import { DASH_JS } from "../src/dash/script.ts";
@@ -25,7 +26,7 @@ const APP = "https://app.example.com";
 const UNKNOWN = "https://evil.example.net";
 const NOT_FOUND = '{"error":"not_found"}';
 const BROWSER = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
-const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const SECURITY: Record<string, string> = {
   "content-security-policy": POLICY,
   "x-frame-options": "DENY",
@@ -440,7 +441,7 @@ describe("the dashboard's pages and files", () => {
         ["/dash/dash.js", true, ""],
         [s.script, true, ""],
       ]);
-      expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")]), s.path).toEqual([["stylesheet", "/dash/dash.css"]]);
+      expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")]), s.path).toEqual([["icon", "/favicon.ico"], ["icon", "/favicon.svg"], ["stylesheet", "/dash/dash.css"]]);
       expect(all.filter((e) => e.tagName === "style"), s.path).toEqual([]);
       for (const e of all) {
         for (const [name, value] of e.attrs) {
@@ -452,7 +453,7 @@ describe("the dashboard's pages and files", () => {
       expect(all.some((e) => e.tagName === "meta" && e.getAttribute("name") === "referrer" && e.getAttribute("content") === "no-referrer"), s.path).toBe(true);
       expect(all.filter((e) => e.tagName === "form"), s.path).toEqual([]);
     }
-    expect(DASH_CSS).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
+    expect(DASH_CSS.replace(MANROPE_FACE, "").replace(CINZEL_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
     // The scripts set no style attribute and add no handler attribute. The one style a page's
     // script may touch is a bar's width through the CSSOM, `.style.width = `, which the policy
     // allows (the account page sizes its bar the same way); only the Storage and Admin pages

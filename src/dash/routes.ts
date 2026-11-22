@@ -1,7 +1,7 @@
 // The dashboard's routes on the app address: GET / (which sends a person on), each page in
 // DASH_PAGES with its own script, the shared stylesheet and script, the terms screen
 // (TERMS_PAGE, also the read-only terms) with its own script, and the product's mark
-// (/dash/mark.png, which the sign-in and invite pages show too). Every page and file
+// (/dash/mark.svg, which the sign-in and invite pages show too). Every page and file
 // answers its fixed text or bytes with the sign-in pages' headers (ACCOUNT_PAGE_HEADERS): no
 // database or storage call, no credential read, nothing about anyone. A page's brand links
 // to the site's home page when the HOME_URL setting names one (withHome, src/brand.ts).
@@ -12,12 +12,12 @@
 // browser on to /signin. The answer depends only on the request's own cookie, never on
 // any account, so it tells nobody anything, and it costs no database call.
 import type { Hono } from "hono";
+import { MARK_SMALL_SVG } from "../brand-assets.ts";
 import { MARK_PATH, withHome } from "../brand.ts";
 import { ACCOUNT_PAGE_HEADERS } from "../pages.ts";
 import type { Config } from "../ports.ts";
 import { sessionCookiePresent } from "../sessions.ts";
 import { DASH_JS } from "./script.ts";
-import { MARK_PNG } from "./mark.ts";
 import { DASH_CSS } from "./style.ts";
 import { TOURS_HTML, TOURS_JS } from "./tours.ts";
 import { GIFS_HTML, GIFS_JS, IMAGES_HTML, IMAGES_JS } from "./media.ts";
@@ -64,7 +64,7 @@ export const TERMS_PAGE: DashPage = { path: "/terms", html: TERMS_HTML, script: 
 const HTML = "text/html; charset=utf-8";
 const CSS = "text/css; charset=utf-8";
 const JS = "text/javascript; charset=utf-8";
-const PNG = "image/png";
+const SVG = "image/svg+xml";
 
 /** The answer GET / gives: a redirect that no cache keeps, with the pages' own headers. */
 function sendTo(path: "/tours" | "/signin"): Response {
@@ -86,6 +86,6 @@ export function dashRoutes(app: Hono, config: Pick<Config, "homeUrl">): void {
   // The terms screen: its brand as every dashboard page's, through withHome.
   app.get(TERMS_PAGE.path, page(TERMS_PAGE.html));
   app.get(TERMS_PAGE.script.path, serve(TERMS_PAGE.script.body, JS));
-  // Each answer gets its own copy of the bytes, so no answer can use up another's.
-  app.get(MARK_PATH, () => new Response(MARK_PNG.slice(), { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": PNG } }));
+  // The brand's small mark, the same file as the tab icon, with the pages' own headers.
+  app.get(MARK_PATH, () => new Response(MARK_SMALL_SVG, { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": SVG } }));
 }

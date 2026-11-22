@@ -145,7 +145,7 @@ describe("answers", () => {
 
   it("the same answers at another moment are identical: only the date header differs", () => {
     const c = compareAnswers(site(), site({ date: "Fri, 20 Nov 2026 11:11:11 GMT" }));
-    expect(c).toEqual({ identical: 6, allowed: 0, playerNames: 0, itemCache: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
+    expect(c).toEqual({ identical: 6, allowed: 0, playerNames: 0, itemCache: 0, fontSrc: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
   });
 
   it("a newer version in the workspace answer is the one allowed body difference, and content-length follows it", () => {
@@ -216,7 +216,7 @@ describe("answers that only add fields", () => {
 
   it("an added top-level key is allowed, counted apart and named by its path, and content-length follows it", () => {
     const c = compare(OLD, { ...OLD, images: 3 });
-    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 0, itemCache: 0, addedFields: 1, addedFieldsByRoute: { "GET /api/v1/usage": ["images"] }, added: [], problems: [] });
+    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 0, itemCache: 0, fontSrc: 0, addedFields: 1, addedFieldsByRoute: { "GET /api/v1/usage": ["images"] }, added: [], problems: [] });
   });
 
   it("an added nested key is allowed, named by its full path", () => {
@@ -392,7 +392,7 @@ describe("tour pages that differ only in the player's file names", () => {
 
   it("a page whose script name (or both names) changed is allowed, counted apart, its etag let follow, and no name is printed", () => {
     const c = compareAnswers(page(), page({ js: JS_B }), NEW);
-    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 1, itemCache: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
+    expect(c).toEqual({ identical: 0, allowed: 0, playerNames: 1, itemCache: 0, fontSrc: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] });
     expect(page()[0].answer.headers.etag).not.toBe(page({ js: JS_B })[0].answer.headers.etag);
     expect(compareAnswers(page(), page({ js: JS_B, css: CSS_B }), NEW).playerNames).toBe(1);
     expect(compareAnswers(page(), page({ css: CSS_B }), NEW).playerNames).toBe(1);

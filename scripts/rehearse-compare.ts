@@ -42,6 +42,14 @@ export type Recorded = { key: string; route: string; answer: Answer };
  *   exactly `no-cache` (ITEM_CACHE_AFTER), with every other header, the status and every byte
  *   the same (itemCacheOnly). 0.1.47 stopped letting caches keep an item's answers, since an
  *   item's address stays the same when it is restricted. Such answers are counted apart.
+ * - from the old build to the new one only (never on the way back): in an HTML answer (a tour
+ *   page, a shared item's page, a gate or a not-found page, by its content type), the
+ *   `content-security-policy` header, when the new value is exactly the old one with
+ *   `font-src 'self'; ` written right after `style-src 'self'; ` and the old one has no
+ *   font-src (withFontSrcOf). 0.1.54 serves the brand's fonts from the site itself, so every
+ *   page's policy gained that one directive and nothing else. Only the header is swapped; the
+ *   status, every other header and every byte must still be the same, or meet the other
+ *   allowances as they are. Such answers are counted apart.
  * The API description's ETags would be a further entry, but the rehearsal records no
  * description answer: its text changes with every version by design.
  */
@@ -66,6 +74,10 @@ export const ITEM_ROUTES: readonly string[] = [
   "HEAD /r/:name/download",
   "HEAD /r/:name/preview",
 ];
+/** The one directive 0.1.54 added to every page's policy, and where: right after this one. */
+export const FONT_SRC_AFTER = "style-src 'self'; ";
+export const FONT_SRC = "font-src 'self'; ";
+
 /** What 0.1.46 and earlier sent an item's answers with (a page, then a file or preview), and what 0.1.47 sends. */
 export const ITEM_CACHE_BEFORE: readonly string[] = ["public, max-age=60", "public, max-age=3600"];
 export const ITEM_CACHE_AFTER = "no-cache";
@@ -89,6 +101,11 @@ export type AnswerComparison = {
   playerNames: number;
   /** Shared item answers that differ only in their cache-control, as itemCacheOnly allows, when the comparison allows it. */
   itemCache: number;
+  /**
+   * HTML answers whose policy only gained font-src 'self' (withFontSrcOf), when the comparison
+   * allows it: counted here whether the rest was then identical or met another allowance.
+   */
+  fontSrc: number;
   /**
    * Answers whose newer JSON body only adds object keys (see onlyAddedFields), when the
    * comparison allows it: the count, and per route the added field paths, each once.
@@ -244,7 +261,10 @@ export function playerFileProblems(name: string, a: Answer): string[] {
  */
 export function identityProblems(c: AnswerComparison): string[] {
   const out = [...c.problems, ...c.added.map((k) => `${k}: answered by one side only`)];
-  const allowed = c.allowed + c.playerNames + c.itemCache + c.addedFields;
+  // An answer let through by the font-src swap alone is counted only in fontSrc; one that also
+  // met another allowance is counted in both, and once here.
+  const fontOnly = c.fontSrc - Math.min(c.fontSrc, c.playerNames + c.itemCache);
+  const allowed = c.allowed + c.playerNames + c.itemCache + c.addedFields + fontOnly;
   if (c.allowed > 0) out.push(`${c.allowed} answer(s) differ in the version`);
   if (allowed - c.allowed > 0) out.push(`${allowed - c.allowed} answer(s) differ in a way allowed only for a new build`);
   return out;
@@ -372,6 +392,23 @@ export function itemCacheOnly(route: string, before: Answer, after: Answer): boo
   return answerProblems({ ...before, headers: { ...before.headers, "cache-control": ITEM_CACHE_AFTER } }, after).length === 0;
 }
 
+/**
+ * The older answer with its policy replaced by the newer one, or null when the swap does not
+ * apply: both answers HTML by their content type, the older policy without any font-src, and
+ * the newer policy exactly the older one with FONT_SRC written once, right after its one
+ * FONT_SRC_AFTER. Nothing else of the answer is touched, so whatever else differs still
+ * differs.
+ */
+export function withFontSrcOf(before: Answer, after: Answer): Answer | null {
+  if (!HTML_TYPE.test(before.headers["content-type"] ?? "") || !HTML_TYPE.test(after.headers["content-type"] ?? "")) return null;
+  const was = before.headers["content-security-policy"];
+  const now = after.headers["content-security-policy"];
+  if (was === undefined || now === undefined || /font-src/i.test(was)) return null;
+  if (was.split(FONT_SRC_AFTER).length !== 2) return null;
+  if (now !== was.replace(FONT_SRC_AFTER, FONT_SRC_AFTER + FONT_SRC)) return null;
+  return { ...before, headers: { ...before.headers, "content-security-policy": now } };
+}
+
 /** Whether `a` is the plain not-found answer every build gives a route it does not have. */
 export function isPlainNotFound(a: Answer): boolean {
   return a.status === 404 && decoder.decode(a.body) === NOT_FOUND_BODY;
@@ -391,8 +428,8 @@ export function isPlainNotFound(a: Answer): boolean {
  * differs only in the player's file names is let through (playerNamesOnly) and counted
  * apart. Without it, such a page is a difference like any other.
  */
-export function compareAnswers(before: Recorded[], after: Recorded[], opts: { allowAddedFields?: boolean; allowPlayerNames?: boolean; allowItemCache?: boolean } = {}): AnswerComparison {
-  const result: AnswerComparison = { identical: 0, allowed: 0, playerNames: 0, itemCache: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] };
+export function compareAnswers(before: Recorded[], after: Recorded[], opts: { allowAddedFields?: boolean; allowPlayerNames?: boolean; allowItemCache?: boolean; allowFontSrc?: boolean } = {}): AnswerComparison {
+  const result: AnswerComparison = { identical: 0, allowed: 0, playerNames: 0, itemCache: 0, fontSrc: 0, addedFields: 0, addedFieldsByRoute: {}, added: [], problems: [] };
   const later = new Map(after.map((r) => [r.key, r]));
   const earlier = new Set(before.map((r) => r.key));
   for (const b of before) {
@@ -414,20 +451,30 @@ export function compareAnswers(before: Recorded[], after: Recorded[], opts: { al
       result.identical++;
       continue;
     }
-    const swapped = withVersionOf(b.route, b.answer, a.answer);
+    // The policy's added font-src, when allowed, is swapped in first; every check below then
+    // looks at the rest of the answer as it is.
+    const fonted = opts.allowFontSrc === true ? withFontSrcOf(b.answer, a.answer) : null;
+    const base = fonted ?? b.answer;
+    if (fonted !== null && answerProblems(base, a.answer).length === 0) {
+      result.fontSrc++;
+      continue;
+    }
+    const swapped = withVersionOf(b.route, base, a.answer);
     if (swapped !== null && answerProblems(swapped, a.answer).length === 0) {
       result.allowed++;
       continue;
     }
-    if (opts.allowPlayerNames === true && playerNamesOnly(b.route, b.answer, a.answer)) {
+    if (opts.allowPlayerNames === true && playerNamesOnly(b.route, base, a.answer)) {
       result.playerNames++;
+      if (fonted !== null) result.fontSrc++;
       continue;
     }
-    if (opts.allowItemCache === true && itemCacheOnly(b.route, b.answer, a.answer)) {
+    if (opts.allowItemCache === true && itemCacheOnly(b.route, base, a.answer)) {
       result.itemCache++;
+      if (fonted !== null) result.fontSrc++;
       continue;
     }
-    const only = opts.allowAddedFields === true ? onlyAddedFields(swapped ?? b.answer, a.answer) : null;
+    const only = opts.allowAddedFields === true ? onlyAddedFields(swapped ?? base, a.answer) : null;
     if (only !== null && only.ok) {
       result.addedFields++;
       const seen = new Set([...(result.addedFieldsByRoute[b.route] ?? []), ...only.paths]);

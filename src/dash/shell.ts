@@ -40,7 +40,7 @@
 // hidden; only the shared script shows it, and only when the session says the person is
 // an admin. Nothing about anyone is in the document: the username, too, is filled in by
 // the shared script through textContent.
-import { BRAND_PLAIN } from "../brand.ts";
+import { BRAND_PLAIN, FAVICON_LINKS } from "../brand.ts";
 import { escapeHtml } from "../signin/invite.ts";
 
 /** The tabs of this version, in order: what each is called and where it leads. */
@@ -81,6 +81,7 @@ export function dashHtml(opts: { title: string; active: DashTab; main: string; s
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
 <title>${escapeHtml(opts.title)}</title>
+${FAVICON_LINKS}
 <link rel="stylesheet" href="/dash/dash.css">
 <script src="/dash/dash.js" defer></script>
 <script src="${opts.script}" defer></script>

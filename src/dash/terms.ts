@@ -25,7 +25,7 @@
 // Where a person goes after "I agree": the dashboard page that sent them here, named in
 // ?next= by the shared script (src/dash/script.ts), only when it is one of the dashboard's own
 // tabs (DASH_TABS); anything else is the Tours page.
-import { BRAND_PLAIN } from "../brand.ts";
+import { BRAND_PLAIN, FAVICON_LINKS } from "../brand.ts";
 import { STRICT_HTTPS_SHAPE } from "../https-address.ts";
 import { DASH_TABS } from "./shell.ts";
 
@@ -73,6 +73,7 @@ export const TERMS_HTML = `<!doctype html>
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
 <title>${TERMS_SAYS.documentTitle}</title>
+${FAVICON_LINKS}
 <link rel="stylesheet" href="/dash/dash.css">
 <script src="/dash/terms.js" defer></script>
 </head>

@@ -3,12 +3,11 @@
 // 0.1.53 did (the accent and its default, the colour on the accent, the card style deciding the
 // scheme, an explicit backdrop), and the stage and card rules are 0.1.53's to the byte.
 import { describe, expect, it } from "vitest";
-import { createHash } from "node:crypto";
 import { makeDeps, seedAccount } from "#harness";
 import { GROUND } from "../src/brand-tokens.ts";
 import { pageHtml, pageTour, type PageData } from "../src/page.ts";
 import { PLAYER_CSS, PLAYER_JS } from "../src/player/assets.ts";
-import { fixtures, send, uploadTour, clone } from "./bundle.ts";
+import { clone, fixtures, send, sha256Hex, uploadTour } from "./bundle.ts";
 import { isStageLine } from "./brand-tokens.test.ts";
 
 /** Themes as authors set them, the default accent among them. */
@@ -48,9 +47,9 @@ describe("a tour's theme", () => {
 
   it("the player applies it as 0.1.53 did: the accent with its default, the colour on it, the scheme from the card style, an explicit backdrop", () => {
     for (const line of [
-      'const accent = TourCore.color(theme.accent, "#5dcaa5");',
+      'const accent = import_tour_core.default.color(theme.accent, "#5dcaa5");',
       'const cardStyle = pick(theme.card_style, ["dark", "light", "compact", "auto"], "dark");',
-      'const backdrop = theme.backdrop === "auto" ? null : TourCore.color(theme.backdrop, null);',
+      'const backdrop = theme.backdrop === "auto" ? null : import_tour_core.default.color(theme.backdrop, null);',
       'css.setProperty("--accent", accent);',
       'css.setProperty("--on-accent", onAccent(accent));',
       'css.setProperty("--accent-soft", "rgba(" + rgb(accent).join(", ") + ", .2)");',
@@ -58,15 +57,15 @@ describe("a tour's theme", () => {
       'const scheme = style() === "dark" ? "dark" : "light";',
     ]) expect(PLAYER_JS, line).toContain(line);
     // Only the "auto" backdrop, which is the player's page colour, moves: to the brand's ground of the scheme.
-    expect(PLAYER_JS).toContain(`css.setProperty("--backdrop", backdrop != null ? backdrop : mix(scheme === "light" ? GROUND.light : GROUND.dark, accent, 0.06));`);
+    expect(PLAYER_JS).toContain(`css.setProperty("--backdrop", backdrop ?? mix(scheme === "light" ? GROUND.light : GROUND.dark, accent, 0.06));`);
     expect(PLAYER_JS).toContain(`light: "${GROUND.light}"`);
     expect(PLAYER_JS).toContain(`dark: "${GROUND.dark}"`);
   });
 
-  it("the stage and the cards, the tour's own look, are 0.1.53's rules to the byte, and keep 0.1.53's font", () => {
+  it("the stage and the cards, the tour's own look, are 0.1.53's rules to the byte, and keep 0.1.53's font", async () => {
     const lines = PLAYER_CSS.split("\n").filter(isStageLine);
     expect(lines).toHaveLength(73);
-    expect(createHash("sha256").update(lines.join("\n")).digest("hex")).toBe("6e0f41cc9dd202355d8e557aca5bc04de6c3e1553522ef35d1eb109cf90d0723");
+    expect(await sha256Hex(new TextEncoder().encode(lines.join("\n")))).toBe("6e0f41cc9dd202355d8e557aca5bc04de6c3e1553522ef35d1eb109cf90d0723");
     expect(PLAYER_CSS).toContain('\n.dp-stage { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }\n');
     // Inside the stage and the cards, focus keeps the tour's accent, as before.
     expect(PLAYER_CSS).toContain(".dp-stage :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }");

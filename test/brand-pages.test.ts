@@ -15,7 +15,7 @@ import { UNDOCUMENTED_ROUTES } from "../src/docs/openapi.ts";
 import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SHARE_CSS } from "../src/media-assets.ts";
-import { SHARE_NOT_FOUND_HTML, SHARE_PAGE_CSP } from "../src/media-page.ts";
+import { RESTRICTED_FILE_CSP, SHARE_FILE_CSP, SHARE_NOT_FOUND_HTML, SHARE_PAGE_CSP } from "../src/media-page.ts";
 import { MEDIA_DENIED_HTML, MEDIA_GATE_HTML, MEDIA_LINK_HTML, MEDIA_SIGNOUT_HTML } from "../src/media-view-page.ts";
 import { contentSecurityPolicy, NOT_FOUND_HTML } from "../src/page.ts";
 import { ACCOUNT_PAGE_HEADERS } from "../src/pages.ts";
@@ -33,6 +33,8 @@ const TOURS = "https://tours.example.com";
 const APP = "https://app.example.com";
 const IMG = "https://img.example.com";
 const UNKNOWN = "https://evil.example.net";
+/** Two byte arrays with the same bytes. */
+const same = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
 const NOT_FOUND = '{"error":"not_found"}';
 
 /** Every page family's policy, written out in full. Each is 0.1.53's with `font-src 'self'` after style-src, and nothing else changed. */
@@ -88,12 +90,9 @@ describe("the pages' policies", () => {
     expect(wizard.headers.get("content-security-policy")).toBe(POLICY.account);
   });
 
-  it("the policies of files that are never pages keep no font-src: pictures, files and previews stay sandboxed as before", async () => {
-    const { deps } = await makeDeps({ hosts: THREE });
-    for (const path of ["/i/aaaaaaaaaaaaaaaaaaaa.png", "/p/00000000000000000000000000000001.png"]) {
-      const r = await send(deps, "GET", path, { origin: path.startsWith("/i/") ? IMG : TOURS });
-      expect(r.headers.get("content-security-policy") ?? "", path).not.toContain("font-src");
-    }
+  it("the policies of files that are never pages keep no font-src: pictures, files and previews stay sandboxed as before", () => {
+    expect(SHARE_FILE_CSP).toBe("default-src 'none'; sandbox");
+    expect(RESTRICTED_FILE_CSP).toBe("default-src 'none'; sandbox; frame-ancestors 'none'");
   });
 });
 
@@ -106,7 +105,8 @@ describe("the fonts", () => {
       expect([...ttf.slice(0, 4)], what).toEqual([0, 1, 0, 0]);
       expect(licence.split("\n")[0], what).toBe(line);
       expect(licence, what).toContain("SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007");
-      expect(licence, what).not.toContain("Reserved Font Name");
+      // No Reserved Font Name is declared beside the copyright line, so the files may be served as they are, under their own names.
+      expect(licence.split("\n").slice(0, 3).join("\n"), what).not.toContain("Reserved Font Name");
     }
     expect(MANROPE_TTF().length).toBe(164_700);
     expect(CINZEL_TTF().length).toBe(125_468);
@@ -123,14 +123,14 @@ describe("the fonts", () => {
       const font = await send(deps, "GET", MANROPE_PATH, { origin });
       expect([font.status, font.calls, font.headers.get("set-cookie")], origin).toEqual([200, 0, null]);
       expect(Object.fromEntries(font.headers.entries()), origin).toEqual({ "content-type": "font/ttf", "cache-control": "public, max-age=31536000, immutable", etag: MANROPE_ETAG, "x-content-type-options": "nosniff" });
-      expect(Buffer.from(font.bytes).equals(Buffer.from(MANROPE_TTF())), origin).toBe(true);
+      expect(same(font.bytes, MANROPE_TTF()), origin).toBe(true);
       const licence = await send(deps, "GET", MANROPE_LICENCE_PATH, { origin });
       expect([licence.status, licence.text, licence.calls, licence.headers.get("content-type"), licence.headers.get("cache-control")], origin).toEqual([200, MANROPE_LICENCE, 0, "text/plain; charset=utf-8", "public, max-age=86400"]);
     }
     for (const [deps, origin] of [[three.deps, APP], [two.deps, APP], [one.deps, "http://localhost:3000"]] as const) {
       const font = await send(deps, "GET", CINZEL_PATH, { origin });
       expect([font.status, font.calls, font.headers.get("etag"), font.headers.get("content-type")], origin).toEqual([200, 0, CINZEL_ETAG, "font/ttf"]);
-      expect(Buffer.from(font.bytes).equals(Buffer.from(CINZEL_TTF())), origin).toBe(true);
+      expect(same(font.bytes, CINZEL_TTF()), origin).toBe(true);
       expect((await send(deps, "GET", CINZEL_LICENCE_PATH, { origin })).text, origin).toBe(CINZEL_LICENCE);
     }
     for (const [deps, origin] of [[three.deps, TOURS], [three.deps, IMG], [two.deps, TOURS]] as const) {
@@ -170,7 +170,7 @@ describe("the tab icon and the mark", () => {
       expect(Object.fromEntries(svg.headers.entries()), origin).toEqual({ "content-type": "image/svg+xml", "cache-control": "public, max-age=3600", "content-security-policy": "default-src 'none'; sandbox", "x-content-type-options": "nosniff" });
       const ico = await send(deps, "GET", FAVICON_ICO_PATH, { origin });
       expect([ico.status, ico.calls, ico.headers.get("content-type"), ico.headers.get("cache-control")], origin).toEqual([200, 0, "image/x-icon", "public, max-age=3600"]);
-      expect(Buffer.from(ico.bytes).equals(Buffer.from(FAVICON_ICO())), origin).toBe(true);
+      expect(same(ico.bytes, FAVICON_ICO()), origin).toBe(true);
     }
     expect((await send(three.deps, "GET", FAVICON_ICO_PATH, { origin: UNKNOWN })).status).toBe(421);
     // Three sizes, 16, 32 and 48 pixels, each a PNG.
@@ -208,13 +208,23 @@ describe("the tab icon and the mark", () => {
     const linked = [
       ...[...DASH_PAGES, ...DASH_LINK_PAGES, TERMS_PAGE].map((p) => [p.path, p.html] as const),
       ["/signin", SIGNIN_HTML], ["/signin/link", LINK_HTML], ["/invite", INVITE_HTML], ["/setup", SETUP_HTML],
-      ["gate", VIEW_GATE_HTML], ["denied", VIEW_DENIED_HTML], ["view link", VIEW_LINK_HTML], ["view signout", VIEW_SIGNOUT_HTML],
-      ["media gate", MEDIA_GATE_HTML.image], ["media gate clip", MEDIA_GATE_HTML.clip], ["media denied", MEDIA_DENIED_HTML.image], ["media link", MEDIA_LINK_HTML], ["media signout", MEDIA_SIGNOUT_HTML],
     ] as const;
     for (const [what, html] of linked) {
       expect(html.split(FAVICON_LINKS).length - 1, what).toBe(1);
       expect(html.indexOf(FAVICON_LINKS), what).toBeLessThan(html.indexOf("</head>"));
     }
-    for (const [what, html] of [["tour not found", NOT_FOUND_HTML], ["share not found", SHARE_NOT_FOUND_HTML]] as const) expect(html, what).not.toContain("rel=\"icon\"");
+    // The pages on the tours and img addresses, whose bytes the upgrade keeps: no icon markup.
+    const kept = [
+      ["tour not found", NOT_FOUND_HTML], ["share not found", SHARE_NOT_FOUND_HTML],
+      ["gate", VIEW_GATE_HTML], ["denied", VIEW_DENIED_HTML], ["view link", VIEW_LINK_HTML], ["view signout", VIEW_SIGNOUT_HTML],
+      ["media gate", MEDIA_GATE_HTML.image], ["media gate clip", MEDIA_GATE_HTML.clip], ["media denied", MEDIA_DENIED_HTML.image], ["media link", MEDIA_LINK_HTML], ["media signout", MEDIA_SIGNOUT_HTML],
+    ] as const;
+    for (const [what, html] of kept) expect(html, what).not.toContain('rel="icon"');
+  });
+
+  it("the API documentation page links the tab icon too", async () => {
+    const { deps } = await makeDeps({ hosts: TWO });
+    const page = await send(deps, "GET", "/docs", { origin: APP });
+    expect(page.text.split(FAVICON_LINKS).length - 1).toBe(1);
   });
 });

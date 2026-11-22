@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { stringify } from "yaml";
+import { PAGE_BASE_CSS } from "../src/brand-css.ts";
 import { openapi } from "../src/docs/openapi.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -85,7 +86,7 @@ export function viewerModule(): string {
   ].join("\n");
 }
 
-/** Our page script, bundled as the player's is, and our stylesheet. */
+/** Our page script, bundled as the player's is, and our stylesheet after the brand's tokens and font (src/brand-css.ts). */
 export async function bundleDocs(): Promise<{ js: string; css: string }> {
   const out = await build({
     absWorkingDir: ROOT,
@@ -100,7 +101,7 @@ export async function bundleDocs(): Promise<{ js: string; css: string }> {
     logLevel: "silent",
   });
   const js = out.outputFiles[0].text;
-  const css = readFileSync(fileURLToPath(new URL("../src/docs/client/docs.css", import.meta.url)), "utf8").replace(/\r\n/g, "\n");
+  const css = PAGE_BASE_CSS + readFileSync(fileURLToPath(new URL("../src/docs/client/docs.css", import.meta.url)), "utf8").replace(/\r\n/g, "\n");
   return { js, css };
 }
 

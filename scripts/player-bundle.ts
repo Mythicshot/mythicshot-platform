@@ -4,12 +4,14 @@
 // /player.css), from strings in src/player/assets.ts, so the Worker and the container
 // serve the same bytes with the same headers and neither needs a static-files setup or
 // a build step at deploy time. That module is generated here from src/player/main.ts
-// (bundled with esbuild, the shared rules included) and src/player/player.css, and is
+// (bundled with esbuild, the shared rules included) and src/player/player.css after the
+// brand's tokens and font (src/brand-css.ts), and is
 // committed; test/node-player-build.test.ts fails when it is stale.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { PLAYER_BASE_CSS } from "../src/brand-css.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 export const ASSETS_MODULE = fileURLToPath(new URL("../src/player/assets.ts", import.meta.url));
@@ -28,7 +30,8 @@ export async function bundlePlayer(): Promise<{ js: string; css: string }> {
     logLevel: "silent",
   });
   const js = out.outputFiles[0].text;
-  const css = readFileSync(fileURLToPath(new URL("../src/player/player.css", import.meta.url)), "utf8");
+  // The brand's tokens and font first (src/brand-css.ts), then the player's own rules.
+  const css = PLAYER_BASE_CSS + readFileSync(fileURLToPath(new URL("../src/player/player.css", import.meta.url)), "utf8");
   return { js, css };
 }
 

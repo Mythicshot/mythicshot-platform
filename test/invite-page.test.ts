@@ -28,7 +28,7 @@ const IMG = "https://img.example.com";
 const UNKNOWN = "https://evil.example.net";
 const NOT_FOUND = '{"error":"not_found"}';
 const BROWSER = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
-const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 type Served = { path: string; body: string; type: string };
 const SERVED: Served[] = [
@@ -265,7 +265,7 @@ describe("the invite page", () => {
     const doc = new FakeDocument(INVITE_HTML);
     const all = doc.root.all();
     expect(all.filter((e) => e.tagName === "script").map((e) => [e.getAttribute("src"), e.getAttribute("defer"), e.textContent])).toEqual([["/invite/invite.js", "", ""]]);
-    expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")])).toEqual([["stylesheet", "/signin/signin.css"]]);
+    expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")])).toEqual([["icon", "/favicon.ico"], ["icon", "/favicon.svg"], ["stylesheet", "/signin/signin.css"]]);
     expect(all.filter((e) => e.tagName === "style" || e.tagName === "form")).toEqual([]);
     for (const e of all) {
       for (const [name, value] of e.attrs) {
@@ -291,7 +291,7 @@ describe("the invite page", () => {
     for (const s of JSON.parse(/var STATES = (\[.*\]);/.exec(INVITE_JS)![1]) as string[]) expect(ids.has(s) && ids.has(`h-${s}`), s).toBe(true);
     // The sign-in stylesheet styles the text field and the hint as it does the email field.
     expect(SIGNIN_CSS).toContain('input[type="email"], input[type="text"] {');
-    expect(SIGNIN_CSS).toContain('input[type="email"]:focus-visible, input[type="text"]:focus-visible {');
-    expect(SIGNIN_CSS).toMatch(/\n\.hint \{[^}]*color: var\(--muted\)/);
+    expect(SIGNIN_CSS).toContain("\n:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }");
+    expect(SIGNIN_CSS).toMatch(/\n\.hint \{[^}]*color: var\(--text-muted\)/);
   });
 });

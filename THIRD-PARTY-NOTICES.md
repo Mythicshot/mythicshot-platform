@@ -2,6 +2,22 @@
 
 This repository is all rights reserved (see [LICENSE](LICENSE)). The parts below come from other authors and keep their own licences.
 
+## Manrope
+
+- What it is: the typeface every page of the platform sets its text in.
+- Copyright line: Copyright 2018 The Manrope Project Authors (https://github.com/googlefonts/manrope)
+- Licence: SIL Open Font License, Version 1.1. No Reserved Font Name is declared.
+- Where it is: the published variable TrueType file, unchanged but renamed, in `src/brand-files/fonts/manrope/Manrope-VariableFont_wght.ttf`, with its licence beside it in `OFL.txt` (the copyright line and the licence text in full). `npm run build:brand` copies both into the generated module `src/brand-assets.ts`, so the licence travels with every copy of the font.
+- Where the licence is served: every install hands it out at `/fonts/manrope-OFL.txt`, beside the font at `/fonts/manrope.<hash>.ttf`, and each stylesheet names that address in a comment above the font.
+
+## Cinzel
+
+- What it is: the typeface of the name "Mythicshot" beside the mark, and nothing else.
+- Copyright line: Copyright 2020 The Cinzel Project Authors (https://github.com/NDISCOVER/Cinzel)
+- Licence: SIL Open Font License, Version 1.1. No Reserved Font Name is declared.
+- Where it is: the published variable TrueType file, unchanged but renamed, in `src/brand-files/fonts/cinzel/Cinzel-VariableFont_wght.ttf`, with its licence beside it in `OFL.txt`; `npm run build:brand` copies both into `src/brand-assets.ts`.
+- Where the licence is served: on the app address, at `/fonts/cinzel-OFL.txt`, beside the font at `/fonts/cinzel.<hash>.ttf`.
+
 ## swagger-ui-dist 5.34.1
 
 - What it is: Swagger UI, the viewer that shows the API reference on the documentation page (`/docs`).

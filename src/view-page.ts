@@ -37,7 +37,7 @@
 //   page itself has no script of its own and may not call the API, so the sign-out is done
 //   here, on a press, by a page that holds no customer content; then the browser goes back
 //   to the tour's address, which shows the gate.
-import { SIGNIN_CSS } from "./signin/page.ts";
+import { SIGNIN_CARD_CSS } from "./signin/page.ts";
 
 const HEAD = (title: string) => `<!doctype html>
 <html lang="en">
@@ -157,18 +157,23 @@ export const VIEW_SIGNOUT_HTML = `${HEAD("Not you?")}
 </html>
 `;
 
-/** The sign-in pages' stylesheet, with a quiet button added (mockup 6's "Use another address"). */
-export const VIEW_CSS = `${SIGNIN_CSS}button.quiet { background: transparent; color: var(--accent); border-color: var(--line); }
-button.quiet:hover:not(:disabled) { background: var(--bg); }
+/**
+ * The sign-in card's look (without the wordmark: these pages show the name alone, without the
+ * mark), with a secondary button added (mockup 6's "Use another address").
+ */
+export const VIEW_CSS = `${SIGNIN_CARD_CSS}button.quiet { background: var(--surface); color: var(--text); border-color: var(--border-strong); }
+button.quiet:hover:not(:disabled) { background: var(--ground); border-color: var(--text-muted); }
 `;
 
 /**
  * The one line under a restricted tour (mockup 7), for the tour page, which keeps the player's
- * own stylesheet: this file only adds the line's look. Nothing else on the page changes.
+ * own stylesheet: this file only adds the line's look. Nothing else on the page changes. Its
+ * colours are the brand's tokens, which the page's other stylesheet (the player's, or the
+ * shared item pages') declares.
  */
-export const SHARED_CSS = `.dp-shared { margin: 0; padding: 10px 16px 16px; text-align: center; font-size: 13px; line-height: 1.5; color: #5c636f; overflow-wrap: anywhere; }
+export const SHARED_CSS = `.dp-shared { margin: 0; padding: 10px 16px 16px; text-align: center; font: 13px/20px var(--font-sans); color: var(--text-muted); overflow-wrap: anywhere; }
 .dp-shared a { color: inherit; text-underline-offset: 2px; }
-@media (prefers-color-scheme: dark) { .dp-shared { color: #9ba2ae; } }
+.dp-shared a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--radius-sm); }
 `;
 
 export const VIEW_JS = String.raw`(function () {

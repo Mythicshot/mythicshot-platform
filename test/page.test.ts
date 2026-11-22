@@ -78,13 +78,13 @@ describe("the player page", () => {
     const { slug } = await published(deps, a.token, v2);
     const r = await page(deps, slug);
     expect(r.headers.get("content-security-policy")).toBe(
-      "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'",
+      "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'",
     );
 
     const other = await setup({ publicImageBase: IMAGE_BASE + "/tours/" });
     const p = await published(other.deps, other.a.token, v2);
     expect((await page(other.deps, p.slug)).headers.get("content-security-policy")).toBe(
-      `default-src 'none'; img-src ${IMAGE_BASE}; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'`,
+      `default-src 'none'; img-src ${IMAGE_BASE}; style-src 'self'; font-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'`,
     );
   });
 

@@ -4,6 +4,7 @@
 // the script text may and may not do. What the script does when it runs is tested under
 // Node in test/node-signin-pages.test.ts, where it can be run against a stand-in document.
 import { describe, expect, it } from "vitest";
+import { CINZEL_FACE, MANROPE_FACE } from "../src/brand-css.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { UNDOCUMENTED_ROUTES } from "../src/docs/openapi.ts";
 import { HOST_RULES } from "../src/host-gate.ts";
@@ -23,7 +24,7 @@ const UNKNOWN = "https://evil.example.net";
 const NOT_FOUND = '{"error":"not_found"}';
 const BROWSER = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
 
-const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const POLICY = "default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 type Served = { path: string; body: string; type: string };
 const PAGES: Served[] = [
@@ -274,7 +275,7 @@ describe("the sign-in pages", () => {
       const all = doc.root.all();
       const scripts = all.filter((e) => e.tagName === "script");
       expect(scripts.map((e) => [e.getAttribute("src"), e.textContent]), s.path).toEqual([["/signin/signin.js", ""]]);
-      expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")]), s.path).toEqual([["stylesheet", "/signin/signin.css"]]);
+      expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")]), s.path).toEqual([["icon", "/favicon.ico"], ["icon", "/favicon.svg"], ["stylesheet", "/signin/signin.css"]]);
       expect(all.filter((e) => e.tagName === "style"), s.path).toEqual([]);
       for (const e of all) {
         for (const [name, value] of e.attrs) {
@@ -291,7 +292,7 @@ describe("the sign-in pages", () => {
         expect(form.hasAttribute("action"), s.path).toBe(false);
       }
     }
-    expect(SIGNIN_CSS).not.toMatch(/url\(|@import|https?:|\/\//i);
+    expect(SIGNIN_CSS.replace(MANROPE_FACE, "").replace(CINZEL_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\//i);
     expect(SIGNIN_JS).not.toMatch(/https?:|\/\/[a-z]/i);
   });
 

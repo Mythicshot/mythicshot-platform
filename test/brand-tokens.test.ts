@@ -50,15 +50,13 @@ const PAGE_SHEETS: [string, string][] = [
   ["/signin/signin.css (sign-in, link, invite)", SIGNIN_CSS],
   ["/view/view.css (a restricted tour's gate)", VIEW_CSS],
   ["/s/view.css (a restricted item's gate)", MEDIA_VIEW_CSS],
-  ["/view/shared.css (the line under a restricted tour)", SHARED_CSS],
-  ["/s/shared.css (the line under a restricted item)", MEDIA_SHARED_CSS],
   ["/s/share.css (shared image and clip pages, their not-found page)", SHARE_CSS],
   ["/setup/setup.css (setup wizard)", SETUP_CSS],
   ["the API documentation page's own stylesheet", DOCS_CSS],
 ];
 
 /** A colour written as a value: hex, a colour function, or a colour keyword (transparent and currentColor are not colours of their own). */
-const LITERAL = /#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix)\(|\b(?:white|black|red|green|blue|gr[ae]y|silver|orange|yellow|purple|navy|teal|maroon|olive|lime|aqua|fuchsia|gold|tomato|crimson)\b/i;
+const LITERAL = /#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix)\(|(?<![-\w])(?:white|black|red|green|blue|gr[ae]y|silver|orange|yellow|purple|navy|teal|maroon|olive|lime|aqua|fuchsia|gold|tomato|crimson)\b/i;
 
 /** Every declaration value of a stylesheet, comments taken out first, with the line it is on. */
 function values(css: string): { value: string; line: string }[] {
@@ -131,6 +129,13 @@ describe("every stylesheet uses the one token set", () => {
     for (const [what, css] of PAGE_SHEETS) expect(literalsAfter(css, PAGE_BASE_CSS), what).toEqual([]);
   });
 
+  it("the line under restricted content uses the tokens its page's other stylesheet declares, and writes no colour", () => {
+    for (const css of [SHARED_CSS, MEDIA_SHARED_CSS]) {
+      expect(literalsAfter(css, ""), css).toEqual([]);
+      expect(css).toContain("var(--text-muted)");
+    }
+  });
+
   it("the player's stylesheet starts with the tokens, its chrome's per scheme, and Manrope; only the tour's own stage and cards keep colours", () => {
     expect(PLAYER_BASE_CSS).toBe(tokensCss() + schemeTokensCss('.dp[data-scheme="light"]', '.dp[data-scheme="dark"]') + MANROPE_FACE);
     const found = literalsAfter(PLAYER_CSS, PLAYER_BASE_CSS);
@@ -140,16 +145,17 @@ describe("every stylesheet uses the one token set", () => {
 
   it("the literal check finds colours in every form it should", () => {
     for (const v of ["#fff", "#A0B1C2", "#a0b1c2ff", "rgb(1, 2, 3)", "rgba(0,0,0,.5)", "hsl(1 2% 3%)", "white", "Black", "oklch(0.5 0.1 200)", "color-mix(in srgb, red, blue)"]) expect(literalsAfter(`${PAGE_BASE_CSS}.x { color: ${v}; }`, PAGE_BASE_CSS), v).toHaveLength(1);
-    for (const v of ["transparent", "currentColor", "var(--text)", "inherit"]) expect(literalsAfter(`${PAGE_BASE_CSS}.x { color: ${v}; }`, PAGE_BASE_CSS), v).toHaveLength(0);
+    for (const v of ["transparent", "currentColor", "var(--text)", "var(--gold)", "inherit"]) expect(literalsAfter(`${PAGE_BASE_CSS}.x { color: ${v}; }`, PAGE_BASE_CSS), v).toHaveLength(0);
     // Selectors and comments are not values: an id that looks like hex is not a colour.
     expect(literalsAfter(`${PAGE_BASE_CSS}#add, #bad { margin: 0; } /* #fff */`, PAGE_BASE_CSS)).toEqual([]);
   });
 
   it("Cinzel is declared only where the mark is shown with the name: the dashboard's and the sign-in pages' stylesheets", () => {
     for (const [what, css] of [["dash", DASH_CSS], ["signin", SIGNIN_CSS]] as const) expect(css.split(CINZEL_FACE).length - 1, what).toBe(1);
-    for (const [what, css] of [...PAGE_SHEETS.filter(([, c]) => c !== DASH_CSS && c !== SIGNIN_CSS), ["player", PLAYER_CSS] as [string, string]]) {
-      expect(css, what).not.toContain("Cinzel");
-      expect(css, what).not.toContain("font-display)");
+    for (const [what, css, base] of [...PAGE_SHEETS.filter(([, c]) => c !== DASH_CSS && c !== SIGNIN_CSS).map(([w, c]) => [w, c, PAGE_BASE_CSS]), ["player", PLAYER_CSS, PLAYER_BASE_CSS]]) {
+      // The token of the family is there with the rest; nothing after it declares or uses Cinzel.
+      expect(css.slice(base.length), what).not.toContain("Cinzel");
+      expect(css, what).not.toContain("var(--font-display)");
     }
   });
 });

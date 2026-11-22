@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { accessRoutes } from "./access.ts";
 import { accountRemovalRoutes } from "./account-removal.ts";
 import { adminRoutes } from "./admin-api.ts";
+import { brandRoutes } from "./brand-routes.ts";
 import { connectRoutes } from "./connect.ts";
 import { dashRoutes } from "./dash/routes.ts";
 import { docsRoutes } from "./docs/page.ts";
@@ -67,6 +68,8 @@ export function createApp(deps: Deps): Hono {
   restrictedRoutes(app, deps);
   pageRoutes(app, deps, restrictedAnswer);
   sharePageRoutes(app, deps);
+  // The tab icon and the fonts, with their licences: fixed files, on the addresses whose pages use them.
+  brandRoutes(app);
 
   app.notFound((c) => c.json({ error: "not_found" }, 404));
 

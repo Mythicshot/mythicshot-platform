@@ -2,6 +2,18 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.54 (2026-11-21)
+
+- Every page of the platform now has the Mythicshot brand's look: violet-tinted neutrals, purple main buttons with white text, gold links and focus ring on dark grounds and bronze on light ones, orange caution boxes with an edge and a warning sign, teal for done, 8 px corners on buttons and fields and 12 px on cards and dialogs, pills only for tags and chips, 36 px controls in dashboard rows and 44 px in dialogs and on the sign-in pages, and a 2 px focus ring with an offset on every control. Both colour schemes follow the system. Table headers are in sentence case. Layout, wording and behaviour are unchanged: this is a restyle of the dashboard, the terms screen, the sign-in, link and invite pages, the gates of restricted tours and items, the shared image and clip pages, the setup wizard, the not-found pages, the API documentation page's own parts and the tour player's chrome.
+- One token set: the brand's colours are written once, in `src/brand-tokens.ts`, with their light and dark values, and every stylesheet starts with them (`src/brand-css.ts`) and writes no colour of its own. A test fails on any colour written anywhere else in those stylesheets, and checks the contrast of every pair of colours the pages use in both schemes; the tour player's stage and cards are the one allowance.
+- Text is set in Manrope, and the name "Mythicshot" beside the mark in Cinzel capitals, both served by the site itself: `/fonts/manrope.<hash>.ttf` on every address and `/fonts/cinzel.<hash>.ttf` on the app address only, each kept for good by its hashed address, with its licence beside it (`/fonts/manrope-OFL.txt`, `/fonts/cinzel-OFL.txt`). Each page's Content-Security-Policy gains `font-src 'self'` after `style-src 'self'`, and nothing else of it changes. Until a font loads, the system font is used.
+- The top bar and the sign-in and invite pages show the brand's small mark as SVG, `/dash/mark.svg`, which replaces `/dash/mark.png` and answers where it did (the app address). `HOME_URL` works as before.
+- A browser-tab icon on every address: `/favicon.svg` and `/favicon.ico` (16, 32 and 48 pixels, made from the marks). The platform's own pages link both; the pages that show what people publish keep their markup and get `/favicon.ico` by the browser's own request.
+- A tour's own look is unchanged: its accent, card style, backdrop and logo, and the player's stage and cards, are as before, byte for byte in the stylesheet. Only the player's chrome (the page, the bars, the chapter menu, the end card's frame and the not-found page) follows the brand; a tour whose backdrop is "auto" is now tinted from the brand's ground instead of the old grey.
+- `favicon` and `fonts` are reserved usernames, as every top-level path of the app is.
+- The upgrade rehearsal lets an HTML answer's policy differ from the old build's by exactly the added `font-src 'self'`, from the old build to the new one only, and counts such answers apart.
+- Emails are unchanged. The README, the dashboard's browser check, the rehearsal's guide and THIRD-PARTY-NOTICES.md (the two fonts' licences and copyright lines) describe the change.
+
 ## 0.1.53 (2026-11-21)
 
 - A site can now ask everyone who signs in to agree to its terms before they use the dashboard, and keeps a record of who agreed to which version and when. A site that has published no terms asks nothing and answers every request as before.
