@@ -276,6 +276,35 @@ describe("the dashboard while the terms wait", () => {
   });
 });
 
+describe("the Admin page's Terms column", () => {
+  const ADMIN_SESSION: Answer = { status: 200, json: { account: { id: "usr_" + "a".repeat(24), username: "owner", email: "owner@example.com", admin: true }, workspace: { id: "ws_" + "a".repeat(24), name: "W" }, session: { id: "ses_" + "a".repeat(24), created_at: NOW, expires_at: NOW + 1 }, csrf: CSRF, email_change: false } };
+  const account = (n: string, terms: unknown) => ({ id: "usr_" + n.repeat(24), username: `user${n}`, email: `${n}@example.com`, status: "active", admin: n === "a", created_at: NOW, deleting: false, workspace_id: "ws_" + n.repeat(24), workspace_name: "W", tours: 0, used_bytes: 0, allowance_bytes: null, storage_allowance_bytes: null, over: false, counted: { pictures: 0, logos: 0, uploads_in_progress: 0, images: 0, gifs: 0 }, terms });
+  const page = (list: Record<string, unknown>) =>
+    openPage(ADMIN_HTML, [DASH_JS, ADMIN_JS], `${APP}/admin`, answers({
+      "GET /api/v1/session": ADMIN_SESSION,
+      "GET /api/v1/admin/summary": { status: 200, json: { accounts: 2, used_bytes: 0, standard_allowance_bytes: null } },
+      "GET /api/v1/admin/accounts": { status: 200, json: { next: null, ...list } },
+      "GET /api/v1/admin/invites": { status: 200, json: { invites: [] } },
+    }));
+  const cells = (tab: Tab) => tab.$("admin-rows").all().filter((e) => e.tagName === "td" && e.className === "terms").map((td) => td.children.map((c) => ("textContent" in c ? (c as FakeElement).textContent : "")));
+
+  it("shows when the site has terms, whoever has agreed; an older agreement is Not yet with the older version under it", async () => {
+    const tab = page({ current_terms: { version: "2 December 2026" }, accounts: [account("a", { version: "2 December 2026", agreed_at: NOW, current: true }), account("b", { version: "21 November 2026", agreed_at: NOW, current: false }), account("c", null)] });
+    await tab.settle();
+    expect(tab.$("accounts-table").className).toBe("accounts");
+    expect(cells(tab)).toEqual([["2 December 2026", "21 Nov 2026"], ["Not yet", "Agreed to 21 November 2026 on 21 Nov 2026"], ["Not yet"]]);
+    const nobody = page({ current_terms: { version: "1" }, accounts: [account("c", null)] });
+    await nobody.settle();
+    expect(nobody.$("accounts-table").className).toBe("accounts");
+  });
+
+  it("is hidden on a site with no terms, even beside a stray agreement", async () => {
+    const tab = page({ current_terms: null, accounts: [account("a", { version: "x", agreed_at: NOW, current: false })] });
+    await tab.settle();
+    expect(tab.$("accounts-table").className).toBe("accounts no-terms");
+  });
+});
+
 describe("against the real app", () => {
   it("a held person opens the dashboard, is sent to the terms screen, agrees, and the Account and Admin pages show it", async () => {
     const ctx = await makeDeps({ hosts: { tours: "tours.example.com", app: "app.example.com" } });

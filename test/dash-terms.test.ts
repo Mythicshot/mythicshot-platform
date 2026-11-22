@@ -69,6 +69,8 @@ describe("the sentences", () => {
       needsScript: "This page needs JavaScript.",
     });
     expect(ADMIN_JS).toContain('terms: "Terms",');
+    expect(ADMIN_JS).toContain('agreedToBefore: "Agreed to ",');
+    expect(ADMIN_JS).toContain('agreedToMiddle: " on ",');
     expect(ADMIN_HTML).toContain('<th scope="col" class="terms">Terms</th>');
     // The script's sentences are the constants, handed over whole.
     expect(TERMS_JS).toContain(`var TEXT = ${JSON.stringify(TERMS_SAYS)};`);

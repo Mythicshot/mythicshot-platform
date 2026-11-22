@@ -28,7 +28,7 @@ const APP = "https://app.example.com";
 const MAX = 9007199254740991;
 
 /** The keys of each answer, exactly. */
-const LIST_KEYS = ["accounts", "next"];
+const LIST_KEYS = ["accounts", "current_terms", "next"];
 const ACCOUNT_KEYS = ["admin", "allowance_bytes", "counted", "created_at", "deleting", "email", "id", "over", "status", "storage_allowance_bytes", "terms", "tours", "used_bytes", "username", "workspace_id", "workspace_name"];
 const COUNTED_KEYS = ["gifs", "images", "logos", "pictures", "uploads_in_progress"];
 const SUMMARY_KEYS = ["accounts", "standard_allowance_bytes", "used_bytes"];

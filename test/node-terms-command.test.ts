@@ -67,11 +67,12 @@ describe("terms publish", () => {
     const row = await s.db.first<{ id: string; seq: number }>("SELECT id, seq FROM terms_version");
     expect(r).toEqual({ code: 0, lines: [TERMS_SAID.published(1, row!.id, "21 November 2026"), TERMS_SAID.publishedNext] });
     expect(r.lines[0]).toBe(`Published version 1 of the terms, "21 November 2026" (${row!.id}).`);
+    expect(TERMS_SAID.published(2, "trm_x", "1 December 2026")).toBe('Published version 2 of the terms, "1 December 2026" (trm_x).');
     const held = await requireAuth(req(), depsOn(s.db));
     expect(held instanceof Response && (await held.json())).toEqual({ error: "terms_required", detail: "agree to the site's terms first" });
     // The same content again, also written with other line ends: refused, nothing written.
     writeFileSync(file, EXAMPLE.toString("utf8").replace(/\n/g, "\r\n"));
-    expect(await run(["terms", "publish", file], s.env)).toEqual({ code: 1, lines: [TERMS_SAID.same(row!.id)] });
+    expect(await run(["terms", "publish", file], s.env)).toEqual({ code: 1, lines: [`These terms are the same as version 1 (${row!.id}), already published. Nothing was changed.`] });
     expect(await s.db.all("SELECT id FROM terms_version")).toHaveLength(1);
     // The command still works while the admin is held: a new version is published.
     writeFileSync(file, EXAMPLE.toString("utf8").replace("version: 21 November 2026", "version: 1 December 2026"));
@@ -112,6 +113,20 @@ describe("terms publish", () => {
   });
 });
 
+describe("two publishes at once", () => {
+  it("the one that loses the race on the version's number gets one clean line and writes nothing", async () => {
+    const s = await site();
+    // As if another publish took the next number between this one's read and its write: the
+    // database refuses the row with the words SQLite uses for that.
+    s.db.raw.exec("CREATE TRIGGER race BEFORE INSERT ON terms_version BEGIN SELECT RAISE(ABORT, 'UNIQUE constraint failed: terms_version.seq'); END;");
+    const lines: string[] = [];
+    expect(await runAdmin(["terms", "publish", "-"], s.env, (l) => lines.push(l), { readStdin: async () => new Uint8Array(EXAMPLE) })).toBe(1);
+    expect(lines).toEqual([TERMS_SAID.busy]);
+    s.db.raw.exec("DROP TRIGGER race");
+    expect(await s.db.all("SELECT id FROM terms_version")).toEqual([]);
+  });
+});
+
 describe("terms list and show", () => {
   it("list says when there is none, then each version oldest first with its agreements and the current one marked; show prints one exactly, made safe for a terminal", async () => {
     const s = await site();
@@ -136,7 +151,8 @@ describe("terms list and show", () => {
   it("the sentences, as the owner is asked to approve them", () => {
     expect(TERMS_SAID.notRead).toBe("The file could not be read. Nothing was changed.");
     expect(TERMS_SAID.refused("line 4: x")).toBe("The terms were not published: line 4: x");
-    expect(TERMS_SAID.same("trm_a")).toBe("These terms are the same as version trm_a, already published. Nothing was changed.");
+    expect(TERMS_SAID.same({ seq: 3, id: "trm_a" })).toBe("These terms are the same as version 3 (trm_a), already published. Nothing was changed.");
+    expect(TERMS_SAID.busy).toBe("Another version of the terms was published at the same moment. Nothing was changed; run the command again.");
     expect(TERMS_SAID.same(null)).toBe("These terms are the same as a version already published. Nothing was changed.");
     expect(TERMS_SAID.publishedNext).toBe("From now on every account is asked to agree to it at its next sign-in or dashboard request. Connected computers keep working.");
     expect(TERMS_SAID.none).toBe("No terms have been published. Nobody is asked to agree to anything.");

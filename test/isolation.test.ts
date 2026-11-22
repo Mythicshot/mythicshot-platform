@@ -497,7 +497,7 @@ const ADMIN: Record<string, { reason: string; request: (w: World) => Sample; fie
   "GET /api/v1/admin/accounts": {
     reason: "the admin's overview of how each account uses its storage: counts and the allowance, nothing of any tour",
     request: () => ({ method: "GET", path: "/api/v1/admin/accounts" }),
-    fields: ["accounts", "next", ...ACCOUNT_FIELDS.map((f) => `accounts[].${f}`)],
+    fields: ["accounts", "next", "current_terms", ...ACCOUNT_FIELDS.map((f) => `accounts[].${f}`)],
   },
   "GET /api/v1/admin/summary": {
     reason: "the admin's summary line: how many accounts there are, the bytes they use in all and the site's standard allowance; three numbers, nothing of any workspace",

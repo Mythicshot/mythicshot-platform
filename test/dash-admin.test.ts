@@ -226,6 +226,9 @@ const ADMIN_TEXT: Record<string, string> = {
   joined: "Joined",
   terms: "Terms",
   notYet: "Not yet",
+  // New (review L5): an agreement to an older version, under "Not yet".
+  agreedToBefore: "Agreed to ",
+  agreedToMiddle: " on ",
 };
 
 /** The strings with a space in the script that are not words for a person: class names and lists of ids. */

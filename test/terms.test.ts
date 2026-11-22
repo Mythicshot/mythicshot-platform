@@ -157,6 +157,14 @@ describe("agreeing", () => {
       expect([r.status, r.json], String(body)).toEqual([400, { error: "bad_request", detail: 'the body must be JSON such as {"terms": "trm_…"}, the id of the terms shown, with nothing else in it' }]);
     }
     expect(TERMS_DETAILS.changed).toBe("these are not the current terms: read the new version and agree to it");
+    // Labelled as anything but JSON, or not at all: refused as every other session change refuses it, whatever the body.
+    for (const type of [null, "text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x"]) {
+      const headers: Record<string, string> = { cookie: s.cookie, "x-csrf-token": s.csrf, origin: ORIGIN, "sec-fetch-site": "same-origin", ...(type === null ? {} : { "content-type": type }) };
+      const r = await send(w.deps, "POST", "/api/v1/terms/agree", { headers, body: JSON.stringify({ terms: id }) });
+      expect([r.status, r.json], String(type)).toEqual([400, { error: "bad_request", detail: 'the body must be JSON such as {"terms": "trm_…"}, the id of the terms shown, with nothing else in it' }]);
+      const email = await send(w.deps, "POST", "/api/v1/account/email", { headers, body: JSON.stringify({ email: "x@example.com" }) });
+      expect([email.status, email.json?.error], String(type)).toEqual([400, "bad_request"]);
+    }
     expect(await rows(w.deps, "terms_agreement")).toEqual([]);
     // The account is the session's, whatever else is sent: the admin, who sent nothing, has not agreed.
     expect((await agree(w.deps, s, id)).status).toBe(204);
@@ -255,19 +263,30 @@ describe("the admin", () => {
     const id1 = await publish(w.deps, fileOf("First version"));
     expect((await agree(w.deps, admin, id1)).status).toBe(204);
     const at1 = w.now();
-    let list = (await ask(w.deps, admin, "GET", "/api/v1/admin/accounts")).json.accounts as { id: string; terms: unknown }[];
+    let answer = (await ask(w.deps, admin, "GET", "/api/v1/admin/accounts")).json;
+    expect(answer.current_terms).toEqual({ version: "First version" });
+    let list = answer.accounts as { id: string; terms: unknown }[];
     expect(Object.fromEntries(list.map((a) => [a.id, a.terms]))).toEqual({
-      [w.admin.userId]: { version: "First version", agreed_at: at1 },
+      [w.admin.userId]: { version: "First version", agreed_at: at1, current: true },
       [w.member.userId]: null,
     });
+    expect((await agree(w.deps, member, id1)).status).toBe(204);
     w.tick();
+    // New terms: the admin agrees to them; the member's agreement is to the older version, and says so.
     const id2 = await publish(w.deps, fileOf("Second version"));
-    expect((await agree(w.deps, member, id2)).status).toBe(204);
     expect((await agree(w.deps, admin, id2)).status).toBe(204);
+    answer = (await ask(w.deps, admin, "GET", "/api/v1/admin/accounts")).json;
+    expect(answer.current_terms).toEqual({ version: "Second version" });
+    list = answer.accounts;
+    expect(Object.fromEntries(list.map((a) => [a.id, a.terms]))).toEqual({
+      [w.admin.userId]: { version: "Second version", agreed_at: w.now(), current: true },
+      [w.member.userId]: { version: "First version", agreed_at: at1, current: false },
+    });
+    expect((await agree(w.deps, member, id2)).status).toBe(204);
     list = (await ask(w.deps, admin, "GET", "/api/v1/admin/accounts")).json.accounts;
     expect(list.map((a) => a.terms)).toEqual([
-      { version: "Second version", agreed_at: w.now() },
-      { version: "Second version", agreed_at: w.now() },
+      { version: "Second version", agreed_at: w.now(), current: true },
+      { version: "Second version", agreed_at: w.now(), current: true },
     ]);
     expect(JSON.stringify(list)).not.toContain("The terms of");
   });
@@ -295,6 +314,42 @@ describe("the terms are the site's text, and still untrusted", () => {
     });
     // As bytes, the answer is JSON: no raw "<" ever starts a tag outside a JSON string.
     expect(JSON.parse(r.text)).toEqual(r.json);
+  });
+});
+
+describe("a stored version is served as it was published, whatever a later rule says", () => {
+  it("a link the current rule refuses is left out, a body or point a stricter rule would refuse is served as text, and it can be agreed to", async () => {
+    const w = await setup();
+    const s = await signIn(w.deps, w.member.userId);
+    const id = "trm_" + "a".repeat(24);
+    const longPoint = "p".repeat(400);
+    const longHeading = "h".repeat(400);
+    // Written as an older release could have published it: rules tightened since.
+    await w.deps.db.run("INSERT INTO terms_version (id, seq, title, version_label, points, links, body, sha256, published_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)", [
+      id,
+      "Old terms",
+      "Old version",
+      JSON.stringify([longPoint, 5]),
+      JSON.stringify([{ label: "Gone", url: "http://example.com/" }, { label: "Kept", url: "https://example.com/kept" }, { label: 3, url: "https://example.com/" }, "nonsense"]),
+      `#\n-\n\n# ${longHeading}\nText.`,
+      "b".repeat(64),
+      T0,
+    ]);
+    const state = await ask(w.deps, s, "GET", "/api/v1/terms");
+    expect(state.status, state.text).toBe(200);
+    expect(state.json.terms).toEqual({
+      id,
+      title: "Old terms",
+      version: "Old version",
+      points: [longPoint],
+      links: [{ label: "Kept", url: "https://example.com/kept" }],
+      body: [{ kind: "paragraph", text: "# -" }, { kind: "heading", text: longHeading }, { kind: "paragraph", text: "Text." }],
+      published_at: T0,
+    });
+    expect((await agree(w.deps, s, id)).status).toBe(204);
+    const agreed = await ask(w.deps, s, "GET", "/api/v1/terms/agreed");
+    expect([agreed.status, agreed.json.terms.links]).toEqual([200, [{ label: "Kept", url: "https://example.com/kept" }]]);
+    expect((await ask(w.deps, s, "GET", "/api/v1/tours")).status).toBe(200);
   });
 });
 
