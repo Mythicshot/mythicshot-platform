@@ -6,7 +6,8 @@
 # tunnel.
 #
 #   sudo bash install.sh [install|update|backup|status|uninstall] [--tunnel|--direct]
-#                        [--app-domain=<name>] [--new-token] [--dry-run] [--yes]
+#                        [--app-domain=<name>] [--img-domain=<name>] [--new-token]
+#                        [--dry-run] [--yes]
 #                        [--force] [--delete-data]
 #
 # Pages checked on 2026-11-17 for what this script does:
@@ -37,7 +38,8 @@
 # dashboard, copy its token, and give the tunnel a published application for the domain
 # with the service URL http://caddy:80. Everything else is done here. With a second
 # address for the app (--app-domain=<name>), the same for that name: a second DNS record,
-# or a second published application with the same service URL.
+# or a second published application with the same service URL. With a third address,
+# for shared images and clips (--img-domain=<name>), the same once more.
 #
 # Safety rules this script keeps:
 # - It never removes or overwrites the data folder, the .env file or a backup. The
@@ -97,6 +99,16 @@
 #   code 1; nothing is undone, and the setup code of a first install is still printed.
 #   An address that cannot be asked yet, or does not answer, is reported and is no
 #   failure.
+# - A third address, for shared images and clips, is recorded in .env as IMG_HOST, the
+#   app's own setting, and only beside APP_DOMAIN. The stack files stay as they are: the
+#   direct one hands the app the whole .env, the tunnel one passes IMG_HOST on. The name
+#   is written into the Caddyfile itself, as a third name in the two-address site
+#   address, so Caddy gets a certificate for it too. --img-domain=<name> writes the line
+#   on a first install only, as --app-domain does; on an existing install it is added
+#   (or removed) by hand and the next install run writes the Caddyfile to match. update
+#   refuses to start while the Caddyfile does not answer for exactly the IMG_HOST of
+#   .env. With it, the third address is asked for /healthz too and must report "img".
+#   Without IMG_HOST every file is written exactly as before.
 #
 # Tests: deploy/test-install.sh (runs this script in Debian containers with Docker
 # replaced by a stub). DP_ROOT, for those tests only, prefixes every system path.
@@ -136,9 +148,13 @@ ENV_TOKEN="${TUNNEL_TOKEN:-}"
 unset TUNNEL_TOKEN
 # The two host names come from .env, the domain question and --app-domain only: this
 # script never takes either from the environment. One left there would be read by
-# Compose before .env, so both are taken out.
+# Compose before .env, so both are taken out. So is the third address's IMG_HOST, which
+# the tunnel stack file passes on from .env, and the site's home page, HOME_URL, which it
+# passes on the same way: only .env supplies either.
 unset APP_DOMAIN
 unset DOMAIN
+unset IMG_HOST
+unset HOME_URL
 
 case "$0" in
   install.sh | */install.sh) SELF="$0" ;;
@@ -176,6 +192,7 @@ DELETE_DATA=0
 MODE_FLAG=""  # tunnel or direct, when --tunnel or --direct was given
 NEW_TOKEN=0
 APP_DOMAIN_FLAG=""  # the name given with --app-domain=
+IMG_HOST_FLAG=""    # the name given with --img-domain=
 
 MODE=""       # direct or tunnel
 TOKEN=""      # the tunnel token; never printed
@@ -190,6 +207,8 @@ UNFINISHED=0  # 1 when update found PENDING_FILE; on_exit then repeats what to r
 SECRET_EXTRA=0
 DOMAIN=""
 APP_DOMAIN=""  # the app address of a two-address install (DOMAIN is then the address of the tours); empty: one address
+IMG_HOST=""    # the img address, for shared images and clips, only beside APP_DOMAIN; empty: none
+SKIP_IMG_CHECK=0  # 1 when status found that the Caddyfile does not answer for IMG_HOST
 ACME_EMAIL=""
 DATA_DIR=""   # the resolved path as the host sees it, without DP_ROOT; stored in .env
 DATA_PATH=""  # "$DP_ROOT$DATA_DIR", the path this script works on
@@ -233,6 +252,7 @@ Options:
   --new-token     With install, on a tunnel install: ask for the tunnel token again and
                   replace the one in .env once the new one has connected.
   --app-domain=<name>  With install: a second address, for the app. The domain asked for stays the address of the tours.
+  --img-domain=<name>  With install, beside --app-domain: a third address, for shared images and clips.
   --dry-run       Print every command and file write without doing any.
   --yes           Do not ask "continue?" questions (never skips the data deletion check).
   --force         Try on a system other than Debian 13 or 12.
@@ -257,7 +277,7 @@ run_pkg() { ( umask 022; run "$@" ); }
 # ---------------------------------------------------------------- arguments
 
 parse_args() {
-  local seen=0 app_seen=0 a
+  local seen=0 app_seen=0 img_seen=0 a
   for a in "$@"; do
     case "$a" in
       install | update | backup | status | uninstall)
@@ -277,6 +297,9 @@ parse_args() {
       --app-domain=*)
         [ "$app_seen" = 0 ] || usage_error "give --app-domain only once"
         APP_DOMAIN_FLAG="${a#--app-domain=}"; app_seen=1 ;;
+      --img-domain=*)
+        [ "$img_seen" = 0 ] || usage_error "give --img-domain only once"
+        IMG_HOST_FLAG="${a#--img-domain=}"; img_seen=1 ;;
       -h | --help) usage; exit 0 ;;
       *) usage_error "unknown argument: $a" ;;
     esac
@@ -293,6 +316,10 @@ parse_args() {
   if [ "$app_seen" = 1 ]; then
     [ "$COMMAND" = install ] || usage_error "--app-domain goes only with install"
     valid_domain "$APP_DOMAIN_FLAG" || usage_error "--app-domain must be a host name in lowercase, such as app.example.com, without https:// and without a path"
+  fi
+  if [ "$img_seen" = 1 ]; then
+    [ "$COMMAND" = install ] || usage_error "--img-domain goes only with install"
+    valid_domain "$IMG_HOST_FLAG" || usage_error "--img-domain must be a host name in lowercase, such as img.example.com, without https:// and without a path"
   fi
 }
 
@@ -897,7 +924,7 @@ is_private_ipv4() {
 }
 
 # Warns, never fails: from inside a network the public address cannot always be known.
-# $1 is the name: the domain, or the app address of a two-address install.
+# $1 is the name: the domain, the app address of a two-address install, or the img address.
 check_dns() {
   local name="$1"
   say "Checking that $name points at this server"
@@ -949,6 +976,7 @@ read_env_file() {
   local line key value have_code=0 mode="" host_lines=0
   TOKEN=""
   APP_DOMAIN=""
+  IMG_HOST=""
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in "" | "#"*) continue ;; esac
     key="${line%%=*}"
@@ -956,6 +984,7 @@ read_env_file() {
     case "$key" in
       DOMAIN) DOMAIN="$value" ;;
       APP_DOMAIN) APP_DOMAIN="$value" ;;
+      IMG_HOST) IMG_HOST="$value" ;;
       ACME_EMAIL) ACME_EMAIL="$value" ;;
       DATA_DIR) DATA_DIR="$value" ;;
       APP_IMAGE) IMAGE="$value" ;;
@@ -984,6 +1013,17 @@ read_env_file() {
   if [ -n "$APP_DOMAIN" ]; then
     if ! valid_domain "$APP_DOMAIN" || [ "$APP_DOMAIN" = "$DOMAIN" ]; then
       die "$ENV_FILE has an APP_DOMAIN that is not a valid host name or is the same as DOMAIN; fix it by hand, nothing was changed"
+    fi
+  fi
+  # No IMG_HOST line, or an empty one, is no third address. One that is set goes only
+  # beside the other two, under a name of its own, as the app itself requires (it does
+  # not start otherwise).
+  if [ -n "$IMG_HOST" ]; then
+    if [ -z "$APP_DOMAIN" ]; then
+      die "$ENV_FILE has an IMG_HOST but no APP_DOMAIN: the img address goes only beside the two others. Add the APP_DOMAIN line or remove the IMG_HOST line by hand; nothing was changed"
+    fi
+    if ! valid_domain "$IMG_HOST" || [ "$IMG_HOST" = "$DOMAIN" ] || [ "$IMG_HOST" = "$APP_DOMAIN" ]; then
+      die "$ENV_FILE has an IMG_HOST that is not a valid host name or is the same as DOMAIN or APP_DOMAIN; fix it by hand, nothing was changed"
     fi
   fi
   if [ "$MODE" = tunnel ]; then
@@ -1027,6 +1067,7 @@ load_or_ask_config() {
     check_recorded_data strict
     if [ -n "$MODE_FLAG" ] && [ "$MODE_FLAG" != "$MODE" ]; then refuse_mode_switch; fi
     if [ -n "$APP_DOMAIN_FLAG" ] && [ "$APP_DOMAIN_FLAG" != "$APP_DOMAIN" ]; then refuse_app_domain_change; fi
+    if [ -n "$IMG_HOST_FLAG" ] && [ "$IMG_HOST_FLAG" != "$IMG_HOST" ]; then refuse_img_host_change; fi
     if [ "$MODE" = tunnel ]; then
       info "tunnel mode, domain $DOMAIN, data folder $DATA_DIR, image $IMAGE"
     else
@@ -1035,17 +1076,29 @@ load_or_ask_config() {
     if [ -n "$APP_DOMAIN" ]; then
       info "two addresses: $DOMAIN is the address of the tours, the app address is $APP_DOMAIN"
     fi
+    if [ -n "$IMG_HOST" ]; then
+      info "img address: $IMG_HOST (for shared images and clips)"
+    fi
     refuse_other_modes_stack
     if [ "$MODE" = tunnel ]; then renew_token; fi
     return 0
   fi
   FIRST_RUN=1
+  if [ -n "$IMG_HOST_FLAG" ] && [ -z "$APP_DOMAIN_FLAG" ]; then
+    die "the img address goes only beside an app address: give --app-domain=<name> too. Nothing was installed and nothing was changed."
+  fi
   say "A few questions"
   if [ -n "$MODE_FLAG" ]; then MODE="$MODE_FLAG"; else ask_mode; fi
   ask_domain
   if [ -n "$APP_DOMAIN_FLAG" ]; then
     [ "$APP_DOMAIN_FLAG" != "$DOMAIN" ] || die "the app address must be a different name than the tours address. Nothing was installed and nothing was changed."
     APP_DOMAIN="$APP_DOMAIN_FLAG"
+  fi
+  if [ -n "$IMG_HOST_FLAG" ]; then
+    if [ "$IMG_HOST_FLAG" = "$DOMAIN" ] || [ "$IMG_HOST_FLAG" = "$APP_DOMAIN" ]; then
+      die "the img address must be a different name than the tours address and the app address. Nothing was installed and nothing was changed."
+    fi
+    IMG_HOST="$IMG_HOST_FLAG"
   fi
   if [ "$MODE" = tunnel ]; then ask_token; else ask_email; fi
   ask_data_dir
@@ -1139,6 +1192,42 @@ refuse_app_domain_change() {
     die "this install's .env does not hold APP_DOMAIN=$APP_DOMAIN_FLAG, and install.sh does not change that file. To add the second address, add that line to $env as root, then run: sudo bash $SELF install. The file holds APP_DOMAIN=$APP_DOMAIN now: change that line instead of adding one. Nothing was changed."
   fi
   die "this install's .env does not hold APP_DOMAIN=$APP_DOMAIN_FLAG, and install.sh does not change that file. To add the second address, add that line to $env as root, then run: sudo bash $SELF install. Nothing was changed."
+}
+
+# The third address of an existing install is never set or changed by a flag either: the
+# IMG_HOST line is added by hand, beside APP_DOMAIN, and the next install run writes the
+# Caddyfile for it.
+refuse_img_host_change() {
+  local env="$LOGICAL_INSTALL_DIR/.env"
+  if [ "$IMG_HOST_FLAG" = "$DOMAIN" ] || [ "$IMG_HOST_FLAG" = "$APP_DOMAIN" ]; then
+    die "the img address must be a different name than the tours address and the app address. Nothing was changed."
+  fi
+  if [ -z "$APP_DOMAIN" ]; then
+    die "this install's .env does not hold IMG_HOST=$IMG_HOST_FLAG, and install.sh does not change that file. The img address goes only beside an app address, and this install has none: add an APP_DOMAIN line first (see the runbook's section on two addresses), then the IMG_HOST line, then run: sudo bash $SELF install. Nothing was changed."
+  fi
+  if [ -n "$IMG_HOST" ]; then
+    die "this install's .env does not hold IMG_HOST=$IMG_HOST_FLAG, and install.sh does not change that file. To add the img address, add that line to $env as root, then run: sudo bash $SELF install. The file holds IMG_HOST=$IMG_HOST now: change that line instead of adding one. Nothing was changed."
+  fi
+  die "this install's .env does not hold IMG_HOST=$IMG_HOST_FLAG, and install.sh does not change that file. To add the img address, add that line to $env as root, then run: sudo bash $SELF install. Nothing was changed."
+}
+
+# The third name in the site address of the Caddyfile on disk, as caddyfile_three_content
+# writes it; nothing when it has none.
+caddyfile_img_name() {
+  local line prefix
+  # shellcheck disable=SC2016 # the literal Caddyfile placeholders
+  local direct='{$DOMAIN}, {$APP_DOMAIN}, ' tunnel='http://{$DOMAIN}, http://{$APP_DOMAIN}, http://' end=' {'
+  [ -f "$CADDYFILE" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    for prefix in "$direct" "$tunnel"; do
+      if [[ "$line" == "$prefix"*"$end" ]]; then
+        line="${line#"$prefix"}"
+        printf '%s\n' "${line%"$end"}"
+        return 0
+      fi
+    done
+  done <"$CADDYFILE"
+  return 0
 }
 
 # The Caddyfile on disk was written for the addresses .env records: the two-address one
@@ -1313,6 +1402,7 @@ write_env_file() {
   fi
   local names=DOMAIN
   [ -z "$APP_DOMAIN" ] || names="DOMAIN, APP_DOMAIN"
+  [ -z "$IMG_HOST" ] || names="$names, IMG_HOST"
   if [ "$DRY_RUN" = 1 ]; then
     if [ "$MODE" = tunnel ]; then
       info "would write $names, DEPLOY_MODE, DATA_DIR, APP_IMAGE, a new SETUP_CODE and the TUNNEL_TOKEN to $ENV_FILE"
@@ -1334,6 +1424,7 @@ write_env_file() {
       printf '# Written by install.sh. Root only: SETUP_CODE claims this install and TUNNEL_TOKEN runs its tunnel. Never share or commit.\n'
       printf 'DOMAIN=%s\n' "$DOMAIN"
       [ -z "$APP_DOMAIN" ] || printf 'APP_DOMAIN=%s\n' "$APP_DOMAIN"
+      [ -z "$IMG_HOST" ] || printf 'IMG_HOST=%s\n' "$IMG_HOST"
       printf 'DEPLOY_MODE=tunnel\n'
       printf 'DATA_DIR=%s\n' "$DATA_DIR"
       printf 'APP_IMAGE=%s\n' "$IMAGE"
@@ -1345,6 +1436,7 @@ write_env_file() {
       printf '# Written by install.sh. Root only: SETUP_CODE claims this install. Never share or commit.\n'
       printf 'DOMAIN=%s\n' "$DOMAIN"
       [ -z "$APP_DOMAIN" ] || printf 'APP_DOMAIN=%s\n' "$APP_DOMAIN"
+      [ -z "$IMG_HOST" ] || printf 'IMG_HOST=%s\n' "$IMG_HOST"
       printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
       printf 'DATA_DIR=%s\n' "$DATA_DIR"
       printf 'APP_IMAGE=%s\n' "$IMAGE"
@@ -1373,7 +1465,9 @@ install_stack_files() {
   else
     say "Writing $COMPOSE_FILE and $CADDYFILE (the domain and email come from .env)"
   fi
-  if [ -n "$APP_DOMAIN" ]; then
+  if [ -n "$IMG_HOST" ]; then
+    info "three addresses: the Caddyfile is the one that answers for $DOMAIN, $APP_DOMAIN and $IMG_HOST"
+  elif [ -n "$APP_DOMAIN" ]; then
     info "two addresses: the Caddyfile is the one that answers for $DOMAIN and $APP_DOMAIN"
   fi
   if [ "$DRY_RUN" = 1 ]; then
@@ -1401,7 +1495,11 @@ install_stack_files() {
   check_rendered_addresses "$staged_compose"
   STAGED="$staged_compose"
   commit_file "$COMPOSE_FILE" "$INSTALL_DIR"
-  stage_file "$CADDYFILE" 0600 < <(caddyfile_for_install)
+  # Made first, so that a failure while making it stops the run (a process substitution
+  # could not). $(...) drops the file's one closing newline, which printf puts back.
+  local caddy_content
+  caddy_content="$(caddyfile_for_install)" || exit 1
+  stage_file "$CADDYFILE" 0600 < <(printf '%s\n' "$caddy_content")
   commit_file "$CADDYFILE" "$CADDY_DIR"
   CADDY_CHANGED="$COMMITTED"
 }
@@ -1412,27 +1510,47 @@ install_stack_files() {
 # file with the project folder, and so the .env, that the start uses, and with a token on
 # trial the way the start gets it. The rendering holds the setup code and the token: it
 # goes down a pipe to rendered_app_hosts and nowhere else, never to the terminal or a
-# file, and what comes back is compared and never printed.
+# file, and what comes back is compared and never printed. The app's IMG_HOST must also
+# come out as the IMG_HOST this script read (absent and empty alike when there is none):
+# Compose reads .env more leniently than read_env_file (an "export " in front, blanks
+# before the name or around the =), and a line only Compose takes would give the app a
+# third address that the Caddyfile written here does not answer for. With "img-only"
+# (update, on the stack file in place) only IMG_HOST is compared.
 check_rendered_addresses() {
-  local staged="$1" want="|" got
+  local staged="$1" only="${2:-}" want="|" got
   [ -z "$APP_DOMAIN" ] || want="$DOMAIN|$APP_DOMAIN"
-  info "asking Docker Compose how it fills in the new stack file's two address settings (what it prints is read here and not shown)"
-  got="$(with_trial_token docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged" config 2>/dev/null | rendered_app_hosts)" || got=""
-  [ "$got" = "$want" ] \
-    || die "This version of Docker Compose does not read the two-address settings in the stack file the way this script expects, so nothing was changed. Update Docker Compose and run install again."
+  if [ "$only" = img-only ]; then
+    # update asks without a word, and needs only the app's IMG_HOST from the rendering:
+    # a stack file from before two addresses has no TOURS_HOST or APP_HOST. pipefail
+    # makes a failed rendering fail the whole pipe, so got is empty only then.
+    got="$(docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged" config 2>/dev/null | rendered_app_hosts img-only)" || got=""
+    [ -n "$got" ] \
+      || die "Docker Compose could not be asked which IMG_HOST it gives the app (docker compose config failed), so update did not start anything. See why with: ${DC[*]} config --quiet"
+  else
+    info "asking Docker Compose how it fills in the new stack file's two address settings (what it prints is read here and not shown)"
+    got="$(with_trial_token docker compose --project-name "$PROJECT" --project-directory "$INSTALL_DIR" -f "$staged" config 2>/dev/null | rendered_app_hosts img)" || got=""
+    if [ -z "$got" ] || [ "${got%|*}" != "$want" ]; then
+      die "This version of Docker Compose does not read the two-address settings in the stack file the way this script expects, so nothing was changed. Update Docker Compose and run install again."
+    fi
+  fi
+  [ "${got##*|}" = "$IMG_HOST" ] \
+    || die "Docker Compose hands the app another IMG_HOST than install.sh reads in .env, so nothing was changed. Write the line exactly as IMG_HOST=<name>, at the start of the line, without export, spaces or quotes (or remove it), and run install again."
 }
 
 # Reads a rendered stack file (the output of docker compose config) and prints the app
 # service's two settings as "<TOURS_HOST>|<APP_HOST>", quotes taken off; nothing unless
 # each is under services, app, environment exactly once. A setting without a value is
-# not an empty one. No other part of what is read is passed on.
+# not an empty one. No other part of what is read is passed on. With "img" it adds the
+# app's IMG_HOST as a third field, "<TOURS_HOST>|<APP_HOST>|<IMG_HOST>": empty when it is
+# absent or empty, "(no value)" or "(twice)" when it cannot be a name. With "img-only" it
+# prints "|<IMG_HOST>" alone, whether the two others are there or not.
 rendered_app_hosts() {
-  awk -v sq="'" '
+  awk -v sq="'" -v img="${1:-}" '
     { sub(/\r$/, "") }
     /^[^ ]/ { top = $0; svc = ""; sec = ""; next }
     /^  [^ ]/ { svc = $0; sec = ""; next }
     /^    [^ ]/ { sec = $0; next }
-    top == "services:" && svc == "  app:" && sec == "    environment:" && /^      (TOURS_HOST|APP_HOST):( |$)/ {
+    top == "services:" && svc == "  app:" && sec == "    environment:" && /^      (TOURS_HOST|APP_HOST|IMG_HOST):( |$)/ {
       key = $1; sub(/:$/, "", key)
       val = $0; sub(/^      [A-Z_]+:/, "", val); gsub(/^ +| +$/, "", val)
       first = substr(val, 1, 1); last = substr(val, length(val), 1)
@@ -1440,18 +1558,45 @@ rendered_app_hosts() {
       else if (val == "") val = "(no value)"
       seen[key]++; value[key] = val
     }
-    END { if (seen["TOURS_HOST"] == 1 && seen["APP_HOST"] == 1) printf "%s|%s\n", value["TOURS_HOST"], value["APP_HOST"] }
+    END {
+      i = ""
+      if (seen["IMG_HOST"] > 1) i = "(twice)"
+      else if (seen["IMG_HOST"] == 1) i = value["IMG_HOST"]
+      if (img == "img-only") { printf "|%s\n", i; exit }
+      if (seen["TOURS_HOST"] != 1 || seen["APP_HOST"] != 1) exit
+      if (img != "img") { printf "%s|%s\n", value["TOURS_HOST"], value["APP_HOST"]; exit }
+      printf "%s|%s|%s\n", value["TOURS_HOST"], value["APP_HOST"], i
+    }
   '
 }
 
-# The Caddyfile for this install's mode and its one or two addresses.
+# The Caddyfile for this install's mode and its one, two or three addresses.
 caddyfile_for_install() {
-  case "$MODE:${APP_DOMAIN:+two}" in
+  case "$MODE:${APP_DOMAIN:+two}${IMG_HOST:+three}" in
+    tunnel:twothree) caddyfile_three_content tunnel_caddyfile_two_content \
+      "http://{\$DOMAIN}, http://{\$APP_DOMAIN} {" "http://{\$DOMAIN}, http://{\$APP_DOMAIN}, http://$IMG_HOST {" ;;
     tunnel:two) tunnel_caddyfile_two_content ;;
     tunnel:) tunnel_caddyfile_content ;;
+    *:twothree) caddyfile_three_content caddyfile_two_content \
+      "{\$DOMAIN}, {\$APP_DOMAIN} {" "{\$DOMAIN}, {\$APP_DOMAIN}, $IMG_HOST {" ;;
     *:two) caddyfile_two_content ;;
     *) caddyfile_content ;;
   esac
+}
+
+# The three-address Caddyfile: caddyfile_three_content <two-address function> <its site
+# address line> <the same line with the img address>. The two-address file with the img
+# address as a third name in its site address, and every other line as it is, so Caddy
+# gets a certificate for that name too (in tunnel mode it answers plain HTTP for it).
+# The name is written into the file, not read from the environment as the other two are:
+# the stack files hand Caddy only DOMAIN and APP_DOMAIN, and stay the same files with or
+# without the third address. It is a host name from .env, checked by valid_domain.
+caddyfile_three_content() {
+  local line found=0
+  while IFS= read -r line; do
+    if [ "$line" = "$2" ]; then printf '%s\n' "$3"; found=1; else printf '%s\n' "$line"; fi
+  done < <("$1")
+  [ "$found" = 1 ] || die "the two-address Caddyfile has no site address line to add the img address to"
 }
 
 # Runs a command. While a new token is on trial, that command alone gets it, as
@@ -1540,13 +1685,24 @@ start_stack() {
       restore_replaced || warn "could not put back every file this run replaced; see the lines above"
       run "${DC[@]}" up -d || warn "the previous setup did not start either"
     fi
+    # The Caddyfile put back may no longer match the IMG_HOST line of .env, which this
+    # run never changes: say which way, and what puts it right.
+    local hint="" back_img
+    if [ "$CADDY_CHANGED" = 1 ]; then
+      back_img="$(caddyfile_img_name)"
+      if [ "$back_img" != "$IMG_HOST" ] && [ -n "$IMG_HOST" ]; then
+        hint=" The earlier Caddyfile was put back, and it does not answer for IMG_HOST=$IMG_HOST in $LOGICAL_INSTALL_DIR/.env: remove that line, or put right what stopped the start and run: sudo bash $SELF install"
+      elif [ "$back_img" != "$IMG_HOST" ]; then
+        hint=" The earlier Caddyfile was put back, and it still answers for $back_img, which $LOGICAL_INSTALL_DIR/.env no longer holds as IMG_HOST: put that line back, or put right what stopped the start and run: sudo bash $SELF install"
+      fi
+    fi
     if [ "$MODE" = tunnel ] && [ "$PENDING" = 1 ]; then
-      die "starting failed: the tunnel still did not connect, so the site cannot be reached yet. The data folder and the backups were not changed. Run: sudo bash $SELF install; it asks for the tunnel token again. See the logs with: ${DC[*]} logs"
+      die "starting failed: the tunnel still did not connect, so the site cannot be reached yet. The data folder and the backups were not changed. Run: sudo bash $SELF install; it asks for the tunnel token again. See the logs with: ${DC[*]} logs$hint"
     fi
     if [ "$MODE" = tunnel ]; then
-      die "starting failed. The data folder, $ENV_FILE and the backups were not changed. If the token is the cause, replace it with: sudo bash $SELF install --new-token. See the logs with: ${DC[*]} logs"
+      die "starting failed. The data folder, $ENV_FILE and the backups were not changed. If the token is the cause, replace it with: sudo bash $SELF install --new-token. See the logs with: ${DC[*]} logs$hint"
     fi
-    die "starting failed. The data folder, $ENV_FILE and the backups were not changed. See the logs with: ${DC[*]} logs"
+    die "starting failed. The data folder, $ENV_FILE and the backups were not changed. See the logs with: ${DC[*]} logs$hint"
   fi
   save_new_token
   if [ "$CADDY_CHANGED" = 1 ] && [ "$caddy_was_running" = 1 ]; then
@@ -1557,7 +1713,17 @@ start_stack() {
 
 finish() {
   if [ "$DRY_RUN" = 1 ]; then say "Dry run finished: nothing was changed"; return 0; fi
-  if [ "$MODE" = tunnel ] && [ -n "$APP_DOMAIN" ]; then
+  if [ "$MODE" = tunnel ] && [ -n "$IMG_HOST" ]; then
+    printf '\nThe platform is running and its tunnel is connected to Cloudflare.\n'
+    printf "\nIn Cloudflare's dashboard, the tunnel needs three published applications, one for each address (skip this if they are there already):\n"
+    printf '  Hostname:     %s\n' "$DOMAIN"
+    printf '  Service URL:  %s\n' "$TUNNEL_SERVICE_URL"
+    printf '  Hostname:     %s\n' "$APP_DOMAIN"
+    printf '  Service URL:  %s\n' "$TUNNEL_SERVICE_URL"
+    printf '  Hostname:     %s\n' "$IMG_HOST"
+    printf '  Service URL:  %s\n' "$TUNNEL_SERVICE_URL"
+    printf 'No port is published on this server; it is reached only through the tunnel.\n'
+  elif [ "$MODE" = tunnel ] && [ -n "$APP_DOMAIN" ]; then
     printf '\nThe platform is running and its tunnel is connected to Cloudflare.\n'
     printf "\nIn Cloudflare's dashboard, the tunnel needs two published applications, one for each address (skip this if they are there already):\n"
     printf '  Hostname:     %s\n' "$DOMAIN"
@@ -1576,6 +1742,9 @@ finish() {
   fi
   if [ -n "$APP_DOMAIN" ]; then
     printf 'Tours are at https://%s; the app address is https://%s. Mythicshot keeps using https://%s.\n' "$DOMAIN" "$APP_DOMAIN" "$DOMAIN"
+  fi
+  if [ -n "$IMG_HOST" ]; then
+    printf 'Shared images and clips are at https://%s.\n' "$IMG_HOST"
   fi
   # The tunnel has connected: the mark that it never did goes, and a setup code that a
   # failed earlier run made without printing it is printed now, once.
@@ -1601,6 +1770,10 @@ finish() {
 check_roles() {
   local tries="$1" bad=0
   [ -n "$APP_DOMAIN" ] || return 0
+  if [ "$DRY_RUN" = 1 ] && [ -n "$IMG_HOST" ]; then
+    info "would ask https://$DOMAIN/healthz, https://$APP_DOMAIN/healthz and https://$IMG_HOST/healthz which address the platform sees each as"
+    return 0
+  fi
   if [ "$DRY_RUN" = 1 ]; then
     info "would ask https://$DOMAIN/healthz and https://$APP_DOMAIN/healthz which address the platform sees each as"
     return 0
@@ -1609,12 +1782,17 @@ check_roles() {
   # an interruption while an address is asked included. Nothing it created is removed.
   CREATED=()
   say "Checking that the platform sees each address in its own role"
+  if ! command -v curl >/dev/null 2>&1 && [ -n "$IMG_HOST" ]; then
+    warn "curl is not installed, so the three addresses were not asked. Install it (apt-get install curl) and run: sudo bash $SELF status. Or open each in a browser: https://$DOMAIN/healthz must show \"address\":\"tours\", https://$APP_DOMAIN/healthz must show \"address\":\"app\" and https://$IMG_HOST/healthz must show \"address\":\"img\"."
+    return 0
+  fi
   if ! command -v curl >/dev/null 2>&1; then
     warn "curl is not installed, so the two addresses were not asked. Install it (apt-get install curl) and run: sudo bash $SELF status. Or open both in a browser: https://$DOMAIN/healthz must show \"address\":\"tours\" and https://$APP_DOMAIN/healthz must show \"address\":\"app\"."
     return 0
   fi
   check_role "$DOMAIN" tours "$tries" || bad=1
   check_role "$APP_DOMAIN" app "$tries" || bad=1
+  if [ -n "$IMG_HOST" ] && [ "$SKIP_IMG_CHECK" = 0 ]; then check_role "$IMG_HOST" img "$tries" || bad=1; fi
   [ "$bad" = 1 ] || return 0
   exit 1
 }
@@ -1643,9 +1821,18 @@ check_role() {
         return 0
       fi
       # No role at all: an app from before two addresses answers like that, and so does
-      # a current one for a host name that is neither of its two.
+      # a current one for a host name that is neither of its two (or three). On the img
+      # address, an app from before the img address does.
+      if [[ "$body" != *'"address"'* ]] && [ "$role" = img ]; then
+        printf 'ERROR: %s answered, but the platform running here is older than the img address, or IMG_HOST does not reach the app. Run: sudo bash %s update. If it is up to date already, the request reached it under another host name: check that nothing in front of the platform changes the Host header.\n' "$url" "$SELF" >&2
+        return 1
+      fi
       if [[ "$body" != *'"address"'* ]]; then
         printf 'ERROR: %s answered, but the platform running here is older than two addresses. Run: sudo bash %s update. If it is up to date already, the request reached it under another host name: check that nothing in front of the platform changes the Host header.\n' "$url" "$SELF" >&2
+        return 1
+      fi
+      if [ -n "$IMG_HOST" ]; then
+        printf 'ERROR: %s answered, but the platform does not see it as its %s address. Check DOMAIN, APP_DOMAIN and IMG_HOST in %s, and that nothing in front of the platform changes the Host header.\n' "$url" "$role" "$LOGICAL_INSTALL_DIR/.env" >&2
         return 1
       fi
       printf 'ERROR: %s answered, but the platform does not see it as its %s address. Check DOMAIN and APP_DOMAIN in %s, and that nothing in front of the platform changes the Host header.\n' "$url" "$role" "$LOGICAL_INSTALL_DIR/.env" >&2
@@ -1668,7 +1855,11 @@ cmd_install() {
   fi
   say "Installing the demo platform"
   load_or_ask_config
-  if [ "$MODE" = tunnel ] && [ -n "$APP_DOMAIN" ]; then
+  if [ "$MODE" = tunnel ] && [ -n "$IMG_HOST" ]; then
+    info "Tunnel mode. Do these by hand, in Cloudflare's dashboard: create the tunnel, and give the tunnel a published application for each of $DOMAIN, $APP_DOMAIN and $IMG_HOST, all with the service URL $TUNNEL_SERVICE_URL."
+  elif [ -n "$IMG_HOST" ]; then
+    info "Do these by hand first: point the DNS records of $DOMAIN, $APP_DOMAIN and $IMG_HOST at this server and open ports 80 and 443 to it."
+  elif [ "$MODE" = tunnel ] && [ -n "$APP_DOMAIN" ]; then
     info "Tunnel mode. Do these by hand, in Cloudflare's dashboard: create the tunnel, and give the tunnel a published application for each of $DOMAIN and $APP_DOMAIN, both with the service URL $TUNNEL_SERVICE_URL."
   elif [ "$MODE" = tunnel ]; then
     info "Tunnel mode. Do these by hand, in Cloudflare's dashboard: create the tunnel, and give it a published application for $DOMAIN with the service URL $TUNNEL_SERVICE_URL."
@@ -1682,6 +1873,9 @@ cmd_install() {
     info "domain:      $DOMAIN"
     if [ -n "$APP_DOMAIN" ]; then
       info "app address: $APP_DOMAIN (the domain above is then the address of the tours)"
+    fi
+    if [ -n "$IMG_HOST" ]; then
+      info "img address: $IMG_HOST (for shared images and clips)"
     fi
     if [ "$MODE" = tunnel ]; then
       info "reached:     through a Cloudflare Tunnel; no port is published"
@@ -1710,10 +1904,12 @@ cmd_install() {
     say "Tunnel mode: no port is published, so ports 80 and 443 and the DNS record are not checked"
     info "the DNS record for $DOMAIN belongs to the tunnel and is managed in Cloudflare's dashboard, not here"
     if [ -n "$APP_DOMAIN" ]; then info "and so does the one for $APP_DOMAIN"; fi
+    if [ -n "$IMG_HOST" ]; then info "and so does the one for $IMG_HOST"; fi
   else
     check_ports
     check_dns "$DOMAIN"
     if [ -n "$APP_DOMAIN" ]; then check_dns "$APP_DOMAIN"; fi
+    if [ -n "$IMG_HOST" ]; then check_dns "$IMG_HOST"; fi
   fi
   if [ "$docker_missing" = 1 ]; then
     make_dir "$INSTALL_DIR" 0700 0
@@ -1784,8 +1980,27 @@ cmd_update() {
     fi
     die "$ENV_FILE holds no APP_DOMAIN, but the Caddyfile here was written for two addresses, and update does not rewrite it. Nothing was changed. Run: sudo bash $SELF install"
   fi
+  local found_img
+  found_img="$(caddyfile_img_name)"
+  if [ "$found_img" != "$IMG_HOST" ] && [ -n "$IMG_HOST" ]; then
+    die "$ENV_FILE holds IMG_HOST=$IMG_HOST, but the Caddyfile here does not answer for that name, and update does not rewrite it. Nothing was changed. Run: sudo bash $SELF install"
+  elif [ "$found_img" != "$IMG_HOST" ]; then
+    # A third name without IMG_HOST (added by hand, or left after the line was removed)
+    # does no harm: the app answers 421 for a name it does not serve. Said, and update
+    # goes on, as it did before 0.1.50.
+    warn "the Caddyfile here answers for a third name, $found_img, that $LOGICAL_INSTALL_DIR/.env does not hold as IMG_HOST. Run: sudo bash $SELF install"
+  fi
   refuse_snap
   check_docker_ready
+  # A hand-written IMG_HOST line that read_env_file does not take but Compose does would
+  # give the app a third address the Caddyfile does not answer for: checked here too,
+  # since update writes no file and starts the stack as it is.
+  # Only when .env has anything to do with IMG_HOST, so that an install without a word
+  # of it updates exactly as before 0.1.50, without asking Compose. A dry run asks
+  # nothing, as install's does not.
+  if [ "$DRY_RUN" = 0 ] && { [ -n "$IMG_HOST" ] || grep -q 'IMG_HOST' "$ENV_FILE"; }; then
+    check_rendered_addresses "$COMPOSE_FILE" img-only
+  fi
   take_lock
   local digests
   digests="$(docker image inspect --format '{{len .RepoDigests}}' "$IMAGE" 2>/dev/null || true)"
@@ -1848,10 +2063,26 @@ cmd_status() {
   if [ -n "$APP_DOMAIN" ]; then
     info "app address: https://$APP_DOMAIN (the address above is the address of the tours)"
   fi
-  if [ "$MODE" = tunnel ] && [ -n "$APP_DOMAIN" ]; then
+  if [ -n "$IMG_HOST" ]; then
+    info "img address: https://$IMG_HOST (for shared images and clips)"
+  fi
+  if [ "$MODE" = tunnel ] && [ -n "$IMG_HOST" ]; then
+    info "mode: behind a Cloudflare Tunnel; no port is published. The tunnel has a published application for each of $DOMAIN, $APP_DOMAIN and $IMG_HOST, all with the service URL $TUNNEL_SERVICE_URL"
+  elif [ "$MODE" = tunnel ] && [ -n "$APP_DOMAIN" ]; then
     info "mode: behind a Cloudflare Tunnel; no port is published. The tunnel has a published application for each of $DOMAIN and $APP_DOMAIN, both with the service URL $TUNNEL_SERVICE_URL"
   elif [ "$MODE" = tunnel ]; then
     info "mode: behind a Cloudflare Tunnel; no port is published. The tunnel's published application for $DOMAIN has the service URL $TUNNEL_SERVICE_URL"
+  fi
+  # .env and the Caddyfile disagree on the img address (a line added, changed or removed
+  # by hand without an install run since): said as such, and that address is not asked,
+  # since its answer would only point at a certificate.
+  local found_img
+  found_img="$(caddyfile_img_name)"
+  if [ "$found_img" != "$IMG_HOST" ] && [ -n "$IMG_HOST" ]; then
+    warn "the Caddyfile here does not answer for IMG_HOST=$IMG_HOST in $LOGICAL_INSTALL_DIR/.env, so the img address cannot work yet. Run: sudo bash $SELF install"
+    SKIP_IMG_CHECK=1
+  elif [ "$found_img" != "$IMG_HOST" ]; then
+    warn "the Caddyfile here answers for a third name, $found_img, that $LOGICAL_INSTALL_DIR/.env does not hold as IMG_HOST. Run: sudo bash $SELF install"
   fi
   check_roles 1
 }
@@ -2082,6 +2313,9 @@ services:
       INVITE_CONTACT: ${INVITE_CONTACT:-}
       # The public page the desktop app is downloaded from, linked on the dashboard: an https address.
       DOWNLOAD_URL: ${DOWNLOAD_URL:-}
+      # The site's home page, which the logo and name at the top of the dashboard link to:
+      # an https address. A value the app cannot use leaves the logo without a link.
+      HOME_URL: ${HOME_URL:-}
       # The sign-in lifetimes in whole days, each 0 or off to switch it off: a browser session
       # ends this long after its sign-in (default 90), a connection from Mythicshot stops after
       # this long unused (default 90) or this long after it was made (default off).

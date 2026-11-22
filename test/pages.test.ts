@@ -13,6 +13,7 @@ import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../
 import { inviteContactFrom } from "../src/signin/invite.ts";
 import { LINK_HTML, SIGNIN_CSS, SIGNIN_HTML, SIGNIN_JS, signinHtml } from "../src/signin/page.ts";
 import { send, type Call } from "./bundle.ts";
+import { isBrandMarkAlt } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -186,7 +187,7 @@ describe("the sign-in pages", () => {
       // No other words hide in attributes a person can meet: the one placeholder, and labels only by reference.
       const placeholders = doc.body.all().flatMap((e) => (e.hasAttribute("placeholder") ? [e.getAttribute("placeholder")] : []));
       expect(placeholders, s.path).toEqual(s.path === "/signin" ? ["you@example.com"] : []);
-      for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt"]) expect(e.hasAttribute(name), `${s.path} <${e.tagName} ${name}>`).toBe(false);
+      for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt"]) expect(e.hasAttribute(name) && !isBrandMarkAlt(e, name), `${s.path} <${e.tagName} ${name}>`).toBe(false);
     }
     // The script's own words are exactly these, and it has no other sentence.
     expect(scriptText()).toEqual(SCRIPT_TEXT);

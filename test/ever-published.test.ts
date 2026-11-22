@@ -29,11 +29,14 @@ function statements(sql: string): string[] {
 describe("migration 0017's backfill, on this target's database", () => {
   it("marks the tours that are published, have a live version or a move, and no other", async () => {
     expect(typeof MIGRATION).toBe("string");
-    const [alter, backfill, ...rest] = statements(MIGRATION);
+    const [alter, backfill, setBy, ...rest] = statements(MIGRATION);
     expect(alter).toMatch(/^ALTER TABLE tour ADD COLUMN ever_published /);
     expect(backfill).toMatch(/^UPDATE tour SET ever_published = 1/);
+    expect(setBy).toMatch(/^ALTER TABLE tour ADD COLUMN access_set_by TEXT /);
     expect(rest).toEqual([]);
     const { deps } = await makeDeps();
+    // The mark of a setting written at creation is there on this target's database, and takes a token id only.
+    expect((await deps.db.all<{ name: string }>("SELECT name FROM pragma_table_info('tour')")).map((c) => c.name)).toContain("access_set_by");
     const owner = await seedAccount(deps);
     const id = (n: number) => "tour_" + String(n).repeat(24);
     const tour = (n: number, status: string, publishedAt: number | null) =>
@@ -45,7 +48,9 @@ describe("migration 0017's backfill, on this target's database", () => {
     await deps.db.run("INSERT INTO snapshot (tour_id, data, published_at) VALUES (?, '{}', ?)", [id(4), NOW]);
     await tour(5, "published", null);
     await deps.db.run("INSERT INTO access_switch (tour_id, switch_id, target, from_publish, data, total, created_at, touched_at) VALUES (?, ?, 'private', NULL, '{}', 0, ?, ?)", [id(5), "sw_" + "5".repeat(24), NOW, NOW]);
-    await deps.db.run("UPDATE tour SET ever_published = 0");
+    await expect(deps.db.run("UPDATE tour SET access_set_by = 'dp_secret' WHERE id = ?", [id(2)])).rejects.toThrow(/CHECK/);
+    await deps.db.run("UPDATE tour SET access_set_by = ? WHERE id = ?", ["tok_" + "a".repeat(24), id(2)]);
+    await deps.db.run("UPDATE tour SET ever_published = 0, access_set_by = NULL");
     await deps.db.run(backfill);
     expect((await deps.db.all<{ id: string; ever_published: number }>("SELECT id, ever_published FROM tour ORDER BY id")).map((r) => [r.id, r.ever_published])).toEqual([
       [id(1), 1],

@@ -20,3 +20,11 @@ UPDATE tour SET ever_published = 1
  WHERE status = 'published' OR published_at IS NOT NULL
     OR EXISTS (SELECT 1 FROM snapshot s WHERE s.tour_id = tour.id)
     OR EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = tour.id);
+
+-- The id of the token whose first publish set the tour's setting and list, while nothing else
+-- has written them since; NULL otherwise, and for every tour at this migration. A first publish
+-- that states a list compares it with the tour's only when this is the asking token's id
+-- (src/access.ts, OWN_CREATION), so a token can confirm only a list it sent itself. The access
+-- PUT empties it in every batch that writes the setting or the list. An id is "tok_" and 24
+-- lowercase hex characters (src/auth.ts, newId).
+ALTER TABLE tour ADD COLUMN access_set_by TEXT CHECK (access_set_by IS NULL OR (length(access_set_by) = 28 AND length(CAST(access_set_by AS BLOB)) = 28 AND substr(access_set_by, 1, 4) = 'tok_' AND substr(access_set_by, 5) NOT GLOB '*[^0-9a-f]*'));

@@ -145,6 +145,13 @@ export type Config = {
    */
   downloadUrl?: string | null;
   /**
+   * The site's home page, from the HOME_URL setting, as homeUrlSetting (src/https-address.ts)
+   * keeps it: an https address, or an http one on localhost. The mark and the name at the
+   * top of the dashboard, sign-in and invite pages link to it (src/brand.ts). Absent or
+   * null: they are no link.
+   */
+  homeUrl?: string | null;
+  /**
    * The sign-in lifetimes in whole days, from SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and
    * CONNECTION_MAX_DAYS (lifetimesSetting, src/lifetimes.ts). A key that is absent is its
    * default (90, 90 and off); null is off. Read it through lifetimesOf.

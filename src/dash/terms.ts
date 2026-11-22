@@ -6,7 +6,9 @@
 // "Sign out" and "I agree". The read-only page is the same card without the buttons, opened
 // by "Read them" on the Account page.
 //
-// Both are one document, fixed text with no data, served with the sign-in pages' headers and
+// Above the card, the product's brand as every dashboard page has it (BRAND_PLAIN,
+// src/brand.ts): the mark and the name, one link to the site's home page when HOME_URL is set,
+// swapped in by the route (withHome). Both are one document, fixed text with no data, served with the sign-in pages' headers and
 // no database call (src/dash/routes.ts), like every dashboard page; its styles are in the
 // dashboard's stylesheet (src/dash/style.ts, "The terms screen"). Its one script,
 // /dash/terms.js, asks GET /api/v1/terms (or GET /api/v1/terms/agreed) and builds every text
@@ -23,6 +25,7 @@
 // Where a person goes after "I agree": the dashboard page that sent them here, named in
 // ?next= by the shared script (src/dash/script.ts), only when it is one of the dashboard's own
 // tabs (DASH_TABS); anything else is the Tours page.
+import { BRAND_PLAIN } from "../brand.ts";
 import { STRICT_HTTPS_SHAPE } from "../https-address.ts";
 import { DASH_TABS } from "./shell.ts";
 
@@ -75,6 +78,7 @@ export const TERMS_HTML = `<!doctype html>
 </head>
 <body data-page="terms">
 <main class="terms-page">
+  ${BRAND_PLAIN}
   <noscript><p class="message">${TERMS_SAYS.needsScript}</p></noscript>
   <p class="load" id="terms-load" role="status" aria-live="polite"></p>
   <section class="card terms-card" id="terms" aria-labelledby="terms-title" hidden>

@@ -17,6 +17,7 @@ import { INVITE_HTML, INVITE_JS } from "../src/signin/accept.ts";
 import { SIGNIN_CSS, SIGNIN_JS } from "../src/signin/page.ts";
 import { RESERVED } from "../src/usernames.ts";
 import { send, type Call } from "./bundle.ts";
+import { isBrandMarkAlt } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -160,7 +161,7 @@ describe("the invite page", () => {
     expect(textNodes(doc.body)).toEqual(WORDING);
     expect(textNodes(doc.head)).toEqual(["Your invite"]);
     // The only words in attributes a person can meet: none.
-    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt", "placeholder"]) expect(e.hasAttribute(name), `<${e.tagName} ${name}>`).toBe(false);
+    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt", "placeholder"]) expect(e.hasAttribute(name) && !isBrandMarkAlt(e, name), `<${e.tagName} ${name}>`).toBe(false);
     expect(scriptText()).toEqual(TEXT);
     const words = new Set(Object.values(TEXT));
     for (const t of scriptStrings().filter((s) => /[a-z]/i.test(s) && /\s/.test(s) && s !== "use strict")) expect(words.has(t), `a text outside TEXT: ${JSON.stringify(t)}`).toBe(true);

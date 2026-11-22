@@ -19,6 +19,7 @@ import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
 import { parseTerms, publishTerms } from "../src/terms.ts";
 import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
+import { isBrandMark } from "./dash-checks.ts";
 
 const APP = "https://app.example.com";
 const CSRF = "c".repeat(64);
@@ -119,6 +120,7 @@ describe("the terms screen", () => {
     await tab.settle();
     expect(tab.$("terms").shown).toBe(true);
     expect(tab.shows()).toEqual([
+      "Mythicshot",
       "Before you start",
       "Mythicshot terms of service",
       "The main points",
@@ -167,7 +169,8 @@ describe("the terms screen", () => {
     expect(tab.$("terms-title").textContent).toBe(evil);
     expect(tab.$("terms-version").textContent).toBe("· version of " + evil);
     expect(tab.$("terms-box").all().map((e) => [e.tagName, e.textContent])).toEqual([["h3", evil], ["p", evil], ["ul", evil], ["li", evil]]);
-    expect(tab.doc.root.all().some((e) => e.tagName === "img" || e.tagName === "script" && e.parent?.tagName !== "head")).toBe(false);
+    // The one image is the brand's mark (src/brand.ts); nothing the terms held became an element.
+    expect(tab.doc.root.all().some((e) => (e.tagName === "img" && !isBrandMark(e)) || (e.tagName === "script" && e.parent?.tagName !== "head"))).toBe(false);
     expect(tab.$("terms-links").shown).toBe(false);
     expect(tab.doc.root.all().filter((e) => e.hasAttribute("href")).map((e) => e.getAttribute("href"))).toEqual(["/dash/dash.css", "/account"]);
   });

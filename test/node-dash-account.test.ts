@@ -12,6 +12,7 @@
 //
 // What this leaves unproven, for docs/dashboard-browser-check.md: real layout, focus rings,
 // `inert` as a browser applies it, a screen reader, the browser's own history and cookie.
+import { isBrandMark } from "./dash-checks.ts";
 import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
@@ -301,7 +302,7 @@ describe("the Account page", () => {
     expect(tab.$("account-email").textContent).toBe("<b>bold</b>@example.com");
     expect(tab.$("account-workspace").textContent).toBe('<img src=x onerror="alert(1)">');
     expect(sessionRows(tab).map((r) => r.textContent)).toEqual(["This browser<i>Firefox</i>since 2 Nov", "<img src=x onerror=alert(1)>last used 18 NovSign out"]);
-    expect(tab.doc.root.all().some((e) => ["script", "b", "img", "i"].includes(e.tagName) && e.parent?.tagName !== "head")).toBe(false);
+    expect(tab.doc.root.all().some((e) => ["script", "b", "img", "i"].includes(e.tagName) && !isBrandMark(e) && e.parent?.tagName !== "head")).toBe(false);
   });
 
   it("ending another session sends the anti-forgery header and removes its row", async () => {
@@ -661,7 +662,7 @@ describe("changing the email address from the Account page", () => {
     expect(JSON.parse(tab.fetched.find((f) => f.method === "POST")!.body!)).toEqual({ email: hostile });
     expect(tab.$("sent-title").textContent).toBe(`Check ${hostile}`);
     expect(tab.$("sent-old").textContent).toBe("<b>old</b>@example.com");
-    expect(tab.doc.root.all().some((e) => e.tagName === "img" || e.tagName === "b")).toBe(false);
+    expect(tab.doc.root.all().some((e) => (e.tagName === "img" && !isBrandMark(e)) || e.tagName === "b")).toBe(false);
   });
 
   it("says why when the server refuses, keeps the question open and gives the buttons back", async () => {
@@ -933,7 +934,7 @@ describe("the page an email-change link opens", () => {
     await tab.settle();
     expect(tab.$("h-done").textContent).toBe("Your email address is now <b>n</b>@example.com");
     expect(tab.$("done-old").textContent).toBe('<img src=x onerror="alert(1)">@example.com');
-    expect(tab.doc.root.all().some((e) => e.tagName === "img" || e.tagName === "b")).toBe(false);
+    expect(tab.doc.root.all().some((e) => (e.tagName === "img" && !isBrandMark(e)) || e.tagName === "b")).toBe(false);
   });
 });
 

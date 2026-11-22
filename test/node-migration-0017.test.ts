@@ -13,6 +13,7 @@ import { NodeFileStore } from "../src/node/files.ts";
 import { migrate } from "../src/node/migrate.ts";
 import type { Deps } from "../src/ports.ts";
 import { createWorkspace } from "../src/workspaces.ts";
+import { OWN_CREATION } from "../src/access.ts";
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url));
 const NAME = "0017_ever_published.sql";
@@ -56,6 +57,12 @@ describe("migration 0017", () => {
       [tourId(4), 1],
       [tourId(5), 1],
     ]);
+    // The mark of a setting written at creation: empty on every tour at the update. The first
+    // publish's question is read from the tour row alone (its key), never from the audit.
+    expect(await db.all("SELECT id FROM tour WHERE access_set_by IS NOT NULL")).toEqual([]);
+    const plan = (await db.all<{ detail: string }>(`EXPLAIN QUERY PLAN SELECT ${OWN_CREATION} AS own FROM tour t WHERE t.id = ?`, ["tok_" + "0".repeat(24), tourId(1)])).map((r) => r.detail).join("\n");
+    expect(plan).toMatch(/SEARCH t USING INDEX sqlite_autoindex_tour_1 \(id=\?\)/);
+    expect(plan).not.toMatch(/audit/);
     // A new tour starts unmarked; the mark takes 0 or 1 only.
     await tour(6, "draft", null);
     expect(await db.first("SELECT ever_published FROM tour WHERE id = ?", [tourId(6)])).toEqual({ ever_published: 0 });
@@ -63,6 +70,7 @@ describe("migration 0017", () => {
     // Applied again by hand, its first statement fails and nothing changes.
     const sql = await readFile(join(MIGRATIONS_DIR, NAME), "utf8");
     expect(() => db.raw.exec(sql)).toThrow(/duplicate column/);
+    expect(await db.all<{ name: string }>("SELECT name FROM pragma_table_info('tour') WHERE name = 'access_set_by'")).toEqual([{ name: "access_set_by" }]);
     expect((await db.all<{ n: number }>("SELECT sum(ever_published) AS n FROM tour"))[0].n).toBe(4);
   });
 });

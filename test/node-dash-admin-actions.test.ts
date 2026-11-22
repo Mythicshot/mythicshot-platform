@@ -7,6 +7,7 @@
 //
 // What this leaves unproven, for docs/dashboard-browser-check.md: real layout at phone
 // width, focus rings, `inert` as a browser applies it, and a screen reader.
+import { isBrandMark } from "./dash-checks.ts";
 import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
@@ -156,7 +157,7 @@ describe("the invites: the list", () => {
     ];
     const tab = await opened(standard({ "GET /api/v1/admin/invites": inviteList(odd), ["DELETE /api/v1/admin/invites/" + I1]: { status: 204 } }));
     expect(invRows(tab).map((r) => invOf(r).address)).toEqual(odd.map((v) => v.email));
-    expect(tab.doc.root.all().some((e) => (e.tagName === "img" || e.tagName === "script") && e.parent?.tagName !== "head")).toBe(false);
+    expect(tab.doc.root.all().some((e) => ((e.tagName === "img" && !isBrandMark(e)) || e.tagName === "script") && e.parent?.tagName !== "head")).toBe(false);
     button(invRows(tab)[0], "Cancel").click();
     const title = tab.$("cancel-title");
     expect(title.textContent).toBe(`Cancel the invite to ${odd[0].email}?`);
@@ -1032,7 +1033,7 @@ describe("deleting an account", () => {
     const tab = await openDelete({ [REMOVAL]: { status: 200, json: { ...counts, username: name, email: '"<b>"@example.com' } } });
     expect(tab.$("delete-title").children.map((c) => (c instanceof FakeElement ? [c.className, c.textContent] : null))).toEqual([["", 'Delete "'], ["name", name], ["", '" for good?']]);
     expect(tab.$("delete-warn").all().filter((e) => e.className === "name").map((e) => e.textContent)).toEqual(['"<b>"@example.com']);
-    expect(tab.doc.root.all().some((e) => e.tagName === "img" || e.tagName === "b")).toBe(false);
+    expect(tab.doc.root.all().some((e) => (e.tagName === "img" && !isBrandMark(e)) || e.tagName === "b")).toBe(false);
     type(tab, name, "delete-input");
     expect(tab.$("delete-go").disabled).toBe(false);
   });

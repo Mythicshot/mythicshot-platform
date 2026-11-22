@@ -60,7 +60,7 @@ export function createApp(deps: Deps): Hono {
   accountRemovalRoutes(app, deps);
   termsRoutes(app, deps);
   pageRoutesForAccounts(app, deps);
-  dashRoutes(app);
+  dashRoutes(app, deps.config);
   publishRoutes(app, deps);
   // A restricted tour's pictures and the pages around it; its page is GET /t/<slug>, which
   // asks restrictedAnswer only when its public lookup found nothing.

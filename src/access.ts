@@ -279,22 +279,29 @@ type State = {
   /** True when the tour has been published at least once (see `everPublished`). */
   ever: boolean;
   /**
-   * Read only for a first publish (readState's `creation`): true when the last change of the
-   * tour's setting or list on record is a token's at creation (its audit entry has
-   * `at: "creation"` and `by: "token"`), so no session has written either since.
+   * Read only for a first publish (readState's `creation`): true when the tour's setting and
+   * list were last written by THIS token at creation (tour.access_set_by, migration 0017), so
+   * no session and no other token has written either since.
    */
   ownCreation: boolean;
 };
 
 /**
- * Whether the last change of who may view the tour `t` on record was a token's at creation:
- * its latest tour_access_changed audit entry, in the order they were written, among those
- * written since the tour was made (which the audit's index on its time bounds). Every change a
- * session makes to the setting or the list writes such an entry, so one ends it. No parameter.
+ * Whether the setting and list of the tour `t` were last written at creation by the token
+ * asking (one parameter: its id), read from the tour row itself: tour.access_set_by
+ * (migration 0017) holds the id of the token whose first publish set them, in the batch that
+ * set them, and every other write of the setting or the list (the access PUT, in each of its
+ * batches) empties it in the same batch. So nothing is ordered by time or looked up in the
+ * audit: the row says it, and a session's change or another token's ends it at once. A session
+ * asks with no token id, which matches nothing.
  */
-const OWN_CREATION = `coalesce((SELECT json_extract(a.detail, '$.at') = 'creation' AND json_extract(a.detail, '$.by') = 'token' FROM audit a
-    WHERE a.at >= t.created_at AND a.event = 'tour_access_changed' AND a.subject = t.id AND a.workspace_id = t.workspace_id
-    ORDER BY a.at DESC, a.rowid DESC LIMIT 1), 0)`;
+// Limit: a list change made by a build before 0.1.51 on this database does not empty the mark (README, "Who may view a tour").
+export const OWN_CREATION = "(t.access_set_by IS NOT NULL AND t.access_set_by = ?)";
+
+/** Empties the mark of a setting written at creation (OWN_CREATION): every write of the setting or the list by the access PUT carries it. */
+function notSetAtCreation(id: string, ws: string): Stmt {
+  return { sql: "UPDATE tour SET access_set_by = NULL WHERE id = ? AND workspace_id = ? AND access_set_by IS NOT NULL", params: [id, ws] };
+}
 
 /**
  * Whether a tour has been published at least once, over a tour row `t` in scope: it is
@@ -319,7 +326,7 @@ async function readState(deps: Deps, auth: Auth, id: string, creation = false): 
             ${EVER_PUBLISHED} AS ever, ${creation ? OWN_CREATION : "0"} AS own
        FROM tour t LEFT JOIN snapshot s ON s.tour_id = t.id LEFT JOIN access_switch w ON w.tour_id = t.id
       WHERE t.id = ? AND t.workspace_id = ?`,
-    [deps.now(), id, auth.workspaceId],
+    creation ? [deps.now(), auth.tokenId, id, auth.workspaceId] : [deps.now(), id, auth.workspaceId],
   );
   if (row === null) return null;
   return {
@@ -455,6 +462,7 @@ function startStatements(deps: Deps, auth: Auth, st: State, body: AccessBody, li
     params: [sw.id, now, JSON.stringify(sw.copies.map((c) => [c.to, c.from])), id, ws],
   });
   if (listChanged) stmts.push(...viewerStatements(id, ws, list, now));
+  stmts.push(notSetAtCreation(id, ws));
   return stmts;
 }
 
@@ -852,7 +860,7 @@ async function putAccess(r: Run, id: string, body: AccessBody): Promise<Response
       const same = toPublic ? body.access === "public" : body.access === st.access;
       if (!same && !cancel) return switching();
       if (listChanged) {
-        await d.db.batch([...viewerStatements(id, ws, list, now), changeAudit(d, auth, id, st.access, st.access, st.viewers.length, list.length, false)]);
+        await d.db.batch([...viewerStatements(id, ws, list, now), changeAudit(d, auth, id, st.access, st.access, st.viewers.length, list.length, false), notSetAtCreation(id, ws)]);
         st.viewers = list;
       }
       if (cancel) {
@@ -913,6 +921,7 @@ async function putAccess(r: Run, id: string, body: AccessBody): Promise<Response
       stmts.push(changeAudit(d, auth, id, st.access, st.access, st.viewers.length, list.length, false));
     }
     if (listChanged) stmts.push(...viewerStatements(id, ws, list, now));
+    if (stmts.length > 0) stmts.push(notSetAtCreation(id, ws));
     if (stmts.length > 0) {
       try {
         await d.db.batch(stmts);
@@ -989,9 +998,10 @@ export async function planFirstPublish(deps: Deps, auth: Auth, id: string, body:
   if (body.access === st.access) {
     // The setting it has, with no list stated (or none on either side): the publish of today.
     if (body.viewers === null || (body.viewers.length === 0 && st.viewers.length === 0)) return { kind: "same" };
-    // A stated list against a list the tour holds is compared only when a token wrote that
-    // list at creation and nobody changed it since (a resend after a lost answer); a list set
-    // in the dashboard is never compared, so a token cannot test guesses of it.
+    // A stated list against a list the tour holds is compared only when this same token wrote
+    // that list at creation and nobody changed it since (a resend after a lost answer); a list
+    // set in the dashboard, or by another token, is never compared, so no token can test
+    // guesses of a list it did not send itself.
     if (body.viewers.length > 0 && st.viewers.length > 0) return st.ownCreation && sameList(body.viewers, st.viewers) ? { kind: "same" } : { kind: "refuse", res: alreadySet() };
   }
   if (st.access !== "public" || st.viewers.length > 0 || st.switch !== null) return { kind: "refuse", res: alreadySet() };
@@ -1000,10 +1010,12 @@ export async function planFirstPublish(deps: Deps, auth: Auth, id: string, body:
   const now = deps.now();
   const stmts: Stmt[] = [
     {
-      sql: `UPDATE tour SET access = ? WHERE id = ? AND workspace_id = ? AND access = 'public' AND status = 'draft' AND published_at IS NULL AND ever_published = 0
+      sql: `UPDATE tour SET access = ?, access_set_by = ? WHERE id = ? AND workspace_id = ? AND access = 'public' AND status = 'draft' AND published_at IS NULL AND ever_published = 0
               AND NOT EXISTS (SELECT 1 FROM snapshot n WHERE n.tour_id = tour.id) AND NOT EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = tour.id)
               AND NOT EXISTS (SELECT 1 FROM tour_viewer v WHERE v.tour_id = tour.id)`,
-      params: [body.access, id, ws],
+      // The token that sets them, so its own resend can be told apart (OWN_CREATION); a
+      // session's creation sets no mark.
+      params: [body.access, auth.session === undefined ? auth.tokenId : null, id, ws],
     },
     viewing.changeAudit(deps, auth, "tour_access_changed", id, "public", body.access, 0, list.length, true, true),
     // The publish starts afresh from the draft as it is now, in the store the setting says:

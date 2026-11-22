@@ -1,8 +1,10 @@
 // The dashboard's routes on the app address: GET / (which sends a person on), each page in
-// DASH_PAGES with its own script, the shared stylesheet and script, and the terms screen
-// (TERMS_PAGE, also the read-only terms) with its own script. Every page and
-// file answers its fixed text with the sign-in pages' headers (ACCOUNT_PAGE_HEADERS): no
-// database or storage call, no credential read, nothing about anyone.
+// DASH_PAGES with its own script, the shared stylesheet and script, the terms screen
+// (TERMS_PAGE, also the read-only terms) with its own script, and the product's mark
+// (/dash/mark.png, which the sign-in and invite pages show too). Every page and file
+// answers its fixed text or bytes with the sign-in pages' headers (ACCOUNT_PAGE_HEADERS): no
+// database or storage call, no credential read, nothing about anyone. A page's brand links
+// to the site's home page when the HOME_URL setting names one (withHome, src/brand.ts).
 //
 // GET / decides from the request alone whether a session cookie was sent, without looking
 // the session up: with one it sends the browser to /tours, without one to /signin. A cookie
@@ -10,9 +12,12 @@
 // browser on to /signin. The answer depends only on the request's own cookie, never on
 // any account, so it tells nobody anything, and it costs no database call.
 import type { Hono } from "hono";
+import { MARK_PATH, withHome } from "../brand.ts";
 import { ACCOUNT_PAGE_HEADERS } from "../pages.ts";
+import type { Config } from "../ports.ts";
 import { sessionCookiePresent } from "../sessions.ts";
 import { DASH_JS } from "./script.ts";
+import { MARK_PNG } from "./mark.ts";
 import { DASH_CSS } from "./style.ts";
 import { TOURS_HTML, TOURS_JS } from "./tours.ts";
 import { GIFS_HTML, GIFS_JS, IMAGES_HTML, IMAGES_JS } from "./media.ts";
@@ -49,8 +54,9 @@ export const DASH_LINK_PAGES: readonly DashPage[] = [
 
 /**
  * The terms screen, which is also the read-only terms at /terms?read (src/dash/terms.ts):
- * served as DASH_PAGES are, with no database call, and kept apart because it is no dashboard
- * page: no top bar and no tabs, one card on its own page, with a script of its own. Its checks
+ * served as DASH_PAGES are (its brand through withHome), with no database call, and kept apart
+ * because it has no top bar and no tabs: the brand above one card on its own page, with a
+ * script of its own. Its checks
  * are in test/dash-terms.test.ts.
  */
 export const TERMS_PAGE: DashPage = { path: "/terms", html: TERMS_HTML, script: { path: "/dash/terms.js", body: TERMS_JS } };
@@ -58,21 +64,28 @@ export const TERMS_PAGE: DashPage = { path: "/terms", html: TERMS_HTML, script: 
 const HTML = "text/html; charset=utf-8";
 const CSS = "text/css; charset=utf-8";
 const JS = "text/javascript; charset=utf-8";
+const PNG = "image/png";
 
 /** The answer GET / gives: a redirect that no cache keeps, with the pages' own headers. */
 function sendTo(path: "/tours" | "/signin"): Response {
   return new Response(null, { status: 302, headers: { ...ACCOUNT_PAGE_HEADERS, location: path } });
 }
 
-export function dashRoutes(app: Hono): void {
+/** `config.homeUrl` is the HOME_URL setting as checked at the start: the pages' brand links to it. */
+export function dashRoutes(app: Hono, config: Pick<Config, "homeUrl">): void {
   const serve = (body: string, type: string) => () => new Response(body, { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": type } });
+  // A page is made when it is asked for, so a request makes only its own.
+  const page = (html: string) => () => new Response(withHome(html, config.homeUrl), { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": HTML } });
   app.get("/", (c) => sendTo(sessionCookiePresent(c.req.raw) ? "/tours" : "/signin"));
-  for (const page of [...DASH_PAGES, ...DASH_LINK_PAGES]) {
-    app.get(page.path, serve(page.html, HTML));
-    app.get(page.script.path, serve(page.script.body, JS));
+  for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES]) {
+    app.get(p.path, page(p.html));
+    app.get(p.script.path, serve(p.script.body, JS));
   }
   app.get("/dash/dash.css", serve(DASH_CSS, CSS));
   app.get("/dash/dash.js", serve(DASH_JS, JS));
-  app.get(TERMS_PAGE.path, serve(TERMS_PAGE.html, HTML));
+  // The terms screen: its brand as every dashboard page's, through withHome.
+  app.get(TERMS_PAGE.path, page(TERMS_PAGE.html));
   app.get(TERMS_PAGE.script.path, serve(TERMS_PAGE.script.body, JS));
+  // Each answer gets its own copy of the bytes, so no answer can use up another's.
+  app.get(MARK_PATH, () => new Response(MARK_PNG.slice(), { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": PNG } }));
 }

@@ -181,6 +181,7 @@ const ROWS: Record<string, Row> = {
   "GET /dash/tours.js": page("/dash/tours.js"),
   "GET /dash/dash.css": page("/dash/dash.css"),
   "GET /dash/dash.js": page("/dash/dash.js"),
+  "GET /dash/mark.png": page("/dash/mark.png"),
   "GET /images": page("/images"),
   "GET /dash/images.js": page("/dash/images.js"),
   "GET /gifs": page("/gifs"),
@@ -251,7 +252,7 @@ const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 /** The sign-in pages and their stylesheet and script, the invite page and its script, the dashboard's account pages (/account, /account/email), and the terms page. */
 const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account|invite|terms)(?:\/|$)/.test(k));
 /** The dashboard's other pages and every file under /dash/ (src/dash/). */
-const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:images|gifs|tours|storage|connections|admin|dash\/[a-z][a-z-]*\.(?:js|css))$/.test(k));
+const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:images|gifs|tours|storage|connections|admin|dash\/[a-z][a-z-]*\.(?:js|css|png))$/.test(k));
 const ROOT_KEY = "GET /";
 const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
 const DOCS_PAGE_KEY = "GET /docs";
@@ -367,10 +368,10 @@ describe("the host-routing matrix", () => {
     for (const key of DASH_KEYS) expect(HOST_RULES[key], key).toBe("app");
     expect(HOST_RULES[ROOT_KEY]).toBe("app-redirect");
     expect(PAGE_KEYS.length).toBe(9);
-    expect(DASH_KEYS.length).toBe(17);
+    expect(DASH_KEYS.length).toBe(18);
     // Every dashboard page and its script is in one of the two lists, and nothing is in both.
     for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES, TERMS_PAGE]) for (const key of [`GET ${p.path}`, `GET ${p.script.path}`]) expect([PAGE_KEYS.includes(key), DASH_KEYS.includes(key)].filter(Boolean), key).toEqual([true]);
-    for (const key of ["GET /dash/dash.css", "GET /dash/dash.js"]) expect(DASH_KEYS, key).toContain(key);
+    for (const key of ["GET /dash/dash.css", "GET /dash/dash.js", "GET /dash/mark.png"]) expect(DASH_KEYS, key).toContain(key);
     // 9, the two requests of an invite, the three requests that take a short code, the three of the token list, the change of who may view a tour or an item, and the three of the site's terms.
     expect(SESSION_KEYS.length).toBe(22);
     expect(ADMIN_KEYS.length).toBe(11);

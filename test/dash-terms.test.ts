@@ -16,7 +16,8 @@ import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
 import { send } from "./bundle.ts";
-import { expectNoForbiddenApis, expectPageShape } from "./dash-checks.ts";
+import { expectNoForbiddenApis, expectPageShape, isBrandMark } from "./dash-checks.ts";
+import { BRAND_PLAIN } from "../src/brand.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -82,7 +83,10 @@ describe("the markup", () => {
     const doc = new FakeDocument(TERMS_HTML);
     expectPageShape(TERMS_HTML, "terms");
     expect(textNodes(doc.head)).toEqual(["Terms"]);
-    expect(textNodes(doc.body)).toEqual(["This page needs JavaScript.", "The main points", "This list is a summary. The full terms below are what you agree to.", "The full terms", "Sign out", "I agree", "Back to your account"]);
+    // The brand above the card, as every dashboard page has it (src/brand.ts), once.
+    expect(TERMS_HTML.split(BRAND_PLAIN).length - 1).toBe(1);
+    expect(doc.root.all().filter((e) => e.tagName === "img").map((e) => isBrandMark(e))).toEqual([true]);
+    expect(textNodes(doc.body)).toEqual(["Mythicshot", "This page needs JavaScript.", "The main points", "This list is a summary. The full terms below are what you agree to.", "The full terms", "Sign out", "I agree", "Back to your account"]);
     const $ = (id: string) => doc.getElementById(id)!;
     // The box: a named region, reached with Tab and scrolled with the keys, and no trap: it is one stop.
     expect([$("terms-box").getAttribute("role"), $("terms-box").getAttribute("tabindex"), $("terms-box").getAttribute("aria-labelledby")]).toEqual(["region", "0", "h-full"]);

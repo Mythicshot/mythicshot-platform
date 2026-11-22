@@ -422,6 +422,8 @@ Use the commands the script printed, not the ones above: yours name the right ba
 cd ~/apps/tours && ./cpanel.sh status
 ```
 
+Going back below 0.1.51 has one more catch for tours whose first publish was started with a list and never finished: a change to the list made by the older version does not end the token's comparison of that list, so do not run an older version while such a publish is unfinished, and after coming forward again save each unpublished restricted tour's setting once in the dashboard (see [Who may view a tour](../../README.md#who-may-view-a-tour) in the README).
+
 ## 13. Troubleshooting
 
 | What you see | What to do |
@@ -724,6 +726,28 @@ touch ~/apps/tours/tmp/restart.txt
 ```
 
 **How to tell it worked:** the Account page shows the card "Mythicshot for Windows" with "Open the download page". A value that cannot be used never stops the app: the card is not shown, and the app's log has the line `download page: off, because DOWNLOAD_URL is not a usable https address. The site runs; the dashboard shows no download link.` To take the link away, remove the line and restart.
+
+### Link the logo to your home page
+
+The mark and the name "Mythicshot" at the top of the dashboard, the sign-in pages and the invite page can be one link to your site's home page (see [The brand and the home page](../../README.md#the-brand-and-the-home-page) in the README). Without the line they show and are no link.
+
+1. Add a line with your home page's full address, the one beginning with https, to the settings file in place of the part in angle brackets, and save. The address rule is in [Settings](../../README.md#settings) in the README.
+
+```sh
+nano ~/apps/tours-config.env
+```
+
+```text
+HOME_URL=<your home page's address>
+```
+
+2. Restart the app, so that it reads the new line.
+
+```sh
+touch ~/apps/tours/tmp/restart.txt
+```
+
+**How to tell it worked:** clicking the mark or the name at the top of the dashboard opens your home page in the same tab. A value the app cannot use never stops the app: the mark and the name are then no link, and the app's log has the line `home page: off, because HOME_URL is not a usable address. The site runs; the logo is not a link.` Fix the line and restart. To take the link away, remove the line and restart.
 
 ### Change how long sign-ins last
 

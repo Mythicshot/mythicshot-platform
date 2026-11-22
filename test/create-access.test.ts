@@ -16,7 +16,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
 import { RESTRICTED_STUB } from "../src/access.ts";
-import { hashToken, newId } from "../src/auth.ts";
+import { hashToken, newId, newToken } from "../src/auth.ts";
 import { SUBREQUEST_BUDGET } from "../src/budget.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { MAX_SERVED_PARTS, PART_BYTES, RESTRICTED_SERVED_PARTS } from "../src/limits.ts";
@@ -791,5 +791,76 @@ describe("the busiest first publish", () => {
     expect(r.calls).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
     await finish(s, t.id, r);
     expect(await s.publicKeys()).toEqual([]);
+  });
+});
+
+// ---- The second review's fixes ----
+
+/** A second token of the workspace, made as the setup's first one is. */
+async function secondToken(deps: Deps, workspaceId: string): Promise<string> {
+  const token = newToken();
+  await deps.db.run("INSERT INTO api_token (id, workspace_id, name, hash, created_at) VALUES (?, ?, ?, ?, ?)", [newId("tok"), workspaceId, "Second computer", await hashToken(token), deps.now()]);
+  return token;
+}
+
+
+describe("a list is compared only with the token that set it", () => {
+  it("another token of the workspace gets the same refusal for a right and a wrong guess while the first publish is under way; the token that set it still joins", SLOW, async () => {
+    const s = await tourSite();
+    const t = await tourOf(s, 2 * COPY_BATCH + 3);
+    const first = await publish(s, t.id, { access: "people", viewers: [LISTED] });
+    expect(first.status).toBe(202);
+    const other = await secondToken(s.deps, s.owner.workspaceId);
+    const before = await settingOf(s.deps, t.id);
+    const right = await publish(s, t.id, { access: "people", viewers: [LISTED] }, other);
+    const wrong = await publish(s, t.id, { access: "people", viewers: [OTHER] }, other);
+    expect([right.status, right.json.error]).toEqual([409, "access_already_set"]);
+    expect({ status: right.status, body: right.text, headers: [...right.headers.entries()].sort() }).toEqual({ status: wrong.status, body: wrong.text, headers: [...wrong.headers.entries()].sort() });
+    expect(right.calls).toBe(wrong.calls);
+    expect(await settingOf(s.deps, t.id)).toEqual(before);
+    const again = await publish(s, t.id, { access: "people", viewers: [LISTED] });
+    expect([again.status, again.json.publish_id]).toEqual([202, first.json.publish_id]);
+  });
+
+  it("a dashboard change ends the comparison whatever the clocks say: made at the same time as the creation, or with a time before it", SLOW, async () => {
+    for (const shift of [0, -60_000]) {
+      const s = await tourSite();
+      const t = await tourOf(s, 2 * COPY_BATCH + 3);
+      expect((await publish(s, t.id, { access: "people", viewers: [LISTED] })).status).toBe(202);
+      const created = (await s.deps.db.first<{ at: number }>("SELECT at FROM audit WHERE event = 'tour_access_changed' AND subject = ?", [t.id]))!.at;
+      // The dashboard's change, by a server whose clock gives the same time, or one a minute behind.
+      const clock = s.deps.now;
+      s.deps.now = () => created + shift;
+      expect((await setAccess(s, t.id, { access: "people", viewers: [LISTED, OTHER] })).status).toBe(200);
+      expect((await setAccess(s, t.id, { access: "people", viewers: [LISTED] })).status).toBe(200);
+      s.deps.now = clock;
+      expect((await s.deps.db.first<{ at: number }>("SELECT max(at) AS at FROM audit WHERE event = 'tour_access_changed' AND subject = ?", [t.id]))!.at).toBe(created + Math.max(0, shift));
+      const r = await publish(s, t.id, { access: "people", viewers: [LISTED] });
+      expect([r.status, r.json.error], `shift ${shift}`).toEqual([409, "access_already_set"]);
+    }
+  });
+});
+
+describe("the setting a stated publish runs under", () => {
+  it("a dashboard move between me and people after the check is refused, and nothing is published", SLOW, async () => {
+    const s = await tourSite();
+    const t = await tourOf(s, 1);
+    expect((await setAccess(s, t.id, { access: "me" })).status).toBe(200);
+    // Forced interleaving: the dashboard moves the tour to people right before the job is recorded.
+    const real = s.deps.db.batch.bind(s.deps.db);
+    let fired = false;
+    s.deps.db.batch = async (stmts) => {
+      if (!fired && stmts.some((x) => x.sql.includes("INSERT INTO publish_job"))) {
+        fired = true;
+        await s.deps.db.run("UPDATE tour SET access = 'people' WHERE id = ?", [t.id]);
+      }
+      return real(stmts);
+    };
+    const r = await publish(s, t.id, { access: "me" });
+    s.deps.db.batch = real;
+    expect(fired).toBe(true);
+    expect([r.status, r.json.error], r.text).toEqual([409, "access_already_set"]);
+    expect((await settingOf(s.deps, t.id)).tour).toMatchObject({ access: "people", status: "draft" });
+    expect((await settingOf(s.deps, t.id)).jobs).toEqual([]);
   });
 });

@@ -113,6 +113,14 @@ function files(dir: string): string[] {
 }
 
 describe("the server command", () => {
+  it("works with a HOME_URL the app cannot use: the logo's link is cosmetic and never closes the recovery commands", async () => {
+    const s = await site();
+    const r = await run({ ...s.env, HOME_URL: "http://made-up.example.com/" }, ["first-admin", "--email", "You@Example.com", "--username", "Alex"]);
+    expect(r.code).toBe(0);
+    expect(r.lines.slice(0, 4)).toEqual(CREATED("alex"));
+    expect(r.lines.join("\n")).not.toContain("made-up");
+  });
+
   it("first-admin prints the planned sentence and exits 0", async () => {
     const s = await site();
     const r = await run(s.env, ["first-admin", "--email", "You@Example.com", "--username", "Alex"]);

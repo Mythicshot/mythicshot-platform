@@ -1,7 +1,8 @@
 // An https address from a setting, checked one way for every setting that takes one:
-// INVITE_CONTACT's https form (src/signin/invite.ts) and DOWNLOAD_URL, the public page the
-// desktop app is downloaded from. A value that cannot be used is never an error here: the
-// caller leaves the feature out.
+// INVITE_CONTACT's https form (src/signin/invite.ts), DOWNLOAD_URL, the public page the
+// desktop app is downloaded from, and HOME_URL, the site's home page the brand links to. A
+// value that cannot be used is never an error in httpsAddressFrom: the caller decides, and
+// leaves the feature out (INVITE_CONTACT, DOWNLOAD_URL, HOME_URL).
 import { normaliseHost } from "./hosts.ts";
 
 /** The longest DOWNLOAD_URL used, in characters, as written and as handed on. */
@@ -72,4 +73,61 @@ export function downloadUrlSetting(raw: unknown): { url: string | null; problem:
   if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return { url: null, problem: null };
   const url = httpsAddressFrom(raw, { maxChars: DOWNLOAD_URL_MAX, strict: true });
   return url === null ? { url: null, problem: DOWNLOAD_URL_UNUSABLE } : { url, problem: null };
+}
+
+/** The longest HOME_URL used, in characters, as written and as handed on. */
+export const HOME_URL_MAX = 300;
+
+/** The one line for a HOME_URL that cannot be used. It names the setting and never repeats the value. */
+export const HOME_URL_UNUSABLE = "home page: off, because HOME_URL is not a usable address. The site runs; the logo is not a link.";
+
+/** An http address on this machine as written: the strict rule's characters, after `http://`. */
+const LOCAL_HTTP_WRITTEN = /^http:\/\/[a-z0-9.-]+(?::[0-9]{1,5})?(?:[\/?][A-Za-z0-9._~!$&'()*+,;=:@%\/?-]*)?$/i;
+/** The same, as URL writes it back: localhost, a `*.localhost` name or 127.0.0.1, an optional port, a path. */
+const LOCAL_HTTP_SHAPE = /^http:\/\/(?:localhost|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+localhost|127\.0\.0\.1)(?::[0-9]{1,5})?\/[A-Za-z0-9._~!$&'()*+,;=:@%\/?-]*$/;
+
+/**
+ * An `http://` address on this machine, as URL writes it, or null: allowed where the address
+ * settings allow http (originOf in src/hosts.ts): localhost, a `*.localhost` name and
+ * 127.0.0.1, which is how an install tried out on one machine reaches its home page. The host
+ * must be written as URL reads it (no other form of 127.0.0.1), with no user name or
+ * password and the strict rule's characters only, so no fragment, quote or backslash.
+ */
+function localHttpAddressFrom(text: string, maxChars: number): string | null {
+  if (!LOCAL_HTTP_WRITTEN.test(text)) return null;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" || url.username !== "" || url.password !== "") return null;
+  if (normaliseHost(url.host) !== url.host) return null;
+  const written = text.slice("http://".length).split(/[:/?]/)[0].toLowerCase();
+  if (url.hostname !== written) return null;
+  const href = url.href;
+  return href.length <= maxChars && LOCAL_HTTP_SHAPE.test(href) ? href : null;
+}
+
+/**
+ * The site's home page, from the HOME_URL setting, on either target: where the mark and the
+ * name at the top of the dashboard, sign-in and invite pages lead (src/brand.ts). Unset,
+ * null or empty (spaces only included): `url` null, no link. A usable address: `url`, as URL
+ * writes it. That is an https address the strict rule keeps (httpsAddressFrom, as
+ * DOWNLOAD_URL), or an http address on localhost, a `*.localhost` name or 127.0.0.1; at most
+ * HOME_URL_MAX characters, no user name or password, no fragment. Anything else, text or
+ * not: off, and `problem` is the one fixed line for the target to write. The link is
+ * cosmetic, so, as with DOWNLOAD_URL, it never stops the start, the site or the admin
+ * commands.
+ */
+export function homeUrlSetting(raw: unknown): { url: string | null; problem: string | null } {
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return { url: null, problem: null };
+  if (typeof raw !== "string") return { url: null, problem: HOME_URL_UNUSABLE };
+  const text = raw.trim();
+  const url = /^http:\/\//i.test(text)
+    ? text.length <= HOME_URL_MAX && /^[\x21-\x7e]+$/.test(text)
+      ? localHttpAddressFrom(text, HOME_URL_MAX)
+      : null
+    : httpsAddressFrom(text, { maxChars: HOME_URL_MAX, strict: true });
+  return url === null ? { url: null, problem: HOME_URL_UNUSABLE } : { url, problem: null };
 }

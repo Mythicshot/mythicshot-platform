@@ -6,6 +6,7 @@
 //
 // What this leaves unproven, for a by-hand check in two browsers: the real layout of the
 // bars, `inert` as a browser applies it, focus rings, and a screen reader.
+import { isBrandMark } from "./dash-checks.ts";
 import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
@@ -342,7 +343,7 @@ describe("the Storage page", () => {
       expect(name.children.every((c) => !(c instanceof FakeElement))).toBe(true);
     }
     expect(tab.$("storage-workspace").textContent).toBe("<i>ws</i>");
-    expect(tab.doc.root.all().some((e) => e.tagName === "img" || e.tagName === "i")).toBe(false);
+    expect(tab.doc.root.all().some((e) => (e.tagName === "img" && !isBrandMark(e)) || e.tagName === "i")).toBe(false);
   });
 
   it("leaves out an entry the API did not answer as a tour, an image or a GIF", async () => {

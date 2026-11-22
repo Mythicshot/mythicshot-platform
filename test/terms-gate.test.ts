@@ -167,6 +167,8 @@ const GATE: Record<string, Entry> = {
   "GET /dash/account-email.js": page("/dash/account-email.js"),
   "GET /terms": page("/terms"),
   "GET /dash/terms.js": page("/dash/terms.js"),
+  // The product's mark (src/dash/mark.ts, src/brand.ts): fixed bytes every page above shows, no session read, no database call.
+  "GET /dash/mark.png": page("/dash/mark.png"),
   // The pages visitors open, the player's files and the documentation: no session.
   "GET /p/:name": none("GET", "/p/" + "0".repeat(32) + ".png"),
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": none("GET", "/player.js"),

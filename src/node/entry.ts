@@ -4,7 +4,7 @@ import { serve } from "@hono/node-server";
 import { createApp } from "../app.ts";
 import { withBudget } from "../budget.ts";
 import { setClientAddress } from "../client.ts";
-import { downloadUrlSetting } from "../https-address.ts";
+import { downloadUrlSetting, homeUrlSetting } from "../https-address.ts";
 import { lifetimesSetting } from "../lifetimes.ts";
 import { DEFER_FAILED, deferTracker, type Deps } from "../ports.ts";
 import { clientAddressReader, configFromEnv, guardTarget, mailFromEnv, proxyHint, type Incoming } from "./config.ts";
@@ -55,6 +55,10 @@ async function main(): Promise<void> {
   // and said in its one fixed line.
   const download = downloadUrlSetting(process.env.DOWNLOAD_URL);
   if (download.problem !== null) console.error(download.problem);
+  // Nor does the site's home page: one that cannot be used leaves the logo without a link
+  // (configFromEnv) and is said in its one fixed line.
+  const home = homeUrlSetting(process.env.HOME_URL);
+  if (home.problem !== null) console.error(home.problem);
   // Nor do the sign-in lifetimes: one that cannot be used is its default (configFromEnv),
   // and each such setting is said in its one fixed line.
   for (const line of lifetimesSetting(process.env).problems) console.error(line);

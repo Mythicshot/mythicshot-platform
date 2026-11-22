@@ -33,6 +33,8 @@
 //   the invite was used in the first. Proposed wording. It offers the dashboard and nothing
 //   that would act on the account that is signed in.
 
+import { BRAND_PLAIN } from "../brand.ts";
+
 export const INVITE_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -46,7 +48,7 @@ export const INVITE_HTML = `<!doctype html>
 </head>
 <body data-page="invite">
 <main class="card">
-  <p class="brand">Mythicshot</p>
+  ${BRAND_PLAIN}
   <noscript><p class="message">This page needs JavaScript.</p></noscript>
 
   <section id="opening" aria-labelledby="h-opening" hidden>

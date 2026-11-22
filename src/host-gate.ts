@@ -168,6 +168,8 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /dash/tours.js": "app",
   "GET /dash/dash.css": "app",
   "GET /dash/dash.js": "app",
+  // The product's mark, shown by the dashboard's pages and the sign-in and invite pages.
+  "GET /dash/mark.png": "app",
   "GET /images": "app",
   "GET /dash/images.js": "app",
   "GET /gifs": "app",

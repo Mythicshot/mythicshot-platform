@@ -8,6 +8,7 @@
 // What this leaves unproven, for docs/dashboard-browser-check.md: real layout at phone
 // width, the preview pictures as a browser loads them (lazily, under the policy), focus
 // rings, a screen reader, and the browser's clipboard.
+import { isBrandMark } from "./dash-checks.ts";
 import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
@@ -352,7 +353,7 @@ describe("the Images page", () => {
     for (const row of r) expect(titleOf(row).children.every((c) => !(c instanceof FakeElement))).toBe(true);
     expect(tab.$("media-in").textContent).toBe(" in <i>ws</i>");
     // No element came from a title: only the page's own img, a and script tags are anywhere.
-    expect(tab.doc.root.all().filter((e) => ["img", "i", "script", "b"].includes(e.tagName) && e.parent?.tagName !== "head")).toEqual([]);
+    expect(tab.doc.root.all().filter((e) => ["img", "i", "script", "b"].includes(e.tagName) && !isBrandMark(e) && e.parent?.tagName !== "head")).toEqual([]);
     // The only links in the rows are Open, to the item's own link.
     for (const row of r) expect(row.all().filter((e) => e.tagName === "a").map((a) => a.getAttribute("href"))).toEqual([row.all().find((e) => e.className === "wide-only")!.getAttribute("title")]);
     // The question names it as text too.

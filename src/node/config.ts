@@ -7,7 +7,7 @@ import { hasNetwork } from "../rate.ts";
 import { parseEmail } from "../accounts.ts";
 import { misdirected } from "../host-gate.ts";
 import { hostSettingsFrom, normaliseHost, resolveHosts, type Hosts } from "../hosts.ts";
-import { downloadUrlSetting } from "../https-address.ts";
+import { downloadUrlSetting, homeUrlSetting } from "../https-address.ts";
 import { DEFAULT_LIFETIMES, lifetimesSetting, sameLifetimes } from "../lifetimes.ts";
 import { linkOrigin, NO_MAIL, type Mailer } from "../mail.ts";
 import type { Config } from "../ports.ts";
@@ -25,6 +25,7 @@ export const NODE_SETTINGS: readonly string[] = [
   "APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE",
   "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST",
   "INVITE_CONTACT", "IMG_HOST", "DOWNLOAD_URL", "SESSION_MAX_DAYS", "CONNECTION_IDLE_DAYS", "CONNECTION_MAX_DAYS",
+  "HOME_URL",
 ];
 
 /**
@@ -52,6 +53,12 @@ export const NODE_SETTINGS: readonly string[] = [
  * usable, the config has no such key; it never stops the start, and the entry writes the
  * one line for a value that cannot be used.
  *
+ * HOME_URL is the site's home page, where the mark and the name at the top of the
+ * dashboard, sign-in and invite pages lead (homeUrlSetting, src/https-address.ts). Unset or
+ * empty, the config has no such key and they are no link. A value that cannot be used is
+ * left out the same way; it never stops the start (the link is cosmetic), and the entry
+ * writes the one line for it, as for DOWNLOAD_URL.
+ *
  * SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and CONNECTION_MAX_DAYS are the sign-in lifetimes
  * (lifetimesSetting, src/lifetimes.ts): unset or empty is the default (the config then has no
  * such key, as before the settings existed),
@@ -71,6 +78,9 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   // The app's download page: kept only when usable, never a reason to stop (the entry says
   // the one line for a value that cannot be used, from downloadUrlSetting).
   const downloadUrl = downloadUrlSetting(env.DOWNLOAD_URL).url;
+  // The site's home page: kept only when usable, never a reason to stop (the entry says
+  // the one line for a value that cannot be used, from homeUrlSetting).
+  const homeUrl = homeUrlSetting(env.HOME_URL).url;
   // The sign-in lifetimes, read by name: env.SESSION_MAX_DAYS, env.CONNECTION_IDLE_DAYS, env.CONNECTION_MAX_DAYS.
   const { lifetimes } = lifetimesSetting({ SESSION_MAX_DAYS: env.SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS: env.CONNECTION_IDLE_DAYS, CONNECTION_MAX_DAYS: env.CONNECTION_MAX_DAYS });
   return {
@@ -81,6 +91,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
     ...(siteHost === null ? {} : { siteHost }),
     ...(inviteContact === "" ? {} : { inviteContact }),
     ...(downloadUrl === null ? {} : { downloadUrl }),
+    ...(homeUrl === null ? {} : { homeUrl }),
     ...(sameLifetimes(lifetimes, DEFAULT_LIFETIMES) ? {} : { lifetimes }),
   };
 }
