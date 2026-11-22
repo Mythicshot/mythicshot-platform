@@ -6,7 +6,7 @@
 // when it runs is tested under Node in
 // test/node-dash-storage.test.ts.
 import { describe, expect, it } from "vitest";
-import { CINZEL_FACE, MANROPE_FACE } from "../src/brand-css.ts";
+import { MANROPE_FACE } from "../src/brand-css.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { DASH_PAGES } from "../src/dash/routes.ts";
 import { DASH_JS } from "../src/dash/script.ts";
@@ -272,7 +272,7 @@ describe("the Storage page", () => {
     // The stylesheet has the page's own part, with the warning colour for the bar that is over.
     expect(DASH_CSS).toContain("/* The Storage page. */");
     expect(DASH_CSS).toContain(".meter.over .meter-fill { background: var(--caution-border); }");
-    expect(DASH_CSS.replace(MANROPE_FACE, "").replace(CINZEL_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
+    expect(DASH_CSS.replace(MANROPE_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
   });
 
   it("keeps to this site: every request through Dash.api, the routes it may call, and leaving only for /signin", () => {

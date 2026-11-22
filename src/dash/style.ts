@@ -3,7 +3,7 @@
 // dialogs, tags, tables, notices), then each page's own part under its heading. Both colour
 // schemes follow the system. Every colour is a token: no colour is written in this file
 // (test/brand-tokens.test.ts). The only url()s are the brand's two fonts, on this address.
-import { CINZEL_FACE, PAGE_BASE_CSS, WORDMARK_CSS } from "../brand-css.ts";
+import { PAGE_BASE_CSS, WORDMARK_CSS } from "../brand-css.ts";
 
 /**
  * A caution box's warning sign, drawn in CSS (the pages load no picture for it): an orange
@@ -12,7 +12,7 @@ import { CINZEL_FACE, PAGE_BASE_CSS, WORDMARK_CSS } from "../brand-css.ts";
  */
 export const CAUTION_ICON_CSS = `content: "!"; content: "!" / ""; position: absolute; left: 12px; top: 11px; width: 18px; height: 16px; padding-top: 3px; clip-path: polygon(50% 0, 100% 100%, 0 100%); background: var(--caution-border); color: var(--surface); font: 800 10px/13px var(--font-sans); text-align: center;`;
 
-export const DASH_CSS = `${PAGE_BASE_CSS}${CINZEL_FACE}*, *::before, *::after { box-sizing: border-box; }
+export const DASH_CSS = `${PAGE_BASE_CSS}*, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
 body {
@@ -226,6 +226,11 @@ h1 { font-size: 20px; line-height: 28px; font-weight: 700; margin: 0 0 4px; }
 .accounts td.used .tag { margin-left: 6px; }
 .accounts td.joined { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .accounts .terms .d { white-space: nowrap; }
+/* Room for an account's name and address, and for the terms' version, before any of them wraps: a
+   long address still wraps inside its column, and a date stays on one line. */
+.accounts td.who-cell { min-width: 13em; }
+.accounts td.terms { min-width: 9em; }
+.accounts .terms .name { white-space: nowrap; }
 .accounts.no-terms th.terms, .accounts.no-terms td.terms { display: none; }
 .accounts .mini { min-width: 80px; }
 .accounts .mini i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--primary); }
@@ -248,6 +253,7 @@ h1 { font-size: 20px; line-height: 28px; font-weight: 700; margin: 0 0 4px; }
   .accounts .bar { width: auto; padding: 6px 0; }
   .accounts td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 6.5em; color: var(--text-muted); font-size: 13px; }
   .accounts .acts-cell { padding-top: 8px; }
+  .accounts td.who-cell, .accounts td.terms { min-width: 0; }
 }
 .invite-text { margin: 0 0 12px; }
 .invite-message { margin: 8px 0 0; }

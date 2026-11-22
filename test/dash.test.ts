@@ -5,7 +5,7 @@
 // may not do. What the scripts do when they run is tested under Node in
 // test/node-dash-pages.test.ts, against a stand-in document.
 import { describe, expect, it } from "vitest";
-import { CINZEL_FACE, MANROPE_FACE } from "../src/brand-css.ts";
+import { MANROPE_FACE } from "../src/brand-css.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { DASH_LINK_PAGES, DASH_PAGES } from "../src/dash/routes.ts";
 import { DASH_JS } from "../src/dash/script.ts";
@@ -412,7 +412,8 @@ describe("the dashboard's pages and files", () => {
     for (const word of ["Images", "GIFs", "/images", "/gifs"]) for (const text of [DASH_JS, TOURS_JS]) expect(text, word).not.toContain(word);
     const user = doc.getElementById("dash-user")!;
     expect([user.textContent, user.className]).toEqual(["", "who"]);
-    expect(doc.body.all().find((e) => e.className === "brand")!.textContent).toBe(BRAND);
+    // The name is the wordmark's picture, whose alt is the name.
+    expect(textNodes(doc.body.all().find((e) => e.className === "brand")!)).toEqual([BRAND]);
     // Each page marks its own tab; Admin is hidden on every page.
     for (const t of DASH_TABS) {
       const page = new FakeDocument(dashHtml({ title: t.label, active: t.key, main: "<p>x</p>", script: "/dash/x.js" }));
@@ -453,7 +454,7 @@ describe("the dashboard's pages and files", () => {
       expect(all.some((e) => e.tagName === "meta" && e.getAttribute("name") === "referrer" && e.getAttribute("content") === "no-referrer"), s.path).toBe(true);
       expect(all.filter((e) => e.tagName === "form"), s.path).toEqual([]);
     }
-    expect(DASH_CSS.replace(MANROPE_FACE, "").replace(CINZEL_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
+    expect(DASH_CSS.replace(MANROPE_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
     // The scripts set no style attribute and add no handler attribute. The one style a page's
     // script may touch is a bar's width through the CSSOM, `.style.width = `, which the policy
     // allows (the account page sizes its bar the same way); only the Storage and Admin pages

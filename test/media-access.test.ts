@@ -12,6 +12,7 @@ import type { Hosts } from "../src/hosts.ts";
 import { MAX_SERVED_PARTS, PART_BYTES, RESTRICTED_EXTRA_CALLS, RESTRICTED_SERVED_PARTS, SERVE_LOOKUP_CALLS } from "../src/limits.ts";
 import { RESTRICTED_MAX_BYTES } from "../src/media-access.ts";
 import { MEDIA_DENIED_HTML, MEDIA_GATE_HTML, MEDIA_LINK_HTML, MEDIA_SIGNOUT_HTML, MEDIA_VIEW_JS } from "../src/media-view-page.ts";
+import { PAGE_BASE_CSS } from "../src/brand-css.ts";
 import { SHARE_CSS, SHARE_CSS_PATH } from "../src/media-assets.ts";
 import { MEDIA_VIEWER_PAGE_HEADERS, RESTRICTED_FILE_CSP, RESTRICTED_SHARE_PAGE_HEADERS } from "../src/media-page.ts";
 import { mediaViewerMail } from "../src/mail.ts";
@@ -591,6 +592,8 @@ describe("public items", () => {
     // And 0.1.54's: the pages' policy gained font-src 'self' after style-src (the brand's font is
     // served by the site), and the pages' stylesheet is the brand's, a different text with its own ETag.
     const SHARE_CSS_ETAG = `"${(await sha256Hex(new TextEncoder().encode(SHARE_CSS))).slice(0, 32)}"`;
+    // The stylesheet let through is the brand's: it starts with the tokens and the font every page stylesheet starts with.
+    expect(SHARE_CSS.startsWith(PAGE_BASE_CSS)).toBe(true);
     const fonted = (old: FrozenAnswer): FrozenAnswer => {
       const page = old.headers.some(([k, v]) => k === "content-security-policy" && v.includes("style-src 'self'; ") && !v.includes("font-src"));
       if (!page) return old;

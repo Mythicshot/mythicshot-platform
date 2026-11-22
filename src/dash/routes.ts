@@ -1,7 +1,8 @@
 // The dashboard's routes on the app address: GET / (which sends a person on), each page in
 // DASH_PAGES with its own script, the shared stylesheet and script, the terms screen
 // (TERMS_PAGE, also the read-only terms) with its own script, and the product's mark
-// (/dash/mark.svg, which the sign-in and invite pages show too). Every page and file
+// (/dash/mark.svg) and name (/dash/wordmark-dark.png and -light.png), which the sign-in and
+// invite pages show too. Every page and file
 // answers its fixed text or bytes with the sign-in pages' headers (ACCOUNT_PAGE_HEADERS): no
 // database or storage call, no credential read, nothing about anyone. A page's brand links
 // to the site's home page when the HOME_URL setting names one (withHome, src/brand.ts).
@@ -12,8 +13,9 @@
 // browser on to /signin. The answer depends only on the request's own cookie, never on
 // any account, so it tells nobody anything, and it costs no database call.
 import type { Hono } from "hono";
-import { MARK_SMALL_SVG } from "../brand-assets.ts";
-import { MARK_PATH, withHome } from "../brand.ts";
+import { MARK_SMALL_SVG, WORDMARK_DARK_PNG, WORDMARK_LIGHT_PNG } from "../brand-assets.ts";
+import { PICTURE_CSP } from "../brand-routes.ts";
+import { MARK_PATH, WORDMARK_DARK_PATH, WORDMARK_LIGHT_PATH, withHome } from "../brand.ts";
 import { ACCOUNT_PAGE_HEADERS } from "../pages.ts";
 import type { Config } from "../ports.ts";
 import { sessionCookiePresent } from "../sessions.ts";
@@ -86,6 +88,11 @@ export function dashRoutes(app: Hono, config: Pick<Config, "homeUrl">): void {
   // The terms screen: its brand as every dashboard page's, through withHome.
   app.get(TERMS_PAGE.path, page(TERMS_PAGE.html));
   app.get(TERMS_PAGE.script.path, serve(TERMS_PAGE.script.body, JS));
-  // The brand's small mark, the same file as the tab icon, with the pages' own headers.
-  app.get(MARK_PATH, () => new Response(MARK_SMALL_SVG, { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": SVG } }));
+  // The brand's small mark, the same file as the tab icon, and the wordmark's two pictures:
+  // the pages' own headers, but a picture's policy, so a picture opened on its own runs
+  // nothing (an SVG could hold a script) and is a sandboxed origin of its own.
+  const picture = (type: string) => ({ ...ACCOUNT_PAGE_HEADERS, "content-security-policy": PICTURE_CSP, "content-type": type });
+  app.get(MARK_PATH, () => new Response(MARK_SMALL_SVG, { status: 200, headers: picture(SVG) }));
+  app.get(WORDMARK_DARK_PATH, () => new Response(WORDMARK_DARK_PNG().slice(), { status: 200, headers: picture("image/png") }));
+  app.get(WORDMARK_LIGHT_PATH, () => new Response(WORDMARK_LIGHT_PNG().slice(), { status: 200, headers: picture("image/png") }));
 }

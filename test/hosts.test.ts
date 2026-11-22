@@ -184,14 +184,13 @@ const ROWS: Record<string, Row> = {
   "GET /dash/dash.css": page("/dash/dash.css"),
   "GET /dash/dash.js": page("/dash/dash.js"),
   "GET /dash/mark.svg": page("/dash/mark.svg"),
-  // The brand's files (src/brand-routes.ts): the tab icon and Manrope on every address,
-  // Cinzel (the name beside the mark) on the app address only.
+  "GET /dash/wordmark-dark.png": page("/dash/wordmark-dark.png"),
+  "GET /dash/wordmark-light.png": page("/dash/wordmark-light.png"),
+  // The brand's files (src/brand-routes.ts): the tab icon and Manrope on every address.
   "GET /favicon.svg": everywhere("/favicon.svg"),
   "GET /favicon.ico": everywhere("/favicon.ico"),
   "GET /fonts/:file{manrope(?:\\.[0-9a-f]{16})?\\.ttf}": everywhere("/fonts/manrope.ttf"),
   "GET /fonts/manrope-OFL.txt": everywhere("/fonts/manrope-OFL.txt"),
-  "GET /fonts/:file{cinzel(?:\\.[0-9a-f]{16})?\\.ttf}": page("/fonts/cinzel.ttf"),
-  "GET /fonts/cinzel-OFL.txt": page("/fonts/cinzel-OFL.txt"),
   "GET /images": page("/images"),
   "GET /dash/images.js": page("/dash/images.js"),
   "GET /gifs": page("/gifs"),
@@ -263,9 +262,9 @@ const WIZARD_KEYS = KEYS.filter((k) => k.includes(" /setup"));
 const PAGE_KEYS = KEYS.filter((k) => /^GET \/(?:signin|account|invite|terms)(?:\/|$)/.test(k));
 /** The dashboard's other pages and every file under /dash/ (src/dash/). */
 const DASH_KEYS = KEYS.filter((k) => /^GET \/(?:images|gifs|tours|storage|connections|admin|dash\/[a-z][a-z-]*\.(?:js|css|svg))$/.test(k));
-/** The brand's files every address serves (rule every), and the one font only the app address serves. */
+/** The brand's files every address serves (rule every), and its pictures only the app address serves (the mark and the wordmark). */
 const BRAND_EVERY_KEYS = KEYS.filter((k) => HOST_RULES[k] === "every");
-const BRAND_APP_KEYS = KEYS.filter((k) => /^GET \/fonts\/(?::file\{cinzel|cinzel-)/.test(k));
+const BRAND_APP_KEYS = KEYS.filter((k) => k === "GET /dash/mark.svg" || k.startsWith("GET /dash/wordmark-"));
 const ROOT_KEY = "GET /";
 const PLAYER_KEY = KEYS.find((k) => k.startsWith("GET /:file"))!;
 const DOCS_PAGE_KEY = "GET /docs";
@@ -398,7 +397,10 @@ describe("the host-routing matrix", () => {
     expect(KEYS.filter((k) => HOST_RULES[k] === "media")).toEqual(MEDIA_KEYS);
     for (const key of KEYS) if (key !== "GET /healthz" && !MEDIA_KEYS.includes(key) && !BRAND_EVERY_KEYS.includes(key)) expect(ROWS[key].img, key).toBe(404);
     for (const key of BRAND_EVERY_KEYS) expect([ROWS[key].one, ROWS[key].tours, ROWS[key].app, ROWS[key].img, ROWS[key].unknown], key).toEqual([200, 200, 200, 200, 421]);
+    expect(BRAND_APP_KEYS).toHaveLength(3);
     for (const key of BRAND_APP_KEYS) expect(HOST_RULES[key], key).toBe("app");
+    // No font of the name: only Manrope is served.
+    expect(KEYS.filter((k) => k.startsWith("GET /fonts/"))).toEqual(["GET /fonts/:file{manrope(?:\\.[0-9a-f]{16})?\\.ttf}", "GET /fonts/manrope-OFL.txt"]);
   });
 
   it("one-address mode answers every route on any host as before", async () => {

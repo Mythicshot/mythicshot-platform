@@ -3,8 +3,8 @@
 // the token values are the brand's; every pair of colours the stylesheets put together reaches
 // its contrast in both schemes; and the type, corners and focus ring follow the brand.
 import { describe, expect, it } from "vitest";
-import { CINZEL_FACE, MANROPE_FACE, PAGE_BASE_CSS, PLAYER_BASE_CSS } from "../src/brand-css.ts";
-import { COLOR_TOKENS, FIXED_TOKENS, GROUND, schemeTokensCss, tokensCss } from "../src/brand-tokens.ts";
+import { MANROPE_FACE, PAGE_BASE_CSS, PLAYER_BASE_CSS } from "../src/brand-css.ts";
+import { COLOR_TOKENS, FIXED_TOKENS, schemeTokensCss, tokensCss } from "../src/brand-tokens.ts";
 import { DASH_CSS } from "../src/dash/style.ts";
 import { DOCS_CSS } from "../src/docs/site-assets.ts";
 import { SHARE_CSS } from "../src/media-assets.ts";
@@ -78,7 +78,6 @@ describe("the token source", () => {
   it("holds the brand's 25 colours with their light and dark values, and the platform's three, nothing else", () => {
     for (const [name, [light, dark]] of Object.entries(BRAND)) expect(COLOR_TOKENS.find((t) => t.name === name), name).toEqual({ name, light, dark });
     expect(COLOR_TOKENS.map((t) => t.name).filter((n) => !(n in BRAND))).toEqual(["wordmark", "scrim", "shadow-raised"]);
-    expect(GROUND).toEqual({ light: BRAND.ground[0], dark: BRAND.ground[1] });
     const wordmark = COLOR_TOKENS.find((t) => t.name === "wordmark");
     expect(wordmark).toEqual({ name: "wordmark", light: BRAND.text[0], dark: BRAND.gold[1] });
   });
@@ -86,7 +85,8 @@ describe("the token source", () => {
   it("gives the type families, the spacing scale, the two control heights and the radii", () => {
     const fixed = Object.fromEntries(FIXED_TOKENS);
     expect(fixed["font-sans"].startsWith('"Manrope", system-ui')).toBe(true);
-    expect(fixed["font-display"].startsWith('"Cinzel", Georgia')).toBe(true);
+    // The name beside the mark is a picture (src/brand.ts): no display font.
+    expect(fixed["font-display"]).toBeUndefined();
     expect(fixed["font-mono"].startsWith("ui-monospace")).toBe(true);
     expect([1, 2, 3, 4, 6, 8, 12].map((n) => fixed[`space-${n}`])).toEqual(["4px", "8px", "12px", "16px", "24px", "32px", "48px"]);
     expect([fixed["control-dense"], fixed["control-roomy"]]).toEqual(["36px", "44px"]);
@@ -147,12 +147,10 @@ describe("every stylesheet uses the one token set", () => {
     expect(literalsAfter(`${PAGE_BASE_CSS}#add, #bad { margin: 0; } /* #fff */`, PAGE_BASE_CSS)).toEqual([]);
   });
 
-  it("Cinzel is declared only where the mark is shown with the name: the dashboard's and the sign-in pages' stylesheets", () => {
-    for (const [what, css] of [["dash", DASH_CSS], ["signin", SIGNIN_CSS]] as const) expect(css.split(CINZEL_FACE).length - 1, what).toBe(1);
-    for (const [what, css, base] of [...PAGE_SHEETS.filter(([, c]) => c !== DASH_CSS && c !== SIGNIN_CSS).map(([w, c]) => [w, c, PAGE_BASE_CSS]), ["player", PLAYER_CSS, PLAYER_BASE_CSS]]) {
-      // The token of the family is there with the rest; nothing after it declares or uses Cinzel.
-      expect(css.slice(base.length), what).not.toContain("Cinzel");
-      expect(css, what).not.toContain("var(--font-display)");
+  it("no stylesheet declares or uses Cinzel: the name beside the mark is a picture", () => {
+    for (const [what, css] of [...PAGE_SHEETS, ["player", PLAYER_CSS] as [string, string]]) {
+      expect(css, what).not.toMatch(/cinzel/i);
+      expect(css, what).not.toContain("--font-display");
     }
   });
 });
@@ -184,10 +182,10 @@ describe("the brand's components", () => {
     }
   });
 
-  it("table headers are in sentence case: no stylesheet makes text upper case but the name beside the mark", () => {
+  it("table headers are in sentence case: no stylesheet makes text upper case but the kicker of the tour's own cover card", () => {
     for (const [what, css] of sheets) {
       const upper = [...css.matchAll(/\n([^\n{]*)\{[^}]*text-transform: uppercase/g)].map((m) => m[1].trim());
-      expect(upper.filter((s) => s !== ".brand" && !s.startsWith(".dp-p-kicker")), what).toEqual([]);
+      expect(upper.filter((s) => !s.startsWith(".dp-p-kicker")), what).toEqual([]);
     }
   });
 

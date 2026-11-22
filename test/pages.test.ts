@@ -4,7 +4,7 @@
 // the script text may and may not do. What the script does when it runs is tested under
 // Node in test/node-signin-pages.test.ts, where it can be run against a stand-in document.
 import { describe, expect, it } from "vitest";
-import { CINZEL_FACE, MANROPE_FACE } from "../src/brand-css.ts";
+import { MANROPE_FACE } from "../src/brand-css.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { UNDOCUMENTED_ROUTES } from "../src/docs/openapi.ts";
 import { HOST_RULES } from "../src/host-gate.ts";
@@ -292,7 +292,7 @@ describe("the sign-in pages", () => {
         expect(form.hasAttribute("action"), s.path).toBe(false);
       }
     }
-    expect(SIGNIN_CSS.replace(MANROPE_FACE, "").replace(CINZEL_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\//i);
+    expect(SIGNIN_CSS.replace(MANROPE_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\//i);
     expect(SIGNIN_JS).not.toMatch(/https?:|\/\/[a-z]/i);
   });
 

@@ -90,6 +90,8 @@ export const UNDOCUMENTED_ROUTES: Readonly<Record<string, string>> = {
   "GET /dash/dash.css": "the dashboard's own stylesheet",
   "GET /dash/dash.js": "the dashboard's shared script",
   "GET /dash/mark.svg": "the product's mark beside the name on the dashboard and the sign-in pages",
+  "GET /dash/wordmark-dark.png": "the product's name beside the mark, drawn as a picture for dark grounds",
+  "GET /dash/wordmark-light.png": "the product's name beside the mark, drawn as a picture for light grounds",
   "GET /images": "the dashboard's Images page, for people in a browser; it calls the shared item requests described here",
   "GET /dash/images.js": "the Images page's own script",
   "GET /gifs": "the dashboard's GIFs page, for people in a browser; it calls the shared item requests described here",
@@ -135,8 +137,6 @@ export const UNDOCUMENTED_ROUTES: Readonly<Record<string, string>> = {
   "GET /favicon.ico": "the browser tab's icon in the older format, a fixed file",
   "GET /fonts/:file{manrope(?:\\.[0-9a-f]{16})?\\.ttf}": "the pages' text font, Manrope, a fixed file",
   "GET /fonts/manrope-OFL.txt": "the licence of the pages' text font, fixed text",
-  "GET /fonts/:file{cinzel(?:\\.[0-9a-f]{16})?\\.ttf}": "the font of the product's name beside the mark, Cinzel, a fixed file",
-  "GET /fonts/cinzel-OFL.txt": "the licence of the font of the product's name, fixed text",
   "GET /api/v1/openapi.json": "this description itself, as JSON",
   "GET /api/v1/openapi.yaml": "this description itself, as YAML",
 };

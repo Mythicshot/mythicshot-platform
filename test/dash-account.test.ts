@@ -6,7 +6,7 @@
 // above all with the code a link carries. What the scripts do when they run is tested under
 // Node in test/node-dash-account.test.ts.
 import { describe, expect, it } from "vitest";
-import { CINZEL_FACE, MANROPE_FACE } from "../src/brand-css.ts";
+import { MANROPE_FACE } from "../src/brand-css.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { ACCOUNT_EMAIL_HTML, ACCOUNT_EMAIL_JS } from "../src/dash/account-email.ts";
 import { ACCOUNT_HTML, ACCOUNT_JS } from "../src/dash/account.ts";
@@ -418,7 +418,7 @@ describe("the Account page and the page an email-change link opens", () => {
     expect([field.getAttribute("type"), field.getAttribute("autocomplete"), field.getAttribute("maxlength"), field.getAttribute("aria-describedby")]).toEqual(["email", "off", "254", "change-hint change-message"]);
     // The stylesheet has the pages' own part.
     expect(DASH_CSS).toContain("/* The Account page. */");
-    expect(DASH_CSS.replace(MANROPE_FACE, "").replace(CINZEL_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
+    expect(DASH_CSS.replace(MANROPE_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
     expect(DASH_CSS).not.toMatch(/overflow-x|100vw/);
   });
 });

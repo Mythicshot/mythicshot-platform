@@ -172,6 +172,8 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /dash/dash.js": "app",
   // The product's mark, shown by the dashboard's pages and the sign-in and invite pages.
   "GET /dash/mark.svg": "app",
+  "GET /dash/wordmark-dark.png": "app",
+  "GET /dash/wordmark-light.png": "app",
   "GET /images": "app",
   "GET /dash/images.js": "app",
   "GET /gifs": "app",
@@ -236,15 +238,11 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /api/v1/openapi.yaml": "both",
 
   // The brand's files (src/brand-routes.ts), fixed and the same for everyone. The tab icon and
-  // Manrope, the text font, with its licence: every address has pages that use them. Cinzel,
-  // the font of the name beside the mark, with its licence: only the app address shows the
-  // mark with the name.
+  // Manrope, the text font, with its licence: every address has pages that use them.
   "GET /favicon.svg": "every",
   "GET /favicon.ico": "every",
   "GET /fonts/:file{manrope(?:\\.[0-9a-f]{16})?\\.ttf}": "every",
   "GET /fonts/manrope-OFL.txt": "every",
-  "GET /fonts/:file{cinzel(?:\\.[0-9a-f]{16})?\\.ttf}": "app",
-  "GET /fonts/cinzel-OFL.txt": "app",
 };
 
 /** The answer to a host this install does not serve: 421 with nothing in it. */

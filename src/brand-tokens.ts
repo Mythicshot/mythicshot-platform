@@ -11,8 +11,7 @@
 // the name beside the mark (`wordmark`: the brand's text colour on light grounds, its gold on
 // dark ones, as on the front page), and the brand's one shadow.
 //
-// Pure: no import, no platform API, so the tour player's script can import GROUND from here
-// without pulling anything else into its bundle.
+// Pure: no import, no platform API.
 
 /** A colour token: its CSS name (without `--`) and its light and dark values. */
 export type ColorToken = { name: string; light: string; dark: string };
@@ -50,13 +49,9 @@ export const COLOR_TOKENS: readonly ColorToken[] = [
   { name: "shadow-raised", light: "0 1px 2px rgba(29, 24, 40, 0.06), 0 8px 24px rgba(29, 24, 40, 0.1)", dark: "0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.45)" },
 ];
 
-/** The page ground of each scheme: the tour player tints it toward a tour's accent for the "auto" backdrop. */
-export const GROUND = { light: "#f7f5fb", dark: "#16121c" } as const;
-
 /** The type families, spacing, control heights and radii: the same in both schemes. */
 export const FIXED_TOKENS: readonly (readonly [string, string])[] = [
   ["font-sans", '"Manrope", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'],
-  ["font-display", '"Cinzel", Georgia, "Times New Roman", serif'],
   ["font-mono", 'ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace'],
   ["space-1", "4px"],
   ["space-2", "8px"],

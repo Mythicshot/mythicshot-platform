@@ -1,16 +1,21 @@
 // The brand at the top of the dashboard's pages (src/dash/shell.ts), the sign-in pages
 // (src/signin/page.ts) and the invite page (src/signin/accept.ts): the product's mark, then
 // its name. The mark is the brand's small mark (used below 48 pixels), the app's own file
-// /dash/mark.svg (src/brand-assets.ts), on the app address, so the pages still load nothing
-// from another site and their policy's img-src 'self' covers it. Its alt is empty: the name
-// beside it is the label. The stylesheets set the name in the brand's wordmark style (Cinzel
-// capitals, src/brand-css.ts); the text itself stays "Mythicshot".
+// /dash/mark.svg (src/brand-assets.ts); its alt is empty, as the name beside it is the label.
+// The name is the wordmark, "MYTHICSHOT" in the brand's Cinzel, drawn as a picture by
+// scripts/build-wordmark.py in two colourways: gold for dark grounds, ink for light ones. A
+// <picture> picks one with the prefers-color-scheme media query of its <source>, which the
+// pages' own colours follow too: no script, and the policy's img-src 'self' covers both,
+// since they are the app's own files on the app address (src/dash/routes.ts), as the mark is.
+// Its alt is "Mythicshot", the text a screen reader reads and a browser shows when the
+// picture cannot be loaded. The platform serves no font for the name.
 //
 // Every page is built with the plain brand, BRAND_PLAIN. With the optional HOME_URL setting
 // (homeUrlSetting, src/https-address.ts) the routes serve the page through withHome, which
 // makes the mark and the name one link to the site's home page, in the same tab. The pages
 // viewers of other people's content see (on the tours and img addresses) keep the name
 // alone: the mark is not served there.
+import { WORDMARK_HEIGHT, WORDMARK_WIDTH } from "./brand-assets.ts";
 import { escapeHtml } from "./signin/invite.ts";
 
 /** Where the tab icon is served, on every address (src/brand-routes.ts). */
@@ -29,9 +34,15 @@ export const FAVICON_LINKS = `<link rel="icon" href="${FAVICON_ICO_PATH}" sizes=
 
 /** Where the mark is served. */
 export const MARK_PATH = "/dash/mark.svg";
+/** Where the wordmark is served: for dark grounds, and for light ones (the picture's fallback). */
+export const WORDMARK_DARK_PATH = "/dash/wordmark-dark.png";
+export const WORDMARK_LIGHT_PATH = "/dash/wordmark-light.png";
+
+/** The wordmark: the dark ground's picture when the system's scheme is dark, else the light one. */
+export const WORDMARK_HTML = `<picture><source srcset="${WORDMARK_DARK_PATH}" media="(prefers-color-scheme: dark)"><img src="${WORDMARK_LIGHT_PATH}" alt="Mythicshot" width="${WORDMARK_WIDTH}" height="${WORDMARK_HEIGHT}"></picture>`;
 
 /** The mark and the name, as written inside the brand and its link. */
-const MARK_AND_NAME = `<img src="${MARK_PATH}" alt="" width="24" height="24">Mythicshot`;
+const MARK_AND_NAME = `<img src="${MARK_PATH}" alt="" width="24" height="24">${WORDMARK_HTML}`;
 
 /** The brand as every page is built with it: the mark beside the name, no link. */
 export const BRAND_PLAIN = `<p class="brand">${MARK_AND_NAME}</p>`;

@@ -169,6 +169,8 @@ const GATE: Record<string, Entry> = {
   "GET /dash/terms.js": page("/dash/terms.js"),
   // The product's mark (src/brand-assets.ts, src/brand.ts): fixed bytes every page above shows, no session read, no database call.
   "GET /dash/mark.svg": page("/dash/mark.svg"),
+  "GET /dash/wordmark-dark.png": page("/dash/wordmark-dark.png"),
+  "GET /dash/wordmark-light.png": page("/dash/wordmark-light.png"),
   // The pages visitors open, the player's files and the documentation: no session.
   "GET /p/:name": none("GET", "/p/" + "0".repeat(32) + ".png"),
   "GET /:file{player(?:\\.[0-9a-f]{16})?\\.(?:js|css)}": none("GET", "/player.js"),
@@ -201,8 +203,6 @@ const GATE: Record<string, Entry> = {
   "GET /favicon.ico": none("GET", "/favicon.ico"),
   "GET /fonts/:file{manrope(?:\\.[0-9a-f]{16})?\\.ttf}": none("GET", "/fonts/manrope.ttf"),
   "GET /fonts/manrope-OFL.txt": none("GET", "/fonts/manrope-OFL.txt"),
-  "GET /fonts/:file{cinzel(?:\\.[0-9a-f]{16})?\\.ttf}": none("GET", "/fonts/cinzel.ttf"),
-  "GET /fonts/cinzel-OFL.txt": none("GET", "/fonts/cinzel-OFL.txt"),
   "GET /api/v1/openapi.json": none("GET", "/api/v1/openapi.json"),
   "GET /api/v1/openapi.yaml": none("GET", "/api/v1/openapi.yaml"),
 };

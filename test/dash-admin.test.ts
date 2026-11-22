@@ -6,7 +6,7 @@
 // under Node in test/node-dash-admin.test.ts: the Workers runtime runs no code from a
 // string, so on this target the parser's rule is pinned by its text.
 import { describe, expect, it } from "vitest";
-import { CINZEL_FACE, MANROPE_FACE } from "../src/brand-css.ts";
+import { MANROPE_FACE } from "../src/brand-css.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { ADMIN_HTML, ADMIN_JS, SIZE_JS } from "../src/dash/admin.ts";
 import { DASH_PAGES } from "../src/dash/routes.ts";
@@ -392,7 +392,7 @@ describe("the Admin page and its script", () => {
     expect(ADMIN_JS).not.toMatch(/setAttribute\("(?:style|on[a-z]+|src|srcdoc|href)"/);
     expect(ADMIN_JS).not.toMatch(/\.on[a-z]+\s*=/);
     expect([...ADMIN_JS.matchAll(/\.style\b[^;]*/g)].map((m) => m[0])).toEqual(['.style.width = width + "%"', '.style.width = share + "%"']);
-    expect(DASH_CSS.replace(MANROPE_FACE, "").replace(CINZEL_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
+    expect(DASH_CSS.replace(MANROPE_FACE, "")).not.toMatch(/url\(|@import|https?:|\/\/|expression\(/i);
   });
 
   it("the script keeps to this site and to the admin routes, and a member's page asks for nothing of them", () => {

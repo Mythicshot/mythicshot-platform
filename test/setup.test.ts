@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CINZEL_PATH, MANROPE_PATH } from "../src/brand-assets.ts";
+import { MANROPE_PATH } from "../src/brand-assets.ts";
 import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
 import { hashToken, requireAuth } from "../src/auth.ts";

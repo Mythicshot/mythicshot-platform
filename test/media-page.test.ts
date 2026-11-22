@@ -3,7 +3,7 @@
 // preview tags, the file with ETag and Range, the one 404 for every link that does not
 // work, the call budget for the largest clip, and the addresses that answer.
 import { describe, expect, it, vi } from "vitest";
-import { CINZEL_PATH, MANROPE_PATH } from "../src/brand-assets.ts";
+import { MANROPE_PATH } from "../src/brand-assets.ts";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
 import { newId, newLinkId } from "../src/auth.ts";
 import { SUBREQUEST_BUDGET } from "../src/budget.ts";

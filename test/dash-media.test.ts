@@ -5,7 +5,7 @@
 // and of the sentences proposed beside them, and what the scripts' text may and may not
 // do. What the scripts do when they run is tested under Node in test/node-dash-media.test.ts.
 import { describe, expect, it } from "vitest";
-import { CINZEL_PATH, MANROPE_PATH } from "../src/brand-assets.ts";
+import { MANROPE_PATH } from "../src/brand-assets.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { DASH_PAGES } from "../src/dash/routes.ts";
 import { GIFS_HTML, GIFS_JS, IMAGES_HTML, IMAGES_JS } from "../src/dash/media.ts";
@@ -390,7 +390,7 @@ describe("the Images and GIFs pages", () => {
     expect(DASH_CSS).toMatch(/\.thumb\.play::after \{[^}]*content: "";/);
     expect(DASH_CSS).not.toMatch(/@import|https?:|\/\/|expression\(/i);
     // The only url()s are the brand's two fonts, served by this address.
-    expect([...DASH_CSS.matchAll(/url\(([^)]*)\)/g)].map((m) => m[1])).toEqual([`"${MANROPE_PATH}"`, `"${CINZEL_PATH}"`]);
+    expect([...DASH_CSS.matchAll(/url\(([^)]*)\)/g)].map((m) => m[1])).toEqual([`"${MANROPE_PATH}"`]);
   });
 
   it("keep to this site: every request through Dash.api, the routes they may call, and leaving only for /signin", () => {

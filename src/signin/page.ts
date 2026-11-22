@@ -13,7 +13,7 @@
 // history never show it. The code then lives in one variable of the link page's own
 // function and leaves it once: in the JSON body of POST /api/v1/signin/complete, when the
 // button is pressed. Nothing here writes to storage, to a cookie or to an address.
-import { CINZEL_FACE, PAGE_BASE_CSS, WORDMARK_CSS } from "../brand-css.ts";
+import { PAGE_BASE_CSS, WORDMARK_CSS } from "../brand-css.ts";
 import { BRAND_PLAIN, FAVICON_LINKS } from "../brand.ts";
 import { escapeHtml, type InviteContact } from "./invite.ts";
 
@@ -181,8 +181,8 @@ a:focus-visible { border-radius: var(--radius-sm); }
 }
 `;
 
-/** The sign-in pages' stylesheet: the card, then Cinzel and the wordmark style for the name beside the mark. */
-export const SIGNIN_CSS = `${SIGNIN_CARD_CSS}${CINZEL_FACE}${WORDMARK_CSS}`;
+/** The sign-in pages' stylesheet: the card, then the wordmark's rules for the name beside the mark. */
+export const SIGNIN_CSS = `${SIGNIN_CARD_CSS}${WORDMARK_CSS}`;
 
 export const SIGNIN_JS = `(function () {
   "use strict";

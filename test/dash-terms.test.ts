@@ -85,7 +85,7 @@ describe("the markup", () => {
     expect(textNodes(doc.head)).toEqual(["Terms"]);
     // The brand above the card, as every dashboard page has it (src/brand.ts), once.
     expect(TERMS_HTML.split(BRAND_PLAIN).length - 1).toBe(1);
-    expect(doc.root.all().filter((e) => e.tagName === "img").map((e) => isBrandMark(e))).toEqual([true]);
+    expect(doc.root.all().filter((e) => e.tagName === "img").map((e) => isBrandMark(e))).toEqual([true, true]);
     expect(textNodes(doc.body)).toEqual(["Mythicshot", "This page needs JavaScript.", "The main points", "This list is a summary. The full terms below are what you agree to.", "The full terms", "Sign out", "I agree", "Back to your account"]);
     const $ = (id: string) => doc.getElementById(id)!;
     // The box: a named region, reached with Tab and scrolled with the keys, and no trap: it is one stop.

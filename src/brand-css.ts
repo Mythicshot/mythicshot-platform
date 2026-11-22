@@ -1,10 +1,9 @@
 // The parts every stylesheet of the platform starts with: the brand's tokens (src/brand-tokens.ts)
 // and the fonts, served by the app itself (src/brand-routes.ts) from addresses that name
-// their content. Manrope sets all text; Cinzel sets the name "Mythicshot" beside the mark,
-// and nothing else, so only the stylesheets of pages that show the mark (the dashboard's and
-// the sign-in pages', on the app address) declare it. Until a font has loaded, the system
-// font of each stack is used (font-display: swap).
-import { CINZEL_PATH, MANROPE_PATH } from "./brand-assets.ts";
+// their content. Manrope sets all text; the name beside the mark is a picture (src/brand.ts),
+// so no other font is served. Until the font has loaded, the system font of the stack is used
+// (font-display: swap).
+import { MANROPE_PATH } from "./brand-assets.ts";
 import { schemeTokensCss, tokensCss } from "./brand-tokens.ts";
 
 /** Manrope, the variable font: every weight from 200 to 800. Licence: /fonts/manrope-OFL.txt. */
@@ -13,17 +12,6 @@ export const MANROPE_FACE = `/* Manrope, SIL Open Font License 1.1: /fonts/manro
   font-family: "Manrope";
   src: url("${MANROPE_PATH}") format("truetype");
   font-weight: 200 800;
-  font-style: normal;
-  font-display: swap;
-}
-`;
-
-/** Cinzel, the variable font, for the name beside the mark only. Licence: /fonts/cinzel-OFL.txt. */
-export const CINZEL_FACE = `/* Cinzel, SIL Open Font License 1.1: /fonts/cinzel-OFL.txt. The name beside the mark only. */
-@font-face {
-  font-family: "Cinzel";
-  src: url("${CINZEL_PATH}") format("truetype");
-  font-weight: 400 900;
   font-style: normal;
   font-display: swap;
 }
@@ -40,9 +28,9 @@ export const PAGE_BASE_CSS = `${tokensCss()}${MANROPE_FACE}`;
 export const PLAYER_BASE_CSS = `${tokensCss()}${schemeTokensCss('.dp[data-scheme="light"]', '.dp[data-scheme="dark"]')}${MANROPE_FACE}`;
 
 /**
- * The name beside the mark, in the brand's wordmark style: Cinzel capitals, weight 600,
- * letter-spacing 0.06em, in the wordmark colour. The text stays "Mythicshot"; the capitals
- * are only drawn.
+ * The brand: the mark, then the wordmark's picture at its own size. When the picture cannot
+ * be loaded, a browser shows its alt, "Mythicshot", in the wordmark's colour.
  */
-export const WORDMARK_CSS = `.brand { font-family: var(--font-display); font-size: 20px; line-height: 24px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--wordmark); }
+export const WORDMARK_CSS = `.brand { font-size: 20px; line-height: 24px; font-weight: 700; color: var(--wordmark); }
+.brand picture { display: block; flex: none; }
 `;

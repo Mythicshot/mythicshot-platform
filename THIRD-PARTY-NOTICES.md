@@ -12,11 +12,10 @@ This repository is all rights reserved (see [LICENSE](LICENSE)). The parts below
 
 ## Cinzel
 
-- What it is: the typeface of the name "Mythicshot" beside the mark, and nothing else.
+- What it is: the typeface used to draw the wordmark image, the name "MYTHICSHOT" beside the mark (`src/brand-files/wordmark-dark.png` and `wordmark-light.png`). The platform does not serve the font: the pages show the pictures.
 - Copyright line: Copyright 2020 The Cinzel Project Authors (https://github.com/NDISCOVER/Cinzel)
-- Licence: SIL Open Font License, Version 1.1. No Reserved Font Name is declared.
-- Where it is: the published variable TrueType file, unchanged but renamed, in `src/brand-files/fonts/cinzel/Cinzel-VariableFont_wght.ttf`, with its licence beside it in `OFL.txt`; `npm run build:brand` copies both into `src/brand-assets.ts`.
-- Where the licence is served: on the app address, at `/fonts/cinzel-OFL.txt`, beside the font at `/fonts/cinzel.<hash>.ttf`.
+- Licence: SIL Open Font License, Version 1.1. No Reserved Font Name is declared. The licence covers the font, not pictures made with it.
+- Where it is: the published variable TrueType file, unchanged but renamed, in `scripts/wordmark/Cinzel-VariableFont_wght.ttf`, with its licence beside it in `OFL.txt`, as the input of `scripts/build-wordmark.py`.
 
 ## swagger-ui-dist 5.34.1
 
