@@ -226,7 +226,7 @@ export function tourRoutes(app: Hono, deps: Deps): void {
     // has no link.
     // `unpublished_changes` says the live page is behind the draft, so a publish would
     // change what visitors see: the snapshot was built from an older draft version than the
-    // tour's (every upload commit and chapter replace raises it; a rename does not, since
+    // tour's (every upload commit, chapter replace and change of the chapters raises it; a rename does not, since
     // it writes its title into the snapshot too), or from one that was never recorded.
     // Always false for a draft, which has no live page.
     const tours = rows.map((t) => ({

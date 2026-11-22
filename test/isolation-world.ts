@@ -49,7 +49,8 @@ import { ORIGIN, clone, commit, createUpload, fixtures, gif, logoPng, png, putSt
 /** The harness's listing of both stores (`makeDeps()` returns it beside `deps`). */
 export type StoreKeys = { draftKeys: () => Promise<string[]>; publicKeys: () => Promise<string[]> };
 
-type TourIds = { tour: string; chapter: string; step: string; slug: string };
+/** `revision` is the tour's revision as GET .../chapters answers it, for a change of its own chapters that names another workspace's. */
+type TourIds = { tour: string; chapter: string; step: string; slug: string; revision: number };
 
 /**
  * Every id of one side that a request can name. `inventedIds` makes the same shape out of
@@ -160,7 +161,7 @@ const sizes = (base: number) => ({
  * their own.
  */
 export function inventedIds(like?: Ids): Ids {
-  const tour = (): TourIds => ({ tour: newId("tour"), chapter: newId("ch"), step: newId("st"), slug: newSlug() });
+  const tour = (): TourIds => ({ tour: newId("tour"), chapter: newId("ch"), step: newId("st"), slug: newSlug(), revision: 0 });
   const name = () => randomHex(32) + ".png";
   const s = sizes(100);
   return {
@@ -363,10 +364,10 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
   deps.config = config;
 
   const tourIds = async (t: { tour_id: string; chapter_id: string }): Promise<TourIds & { sha256: string[] }> => {
-    const slug = (await need(deps.db.first<{ slug: string }>("SELECT slug FROM tour WHERE id = ?", [t.tour_id]), "tour")).slug;
+    const { slug, draft_version: revision } = await need(deps.db.first<{ slug: string; draft_version: number }>("SELECT slug, draft_version FROM tour WHERE id = ?", [t.tour_id]), "tour");
     const steps = await deps.db.all<{ id: string; sha256: string | null }>("SELECT id, sha256 FROM step WHERE tour_id = ? ORDER BY position, id", [t.tour_id]);
     if (steps.length === 0 || steps.some((x) => x.sha256 === null)) throw new Error("the world could not be built: a tour without hashed steps");
-    return { tour: t.tour_id, chapter: t.chapter_id, step: steps[0].id, slug, sha256: steps.map((x) => x.sha256 as string) };
+    return { tour: t.tour_id, chapter: t.chapter_id, step: steps[0].id, slug, revision, sha256: steps.map((x) => x.sha256 as string) };
   };
   const nameOf = async (sql: string, tourId: string, what: string) => (await need(deps.db.first<{ image_key: string }>(sql, [tourId]), what)).image_key.slice(2);
   const live = await need(deps.db.first<{ publish_id: string }>("SELECT publish_id FROM snapshot WHERE tour_id = ?", [published.tour_id]), "snapshot");

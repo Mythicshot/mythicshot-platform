@@ -267,7 +267,7 @@ describe("the Tours page", () => {
     const tab = openTours(standard());
     await tab.settle();
     const r = rows(tab);
-    expect(r.map((row) => menuItems(row).map((m) => m.textContent))).toEqual([["Sharing…", "Unpublish", "Delete"], ["Sharing…", "Publish changes", "Unpublish", "Delete"], ["Delete"]]);
+    expect(r.map((row) => menuItems(row).map((m) => m.textContent))).toEqual([["Sharing…", "Chapters…", "Unpublish", "Delete"], ["Sharing…", "Chapters…", "Publish changes", "Unpublish", "Delete"], ["Chapters…", "Delete"]]);
     const row = r[1];
     const more = byText(row, "More");
     expect([more.getAttribute("aria-haspopup"), more.getAttribute("aria-expanded"), more.getAttribute("aria-controls")]).toEqual(["true", "false", "menu-1"]);
@@ -284,21 +284,21 @@ describe("the Tours page", () => {
     expect(tab.doc.activeElement).toBe(items[1]);
     key(items[1], "ArrowUp");
     key(items[0], "ArrowUp");
-    expect(tab.doc.activeElement).toBe(items[3]);
-    key(items[3], "Home");
+    expect(tab.doc.activeElement).toBe(items[4]);
+    key(items[4], "Home");
     expect(tab.doc.activeElement).toBe(items[0]);
     key(items[0], "End");
-    expect(tab.doc.activeElement).toBe(items[3]);
+    expect(tab.doc.activeElement).toBe(items[4]);
     // Escape closes it and gives the focus back to More.
-    key(items[3], "Escape");
+    key(items[4], "Escape");
     expect(menuOf(row).hidden).toBe(true);
     expect(more.getAttribute("aria-expanded")).toBe("false");
     expect(tab.doc.activeElement).toBe(more);
     // ArrowDown on More opens it too, ArrowUp at the last entry.
     key(more, "ArrowUp");
-    expect(tab.doc.activeElement).toBe(items[3]);
+    expect(tab.doc.activeElement).toBe(items[4]);
     // Tab leaves it closed.
-    key(items[3], "Tab");
+    key(items[4], "Tab");
     expect(menuOf(row).hidden).toBe(true);
     key(more, "ArrowDown");
     expect(tab.doc.activeElement).toBe(items[0]);
@@ -326,7 +326,7 @@ describe("the Tours page", () => {
     await tab.settle();
     const more = byText(rows(tab)[0], "More");
     more.click();
-    menuItems(rows(tab)[0])[1].click();
+    menuItems(rows(tab)[0])[2].click();
     expect(tab.$("delete-dialog").hidden).toBe(true);
     expect(more.textContent).toBe("Unpublishing…");
     expect(more.disabled).toBe(true);
@@ -371,7 +371,7 @@ describe("the Tours page", () => {
     expect(tab.doc.activeElement).toBe(byText(rows(tab)[2], "Copy link"));
 
     byText(rows(tab)[1], "More").click();
-    menuItems(rows(tab)[1])[1].click();
+    menuItems(rows(tab)[1])[2].click();
     await tab.settle();
     expect(tab.fetched.filter((f) => f.method === "POST").at(-1)!.path).toBe(`/api/v1/tours/${T2}/publish`);
   });
@@ -408,7 +408,7 @@ describe("the Tours page", () => {
     const out = openTours(standard({ ["POST /api/v1/tours/" + T1 + "/unpublish"]: SIGNED_OUT }));
     await out.settle();
     byText(rows(out)[0], "More").click();
-    menuItems(rows(out)[0])[1].click();
+    menuItems(rows(out)[0])[2].click();
     await out.settle();
     expect(out.left()).toBe("/signin");
   });
@@ -426,7 +426,7 @@ describe("the Tours page", () => {
       const tab = openTours(standard({ [`POST /api/v1/tours/${T1}/unpublish`]: answer, "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), toursAnswer(after)] }));
       await tab.settle();
       byText(rows(tab)[0], "More").click();
-      menuItems(rows(tab)[0])[1].click();
+      menuItems(rows(tab)[0])[2].click();
       await tab.settle();
       expect(tab.$("tours-message").textContent, what).toBe(text);
       expect(tab.$("tours-message").hidden, what).toBe(text === "");
@@ -444,7 +444,7 @@ describe("the Tours page", () => {
       await tab.settle();
       const more = byText(rows(tab)[0], "More");
       more.click();
-      menuItems(rows(tab)[0])[1].click();
+      menuItems(rows(tab)[0])[2].click();
       await tab.settle();
       expect(tab.$("tours-message").textContent, what).toBe(NOT_RELOADED);
       expect(tab.$("tours-message").hidden, what).toBe(false);
@@ -457,7 +457,7 @@ describe("the Tours page", () => {
     const del = openTours(standard({ [`DELETE /api/v1/tours/${T2}`]: { status: 200, json: { deleted: true } }, "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), { status: 500, json: { error: "internal" } }] }));
     await del.settle();
     byText(rows(del)[1], "More").click();
-    menuItems(rows(del)[1])[3].click();
+    menuItems(rows(del)[1])[4].click();
     del.$("delete-go").click();
     await del.settle();
     expect(del.$("delete-dialog").hidden).toBe(true);
@@ -472,7 +472,7 @@ describe("the Tours page", () => {
     const tab = openTours(held.respond);
     await tab.settle();
     byText(rows(tab)[0], "More").click();
-    menuItems(rows(tab)[0])[1].click();
+    menuItems(rows(tab)[0])[2].click();
     await tab.settle();
     const buttons = rowButtons(tab).filter((b) => b.getAttribute("role") !== "menuitem");
     expect(buttons.map((b) => [b.textContent, b.disabled])).toEqual([
@@ -499,7 +499,7 @@ describe("the Tours page", () => {
     const tab = openTours(held.respond);
     await tab.settle();
     byText(rows(tab)[0], "More").click();
-    menuItems(rows(tab)[0])[2].click();
+    menuItems(rows(tab)[0])[3].click();
     tab.$("delete-go").click();
     tab.$("delete-go").click();
     tab.$("delete-go").dispatch("click");
@@ -519,7 +519,7 @@ describe("the Tours page", () => {
     const row = rows(tab)[1];
     const more = byText(row, "More");
     more.click();
-    menuItems(row)[3].click();
+    menuItems(row)[4].click();
     const dialog = tab.$("delete-dialog");
     expect(dialog.hidden).toBe(false);
     expect(tab.$("delete-title").textContent).toBe('Delete "Loot master setup"?');
@@ -543,7 +543,7 @@ describe("the Tours page", () => {
     expect(tab.doc.activeElement).toBe(more);
     // So does Escape.
     more.click();
-    menuItems(row)[3].click();
+    menuItems(row)[4].click();
     expect(dialog.hidden).toBe(false);
     key(tab.$("delete-keep"), "Escape");
     expect(dialog.hidden).toBe(true);
@@ -562,7 +562,7 @@ describe("the Tours page", () => {
     );
     await tab.settle();
     byText(rows(tab)[1], "More").click();
-    menuItems(rows(tab)[1])[3].click();
+    menuItems(rows(tab)[1])[4].click();
     const go = tab.$("delete-go");
     go.click();
     expect([go.textContent, go.disabled, tab.$("delete-keep").disabled]).toEqual(["Deleting…", true, true]);
@@ -590,7 +590,7 @@ describe("the Tours page", () => {
     const tab = openTours(standard({ [`DELETE /api/v1/tours/${T1}`]: { status: 500, json: { error: "cleanup_pending" } }, "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), toursAnswer(MOCKUP_TOURS.slice(1))] }));
     await tab.settle();
     byText(rows(tab)[0], "More").click();
-    menuItems(rows(tab)[0])[2].click();
+    menuItems(rows(tab)[0])[3].click();
     tab.$("delete-go").click();
     await tab.settle();
     expect(tab.$("delete-dialog").hidden).toBe(true);
@@ -611,7 +611,7 @@ describe("the Tours page", () => {
       const tab = openTours(standard({ [`DELETE /api/v1/tours/${T1}`]: [answer, { status: 404, json: { error: "not_found" } }], "GET /api/v1/tours": [toursAnswer(MOCKUP_TOURS), toursAnswer(MOCKUP_TOURS), toursAnswer(MOCKUP_TOURS.slice(1))] }));
       await tab.settle();
       byText(rows(tab)[0], "More").click();
-      menuItems(rows(tab)[0])[2].click();
+      menuItems(rows(tab)[0])[3].click();
       tab.$("delete-go").click();
       await tab.settle();
       expect(tab.$("delete-dialog").hidden, what).toBe(false);
@@ -631,7 +631,7 @@ describe("the Tours page", () => {
     const kept = openTours(standard({ [`DELETE /api/v1/tours/${T1}`]: { status: 500, json: { error: "internal" } } }));
     await kept.settle();
     byText(rows(kept)[0], "More").click();
-    menuItems(rows(kept)[0])[2].click();
+    menuItems(rows(kept)[0])[3].click();
     kept.$("delete-go").click();
     await kept.settle();
     kept.$("delete-keep").click();
@@ -646,7 +646,7 @@ describe("the Tours page", () => {
     for (const id of behind) expect([tab.$(id).hasAttribute("inert"), tab.$(id).hasAttribute("aria-hidden")], id).toEqual([false, false]);
     const openIt = () => {
       byText(rows(tab)[1], "More").click();
-      menuItems(rows(tab)[1])[3].click();
+      menuItems(rows(tab)[1])[4].click();
       expect(tab.$("delete-dialog").hidden).toBe(false);
     };
     openIt();
@@ -734,7 +734,7 @@ describe("the Tours page against the real app", () => {
 
     // Unpublish, through the real API with the real anti-forgery check.
     byText(row, "More").click();
-    menuItems(row)[1].click();
+    menuItems(row)[2].click();
     await tab.settle();
     expect(tab.$("tours-message").textContent).toBe("");
     expect(controlsOf(rows(tab)[0]).map((c) => c.textContent)).toEqual(["Publish", "More"]);
@@ -771,7 +771,7 @@ describe("the Tours page against the real app", () => {
     });
     await tab.settle();
     byText(rows(tab)[0], "More").click();
-    menuItems(rows(tab)[0])[0].click();
+    menuItems(rows(tab)[0])[1].click();
     tab.$("delete-go").click();
     await tab.settle();
     expect(tab.$("delete-message").textContent).toBe(FAILED);

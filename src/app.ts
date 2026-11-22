@@ -3,6 +3,7 @@ import { accessRoutes } from "./access.ts";
 import { accountRemovalRoutes } from "./account-removal.ts";
 import { adminRoutes } from "./admin-api.ts";
 import { brandRoutes } from "./brand-routes.ts";
+import { chapterRoutes } from "./chapters.ts";
 import { connectRoutes } from "./connect.ts";
 import { dashRoutes } from "./dash/routes.ts";
 import { docsRoutes } from "./docs/page.ts";
@@ -48,6 +49,7 @@ export function createApp(deps: Deps): Hono {
   mediaRoutes(app, deps);
   mediaAccessRoutes(app, deps);
   tourRoutes(app, deps);
+  chapterRoutes(app, deps);
   accessRoutes(app, deps);
   usageRoutes(app, deps);
   signinRoutes(app, deps);

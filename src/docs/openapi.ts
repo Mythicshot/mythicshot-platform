@@ -11,6 +11,7 @@
 // it fetched the description from. The one example carries a placeholder address.
 import { ACCESS_BODY_BYTES, MAX_VIEWERS } from "../access.ts";
 import { ADMIN_PAGE, MAX_ALLOWANCE_BYTES } from "../admin-api.ts";
+import { CHAPTERS_BODY_BYTES, MAX_CHAPTERS } from "../chapters.ts";
 import { PAGE_CACHE } from "../page.ts";
 import { LIMITS } from "../manifest.ts";
 import { CLIP_MAX_DURATION_MS, CLIP_MAX_SIDE, DEFAULT_MEDIA_LIMITS, LIST_PAGE, MAX_LOOSE_CLAIMS, MEDIA_MAX_AGE_MS, PART_BYTES, PREVIEW_RULE, TITLE_MAX } from "../media.ts";
@@ -400,6 +401,22 @@ function schemas(): Record<string, Schema> {
     RenameBody: input(["title"], { title: text(LIMITS.title, "The new title: trimmed, no control or format characters.", 1) }),
     Renamed: object(["id", "title"], { id: { type: "string" }, title: { type: "string", description: "The title as saved (trimmed)." } }),
     Deleted: object(["deleted"], { deleted: { type: "boolean", const: true } }, "Nothing of the tour is left."),
+    Chapter: object(["id", "title", "position", "steps", "pictures", "uploaded_at"], {
+      id: { type: "string", pattern: "^ch_[0-9a-f]{24}$", description: "The chapter's id." },
+      title: { type: "string", description: "The chapter's title, as its upload named it." },
+      position: whole("Its place in the tour, from 0: visitors see the chapters in this order."),
+      steps: whole("How many steps it has."),
+      pictures: whole("How many picture files its steps use (two steps may share one); removing the chapter deletes them."),
+      uploaded_at: { type: ["integer", "null"], minimum: 0, description: "When it was last uploaded (a new chapter or a replace of it), in milliseconds since 1970. null when that was before version 0.1.55 and is not known, which is so for every chapter but the one a tour was made with." },
+    }),
+    ChapterList: object(["revision", "chapters"], {
+      revision: whole("The tour's revision: every upload, replace or change of the chapters moves it on. Send it back with a change."),
+      chapters: { type: "array", items: ref("Chapter"), description: "In the order visitors see them." },
+    }),
+    ChaptersBody: input(["revision", "chapters"], {
+      revision: whole("The revision the chapters were read at, from GET /api/v1/tours/{id}/chapters."),
+      chapters: { type: "array", minItems: 1, maxItems: MAX_CHAPTERS, items: { type: "string", pattern: "^ch_[0-9a-f]{24}$" }, description: "The ids of the chapters to keep, in their new order, each once. A chapter of the tour not listed is removed." },
+    }),
     PublishBody: input([], {
       publish_id: { type: ["string", "null"], pattern: "^pub_[0-9a-f]{24}$", description: "The publish_id of the previous answer, to continue that publish. Never together with access or viewers." },
       access: CREATION_ACCESS("tour", "on the request that starts its first publish (no publish_id), of a tour never published whose setting and list were never set in the dashboard", 1024),
@@ -1262,6 +1279,39 @@ function paths(): OpenApiDoc["paths"] {
         },
       },
     },
+    "/api/v1/tours/{id}/chapters": {
+      get: {
+        tags: ["Tours"],
+        summary: "List a tour's chapters",
+        description: "The tour's chapters in the order visitors see them, with each one's steps, pictures and upload time, and the tour's revision, which a change of the chapters sends back.",
+        operationId: "listChapters",
+        security: TOKEN,
+        parameters: [tourId],
+        responses: { "200": answer("The chapters and the revision they were read at.", ref("ChapterList")), "401": UNAUTHORIZED, "404": noTour },
+      },
+      put: {
+        tags: ["Tours"],
+        summary: "Reorder and remove a tour's chapters",
+        description: `Sends the ids of the chapters to keep, in their new order, with the revision they were read at. A chapter of the tour that is not listed is removed with its steps, and its pictures are deleted for good. It is one change: all of it is made, or nothing. It changes the draft only: visitors keep seeing the published version until the tour is published again, and until then the tour list says unpublished_changes. The tour keeps its title, link, settings and logo, whichever chapter comes first. When someone uploaded, replaced or changed the chapters since they were read, the answer is 409 tour_changed and nothing is changed: read them again. A replace still being uploaded for a removed chapter, or for the first chapter when another one becomes first, is cancelled (its upload answers 404). A list that changes nothing answers 200 and changes nothing. At most ${n(MAX_CHAPTERS)} ids.`,
+        operationId: "changeChapters",
+        security: TOKEN,
+        parameters: [tourId],
+        requestBody: { required: true, content: json(ref("ChaptersBody")) },
+        responses: {
+          "200": answer("Done: the chapters as they are now, with the new revision.", ref("ChapterList")),
+          "400": refusal(
+            `bad_request: the body is not a JSON object, revision is not a whole number, chapters is not a list of ids, or it lists an id twice. last_chapter: the list is empty; a tour keeps at least one chapter, so delete the tour instead. too_many_chapters: more than ${n(MAX_CHAPTERS)} ids. Nothing was changed.`,
+            "bad_request",
+            "last_chapter",
+            "too_many_chapters",
+          ),
+          "401": UNAUTHORIZED,
+          "404": refusal("No such tour in this workspace (unknown, another workspace's, or already deleted), or an id that is not a chapter of this tour (detail: no such chapter). Nothing was changed.", "not_found"),
+          "409": refusal("The tour changed since its chapters were read. Nothing was changed: read them again.", "tour_changed"),
+          "413": refusal(`The request body is over ${n(CHAPTERS_BODY_BYTES)} bytes.`, "too_large"),
+        },
+      },
+    },
     "/api/v1/tours/{id}/unpublish": {
       post: {
         tags: ["Tours"],
@@ -1319,6 +1369,7 @@ function paths(): OpenApiDoc["paths"] {
           ),
           "401": UNAUTHORIZED,
           "404": refusal("The target's tour is not in this workspace (detail: no such tour), or the chapter is not a chapter of that tour (detail: no such chapter).", "not_found"),
+          "409": refusal("A replace only: the tour's chapters were reordered or removed while this request was being decided, so whether it carries the tour's settings may have changed. Nothing was stored; start again.", "chapter_changed"),
           "413": answer(
             "too_large: the request body is too long. storage_full: the upload would take the workspace over its storage allowance; nothing was stored, and the answer carries the numbers in bytes. Deleting tours, or a larger allowance, makes room; waiting does not.",
             { oneOf: [refusalSchema("too_large"), ref("StorageFull")] },

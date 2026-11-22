@@ -59,7 +59,7 @@ The pages follow the Mythicshot brand (README, "The look"). Check each step in l
 
 ## The More menu
 
-- [ ] "More" on the tour with changes waiting opens a small menu with "Sharing…", "Publish changes", "Unpublish" and "Delete" (in red); on the other published tour "Sharing…", "Unpublish" and "Delete"; on the unpublished one "Delete" only.
+- [ ] "More" on the tour with changes waiting opens a small menu with "Sharing…", "Chapters…", "Publish changes", "Unpublish" and "Delete" (in red); on the other published tour "Sharing…", "Chapters…", "Unpublish" and "Delete"; on the unpublished one "Chapters…" and "Delete".
 - [ ] A click anywhere else closes the menu; opening another row's menu closes the first.
 - [ ] With the keyboard: Tab to "More", Enter opens it with the focus on the first entry, the arrow keys move, Home and End jump, Escape closes it and puts the focus back on "More", and Tab closes it and moves on.
 
@@ -77,6 +77,20 @@ The pages follow the Mythicshot brand (README, "The look"). Check each step in l
 - [ ] Tab and Shift+Tab stay on the two buttons, and the page behind cannot be clicked or reached with Tab. "Keep it", Escape and a click on the dimmed area around the question each close it and put the focus back on that row's "More", with no request sent.
 - [ ] "Delete tour" reads "Deleting…", sends `DELETE /api/v1/tours/tour_…` (again while it answers 202) with an `X-Csrf-Token` header, closes the question, and the row is gone, the line under the heading counts one tour fewer, and the focus is on the heading. While it runs, Tab and Shift+Tab keep the focus on the question's title, never on a greyed-out button.
 - [ ] Delete every tour: the page shows "No tours yet" and "Record a tour in Mythicshot and choose Publish. It shows up here with a link to share." with no table and no hint.
+
+## Chapters of a tour
+
+Do this with a published tour of three chapters (upload two more chapters into it from Mythicshot first, then publish it).
+
+- [ ] "Chapters…" opens a box like the Sharing box: "Chapters of \"<title>\"", "Visitors see the chapters in this order.", one row per chapter ("1. <title>", and under it "<n> steps · uploaded <date>"), each with an up arrow, a down arrow and "Remove", then "Cancel" and "Save changes" (greyed out). The first row's up arrow and the last row's down arrow are greyed out. The focus is on the first row's down arrow.
+- [ ] A screen reader reads the arrows as "Move up" and "Move down", with the chapter's title.
+- [ ] The down arrow on row 1 swaps rows 1 and 2; both say "moved up" or "moved down" in a small tag, the focus stays on the arrow, and "Save changes" is no longer greyed out. Moving it back takes the notes away and greys "Save changes" out again.
+- [ ] "Remove" strikes the row through and moves it to the end without a number; the others are numbered again; its button reads "Put back". An orange caution box with its warning sign says "Removing \"<title>\" deletes its <n> pictures for good. Visitors keep seeing the tour as it is until you publish." With two removed it says "Removing 2 chapters deletes their <n> pictures for good. …". On the last row left, "Remove" is greyed out and its tooltip says "A tour needs at least one chapter. Delete the tour instead."
+- [ ] "Put back" brings the row back where it was.
+- [ ] Tab and Shift+Tab go round the row buttons that work, "Cancel" and "Save changes", never the page behind. "Cancel", Escape and a click on the dimmed area close it with no request sent and the focus back on "More".
+- [ ] "Save changes" reads "Saving…", sends one `PUT /api/v1/tours/tour_…/chapters` with `{"revision":…,"chapters":[…]}`, an `X-Csrf-Token` header and the page's Origin, closes the box, and the row has "Changes waiting". The public link still shows the old chapters until "Publish changes".
+- [ ] Open the box in two tabs, save in one, then save in the other: it says "This tour changed while the box was open. The chapters were loaded again; nothing was saved." and shows the chapters as saved in the first tab.
+- [ ] At phone width the box fits the screen, each row's buttons go under its words, and nothing scrolls sideways.
 
 ## Sharing a tour
 

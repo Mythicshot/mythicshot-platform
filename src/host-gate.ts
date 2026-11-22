@@ -78,6 +78,9 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /api/v1/tours/:id/steps/:step_id/image": "both",
   "POST /api/v1/tours/:id/publish": "both",
   "POST /api/v1/tours/:id/unpublish": "both",
+  // A tour's chapters: a token or a session, like rename and delete.
+  "GET /api/v1/tours/:id/chapters": "both",
+  "PUT /api/v1/tours/:id/chapters": "both",
   // Who may view a tour: read with a token or a session, like the tour list; changed with a
   // session alone, which counts on the app address only, so the change answers there only.
   "GET /api/v1/tours/:id/access": "both",

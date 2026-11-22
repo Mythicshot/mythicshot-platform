@@ -85,6 +85,8 @@ const GATE: Record<string, Entry> = {
   "GET /api/v1/tours/:id/steps/:step_id/image": held("GET", `/api/v1/tours/${TOUR}/steps/${STEP}/image`),
   "POST /api/v1/tours/:id/publish": held("POST", `/api/v1/tours/${TOUR}/publish`),
   "POST /api/v1/tours/:id/unpublish": held("POST", `/api/v1/tours/${TOUR}/unpublish`),
+  "GET /api/v1/tours/:id/chapters": held("GET", `/api/v1/tours/${TOUR}/chapters`),
+  "PUT /api/v1/tours/:id/chapters": held("PUT", `/api/v1/tours/${TOUR}/chapters`, { revision: 1, chapters: [`ch_${Z24}`] }),
   "GET /api/v1/tours/:id/access": held("GET", `/api/v1/tours/${TOUR}/access`),
   "PUT /api/v1/tours/:id/access": held("PUT", `/api/v1/tours/${TOUR}/access`, { access: "me" }),
   "GET /api/v1/media/:id/access": held("GET", `/api/v1/media/${MEDIA}/access`),
@@ -320,7 +322,7 @@ describe("before the account agrees to the site's terms", () => {
     const id = await publish(w.deps);
     const before = await dumpAll(w.deps);
     const heldKeys = Object.keys(GATE).filter((k) => GATE[k].kind === "held");
-    expect(heldKeys.length).toBe(48);
+    expect(heldKeys.length).toBe(50);
     for (const key of heldKeys) {
       const e = GATE[key];
       const r = await fire(w.deps, e.sample!, e.admin ? adminSession : memberSession);
