@@ -9,6 +9,7 @@
 //
 // What this leaves unproven, for docs/dashboard-browser-check.md: real layout and focus, the
 // browser's own handling of the policy, the cookie and the history.
+import { isBrandMark } from "./dash-checks.ts";
 import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
@@ -252,7 +253,7 @@ describe("the invite page: opening the link", () => {
       const to = tab.$("invite-email");
       expect([to.tagName, to.children.length, to.all(), to.textContent], email).toEqual(["strong", 1, [], email]);
       expect(tab.shows()[2], email).toBe(CHOOSE_LEAD(email));
-      expect(tab.doc.root.all().filter((e) => e.tagName === "img"), email).toEqual([]);
+      expect(tab.doc.root.all().filter((e) => e.tagName === "img" && !isBrandMark(e)), email).toEqual([]);
     }
   });
 
@@ -384,7 +385,7 @@ describe("the invite page: choosing the username", () => {
       expect(tab.doc.activeElement?.id, name).toBe("username");
     }
     expect(tab.fetched.map((f) => f.path)).toEqual(["/api/v1/invite/check"]);
-    expect(tab.doc.root.all().filter((e) => e.tagName === "img" || e.tagName === "b")).toEqual([]);
+    expect(tab.doc.root.all().filter((e) => (e.tagName === "img" && !isBrandMark(e)) || e.tagName === "b")).toEqual([]);
     // Typing clears the sentence.
     type(tab, "mara");
     expect([tab.$("choose-message").textContent, tab.$("username").hasAttribute("aria-invalid")]).toEqual(["", false]);

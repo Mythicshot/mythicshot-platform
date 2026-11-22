@@ -16,7 +16,7 @@ import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { send, type Call } from "./bundle.ts";
-import { expectNoForbiddenApis, expectPageShape } from "./dash-checks.ts";
+import { expectNoForbiddenApis, expectPageShape, isBrandMarkAlt } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -354,10 +354,11 @@ describe("the dashboard's pages and files", () => {
     expect(textNodes(doc.body)).toEqual(TOURS_WORDING);
     expect(textNodes(doc.head)).toEqual(["Tours"]);
     // No other words hide in attributes a person can meet. The one exception is the Sharing
-    // box's address field, whose placeholder is mockup 2's example address, exactly.
+    // box's address field, whose placeholder is mockup 2's example address, exactly; and the
+    // brand mark's empty alt, which is no words (isBrandMarkAlt).
     for (const e of doc.body.all()) {
       for (const name of ["aria-label", "title", "alt", "placeholder"]) {
-        const allowed = e.id === "share-input" && name === "placeholder" && e.getAttribute(name) === "name@example.com";
+        const allowed = (e.id === "share-input" && name === "placeholder" && e.getAttribute(name) === "name@example.com") || isBrandMarkAlt(e, name);
         expect(e.hasAttribute(name) && !allowed, `<${e.tagName} ${name}>`).toBe(false);
       }
     }

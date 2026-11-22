@@ -1,5 +1,5 @@
 // The dashboard's shell: the one document every dashboard page is, with the top bar
-// (the brand, the tabs and the username) and the page's own body. The shared stylesheet
+// (the brand, which is the mark and the name (src/brand.ts), the tabs and the username) and the page's own body. The shared stylesheet
 // and script are src/dash/style.ts and src/dash/script.ts; src/dash/routes.ts serves them.
 //
 // How a page joins the dashboard (Images, GIFs, Tours, Storage, Connections, Account and Admin are built this way):
@@ -40,6 +40,7 @@
 // hidden; only the shared script shows it, and only when the session says the person is
 // an admin. Nothing about anyone is in the document: the username, too, is filled in by
 // the shared script through textContent.
+import { BRAND_PLAIN } from "../brand.ts";
 import { escapeHtml } from "../signin/invite.ts";
 
 /** The tabs of this version, in order: what each is called and where it leads. */
@@ -86,7 +87,7 @@ export function dashHtml(opts: { title: string; active: DashTab; main: string; s
 </head>
 <body data-page="${opts.active}">
 <header class="top" id="dash-top">
-  <p class="brand">Mythicshot</p>
+  ${BRAND_PLAIN}
   <nav class="nav">${tabs}</nav>
   <p class="who" id="dash-user"></p>
 </header>

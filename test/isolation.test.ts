@@ -437,6 +437,7 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
   "GET /dash/tours.js": { reason: "the Tours page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/tours.js" }] },
   "GET /dash/dash.css": { reason: "the dashboard's stylesheet, fixed text", samples: () => [{ method: "GET", path: "/dash/dash.css" }] },
   "GET /dash/dash.js": { reason: "the dashboard's shared script, fixed text", samples: () => [{ method: "GET", path: "/dash/dash.js" }] },
+  "GET /dash/mark.png": { reason: "the product's mark beside the name on the dashboard and the sign-in pages, a fixed file", samples: () => [{ method: "GET", path: "/dash/mark.png" }] },
   "GET /images": { reason: "the dashboard's Images page, fixed text the same for everyone; the items it shows its script asks the API for", samples: () => [{ method: "GET", path: "/images" }] },
   "GET /dash/images.js": { reason: "the Images page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/images.js" }] },
   "GET /gifs": { reason: "the dashboard's GIFs page, fixed text the same for everyone; the items it shows its script asks the API for", samples: () => [{ method: "GET", path: "/gifs" }] },

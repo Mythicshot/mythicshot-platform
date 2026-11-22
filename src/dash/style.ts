@@ -65,7 +65,9 @@ h1:focus, h2:focus { outline: none; }
 
 /* The bar across the top. */
 .top { display: flex; align-items: center; gap: 6px 18px; flex-wrap: wrap; padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--card); }
-.brand { margin: 0 8px 0 0; font-weight: 650; }
+.brand { display: flex; align-items: center; gap: 8px; margin: 0 8px 0 0; font-weight: 650; }
+.brand a { display: inline-flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; }
+.brand img { display: block; flex: none; }
 .nav { display: flex; gap: 4px; flex-wrap: wrap; flex: 1 1 auto; }
 .nav a { padding: 5px 10px; border-radius: 8px; color: var(--muted); font-size: 0.93rem; text-decoration: none; }
 .nav a:hover { color: var(--text); }

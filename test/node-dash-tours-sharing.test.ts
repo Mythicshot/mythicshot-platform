@@ -5,6 +5,7 @@
 // page's scripts run under Node against a stand-in document (test/node-tours-page.ts), first
 // with answers from the test, then against the real app. Node only: the Workers runtime runs
 // no code from a string.
+import { isBrandMark } from "./dash-checks.ts";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
 import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
@@ -954,7 +955,7 @@ describe("the house rules", () => {
     ]);
     expect(addresses(tab)).toEqual(list);
     for (const c of chips(tab)) expect(c.all().find((e) => e.className === "name")!.children.every((n) => !(n instanceof FakeElement))).toBe(true);
-    expect(tab.doc.body.all().some((e) => e.tagName === "img" || e.tagName === "script")).toBe(false);
+    expect(tab.doc.body.all().some((e) => (e.tagName === "img" && !isBrandMark(e)) || e.tagName === "script")).toBe(false);
     tab.$("share-public").click();
     tab.$("share-save").click();
     expect(tab.$("share-title").children.map((c) => (c as FakeElement).className)).toEqual(["", "name", ""]);

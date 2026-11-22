@@ -76,6 +76,9 @@ IMG=img.example.com
 # third address, by checksum: an install without IMG_HOST still has exactly these bytes.
 COMPOSE_0_1_49=29714c1b34f5054e7abb63b8509eaa7f6240f4eefd4c28f65094608e83735968
 TUNNEL_COMPOSE_0_1_49=75614d1aae25dbf398cfddb665115111dce5e3d1ed283ad1f020055a1866648d
+# The tunnel stack file of version 0.1.52: the 0.1.49 file with the HOME_URL line and its
+# two comment lines added (the direct stack hands the app its whole .env and is unchanged).
+TUNNEL_COMPOSE_0_1_52=2bdd48205b2424215a39fa19f81cf4c6f006ec3066d24628e89d01a16053be5a
 CADDYFILE_TWO_0_1_49=98be45f483f05efff1b20f2f622e3e692c9c8dff2529545ea190010cd5638e60
 TUNNEL_CADDYFILE_TWO_0_1_49=2fa9783fc068051af7fbe868ada6503c4aff78a18d056881d715259acab9df2e
 PASSES=0
@@ -206,6 +209,8 @@ case "$args" in
     printf '%s %s\n' "${DOMAIN-unset}" "${APP_DOMAIN-unset}" >>"$STUB_STATE/up-names"
     # up-img-names: the same for the third address's setting.
     printf '%s\n' "${IMG_HOST-unset}" >>"$STUB_STATE/up-img-names"
+    # up-home-url: the same for the site's home page.
+    printf '%s\n' "${HOME_URL-unset}" >>"$STUB_STATE/up-home-url"
     # STUB_UP_SIGNAL: the run gets that signal during the starts listed in STUB_UP_SIGNAL_ON
     # (default: the first). The first start is cut short by it; a later one finishes.
     if [ -n "${STUB_UP_SIGNAL:-}" ] && [[ " ${STUB_UP_SIGNAL_ON:-1} " == *" $n "* ]]; then
@@ -2776,7 +2781,7 @@ APP_IMAGE=demo-platform:latest
 SETUP_CODE=$code
 TUNNEL_TOKEN=$TOK"
   expect ".env is the tunnel file with both extra addresses in it" test "$(cat "$INST/.env")" = "$want"
-  expect "the stack file is the tunnel copy, unchanged" test "$(sum_of "$INST/docker-compose.yml")" = "$TUNNEL_COMPOSE_0_1_49"
+  expect "the stack file is this version's tunnel copy" test "$(sum_of "$INST/docker-compose.yml")" = "$TUNNEL_COMPOSE_0_1_52"
   # shellcheck disable=SC2016 # the literal compose placeholder
   expect "the app gets IMG_HOST from .env" grep -qxF '      IMG_HOST: ${IMG_HOST:-}' "$INST/docker-compose.yml"
   expect "the Caddyfile is the two-address tunnel one with the img address added" is_three_of /src/tunnel/caddy/Caddyfile.two "$TUNNEL_THREE_SITE_LINE"
@@ -2845,21 +2850,48 @@ test_img_host_added_by_hand_is_picked_up_and_taken_out_again() {
 }
 
 # An install with one or two addresses that runs this version without IMG_HOST keeps
-# every file exactly as 0.1.49 wrote it: the stack file, the Caddyfile and .env.
-test_installs_without_img_host_are_unchanged_by_this_version() {
-  local kind before compose_want caddy_want
+# every file exactly as 0.1.49 wrote it (the stack file, the Caddyfile and .env), except
+# the tunnel stack file, which gained the HOME_URL line in 0.1.52: the first install over
+# a 0.1.49 tunnel stack file replaces it once, keeping the old one as a .bak copy, and
+# nothing changes after that.
+test_installs_without_img_host_keep_their_files_and_the_tunnel_stack_gains_home_url_once() {
+  local kind before compose_want caddy_want baks
   for kind in direct-one direct-two tunnel-one tunnel-two; do
     new_sandbox
     case "$kind" in
       direct-one) fresh_install; compose_want="$COMPOSE_0_1_49"; caddy_want="$CADDYFILE_0_1_3" ;;
       direct-two) two_install; compose_want="$COMPOSE_0_1_49"; caddy_want="$CADDYFILE_TWO_0_1_49" ;;
-      tunnel-one) tunnel_install; compose_want="$TUNNEL_COMPOSE_0_1_49"; caddy_want="$TUNNEL_CADDYFILE_0_1_3" ;;
-      tunnel-two) tunnel_two_install; compose_want="$TUNNEL_COMPOSE_0_1_49"; caddy_want="$TUNNEL_CADDYFILE_TWO_0_1_49" ;;
+      tunnel-one) tunnel_install; compose_want="$TUNNEL_COMPOSE_0_1_52"; caddy_want="$TUNNEL_CADDYFILE_0_1_3" ;;
+      tunnel-two) tunnel_two_install; compose_want="$TUNNEL_COMPOSE_0_1_52"; caddy_want="$TUNNEL_CADDYFILE_TWO_0_1_49" ;;
     esac
-    expect "$kind: the stack file has the bytes of 0.1.49" test "$(sum_of "$INST/docker-compose.yml")" = "$compose_want"
+    expect "$kind: a fresh install writes this version's stack file" test "$(sum_of "$INST/docker-compose.yml")" = "$compose_want"
     expect "$kind: the Caddyfile has the bytes of 0.1.49" test "$(sum_of "$INST/caddy/Caddyfile")" = "$caddy_want"
     expect "$kind: .env has no IMG_HOST" test "$(grep -c IMG_HOST "$INST/.env")" = 0
     expect "$kind: no word of a third address on the first run" test "$(cat "$OUT" "$ERR" | grep -ciE 'img address|IMG_HOST|images and clips|three (addresses|published)')" = 0
+    baks=0
+    case "$kind" in
+      tunnel-*)
+        # The stack file as 0.1.49 wrote it: this version's without the HOME_URL line and
+        # its two comment lines.
+        local new_copy="$T/compose-0.1.52"
+        cp "$INST/docker-compose.yml" "$new_copy"
+        grep -v -e '^      HOME_URL: ' -e "^      # The site's home page, which the logo" -e '^      # an https address. A value the app cannot use leaves the logo' "$new_copy" >"$INST/docker-compose.yml"
+        expect "$kind: the old stack file has the bytes of 0.1.49" test "$(sum_of "$INST/docker-compose.yml")" = "$TUNNEL_COMPOSE_0_1_49"
+        : >"$LOG"
+        STUB_RESOLVE="$HERE" install_sh "" install
+        expect "$kind: install over the 0.1.49 stack file succeeds" test "$RC" = 0
+        expect "$kind: the stack file is replaced by this version's" test "$(sum_of "$INST/docker-compose.yml")" = "$TUNNEL_COMPOSE_0_1_52"
+        local bak; bak="$(find "$INST" -maxdepth 1 -name 'docker-compose.yml.bak-*')"
+        expect "$kind: one copy of the old stack file" test "$(printf '%s\n' "$bak" | grep -c .)" = 1
+        expect "$kind: the copy is the 0.1.49 file" test "$(sum_of "$bak")" = "$TUNNEL_COMPOSE_0_1_49"
+        # shellcheck disable=SC2016 # the literal compose placeholder
+        expect "$kind: the only difference is the HOME_URL line and its comment" test "$(diff "$bak" "$INST/docker-compose.yml" | grep '^[<>]')" = '>       # The site'"'"'s home page, which the logo and name at the top of the dashboard link to:
+>       # an https address. A value the app cannot use leaves the logo without a link.
+>       HOME_URL: ${HOME_URL:-}'
+        expect "$kind: the Caddyfile is not touched" test "$(sum_of "$INST/caddy/Caddyfile") $(find "$INST/caddy" -name 'Caddyfile.bak-*' | wc -l)" = "$caddy_want 0"
+        baks=1
+        ;;
+    esac
     # update adds a backup archive and nothing else; the snapshot leaves the backups out.
     before="$(snapshot | grep -v '/backups')"
     : >"$LOG"
@@ -2870,9 +2902,9 @@ test_installs_without_img_host_are_unchanged_by_this_version() {
       expect "$kind, $cmd: no word of a third address" test "$(cat "$OUT" "$ERR" | grep -ciE 'img address|IMG_HOST|images and clips|three (addresses|published)')" = 0
       expect "$kind, $cmd: every other file, mode and owner unchanged" test "$(snapshot | grep -v '/backups')" = "$before"
     done
-    expect "$kind: the stack file still has the bytes of 0.1.49" test "$(sum_of "$INST/docker-compose.yml")" = "$compose_want"
+    expect "$kind: the stack file still has the same bytes" test "$(sum_of "$INST/docker-compose.yml")" = "$compose_want"
     expect "$kind: the Caddyfile still has the bytes of 0.1.49" test "$(sum_of "$INST/caddy/Caddyfile")" = "$caddy_want"
-    expect "$kind: no copy of a replaced file" test "$(find "$R" -name '*.bak-*' | wc -l)" = 0
+    expect "$kind: no further copy of a replaced file" test "$(find "$R" -name '*.bak-*' | wc -l)" = "$baks"
     expect "$kind: Caddy is never restarted" test "$(grep -c 'restart caddy' "$LOG")" = 0
     expect "$kind: no img address is asked" test "$(grep -c "https://$IMG/" "$LOG")" = 0
   done
@@ -3042,6 +3074,28 @@ test_img_host_in_the_environment_does_not_reach_the_stack() {
   expect "tunnel: a later run succeeds" test "$RC" = 0
   expect "tunnel: the start was not handed it" test "$(sort -u "$STATE/up-img-names")" = unset
   expect "the name from the environment appears nowhere" test "$(cat "$OUT" "$ERR" "$LOG" | grep -c 'example\.net')" = 0
+}
+
+# Compose reads its own environment before .env, so a HOME_URL left in the caller's shell
+# must not reach the stack: only .env supplies it.
+test_home_url_in_the_environment_does_not_reach_the_stack() {
+  new_sandbox
+  HOME_URL=https://other-home.example.net/ STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes
+  expect "direct: a first install succeeds" test "$RC" = 0
+  expect "direct: no home page is taken from the environment" test "$(grep -c HOME_URL "$INST/.env")" = 0
+  expect "direct: the start was not handed it" test "$(sort -u "$STATE/up-home-url")" = unset
+  new_sandbox
+  HOME_URL=https://other-home.example.net/ install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
+  expect "tunnel: a first install succeeds" test "$RC" = 0
+  expect "tunnel: no home page is taken from the environment" test "$(grep -c HOME_URL "$INST/.env")" = 0
+  expect "tunnel: the start was not handed it" test "$(sort -u "$STATE/up-home-url")" = unset
+  rm -f "$STATE/up-home-url"
+  HOME_URL=https://other-home.example.net/ install_sh "" install
+  expect "tunnel: a later install succeeds" test "$RC" = 0
+  HOME_URL=https://other-home.example.net/ install_sh "" update
+  expect "tunnel: update succeeds" test "$RC" = 0
+  expect "tunnel: neither run handed it to a start" test "$(sort -u "$STATE/up-home-url")" = unset
+  expect "the address from the environment appears nowhere" test "$(cat "$OUT" "$ERR" "$LOG" | grep -c 'example\.net')" = 0
 }
 
 # The sentence a run stops with when Compose gives the app another IMG_HOST than the

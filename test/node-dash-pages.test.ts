@@ -7,6 +7,7 @@
 //
 // What this leaves unproven, for docs/dashboard-browser-check.md: real layout at phone
 // width, focus rings, a screen reader, the browser's clipboard and its handling of the policy.
+import { isBrandMark } from "./dash-checks.ts";
 import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
@@ -199,7 +200,7 @@ describe("the Tours page", () => {
     expect(title.textContent).toBe('<img src=x onerror="alert(1)">');
     expect(title.children.every((c) => !(c instanceof FakeElement))).toBe(true);
     expect(tab.$("tours-in").textContent).toBe(" in <i>ws</i>");
-    expect(tab.doc.root.all().some((e) => e.tagName === "img" || e.tagName === "i")).toBe(false);
+    expect(tab.doc.root.all().some((e) => (e.tagName === "img" && !isBrandMark(e)) || e.tagName === "i")).toBe(false);
   });
 
   it("builds the public link from the tours address: https, http only on a local name, and no link at all when it cannot be trusted", async () => {

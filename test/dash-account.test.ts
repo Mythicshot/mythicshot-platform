@@ -19,7 +19,7 @@ import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { SIGNIN_JS } from "../src/signin/page.ts";
 import { send, type Call } from "./bundle.ts";
-import { expectNoForbiddenApis, expectPageShape } from "./dash-checks.ts";
+import { expectNoForbiddenApis, expectPageShape, isBrandMarkAlt } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -242,7 +242,7 @@ describe("the Account page and the page an email-change link opens", () => {
     const doc = new FakeDocument(ACCOUNT_HTML);
     expect(textNodes(doc.body)).toEqual(ACCOUNT_WORDING);
     expect(textNodes(doc.head)).toEqual(["Account"]);
-    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt", "placeholder"]) expect(e.hasAttribute(name), `<${e.tagName} ${name}>`).toBe(false);
+    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt", "placeholder"]) expect(e.hasAttribute(name) && !isBrandMarkAlt(e, name), `<${e.tagName} ${name}>`).toBe(false);
     const current = doc.body.all().filter((e) => e.tagName === "a" && e.getAttribute("aria-current") === "page");
     expect(current.map((a) => [a.textContent, a.getAttribute("href")])).toEqual([["Account", "/account"]]);
     // Each sentence where it belongs.
@@ -284,7 +284,7 @@ describe("the Account page and the page an email-change link opens", () => {
     const doc = new FakeDocument(ACCOUNT_EMAIL_HTML);
     expect(textNodes(doc.body)).toEqual(EMAIL_WORDING);
     expect(textNodes(doc.head)).toEqual(["Confirm your new email address"]);
-    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt", "placeholder"]) expect(e.hasAttribute(name), `<${e.tagName} ${name}>`).toBe(false);
+    for (const e of doc.body.all()) for (const name of ["aria-label", "title", "alt", "placeholder"]) expect(e.hasAttribute(name) && !isBrandMarkAlt(e, name), `<${e.tagName} ${name}>`).toBe(false);
     expect(doc.body.all().filter((e) => e.tagName === "a" && e.getAttribute("aria-current") === "page").map((a) => a.textContent)).toEqual(["Account"]);
     // Every state starts hidden: the script shows one, and none before it knows which.
     for (const id of ["confirm", "first", "done", "dead"]) expect(doc.getElementById(id)!.hidden, id).toBe(true);
