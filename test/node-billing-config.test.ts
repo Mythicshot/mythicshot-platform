@@ -7,19 +7,26 @@ const HOST = { SITE_HOST: "app.example.com" };
 const FOUR = { ...HOST, STRIPE_API_KEY: "rk_test_FAKE", STRIPE_WEBHOOK_SECRET: "whsec_FAKE", STRIPE_PRICE_ID: "price_FAKE", STRIPE_PUBLISHABLE_KEY: "pk_test_FAKE" };
 
 describe("billing on the Node server", () => {
-  it("is on with all four, and without any one the config is as before, with no such key", () => {
+  it("is on with all four, off with none (the config as before, with no such key), and some but not all stop the start naming the missing ones", () => {
     expect(configFromEnv({ ...FOUR }).billing).toEqual({ apiKey: "rk_test_FAKE", webhookSecret: "whsec_FAKE", priceId: "price_FAKE", publishableKey: "pk_test_FAKE" });
-    for (const name of Object.keys(FOUR).filter((k) => k !== "SITE_HOST")) {
-      const config = configFromEnv({ ...FOUR, [name]: "" });
-      expect("billing" in config, name).toBe(false);
-    }
-    expect(configFromEnv({})).toEqual(configFromEnv({ STRIPE_PRICE_ID: "price_FAKE" }));
+    for (const name of Object.keys(FOUR).filter((k) => k !== "SITE_HOST")) expect(() => configFromEnv({ ...FOUR, [name]: "" }), name).toThrow(new RegExp(name));
+    expect(() => configFromEnv({ STRIPE_PRICE_ID: "price_FAKE" })).toThrow(/STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PUBLISHABLE_KEY are missing/);
+    expect("billing" in configFromEnv({ SITE_HOST: "app.example.com" })).toBe(false);
+  });
+
+  it("on localhost over http only with both keys in test mode: a live key, or a host that is not local, stops the start", () => {
+    const { SITE_HOST: _, ...keys } = FOUR;
+    expect(configFromEnv({ ...keys, SITE_HOST: "localhost:3000" }).billing).toBeDefined();
+    expect(configFromEnv({ ...keys, SITE_HOST: "127.0.0.1:8080" }).billing).toBeDefined();
+    expect(() => configFromEnv({ ...keys, STRIPE_API_KEY: "rk_live_FAKE", STRIPE_PUBLISHABLE_KEY: "pk_live_FAKE", SITE_HOST: "localhost:3000" })).toThrow(/https/);
+    // A local-looking name that is not exactly localhost is served over http too, and is no exception.
+    expect(() => configFromEnv({ ...keys, SITE_HOST: "app.localhost:3000" })).toThrow(/https/);
   });
 
   it("with billing on, the site needs its own https address for Stripe's return address: without one the start stops, naming the settings", () => {
     const { SITE_HOST: _, ...noHost } = FOUR;
     expect(() => configFromEnv(noHost)).toThrow(/APP_HOST.*SITE_HOST|SITE_HOST.*APP_HOST/);
-    expect(() => configFromEnv({ ...noHost, SITE_HOST: "localhost:3000" })).toThrow(/https/);
+    expect(() => configFromEnv({ ...noHost, SITE_HOST: "localhost:3000", STRIPE_API_KEY: "rk_live_FAKE", STRIPE_PUBLISHABLE_KEY: "pk_live_FAKE" })).toThrow(/https/);
     expect(configFromEnv({ ...noHost, TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com" }).billing).toBeDefined();
   });
 

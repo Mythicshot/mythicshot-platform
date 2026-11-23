@@ -23,7 +23,7 @@
 // the one 404 `not_found` and changes nothing. An account id that is malformed or names no
 // account is that same 404. Every answer is `cache-control: no-store`.
 import type { Hono } from "hono";
-import { cancelForDeletion } from "./billing.ts";
+import { prepareDeletion } from "./billing.ts";
 import { auditStatement } from "./audit.ts";
 import { requireAuth } from "./auth.ts";
 import { SUBREQUEST_BUDGET, metered } from "./budget.ts";
@@ -439,12 +439,6 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
     if (t.shared === 1) return sharedWorkspace();
     if (t.site_workspace === 1) return siteOwner();
 
-    // Billing (src/billing.ts): a workspace's subscription is cancelled at Stripe before
-    // anything of it is deleted; without Stripe's confirmation nothing is. No call without billing.
-    if ((await cancelForDeletion(d, t.workspace_id, adminId)) === "failed") {
-      return apiError(500, "cleanup_pending", "the account is being deleted, but some of its files could not be removed yet; delete it again to retry");
-    }
-
     if (t.removing === 0) {
       // Recorded only while the account is still disabled and no delete of it is recorded,
       // with the workspace's file count for the progress. From then on it cannot be enabled
@@ -466,9 +460,18 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
       }
     }
 
+    // Billing (src/billing.ts): with the removal recorded (so the account cannot be enabled
+    // meanwhile and end up kept with its subscription cancelled), the workspace's subscription
+    // is cancelled at Stripe and its open checkouts closed there, before anything of it is
+    // deleted; without Stripe's definite answer nothing is. No call without billing.
+    const prepared = await prepareDeletion(d, t.workspace_id, adminId, (cost) => meter.calls() + cost + CALLS_AT_THE_END <= SUBREQUEST_BUDGET);
+    if (prepared === "failed") {
+      return apiError(500, "cleanup_pending", "the account is being deleted, but some of its files could not be removed yet; delete it again to retry");
+    }
+
     let outcome: "deleted" | "more";
     try {
-      outcome = await work(d, meter.calls, t, adminId);
+      outcome = prepared === "more" ? "more" : await work(d, meter.calls, t, adminId);
     } catch {
       // Fixed text only: the error could carry anything a back end put in its message.
       console.error("account delete: could not remove some of a deleted account's files or rows; the next delete call retries");

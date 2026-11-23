@@ -32,7 +32,13 @@ afterEach(() => vi.restoreAllMocks());
 describe("billing on the Worker", () => {
   it("is on with all four vars and secrets, off without any one, and a client reaches Stripe only then", () => {
     expect(entry.billingFromWorkerEnv(FOUR)).toEqual({ ok: true, billing: { apiKey: "rk_test_FAKE", webhookSecret: "whsec_FAKE", priceId: "price_FAKE", publishableKey: "pk_test_FAKE" } });
-    for (const name of Object.keys(FOUR)) expect(entry.billingFromWorkerEnv({ ...FOUR, [name]: undefined }), name).toEqual({ ok: true, billing: null });
+    // Some but not all of the four is a problem naming the missing ones (0.1.58); none is off.
+    for (const name of Object.keys(FOUR)) {
+      const partial = entry.billingFromWorkerEnv({ ...FOUR, [name]: undefined });
+      expect(partial.ok, name).toBe(false);
+      if (!partial.ok) expect(partial.problem, name).toContain(name);
+    }
+    expect(entry.billingFromWorkerEnv({})).toEqual({ ok: true, billing: null });
     const on = entry.billingFromWorkerEnv(FOUR);
     if (!on.ok) throw new Error("expected billing");
     const withBilling = entry.depsFromEnv(bindings(), null, null, undefined, on.billing);

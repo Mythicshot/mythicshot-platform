@@ -79,7 +79,7 @@ describe("H1: a stale read-back never overwrites a newer one", () => {
     const checkout = (await row(s.deps, s.a.workspaceId))!.checkout_session_id as string;
     s.stripe.subscription("sub_A", "cus_A", "active");
     s.stripe.complete(checkout, "cus_A", "sub_A");
-    const deleted = eventOf("customer.subscription.deleted", { id: "sub_A", customer: "cus_A" });
+    const deleted = eventOf("customer.subscription.deleted", { id: "sub_A", customer: "cus_A", created: Math.floor(T0 / 1000) });
     let inner: number | null = null;
     s.stripe.hook = async (call) => {
       if (call.path !== "/v1/subscriptions/sub_A") return;
@@ -109,8 +109,10 @@ describe("H1: a stale read-back never overwrites a newer one", () => {
     const refused = await createUpload(s.deps, s.a.token);
     expect([refused.status, refused.json.error]).toEqual([402, "subscription_ended"]);
     expect((await row(s.deps, s.a.workspaceId))!.subscription_status).toBe("active");
-    // Stripe back: it says canceled, which is stored, and the state says so.
+    // Stripe back: it says canceled, which is stored, and the state says so (a minute later:
+    // within the minute the last try's outcome stands, 0.1.58).
     s.stripe.down = false;
+    s.advance(60_001);
     s.stripe.subscription("sub_A", "cus_A", "canceled", { endedAt: 1_799_700_000 });
     const state = await send(s.deps, "GET", BILLING_PATHS.state, { headers: await headers(s.deps, s.a.userId) });
     expect(state.json.state).toBe("ended");
@@ -118,6 +120,7 @@ describe("H1: a stale read-back never overwrites a newer one", () => {
     // And a renewal Stripe made heals it the other way.
     await s.deps.db.run("UPDATE workspace SET subscription_status = 'active', subscription_period_end = ? WHERE id = ?", [T0 - 4 * DAY, s.a.workspaceId]);
     s.stripe.subscription("sub_A", "cus_A", "active", { periodEnd: 1_802_000_000 });
+    s.advance(60_001);
     expect((await createUpload(s.deps, s.a.token)).status).toBe(201);
     expect((await row(s.deps, s.a.workspaceId))!.subscription_period_end).toBe(1_802_000_000_000);
   });
@@ -167,8 +170,9 @@ describe("H2: a paid checkout is never orphaned", () => {
     await send(s.deps, "POST", BILLING_PATHS.checkout, { headers: h });
     const form = Object.fromEntries(s.stripe.to("/v1/checkout/sessions")[0].form!);
     const at = Number(form.expires_at);
-    expect(at - T0 / 1000).toBeGreaterThanOrEqual(1800);
-    expect(at - T0 / 1000).toBeLessThanOrEqual(1800 + 120);
+    // 0.1.58: the start of the minute plus 33 minutes, so always at least 32 minutes ahead.
+    expect(at - T0 / 1000).toBeGreaterThanOrEqual(32 * 60);
+    expect(at - T0 / 1000).toBeLessThanOrEqual(33 * 60);
     s.advance(31 * 60 * 1000);
     s.stripe.sessions.get("cs_test_1")!.status = "expired";
     const r = await send(s.deps, "POST", BILLING_PATHS.checkout, { headers: h });

@@ -3,7 +3,7 @@
 // 404 and no page, script or request of billing exists). Every sentence is from the approved
 // mockups (Files/Mythicshot billing/billing-mockups.html), sections 2, 3 and 5; the Subscribe
 // page's three sentences are the owner's approved embedded-checkout wording, and the run-out
-// trial's two (TRIAL_OVER_WORDS) are the owner's wording pending approval, each one constant.
+// trial's two (TRIAL_OVER_WORDS) the owner approved on 2026-11-23, each one constant.
 //
 // - BILLING_JS, /dash/billing.js: loaded by the shared script (src/dash/script.ts) on every
 //   dashboard page when the session answer says `billing: true`. It asks GET /api/v1/billing
@@ -35,7 +35,7 @@ export const SUBSCRIBE_WORDS = {
 } as const;
 
 /**
- * A trial that has run out (wording pending the owner's approval): the notice strip's sentences
+ * A trial that has run out (wording approved by the owner on 2026-11-23): the notice strip's sentences
  * (the first in bold, as every notice's lead) and the Billing card's row in place of "Trial ends".
  */
 export const TRIAL_OVER_WORDS = {

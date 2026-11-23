@@ -2,6 +2,16 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.58 (2026-11-23)
+
+- Billing, before it is switched on anywhere (it stays off without the Stripe settings, exactly as in 0.1.57): a notice of a subscription not linked to a workspace is held back only while it may really be one a checkout will link (made in the last 2 hours, and for an unknown customer only with a checkout of the site made before it that had not expired more than 10 minutes earlier); every other one, such as the notice of a subscription cancelled by an account's delete, is taken at once.
+- A checkout now lives from 32 to 33 minutes (the start of its minute plus 33), never at or under Stripe's 30-minute minimum, with one idempotency key per minute.
+- Deleting an account records the delete first, so the account cannot be enabled meanwhile, then cancels the workspace's subscription and closes every checkout of it that has not expired; one that turns out paid has its subscription cancelled too. Without Stripe's definite answer nothing is deleted. Disabling an account still cancels nothing, by the owner's decision: a disable can be undone.
+- The settings: some but not all of the four Stripe settings now stop the start, naming the missing ones (none is still off), and the two keys must be of one mode, both test or both live. For a run on one's own computer against a Stripe sandbox, an address of exactly localhost, 127.0.0.1 or [::1] over http is taken for Stripe's return addresses when both keys are test keys; nothing else is relaxed.
+- A stale subscription is read back from Stripe at most once a minute per workspace, keeping the last outcome in between; one Stripe confirms live with an old period end is trusted for a day, with one audit row, `billing_stale_confirmed`. Reads of the billing state are counted too, 600 an hour per workspace. Migration 0022 adds the three columns this needs; it is additive.
+- The record of checkouts is cleared 7 days after each expired, by the workspace's own housekeeping. A paid checkout that named a workspace's checkout but not its reference or customer is now among the admin summary's `billing_problems`.
+- The README and the Docker runbook describe the changes. New tests: `test/billing-round3.test.ts`, `test/node-migration-0022.test.ts`, and the earlier billing tests brought to the new rules.
+
 ## 0.1.57 (2026-11-23)
 
 - Optional billing, with Stripe: a site that has all four settings `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID` and `STRIPE_PUBLISHABLE_KEY` sells one plan, Mythicshot Essentials. Without them nothing changes: no billing route exists, no screen mentions it and no limit applies. A setting of the wrong shape stops the start with a line that names it and never its value.
