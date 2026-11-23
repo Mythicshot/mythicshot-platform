@@ -471,7 +471,7 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     if (!(await verifyStripeSignature(c.req.raw.headers.get("stripe-signature"), raw, deps.config.billing!.webhookSecret, deps.now()))) return listenerRefused();
     let event: unknown;
     try {
-      event = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+      event = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw));
     } catch {
       return listenerRefused();
     }

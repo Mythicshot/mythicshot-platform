@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
 import { DASH_LINK_PAGES, DASH_PAGES, TERMS_PAGE } from "../src/dash/routes.ts";
+import { BILLING_ROUTE_KEYS, withBilling } from "./fake-stripe.ts";
 import { HOST_RULES, hostGate, type HostRule } from "../src/host-gate.ts";
 import { HOST_ROLES, type HostRole, type Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
@@ -358,7 +359,8 @@ describe("the host-routing matrix", () => {
     const lacking = (have: string[], want: string[]) => want.filter((k) => !have.includes(k));
     expect(lacking(rules, routes), "add a rule to HOST_RULES in src/host-gate.ts for each of these routes").toEqual([]);
     expect(lacking(KEYS, routes), "add a row to ROWS in test/hosts.test.ts for each of these routes").toEqual([]);
-    expect(lacking(routes, rules), "remove these keys from HOST_RULES in src/host-gate.ts: no route has them").toEqual([]);
+    // Billing's routes exist only with the Stripe settings; their rules are checked in the test below.
+    expect(lacking([...routes, ...BILLING_ROUTE_KEYS], rules), "remove these keys from HOST_RULES in src/host-gate.ts: no route has them").toEqual([]);
     expect(lacking(routes, KEYS), "remove these keys from ROWS in test/hosts.test.ts: no route has them").toEqual([]);
     // Each row's sample request reaches its own route and no other.
     for (const key of KEYS) {
@@ -403,6 +405,22 @@ describe("the host-routing matrix", () => {
     for (const key of BRAND_APP_KEYS) expect(HOST_RULES[key], key).toBe("app");
     // No font of the name: only Manrope is served.
     expect(KEYS.filter((k) => k.startsWith("GET /fonts/"))).toEqual(["GET /fonts/:file{manrope(?:\\.[0-9a-f]{16})?\\.ttf}", "GET /fonts/manrope-OFL.txt"]);
+  });
+
+  it("billing's routes, with the Stripe settings, live on the app address alone: 404 on the tours address and 421 on an unknown host", async () => {
+    const { deps } = await twoAddress();
+    withBilling(deps);
+    const app = createApp(deps);
+    expect(BILLING_ROUTE_KEYS.filter((k) => !app.routes.some((r) => `${r.method} ${r.path}` === k))).toEqual([]);
+    for (const key of BILLING_ROUTE_KEYS) {
+      expect(HOST_RULES[key], key).toBe("app");
+      const [method, path] = key.split(" ");
+      const onApp = await send(deps, method, path, { origin: APP });
+      const want = path.startsWith("/api/") ? (path.endsWith("/webhook") ? 400 : 401) : 200;
+      expect(onApp.status, key).toBe(want);
+      expectNotHere(await send(deps, method, path, { origin: TOURS }), key);
+      expectMisdirected(await send(deps, method, path, { origin: UNKNOWN }), key);
+    }
   });
 
   it("one-address mode answers every route on any host as before", async () => {

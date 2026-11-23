@@ -210,6 +210,7 @@ export const CODE_MEANINGS: Readonly<Record<string, string>> = {
   bad_name: "A token's name must be 1 to 60 characters of text, without control or formatting characters.",
   expired_code: "The device code can give no token: it is unknown, expired, refused or already used. Start again.",
   slow_down: "The app asked for its token again before the interval was up; wait 5 seconds more.",
+  subscription_ended: "Only on a site with billing: the workspace's subscription has ended or its trial is over, so it can view, download and delete but not upload, publish or change who may view. Nothing was done.",
   bad_allowance: "The storage allowance must be a whole number of bytes from 0 to 9007199254740991, or null for the site's default.",
   own_account: "An admin cannot disable, enable or delete their own account; another admin must.",
   last_admin: "The account is the site's last active admin; the site would be left without one.",

@@ -28,6 +28,7 @@ import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { parseTerms, publishTerms } from "../src/terms.ts";
 import { ORIGIN, send, type Call } from "./bundle.ts";
+import { BILLING_CONFIG, withBilling } from "./fake-stripe.ts";
 
 type Kind = "held" | "open" | "page" | "none";
 type Sample = { method: string; path: string; json?: unknown; body?: string };
@@ -169,6 +170,19 @@ const GATE: Record<string, Entry> = {
   "GET /dash/account-email.js": page("/dash/account-email.js"),
   "GET /terms": page("/terms"),
   "GET /dash/terms.js": page("/dash/terms.js"),
+  // Billing (src/billing.ts, src/dash/billing.ts), whose routes exist only with the Stripe
+  // settings, which every app of this file has: the dashboard's three requests take a session;
+  // Stripe's listener takes none (its signature is its credential); the two pages and three
+  // scripts are fixed files.
+  "GET /api/v1/billing": held("GET", "/api/v1/billing"),
+  "POST /api/v1/billing/checkout": held("POST", "/api/v1/billing/checkout"),
+  "POST /api/v1/billing/portal": held("POST", "/api/v1/billing/portal"),
+  "POST /api/v1/billing/webhook": none("POST", "/api/v1/billing/webhook", { id: "evt_x" }),
+  "GET /billing/subscribe": page("/billing/subscribe"),
+  "GET /dash/billing-subscribe.js": page("/dash/billing-subscribe.js"),
+  "GET /billing/return": page("/billing/return"),
+  "GET /dash/billing-return.js": page("/dash/billing-return.js"),
+  "GET /dash/billing.js": page("/dash/billing.js"),
   // The product's mark (src/brand-assets.ts, src/brand.ts): fixed bytes every page above shows, no session read, no database call.
   "GET /dash/mark.svg": page("/dash/mark.svg"),
   "GET /dash/wordmark-dark.png": page("/dash/wordmark-dark.png"),
@@ -225,7 +239,8 @@ function gateProblems(routes: string[], gate: Record<string, Entry> = GATE): str
   return problems;
 }
 
-const routes = () => routeKeysOf(createApp({ config: { publicImageBase: "", setupCode: null } } as Deps));
+// With billing on, so its routes are classified too (without the settings they do not exist: test/billing.test.ts).
+const routes = () => routeKeysOf(createApp({ config: BILLING_CONFIG } as Deps));
 
 describe("every route is classified for the terms", () => {
   it("every route of the route table is in GATE, and nothing else is", () => {
@@ -258,7 +273,7 @@ describe("every route is classified for the terms", () => {
   });
 
   it("the check itself fails for a new route nobody classified, and for a key left behind", () => {
-    const app = createApp({ config: { publicImageBase: "", setupCode: null } } as Deps);
+    const app = createApp({ config: BILLING_CONFIG } as Deps);
     app.get("/api/v1/export", (c) => c.json({}));
     expect(gateProblems(routeKeysOf(app))).toEqual([
       "GET /api/v1/export is not classified: add it to GATE in test/terms-gate.test.ts as held (a session route the terms hold back), open, page or none, with a request that shows it",
@@ -307,6 +322,7 @@ const REFUSED = '{"error":"terms_required","detail":"agree to the site\'s terms 
 
 async function world() {
   const ctx = await makeDeps();
+  withBilling(ctx.deps);
   let now = T0;
   ctx.deps.now = () => now;
   const admin = await seedAccount(ctx.deps, { username: "owner", admin: true });
@@ -322,7 +338,7 @@ describe("before the account agrees to the site's terms", () => {
     const id = await publish(w.deps);
     const before = await dumpAll(w.deps);
     const heldKeys = Object.keys(GATE).filter((k) => GATE[k].kind === "held");
-    expect(heldKeys.length).toBe(50);
+    expect(heldKeys.length).toBe(53);
     for (const key of heldKeys) {
       const e = GATE[key];
       const r = await fire(w.deps, e.sample!, e.admin ? adminSession : memberSession);

@@ -84,6 +84,19 @@ const ALLOWED_HOSTS = new Set([
   "www.debian.org",
   "r2.dev",
   "workers.dev",
+  // Stripe, the billing integration (README, "Billing (optional)"): its hosts the Subscribe page's policy names.
+  "js.stripe.com",
+  "checkout.stripe.com",
+  "api.stripe.com",
+  // And the names of the Stripe notices the listener takes, which have the shape of a host name.
+  "checkout.session.completed",
+  "checkout.session",
+  "customer.subscription.created",
+  "customer.subscription.updated",
+  "customer.subscription.deleted",
+  "invoice.paid",
+  "charge.refunded",
+  "charge.dispute.created",
 ]);
 
 /** Last labels that are file extensions, not top-level domains. */

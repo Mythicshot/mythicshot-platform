@@ -1289,6 +1289,14 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `viewer_link_sent` | A link for a visitor to view a tour shared with their address was made to be mailed; the mail itself may still have failed. Only the subject is set, the link's own id: no account, workspace, tour or address is recorded |
 | `viewer_signin` | A visitor used such a link and this browser now views tours as that address; the subject is the viewer session. No account, workspace or address is recorded |
 | `terms_agreed` | The account agreed to the site's terms; the subject is the version of the terms. No network address or browser is recorded |
+| `billing_checkout_started` | On a site with billing: the account pressed Subscribe and a checkout was stored against its workspace. The checkout's client secret is never recorded |
+| `billing_changed` | On a site with billing: Stripe's notice changed the workspace's subscription, as read back from Stripe; the detail holds the new status, the one before, whether it is set to end and whether this notice linked it, such as `{"status":"active","was":"none","cancelling":0,"linked":1}` |
+| `billing_checkout_mismatch` | On a site with billing: a notice named this workspace's checkout or customer but something else in it did not match (`reference_differs`, `customer_differs` or `customer_taken`); nothing was changed |
+| `billing_checkout_unmatched` | On a site with billing: a completed checkout no workspace stored; nothing was granted. With a workspace when the checkout's customer is on its record (a second payment), `{"live":1}` when that workspace already pays |
+| `billing_second_subscription` | On a site with billing: a second checkout of a workspace that already has a live subscription was paid; the live one was kept, and the second needs a refund by hand in Stripe |
+| `billing_unlinked_subscription` | On a site with billing: Stripe told of a subscription of this workspace's customer that no checkout of it started; it was not linked |
+| `billing_payment_failed` | On a site with billing: a payment failed, at the checkout (`{"stage":"checkout"}`) or at a renewal (`{"stage":"renewal"}`) |
+| `billing_risk` | On a site with billing: a refund, a dispute or an early fraud warning on this workspace's customer (`{"kind":"refund"}`, `dispute` or `fraud_warning`); the subscription was read back from Stripe after it |
 
 ## Troubleshooting by symptom
 

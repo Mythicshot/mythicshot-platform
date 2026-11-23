@@ -4,7 +4,7 @@
 // sends is held to the budget by test/bundle.ts as well; these tests make sure the worst
 // cases are reached and record the highest count per route.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { makeDeps, seedWorkspace } from "#harness";
+import { makeDeps, seedAccount, seedWorkspace } from "#harness";
 import { metered, SUBREQUEST_BUDGET, withBudget } from "../src/budget.ts";
 import { LIMITS } from "../src/manifest.ts";
 import { MailOff, NO_MAIL } from "../src/mail.ts";
@@ -12,6 +12,7 @@ import { DEFER_FAILED, deferOf, mailOf, type Deps } from "../src/ports.ts";
 import { COPY_BATCH, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../src/publish.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { FakeMailer } from "./fake-mail.ts";
+import { eventOf, notify, sessionOf, withBilling } from "./fake-stripe.ts";
 import { clone, commit, createUpload, fixtures, logoPng, ORIGIN, putLogo, putStep, routeOf, send, sendAll, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 
 const v3 = fixtures.v3 as Json;
@@ -613,6 +614,46 @@ describe("the call budget, route by route", () => {
     await settle();
     expect(done).toBe(true);
     expect(m.calls()).toBe(5);
+  });
+
+  it("billing: the gated worst create, the worst Subscribe, the state with a checkout, the portal, and the listener's heaviest notices stay in the budget", async () => {
+    const { deps, a, advance } = await clocked({ maxOpenUploads: 5 });
+    const stripe = withBilling(deps);
+    await seedAccount(deps, { username: "siteadmin", admin: true });
+    const owner = await deps.db.first<{ user_id: string }>("SELECT user_id FROM membership WHERE workspace_id = ?", [a.workspaceId]);
+    // The worst create, as in the uploads case, now with billing's one read more.
+    const big = heavyManifest(200);
+    for (let i = 0; i < 5; i++) await sendAll(deps, a.token, big, { kind: "new" }, i);
+    advance(UPLOAD_MAX_AGE_MS + HOUR);
+    const anchor = "tour_" + "c".repeat(24);
+    await deps.db.run("INSERT INTO tour (id, workspace_id, title, slug, status, created_at, updated_at) VALUES (?, ?, 'Anchor', 'anchor3333', 'draft', 1, 1)", [anchor, a.workspaceId]);
+    await seedLeftovers(deps, a.workspaceId, anchor, 5, 1500, deps.now());
+    const created = await call(deps, "POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: big, target: { kind: "new" } }), headers: { "content-type": "application/json" } });
+    expect(created.status, created.text).toBe(201);
+    const session = await sessionOf(deps, owner!.user_id);
+    // Subscribe: a stored checkout to look at (expired), a new one, the store, and a lost race's expire.
+    expect((await call(deps, "POST", "/api/v1/billing/checkout", { headers: session.headers })).status).toBe(200);
+    stripe.sessions.get("cs_test_1")!.status = "expired";
+    const second = await call(deps, "POST", "/api/v1/billing/checkout", { headers: session.headers });
+    expect(second.status).toBe(200);
+    expect((await call(deps, "GET", "/api/v1/billing?session_id=cs_test_2", { headers: session.headers })).json.checkout).toBe("open");
+    // The listener: a completed checkout, a renewal that failed, and a dispute whose charge is read.
+    stripe.subscription("sub_B", "cus_B", "active");
+    const done = await notify(deps, eventOf("checkout.session.completed", { id: "cs_test_2", client_reference_id: a.workspaceId, customer: "cus_B", subscription: "sub_B", payment_status: "paid" }));
+    noted(done, "POST /api/v1/billing/webhook");
+    stripe.subscription("sub_B", "cus_B", "past_due");
+    noted(await notify(deps, eventOf("invoice.payment_failed", { id: "in_B", customer: "cus_B" })), "POST /api/v1/billing/webhook");
+    stripe.charges.set("ch_B", { id: "ch_B", customer: "cus_B" });
+    const dispute = noted(await notify(deps, eventOf("charge.dispute.created", { id: "dp_B", charge: "ch_B" })), "POST /api/v1/billing/webhook");
+    expect(dispute.status).toBe(200);
+    // Five calls at most for the heaviest notice: seen?, the workspace, the charge, the subscription, the batch.
+    expect(dispute.calls).toBeLessThanOrEqual(5);
+    expect((await call(deps, "POST", "/api/v1/billing/portal", { headers: session.headers })).status).toBe(200);
+    // A read-only workspace's refusal costs its one read.
+    await deps.db.run("UPDATE workspace SET subscription_status = 'canceled' WHERE id = ?", [a.workspaceId]);
+    const refused = await call(deps, "POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: big, target: { kind: "new" } }), headers: { "content-type": "application/json" } });
+    expect(refused.status).toBe(402);
+    expect(refused.calls).toBeLessThanOrEqual(3);
   });
 
   it("reports the highest count seen per route (run with --silent=false to see it)", () => {

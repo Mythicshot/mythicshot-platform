@@ -57,6 +57,7 @@ import { createApp } from "../src/app.ts";
 import { hashToken, newId, newToken } from "../src/auth.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { openapi, type OpenApiDoc } from "../src/docs/openapi.ts";
+import { BILLING_CONFIG, eventOf, notify, withBilling, type FakeStripe } from "./fake-stripe.ts";
 import type { Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
 import { LIMITS_SIGNIN } from "../src/rate.ts";
@@ -305,6 +306,7 @@ const LISTS: Record<string, { path: string; holds: string; only?: "token" | "ses
   "GET /api/v1/tokens": { path: "/api/v1/tokens", holds: "the caller's workspace's tokens that are not revoked: ids, names, times and kinds", only: "session" },
   "GET /api/v1/terms": { path: "/api/v1/terms", holds: "the site's current terms, the caller's own account's newest agreement and its session's anti-forgery value", only: "session" },
   "GET /api/v1/terms/agreed": { path: "/api/v1/terms/agreed", holds: "the version of the site's terms the caller's own account agreed to last, and when", only: "session" },
+  "GET /api/v1/billing": { path: "/api/v1/billing", holds: "where the caller's own workspace stands with billing: its state, dates, usage and allowance", only: "session" },
 };
 
 /**
@@ -473,6 +475,12 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
   "GET /dash/account-email.js": { reason: "the email-change link page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/account-email.js" }] },
   "GET /terms": { reason: "the terms screen and, with ?read, the terms agreed to: fixed text the same for everyone; the terms and the agreement it shows its script asks the API for", samples: () => [{ method: "GET", path: "/terms" }, { method: "GET", path: "/terms?read" }] },
   "GET /dash/terms.js": { reason: "the terms page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/terms.js" }] },
+  "POST /api/v1/billing/webhook": { reason: "Stripe's signed notices: no credential is read, and without a valid signature nothing is read or written; a notice finds a workspace only through ids the platform stored (the test of billing below)", samples: () => [{ method: "POST", path: "/api/v1/billing/webhook", json: { id: "evt_x", type: "invoice.paid", data: { object: {} } } }] },
+  "GET /billing/subscribe": { reason: "the Subscribe page, fixed text the same for everyone; its script asks the checkout route, which takes the caller's own session", samples: () => [{ method: "GET", path: "/billing/subscribe" }] },
+  "GET /dash/billing-subscribe.js": { reason: "the Subscribe page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/billing-subscribe.js" }] },
+  "GET /billing/return": { reason: "the page Stripe sends a person back to, fixed text; its script asks the caller's own billing state", samples: () => [{ method: "GET", path: "/billing/return" }] },
+  "GET /dash/billing-return.js": { reason: "the return page's script, fixed text", samples: () => [{ method: "GET", path: "/dash/billing-return.js" }] },
+  "GET /dash/billing.js": { reason: "the dashboard's billing script, fixed text", samples: () => [{ method: "GET", path: "/dash/billing.js" }] },
   "POST /api/v1/signin/request": {
     reason: "asks for a sign-in link: the answer is the same for every address and every caller, and a link goes only to the address's own mailbox",
     samples: () => [{ method: "POST", path: "/api/v1/signin/request", json: { email: "nobody-here@example.com" }, headers: { origin: ORIGIN } }],
@@ -493,6 +501,8 @@ const SELF: Record<string, { path: string; ends?: string; changes?: string }> = 
   "POST /api/v1/account/email": { path: "/api/v1/account/email", changes: "asks for a change of the caller's own email address; another account's address answers the same and changes nothing" },
   "POST /api/v1/account/email/confirm": { path: "/api/v1/account/email/confirm", changes: "confirms a change of the caller's own email address; another account's code is refused like one that never existed" },
   "POST /api/v1/terms/agree": { path: "/api/v1/terms/agree", changes: "records that the caller's own account agrees to the site's current terms; the body names the version and nothing of any account" },
+  "POST /api/v1/billing/checkout": { path: "/api/v1/billing/checkout", changes: "starts a checkout for the caller's own workspace and stores its id there; nothing in the request names a workspace" },
+  "POST /api/v1/billing/portal": { path: "/api/v1/billing/portal", changes: "opens Stripe's page for the customer on the caller's own workspace's record; nothing in the request names one" },
 };
 /** The SELF routes that end sessions, and those that change the caller's email address. */
 const SELF_ENDS = Object.entries(SELF).filter(([, entry]) => entry.ends !== undefined);
@@ -759,6 +769,8 @@ const label = (key: string, req: Req, credential: string, as: Side) => `${key}: 
 
 async function build(config?: Parameters<typeof makeDeps>[0]): Promise<World> {
   const ctx = await makeDeps(config);
+  // Billing on, with the fake Stripe: every route of it is in the tables, and every case runs with it.
+  withBilling(ctx.deps);
   return world(ctx.deps, { draftKeys: ctx.draftKeys, publicKeys: ctx.publicKeys });
 }
 
@@ -766,7 +778,7 @@ async function build(config?: Parameters<typeof makeDeps>[0]): Promise<World> {
 const directions = (w: World): [Side, Side][] => [[w.b, w.a], [w.a, w.b]];
 
 describe("the tables against the route table", () => {
-  const routes = () => routeKeysOf(createApp({ config: { publicImageBase: "", setupCode: null } } as Deps));
+  const routes = () => routeKeysOf(createApp({ config: BILLING_CONFIG } as Deps));
 
   it("every route in the route table is in exactly one of the tables, and nothing else is", () => {
     expect(tableProblems(routes())).toEqual([]);
@@ -835,7 +847,7 @@ describe("the tables against the route table", () => {
   });
 
   it("the suite itself fails for a route with no case", () => {
-    const app = createApp({ config: { publicImageBase: "", setupCode: null } } as Deps);
+    const app = createApp({ config: BILLING_CONFIG } as Deps);
     app.get("/api/v1/tours/:id/notes", (c) => c.json({}));
     app.post("/api/v1/export", (c) => c.json({}));
     app.all("/api/v1/anything/:id", (c) => c.json({}));
@@ -858,7 +870,7 @@ describe("the tables against the route table", () => {
 
     // A new admin route with no entry fails, and so does one passed off as a list or put in CASES,
     // and a route in ADMIN that is no admin route.
-    const withAdmin = createApp({ config: { publicImageBase: "", setupCode: null } } as Deps);
+    const withAdmin = createApp({ config: BILLING_CONFIG } as Deps);
     withAdmin.get("/api/v1/admin/tours", (c) => c.json({}));
     withAdmin.delete("/api/v1/admin/workspaces/:id", (c) => c.json({}));
     expect(tableProblems(routeKeysOf(withAdmin))).toEqual([
@@ -1054,7 +1066,7 @@ describe("one workspace against another", () => {
 
     const first = { a: await answers(w.a), b: await answers(w.b) };
     // Six lists take one credential, the others both.
-    expect(Object.keys(first.a)).toHaveLength(Object.keys(LISTS).length * 2 - 6);
+    expect(Object.keys(first.a)).toHaveLength(Object.keys(LISTS).length * 2 - 7);
     for (const key of Object.keys(first.a)) {
       expect(first.a[key].status, key).toBe(200);
       expect(first.b[key].status, key).toBe(200);
@@ -1319,6 +1331,55 @@ describe("one workspace against another", () => {
         for (const r of answers) for (const n of [...namesIn(theirs.ids), ...listed]) expect(r.text.includes(n), `${what} told ${n}`).toBe(false);
       }
     }
+  });
+
+  it("billing is the workspace's own: neither can read, start or change the other's, a checkout id of the other answers as one that never existed, and a notice for one changes nothing of the other", SLOW, async () => {
+    const w = await build();
+    const stripe = w.deps.stripe as FakeStripe;
+    const state = (side: Side, query = "") => fire(w.deps, { method: "GET", path: `/api/v1/billing${query}` }, BY_SESSION.of(side));
+    const checkoutOf = async (side: Side) => (await w.deps.db.first<{ c: string | null }>("SELECT checkout_session_id AS c FROM workspace WHERE id = ?", [side.workspaceId]))!.c;
+    for (const [mine, theirs] of directions(w)) {
+      const before = await snapshotOf(w.deps, theirs, w.keys);
+      w.tick();
+      const started = await fire(w.deps, { method: "POST", path: "/api/v1/billing/checkout" }, BY_SESSION.of(mine));
+      expect(started.status, started.text).toBe(200);
+      expect(await checkoutOf(mine)).toMatch(/^cs_test_/);
+      // Manage subscription without a customer of its own: refused, whatever the other has.
+      expect((await fire(w.deps, { method: "POST", path: "/api/v1/billing/portal" }, BY_SESSION.of(mine))).status).toBe(409);
+      expect(await snapshotOf(w.deps, theirs, w.keys), `${mine.name}'s Subscribe changed something of ${theirs.name}`).toEqual(before);
+      const own = (await state(mine)).text;
+      for (const n of namesIn(theirs.ids)) expect(own.includes(n), n).toBe(false);
+    }
+    // The other workspace's checkout id answers byte for byte as an id that never existed, and Stripe is not asked.
+    for (const [mine, theirs] of directions(w)) {
+      const calls = stripe.calls.length;
+      const theirsAnswer = await state(mine, `?session_id=${await checkoutOf(theirs)}`);
+      const never = await state(mine, "?session_id=cs_test_never");
+      expect(seen(theirsAnswer)).toEqual(seen(never));
+      expect(stripe.calls.length).toBe(calls);
+    }
+    // B pays. A notice of B's checkout, customer and subscription changes nothing of A, and A's portal never reaches B's customer.
+    const aBefore = await snapshotOf(w.deps, w.a, w.keys);
+    stripe.subscription("sub_ISO_B", "cus_ISO_B", "active");
+    const checkoutB = await checkoutOf(w.b);
+    expect((await notify(w.deps, eventOf("checkout.session.completed", { id: checkoutB, client_reference_id: w.b.workspaceId, customer: "cus_ISO_B", subscription: "sub_ISO_B", payment_status: "paid" }))).status).toBe(200);
+    // A's own checkout completing with B's reference, or with B's customer, is ignored.
+    stripe.subscription("sub_ISO_X", "cus_ISO_B", "active");
+    const checkoutA = await checkoutOf(w.a);
+    await notify(w.deps, eventOf("checkout.session.completed", { id: checkoutA, client_reference_id: w.b.workspaceId, customer: "cus_ISO_B", subscription: "sub_ISO_X", payment_status: "paid" }));
+    await notify(w.deps, eventOf("checkout.session.completed", { id: checkoutA, client_reference_id: w.a.workspaceId, customer: "cus_ISO_B", subscription: "sub_ISO_X", payment_status: "paid" }));
+    stripe.subscription("sub_ISO_B", "cus_ISO_B", "past_due");
+    stripe.charges.set("ch_ISO", { id: "ch_ISO", customer: "cus_ISO_B" });
+    for (const e of [
+      eventOf("customer.subscription.updated", { id: "sub_ISO_B", customer: "cus_ISO_B" }),
+      eventOf("invoice.payment_failed", { id: "in_ISO", customer: "cus_ISO_B" }),
+      eventOf("charge.dispute.created", { id: "dp_ISO", charge: "ch_ISO" }),
+    ]) expect((await notify(w.deps, e)).status).toBe(200);
+    expect(await snapshotOf(w.deps, w.a, w.keys), "a notice of B's changed something of A").toEqual(aBefore);
+    expect((await w.deps.db.first<{ s: string }>("SELECT subscription_status AS s FROM workspace WHERE id = ?", [w.b.workspaceId]))!.s).toBe("past_due");
+    expect((await fire(w.deps, { method: "POST", path: "/api/v1/billing/portal" }, BY_SESSION.of(w.a))).status).toBe(409);
+    expect(stripe.to("/v1/billing_portal/sessions").every((c) => !JSON.stringify(c.form).includes("cus_ISO_B"))).toBe(true);
+    expect(w.writes()).toEqual([]);
   });
 
   it("an agreement to the site's terms is the account's own: agreeing changes nothing of the other workspace, and neither can read or make the other's", SLOW, async () => {
@@ -2052,7 +2113,7 @@ describe("a viewer cookie", () => {
       await compare("POST /api/v1/invite/accept", "by nobody", { method: "POST", path: "/api/v1/invite/accept", json: { code: "dpi_" + "0".repeat(40), username: "newcomer" } }, page);
 
       // Every route was asked, but the viewers' own, which are the routes that read the cookies.
-      const routes = routeKeysOf(createApp({ config: { publicImageBase: "", setupCode: null } } as Deps));
+      const routes = routeKeysOf(createApp({ config: BILLING_CONFIG } as Deps));
       expect(routes.filter((key) => !covered.has(key)).sort()).toEqual(Object.keys(VIEWER).sort());
       // The viewer session is still there, and still the first side's address alone.
       expect(await deps.db.all(`SELECT email FROM ${kind === "tour" ? "viewer_session" : "media_viewer_session"}`)).toEqual([{ email: a.email }]);

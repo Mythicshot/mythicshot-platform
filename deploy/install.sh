@@ -2316,6 +2316,12 @@ services:
       # The site's home page, which the logo and name at the top of the dashboard link to:
       # an https address. A value the app cannot use leaves the logo without a link.
       HOME_URL: ${HOME_URL:-}
+      # Billing (optional, all four or none): a Stripe restricted key, the listener's signing
+      # secret, the plan's price and the publishable key. Without all four there is no billing.
+      STRIPE_API_KEY: ${STRIPE_API_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRICE_ID: ${STRIPE_PRICE_ID:-}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
       # The sign-in lifetimes in whole days, each 0 or off to switch it off: a browser session
       # ends this long after its sign-in (default 90), a connection from Mythicshot stops after
       # this long unused (default 90) or this long after it was made (default off).

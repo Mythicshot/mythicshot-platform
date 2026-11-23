@@ -12,6 +12,19 @@ export const BILLING: BillingSettings = { apiKey: "rk_test_FAKE", webhookSecret:
 /** The config of a site with billing switched on (the route table's tests build their app from it). */
 export const BILLING_CONFIG = { publicImageBase: "", setupCode: null, billing: BILLING };
 
+/** Billing's nine routes, which exist only with the settings. */
+export const BILLING_ROUTE_KEYS = [
+  "GET /api/v1/billing",
+  "POST /api/v1/billing/checkout",
+  "POST /api/v1/billing/portal",
+  "POST /api/v1/billing/webhook",
+  "GET /billing/subscribe",
+  "GET /dash/billing-subscribe.js",
+  "GET /billing/return",
+  "GET /dash/billing-return.js",
+  "GET /dash/billing.js",
+] as const;
+
 type Json = Record<string, any>;
 export type StripeCall = { method: string; path: string; form: [string, string][] | null; key: string | undefined };
 
