@@ -1377,7 +1377,7 @@ describe("one workspace against another", () => {
     await notify(w.deps, eventOf("checkout.session.completed", { id: checkoutA, client_reference_id: w.a.workspaceId, customer: "cus_ISO_B", subscription: "sub_ISO_X", payment_status: "paid" }));
     expect(await snapshotOf(w.deps, w.b, w.keys)).toEqual(bPaid);
     expect(await w.deps.db.first("SELECT * FROM workspace WHERE id = ?", [w.a.workspaceId])).toEqual(aRow);
-    expect((await w.deps.db.all<{ detail: string }>("SELECT detail FROM audit WHERE event = 'billing_checkout_mismatch' AND workspace_id = ? ORDER BY rowid", [w.a.workspaceId])).map((r) => r.detail)).toEqual(['{"reason":"reference_differs"}', '{"reason":"customer_taken"}']);
+    expect((await w.deps.db.all<{ detail: string }>("SELECT detail FROM audit WHERE event = 'billing_checkout_mismatch' AND workspace_id = ? ORDER BY rowid", [w.a.workspaceId])).map((r) => r.detail)).toEqual(['{"reason":"reference_differs","paid":1}', '{"reason":"customer_taken","paid":1}']);
     const aAfterOwn = await snapshotOf(w.deps, w.a, w.keys);
     stripe.subscription("sub_ISO_B", "cus_ISO_B", "past_due");
     stripe.charges.set("ch_ISO", { id: "ch_ISO", customer: "cus_ISO_B" });

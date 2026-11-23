@@ -53,6 +53,10 @@ export const REMOVAL_MS = 90 * DAY_MS;
 export const DAY = DAY_MS;
 /** How long past its stored period's end a live status is trusted without asking Stripe again. */
 export const STALE_MS = 3 * DAY_MS;
+/** How long a read-back's outcome stands for a stale row before Stripe is asked again. */
+export const HEAL_EVERY_MS = 60_000;
+/** How long Stripe's confirmation of a live status with an old period end is trusted. */
+export const CONFIRMED_FOR_MS = DAY_MS;
 
 /** Stripe's subscription statuses in which the workspace has the plan. */
 export const LIVE_STATUSES = ["active", "trialing", "past_due"] as const;
@@ -80,9 +84,10 @@ const SHAPES: Record<(typeof BILLING_SETTINGS)[number], { test: (v: string) => b
 };
 
 /**
- * The billing settings from the three raw values. Each is trimmed. A value that is unset,
- * empty or only spaces is missing; with any one missing billing is off (`billing` null) and
- * nothing else is said. A value that is present but not of its shape (or not text at all) is a
+ * The billing settings from the four raw values. Each is trimmed. A value that is unset,
+ * empty or only spaces is missing. With all four missing billing is off (`billing` null) and
+ * nothing else is said; with some but not all, it is a problem naming the missing ones. The two
+ * keys must be of one mode, both test or both live. A value that is present but not of its shape (or not text at all) is a
  * problem: one fixed line that names the setting and never repeats its value, for the entry to
  * refuse to start with. Nothing about a key is checked but its prefix.
  */
@@ -98,8 +103,29 @@ export function billingFromSettings(raw: Partial<Record<(typeof BILLING_SETTINGS
     values[name] = text;
   }
   const { STRIPE_API_KEY: apiKey, STRIPE_WEBHOOK_SECRET: webhookSecret, STRIPE_PRICE_ID: priceId, STRIPE_PUBLISHABLE_KEY: publishableKey } = values;
-  if (apiKey === undefined || webhookSecret === undefined || priceId === undefined || publishableKey === undefined) return { ok: true, billing: null };
+  const missing = BILLING_SETTINGS.filter((name) => values[name] === undefined);
+  // None at all: billing is off, exactly as before billing existed.
+  if (missing.length === BILLING_SETTINGS.length) return { ok: true, billing: null };
+  if (apiKey === undefined || webhookSecret === undefined || priceId === undefined || publishableKey === undefined) {
+    return { ok: false, problem: `billing: ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} missing. Set all four Stripe settings to switch billing on, or none of them to leave it off.` };
+  }
+  const apiMode = keyMode(apiKey);
+  if (apiMode === null || apiMode !== keyMode(publishableKey)) {
+    return { ok: false, problem: "billing: STRIPE_API_KEY and STRIPE_PUBLISHABLE_KEY must both be test keys (rk_test_ or sk_test_ with pk_test_) or both live keys (rk_live_ or sk_live_ with pk_live_)." };
+  }
   return { ok: true, billing: { apiKey, webhookSecret, priceId, publishableKey } };
+}
+
+/** The mode of a Stripe key from its prefix: test, live, or null when the prefix does not say. */
+export function keyMode(key: string): "test" | "live" | null {
+  if (/^(?:rk|sk|pk)_test_/.test(key)) return "test";
+  if (/^(?:rk|sk|pk)_live_/.test(key)) return "live";
+  return null;
+}
+
+/** True when both of the site's Stripe keys are test-mode keys (a Stripe sandbox). */
+export function testKeys(billing: BillingSettings): boolean {
+  return keyMode(billing.apiKey) === "test" && keyMode(billing.publishableKey) === "test";
 }
 
 /**
@@ -160,6 +186,9 @@ export type BillingRow = {
   checkout_session: string | null;
   checkout_created_at: number | null;
   checkout_expires_at: number | null;
+  checked_at: number | null;
+  check_ok: number | null;
+  confirmed_until: number | null;
 };
 
 /** The columns of BillingRow, over the row `workspace` in scope. They take no parameter. */
@@ -170,7 +199,8 @@ export const BILLING_COLUMNS_SQL =
   "workspace.subscription_period_end AS period_end, workspace.subscription_cancel_at AS cancel_at, " +
   "workspace.subscription_cancel_at_period_end AS cancel_at_period_end, workspace.subscription_ended_at AS ended_at, " +
   "workspace.checkout_session_id AS checkout_session, workspace.checkout_created_at AS checkout_created_at, " +
-  "(SELECT bc.expires_at FROM stripe_checkout bc WHERE bc.id = workspace.checkout_session_id AND bc.workspace_id = workspace.id) AS checkout_expires_at";
+  "(SELECT bc.expires_at FROM stripe_checkout bc WHERE bc.id = workspace.checkout_session_id AND bc.workspace_id = workspace.id) AS checkout_expires_at, " +
+  "workspace.billing_checked_at AS checked_at, workspace.billing_check_ok AS check_ok, workspace.billing_confirmed_until AS confirmed_until";
 
 export type Standing =
   | { kind: "exempt" }
@@ -191,7 +221,7 @@ export function isEnded(status: string | null): boolean {
 export function standingOf(row: BillingRow, now: number): Standing {
   if (isLive(row.status)) {
     const endsAt = row.cancel_at !== null ? row.cancel_at : row.cancel_at_period_end === 1 ? row.period_end : null;
-    const stale = row.period_end !== null && row.period_end < now - STALE_MS;
+    const stale = row.period_end !== null && row.period_end < now - STALE_MS && !(row.confirmed_until !== null && row.confirmed_until > now);
     return { kind: "subscribed", pastDue: row.status === "past_due", periodEnd: row.period_end, endsAt, stale };
   }
   if (row.trial === 0 || row.admin === 1) return { kind: "exempt" };

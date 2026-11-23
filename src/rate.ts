@@ -109,6 +109,7 @@ export const LIMITS_BILLING = {
   checkout: { bucket: "billing_checkout", windowMs: 3_600_000, most: 20 },
   portal: { bucket: "billing_portal", windowMs: 3_600_000, most: 30 },
   checkoutState: { bucket: "billing_checkout_state", windowMs: 3_600_000, most: 60 },
+  state: { bucket: "billing_state", windowMs: 3_600_000, most: 600 },
 } as const satisfies Record<string, Limit>;
 
 /**

@@ -61,8 +61,12 @@ describe("the settings switch", () => {
     expect(billingFromSettings({ ...all, STRIPE_API_KEY: " sk_test_FAKE \n" })).toEqual({ ok: true, billing: { ...BILLING, apiKey: "sk_test_FAKE" } });
     expect(billingFromSettings({})).toEqual({ ok: true, billing: null });
     for (const name of Object.keys(all) as (keyof typeof all)[]) {
-      expect(billingFromSettings({ ...all, [name]: undefined }), name).toEqual({ ok: true, billing: null });
-      expect(billingFromSettings({ ...all, [name]: "  " }), name).toEqual({ ok: true, billing: null });
+      // Three of four (0.1.58): a problem naming the missing one, never billing off.
+      for (const gap of [undefined, "  "]) {
+        const partial = billingFromSettings({ ...all, [name]: gap });
+        expect(partial.ok, name).toBe(false);
+        if (!partial.ok) expect(partial.problem, name).toContain(name);
+      }
       for (const bad of ["xx_FAKE_VALUE_123", "pk_wrong_FAKE", 42]) {
         if (name === "STRIPE_PUBLISHABLE_KEY" && bad === "pk_wrong_FAKE") continue;
         const r = billingFromSettings({ ...all, [name]: bad });
@@ -73,8 +77,9 @@ describe("the settings switch", () => {
         for (const v of Object.values(all)) expect(r.problem).not.toContain(v);
       }
     }
-    // Only the prefix of a key is looked at.
-    expect(billingFromSettings({ ...all, STRIPE_API_KEY: "rk_" }).ok).toBe(true);
+    // Beyond its prefix, only a key's mode is looked at (test or live, as the publishable key's).
+    expect(billingFromSettings({ ...all, STRIPE_API_KEY: "rk_test_" }).ok).toBe(true);
+    expect(billingFromSettings({ ...all, STRIPE_API_KEY: "rk_" }).ok).toBe(false);
   });
 
   it("without the settings: no billing route exists, the session says nothing of billing, the allowance and every refusal are as before, and Stripe is never asked", async () => {
@@ -251,7 +256,7 @@ describe("Subscribe", () => {
       "line_items[0][quantity]": "1",
       "managed_payments[enabled]": "true",
       ui_mode: "embedded_page",
-      expires_at: String(T0 / 1000 + 31 * 60),
+      expires_at: String(T0 / 1000 + 33 * 60),
       return_url: "https://tours.example.com/billing/return?session_id={CHECKOUT_SESSION_ID}",
       client_reference_id: s.a.workspaceId,
       customer_email: s.a.email,
@@ -477,7 +482,7 @@ describe("the listener", () => {
     await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
     s.stripe.subscription("sub_A", "cus_A", "canceled", { endedAt: 1_800_000_100 });
     // Deleted first: no workspace holds sub_A yet, and a checkout is pending: answered 500, to come back after the link.
-    expect((await notify(s.deps, eventOf("customer.subscription.deleted", { id: "sub_A", customer: "cus_A", status: "canceled" }))).status).toBe(500);
+    expect((await notify(s.deps, eventOf("customer.subscription.deleted", { id: "sub_A", customer: "cus_A", status: "canceled", created: Math.floor(T0 / 1000) }))).status).toBe(500);
     expect((await rowOf(s.deps, s.a.workspaceId))!.subscription_status).toBeNull();
     // Then the completed checkout: Stripe says canceled now, so canceled is stored.
     await notify(s.deps, eventOf("checkout.session.completed", { id: "cs_test_1", client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A", payment_status: "paid" }));

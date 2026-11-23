@@ -45,7 +45,11 @@ import {
   REMOVAL_MS,
   RETURN_PATH,
   STRIPE_STATUSES,
+  CONFIRMED_FOR_MS,
+  HEAL_EVERY_MS,
   billingConfigured,
+  testKeys,
+  type BillingSettings,
   isEnded,
   isLive,
   isReadOnly,
@@ -73,14 +77,13 @@ export const LISTENER_MAX_BYTES = 262_144;
 /** How far a notice's signed time may be from now, either way, in seconds (Stripe's own default). */
 export const SIGNATURE_TOLERANCE_S = 300;
 /**
- * How long a checkout lives at Stripe (`expires_at`), in seconds: Stripe's shortest, 30 minutes,
- * plus a minute so the time Stripe measures from cannot fall short of it.
+ * How long a checkout lives at Stripe (`expires_at`), in seconds, from the start of the minute it
+ * is made in (so two presses in one minute send one key): at least 32 minutes from the moment it
+ * is made, so Stripe's shortest, 30 minutes, holds with room for a clock that is behind.
  */
-export const CHECKOUT_LIFE_S = 31 * 60;
+export const CHECKOUT_LIFE_S = 33 * 60;
 /** A stored checkout is offered again only while at least this much of its life is left. */
 export const CHECKOUT_REUSE_MARGIN_MS = 5 * 60 * 1000;
-/** A pending checkout this young holds back a notice of a subscription not linked yet (Stripe retries for days). */
-export const PENDING_HOLD_MS = 25 * 60 * 60 * 1000;
 /** The most rows of billing problems the admin's summary lists. */
 export const BILLING_PROBLEMS_LISTED = 20;
 
@@ -199,9 +202,22 @@ function msOf(v: unknown): number | null {
   return typeof v === "number" && Number.isSafeInteger(v) && v > 0 && v < 1e11 ? v * 1000 : null;
 }
 
-/** True for Stripe's answer that an object does not exist. */
+/**
+ * True for Stripe's answer that an object does not exist (404 resource_missing).
+ *
+ * A 404 is never proof for anything that removes data. Stripe answers it for an object it
+ * deleted, but also for one of another account or mode, a key that lost a permission, or a
+ * mistyped id. It may end a subscription's access (read-only, which nothing undoes but a new
+ * payment, and which removes nothing), and it may let an admin's own delete go ahead, but code
+ * that deletes or unpublishes anything on its own must ask missingAllowsRemoval and get false.
+ */
 function isMissing(status: number, body: unknown): boolean {
   return status === 404 && isObj(body) && isObj(body.error) && body.error.code === "resource_missing";
+}
+
+/** Whether Stripe's 404 may be taken as proof for removing data: never (see isMissing). */
+export function missingAllowsRemoval(): false {
+  return false;
 }
 
 /** A subscription as read back from Stripe. */
@@ -334,14 +350,15 @@ async function recordOnly(deps: Deps, eventId: string, audit: Stmt | null): Prom
   return listenerTaken();
 }
 
-function mismatch(deps: Deps, workspaceId: string, reason: string): Stmt {
-  return auditStatement(deps, { event: "billing_checkout_mismatch", workspaceId, detail: { reason } });
+/** The audit row of a notice that named this workspace but did not match it. `paid`: a paid checkout's, money taken without access (a billing problem for the admin). */
+function mismatch(deps: Deps, workspaceId: string, reason: string, paid = false): Stmt {
+  return auditStatement(deps, { event: "billing_checkout_mismatch", workspaceId, detail: paid ? { reason, paid: 1 } : { reason } });
 }
 
 /** A notice's answer for what storeSubscription did. */
-async function answerFor(deps: Deps, eventId: string, row: BillingRow, stored: Stored): Promise<Response> {
+async function answerFor(deps: Deps, eventId: string, row: BillingRow, stored: Stored, paid = false): Promise<Response> {
   if (stored === "conflict") return listenerRetry();
-  if (stored === "customer_taken") return recordOnly(deps, eventId, mismatch(deps, row.id, "customer_taken"));
+  if (stored === "customer_taken") return recordOnly(deps, eventId, mismatch(deps, row.id, "customer_taken", paid));
   return listenerTaken();
 }
 
@@ -351,13 +368,45 @@ async function answerFor(deps: Deps, eventId: string, row: BillingRow, stored: S
  * not be read (or the row changed meanwhile, which a later request heals).
  */
 async function heal(deps: Deps, row: BillingRow): Promise<BillingRow | null> {
-  if (row.subscription === null) return null;
+  const now = deps.now();
+  const unconfirmed = async () => {
+    await deps.db.run("UPDATE workspace SET billing_checked_at = ?, billing_check_ok = 0 WHERE id = ?", [now, row.id]);
+    return null;
+  };
+  if (row.subscription === null) return unconfirmed();
   const read = await readSubscription(deps, row.subscription);
-  const sub = read === "missing" ? goneSubscription(row, deps.now()) : read;
-  if (sub === null || (row.customer !== null && sub.customer !== row.customer)) return null;
+  const sub = read === "missing" ? goneSubscription(row, now) : read;
+  if (sub === null || (row.customer !== null && sub.customer !== row.customer)) return unconfirmed();
   const stored = await storeSubscription(deps, null, row, sub, null);
-  if (stored === "conflict" || stored === "customer_taken") return null;
-  return billingRowOf(deps, row.id);
+  if (stored === "conflict" || stored === "customer_taken") return unconfirmed();
+  const after = await billingRowOf(deps, row.id);
+  if (after === null) return null;
+  const still = standingOf(after, now);
+  if (still.kind === "subscribed" && still.stale) {
+    // Stripe says live, with a period end still long past: trusted for a day, and said once.
+    const until = now + CONFIRMED_FOR_MS;
+    await deps.db.batch([
+      { sql: "UPDATE workspace SET billing_checked_at = ?, billing_check_ok = 1, billing_confirmed_until = ? WHERE id = ?", params: [now, until, row.id] },
+      auditStatement(deps, { event: "billing_stale_confirmed", workspaceId: row.id, detail: { status: after.status ?? "none" } }),
+    ]);
+    return { ...after, checked_at: now, check_ok: 1, confirmed_until: until };
+  }
+  await deps.db.run("UPDATE workspace SET billing_checked_at = ?, billing_check_ok = 1 WHERE id = ?", [now, row.id]);
+  return { ...after, checked_at: now, check_ok: 1 };
+}
+
+/**
+ * The row and where it stands, a stale live status read back first: at most once in
+ * HEAL_EVERY_MS per workspace. In between, the last try's outcome stands: unconfirmed is
+ * read-only for writes, confirmed is trusted.
+ */
+async function trusted(deps: Deps, row: BillingRow): Promise<{ row: BillingRow; standing: Standing }> {
+  const now = deps.now();
+  const standing = standingOf(row, now);
+  if (standing.kind !== "subscribed" || !standing.stale) return { row, standing };
+  if (row.checked_at !== null && row.checked_at > now - HEAL_EVERY_MS) return { row, standing: row.check_ok === 1 ? { ...standing, stale: false } : standing };
+  const healed = await heal(deps, row);
+  return healed === null ? { row, standing } : { row: healed, standing: standingOf(healed, now) };
 }
 
 /**
@@ -371,16 +420,9 @@ async function heal(deps: Deps, row: BillingRow): Promise<BillingRow | null> {
  */
 export async function readOnlyRefusal(deps: Deps, workspaceId: string, narrows?: () => Promise<boolean>): Promise<Response | null> {
   if (!billingConfigured(deps.config)) return null;
-  let row = await billingRowOf(deps, workspaceId);
+  const row = await billingRowOf(deps, workspaceId);
   if (row === null) return null;
-  let standing = standingOf(row, deps.now());
-  if (standing.kind === "subscribed" && standing.stale) {
-    const healed = await heal(deps, row);
-    if (healed !== null) {
-      row = healed;
-      standing = standingOf(row, deps.now());
-    }
-  }
+  const { standing } = await trusted(deps, row);
   if (!isReadOnly(standing)) return null;
   if (narrows !== undefined && (await narrows())) return null;
   return apiError(SUBSCRIPTION_ENDED.status, SUBSCRIPTION_ENDED.error, SUBSCRIPTION_ENDED.detail);
@@ -466,15 +508,29 @@ function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, al
  */
 function appOrigin(deps: Deps): string | null {
   const origin = linkOrigin(deps.config);
-  return origin !== null && origin.startsWith("https://") ? origin : null;
+  if (origin === null) return null;
+  if (origin.startsWith("https://")) return origin;
+  return localDevelopment(deps.config, origin) ? origin : null;
+}
+
+/**
+ * The one exception to https: a site run on this computer against a Stripe sandbox. Its own
+ * address is exactly localhost, 127.0.0.1 or [::1] (any port), served over http, and both keys
+ * are test-mode keys. A live key never gets it.
+ */
+function localDevelopment(config: { billing?: BillingSettings | null }, origin: string): boolean {
+  if (config.billing === undefined || config.billing === null || !testKeys(config.billing)) return false;
+  return /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?$/.test(origin);
 }
 
 /** The line that stops the start when billing is on without an https address of the site's own, or null. Fixed text. */
-export function billingAddressProblem(config: Parameters<typeof linkOrigin>[0] & { billing?: unknown }): string | null {
+export function billingAddressProblem(config: Parameters<typeof linkOrigin>[0] & { billing?: BillingSettings | null }): string | null {
   if (config.billing === undefined || config.billing === null) return null;
   const origin = linkOrigin(config);
   if (origin === null) return "billing: Stripe needs the site's own address to send people back to. Set APP_HOST and TOURS_HOST, or SITE_HOST on a site with one address.";
-  if (!origin.startsWith("https://")) return "billing: Stripe sends people back to an https address only. Set APP_HOST, or SITE_HOST, to a name that is served over https.";
+  if (!origin.startsWith("https://") && !localDevelopment(config, origin)) {
+    return "billing: Stripe sends people back to an https address only (http only on localhost, with STRIPE_API_KEY and STRIPE_PUBLISHABLE_KEY both test keys). Set APP_HOST, or SITE_HOST, to a name that is served over https.";
+  }
   return null;
 }
 
@@ -576,21 +632,22 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     const auth = await requireAuth(c.req.raw, deps, { only: "session" });
     if (auth instanceof Response) return auth;
     const asked = c.req.query("session_id");
+    const plain = await hitLimit(deps, LIMITS_BILLING.state, await workspaceKey(auth.workspaceId));
+    if (plain.over) return tooMany(plain.retryAfterSeconds);
     if (asked !== undefined) {
       const limit = await hitLimit(deps, LIMITS_BILLING.checkoutState, await workspaceKey(auth.workspaceId));
       if (limit.over) return tooMany(limit.retryAfterSeconds);
     }
-    let row = await billingRowOf(deps, auth.workspaceId);
-    if (row === null) return apiError(404, "not_found", "no such workspace");
-    const before = standingOf(row, deps.now());
-    if (before.kind === "subscribed" && before.stale) row = (await heal(deps, row)) ?? row;
+    const read = await billingRowOf(deps, auth.workspaceId);
+    if (read === null) return apiError(404, "not_found", "no such workspace");
+    const { row, standing } = await trusted(deps, read);
     const usage = await usageOf(deps, auth.workspaceId);
     const now = deps.now();
     let checkout: string | null = null;
     if (asked !== undefined && idOf(asked, "checkout") !== null && (await ownCheckout(deps, auth.workspaceId, asked))) {
       checkout = (await checkoutNow(deps, asked))?.status ?? "unknown";
     }
-    return json(200, { ...stateAnswer(standingOf(row, now), row, now, usage.used, usage.allowance), checkout });
+    return json(200, { ...stateAnswer(standing, row, now, usage.used, usage.allowance), checkout });
   });
 
   /**
@@ -749,9 +806,25 @@ async function workspaceOfCheckout(deps: Deps, checkout: string): Promise<Billin
   return deps.db.first<BillingRow>(`SELECT ${BILLING_COLUMNS_SQL} FROM workspace WHERE workspace.id = (SELECT c.workspace_id FROM stripe_checkout c WHERE c.id = ?)`, [checkout]);
 }
 
-/** True while some workspace has a checkout pending that is young enough to be paid and not linked yet. */
-async function anyCheckoutPending(deps: Deps): Promise<boolean> {
-  return (await deps.db.first("SELECT 1 AS pending FROM workspace WHERE checkout_session_id IS NOT NULL AND checkout_created_at > ? LIMIT 1", [deps.now() - PENDING_HOLD_MS])) !== null;
+/** How recent a subscription must be, by its own `created`, for its notice to be held for a checkout's. */
+export const HOLD_RECENT_MS = 2 * 60 * 60 * 1000;
+/** How long after a checkout expired a subscription made then may still be its. */
+const HOLD_AFTER_EXPIRY_MS = 10 * 60 * 1000;
+
+/**
+ * Whether a notice of a subscription that is not linked may be one a checkout's notice will link
+ * soon, and so is held (answered 500, for Stripe to send it again). Only when the subscription
+ * was made, by its own `created`, within HOLD_RECENT_MS of now, and: for a customer on a
+ * workspace's record, that workspace has a pending checkout; for a customer unknown here, a
+ * checkout of this site was made at or before that time and had not expired more than
+ * HOLD_AFTER_EXPIRY_MS before it. Every other unlinked notice is taken at once.
+ */
+async function mayBeOfAPendingCheckout(deps: Deps, obj: Obj, owner: BillingRow | null): Promise<boolean> {
+  const created = msOf(obj.created);
+  if (created === null || Math.abs(deps.now() - created) > HOLD_RECENT_MS) return false;
+  if (owner !== null) return owner.checkout_session !== null;
+  const found = await deps.db.first("SELECT 1 AS near FROM stripe_checkout WHERE created_at <= ? AND expires_at > ? LIMIT 1", [created, created - HOLD_AFTER_EXPIRY_MS]);
+  return found !== null;
 }
 
 /** The subscription a checkout or invoice object names: its `subscription`, or (newer API versions) its parent's. */
@@ -834,7 +907,8 @@ async function handleNotice(deps: Deps, eventId: string, type: string, obj: Obj)
       const owner = customer === null ? null : await workspaceBy(deps, "stripe_customer_id", customer);
       return recordOnly(deps, eventId, auditStatement(deps, { event: "billing_checkout_unmatched", workspaceId: owner?.id ?? null, detail: { live: owner !== null && isLive(owner.status) ? 1 : 0 } }));
     }
-    if (obj.client_reference_id !== row.id) return recordOnly(deps, eventId, mismatch(deps, row.id, "reference_differs"));
+    const paid = type !== "checkout.session.async_payment_failed" && obj.payment_status === "paid";
+    if (obj.client_reference_id !== row.id) return recordOnly(deps, eventId, mismatch(deps, row.id, "reference_differs", paid));
     if (type === "checkout.session.async_payment_failed") {
       return recordOnly(deps, eventId, auditStatement(deps, { event: "billing_payment_failed", workspaceId: row.id, detail: { stage: "checkout" } }));
     }
@@ -848,8 +922,8 @@ async function handleNotice(deps: Deps, eventId: string, type: string, obj: Obj)
     const sub = await readSubscription(deps, subId);
     if (sub === null || sub === "missing") return listenerRetry();
     const named = idOf(obj.customer, "customer");
-    if ((named !== null && named !== sub.customer) || (row.customer !== null && row.customer !== sub.customer)) return recordOnly(deps, eventId, mismatch(deps, row.id, "customer_differs"));
-    return answerFor(deps, eventId, row, await storeSubscription(deps, eventId, row, sub, checkout));
+    if ((named !== null && named !== sub.customer) || (row.customer !== null && row.customer !== sub.customer)) return recordOnly(deps, eventId, mismatch(deps, row.id, "customer_differs", paid));
+    return answerFor(deps, eventId, row, await storeSubscription(deps, eventId, row, sub, checkout), paid);
   }
 
   if (type.startsWith("customer.subscription.")) {
@@ -863,7 +937,7 @@ async function handleNotice(deps: Deps, eventId: string, type: string, obj: Obj)
       // against that workspace, and changes nothing.
       const customer = idOf(obj.customer, "customer");
       const owner = customer === null ? null : await workspaceBy(deps, "stripe_customer_id", customer);
-      if (owner !== null ? owner.checkout_session !== null : await anyCheckoutPending(deps)) return listenerRetry();
+      if (await mayBeOfAPendingCheckout(deps, obj, owner)) return listenerRetry();
       return recordOnly(deps, eventId, owner === null ? null : auditStatement(deps, { event: "billing_unlinked_subscription", workspaceId: owner.id }));
     }
     return readBackOwn(deps, eventId, row, null);
@@ -887,52 +961,123 @@ async function handleNotice(deps: Deps, eventId: string, type: string, obj: Obj)
 
 // ---- Deleting an account ----
 
+/** The most calls one open checkout's settling may take: its expire, its read, its subscription's cancel and read, and the record. */
+const CALLS_PER_CHECKOUT = 6;
+
 /**
- * Before an account and its workspace are deleted: the workspace's subscription is cancelled at
- * Stripe, at once (DELETE /v1/subscriptions/<id>: no proration, no refund), and stored as ended
- * with an audit row. "ok" when there is nothing to cancel (billing off, which makes no call at
- * all; no subscription; one ended already), when Stripe confirms the cancel, or when Stripe says
- * it does not exist or is ended; "failed" otherwise, and then nothing may be deleted.
+ * Cancels a subscription at Stripe at once (DELETE /v1/subscriptions/<id>: no proration, no
+ * refund). The subscription as Stripe has it after, "missing" when Stripe says there is none,
+ * or null when there was no definite answer that it is ended.
  */
-export async function cancelForDeletion(deps: Deps, workspaceId: string, adminId: string): Promise<"ok" | "failed"> {
-  if (!billingConfigured(deps.config)) return "ok";
-  const row = await billingRowOf(deps, workspaceId);
-  if (row === null || row.subscription === null || isEnded(row.status)) return "ok";
-  if (deps.stripe === undefined) return "failed";
-  let confirmed: Subscription | null = null;
-  let gone = false;
+async function cancelAtStripe(deps: Deps, id: string): Promise<Subscription | "missing" | null> {
+  if (deps.stripe === undefined) return null;
   try {
-    const a = await deps.stripe.call("DELETE", `/v1/subscriptions/${row.subscription}`);
-    if (isMissing(a.status, a.body)) gone = true;
-    else if (a.status === 200 && isObj(a.body)) confirmed = subscriptionOf(a.body, row.subscription);
+    const a = await deps.stripe.call("DELETE", `/v1/subscriptions/${id}`);
+    if (isMissing(a.status, a.body)) return "missing";
+    if (a.status === 200 && isObj(a.body)) {
+      const sub = subscriptionOf(a.body, id);
+      if (sub !== null && isEnded(sub.status)) return sub;
+    }
   } catch {
     // No answer: asked again below.
   }
-  if (confirmed === null && !gone) {
-    const read = await readSubscription(deps, row.subscription);
-    if (read === "missing") gone = true;
-    else if (read !== null) confirmed = read;
+  const read = await readSubscription(deps, id);
+  return read === "missing" || (read !== null && isEnded(read.status)) ? read : null;
+}
+
+/**
+ * Settles one open checkout of a workspace being deleted: it must be closed at Stripe first.
+ * Stripe says it expired (now or before), or has no such checkout: done. Stripe says it was
+ * paid: its subscription is cancelled first (cancelAtStripe). Anything else: "failed".
+ */
+async function settleCheckout(deps: Deps, workspaceId: string, adminId: string, id: string, own: string | null): Promise<"ok" | "failed"> {
+  if (deps.stripe === undefined) return "failed";
+  let state: "expired" | "complete" | "missing" | null = null;
+  let body: Obj | null = null;
+  try {
+    const a = await deps.stripe.call("POST", `/v1/checkout/sessions/${id}/expire`);
+    if (a.status === 200 && isObj(a.body) && a.body.status === "expired") state = "expired";
+    else if (isMissing(a.status, a.body)) state = "missing";
+  } catch {
+    // No answer: what Stripe holds is asked below.
   }
-  if (gone) {
-    await deps.db.run("UPDATE workspace SET subscription_status = 'canceled', subscription_ended_at = coalesce(subscription_ended_at, ?) WHERE id = ? AND stripe_subscription_id = ?", [deps.now(), workspaceId, row.subscription]);
-    return "ok";
+  if (state === null) {
+    try {
+      const a = await deps.stripe.call("GET", `/v1/checkout/sessions/${id}`);
+      if (isMissing(a.status, a.body)) state = "missing";
+      else if (a.status === 200 && isObj(a.body) && a.body.id === id && (a.body.status === "expired" || a.body.status === "complete")) {
+        state = a.body.status;
+        body = a.body;
+      }
+    } catch {
+      // No answer: failed below.
+    }
   }
-  if (confirmed === null || !isEnded(confirmed.status)) return "failed";
-  await deps.db.batch([
-    {
-      sql: "UPDATE workspace SET subscription_status = ?, subscription_ended_at = ? WHERE id = ? AND stripe_subscription_id = ?",
-      params: [confirmed.status, confirmed.endedAt ?? deps.now(), workspaceId, row.subscription],
-    },
-    auditStatement(deps, { event: "billing_cancelled_for_deletion", userId: adminId, workspaceId }, { onlyAfterOneChange: true }),
-  ]);
+  if (state === null) return "failed";
+  if (state === "complete") {
+    const sub = body === null ? null : subscriptionNamedBy(body);
+    // The workspace's own subscription is cancelled already (prepareDeletion); any other is cancelled here.
+    if (sub !== null && sub !== own) {
+      const cancelled = await cancelAtStripe(deps, sub);
+      if (cancelled === null) return "failed";
+      await deps.db.batch([auditStatement(deps, { event: "billing_cancelled_for_deletion", userId: adminId, workspaceId, detail: { checkout: 1 } })]);
+    }
+  }
+  // Settled: it is no longer open, so a later delete request does not ask again.
+  await deps.db.run("UPDATE stripe_checkout SET expires_at = min(expires_at, ?) WHERE id = ? AND workspace_id = ?", [deps.now(), id, workspaceId]);
   return "ok";
 }
+
+/**
+ * Before an account and its workspace are deleted (src/account-removal.ts, after the removal is
+ * recorded, so the account can no longer be enabled meanwhile): the workspace's subscription is
+ * cancelled at Stripe, at once, and stored as ended with an audit row; then every checkout of it
+ * that has not expired is closed at Stripe (settleCheckout), within the calls `room` allows.
+ * "ok" when all is settled (and at once, with no call, without billing); "more" when checkouts
+ * are left for the next request; "failed" when Stripe gave no definite answer, and then nothing
+ * may be deleted.
+ */
+export async function prepareDeletion(deps: Deps, workspaceId: string, adminId: string, room: (cost: number) => boolean): Promise<"ok" | "more" | "failed"> {
+  if (!billingConfigured(deps.config)) return "ok";
+  const row = await billingRowOf(deps, workspaceId);
+  if (row === null) return "ok";
+  if (row.subscription !== null && !isEnded(row.status)) {
+    if (!room(4)) return "more";
+    const cancelled = await cancelAtStripe(deps, row.subscription);
+    if (cancelled === null) return "failed";
+    if (cancelled === "missing") {
+      await deps.db.run("UPDATE workspace SET subscription_status = 'canceled', subscription_ended_at = coalesce(subscription_ended_at, ?) WHERE id = ? AND stripe_subscription_id = ?", [deps.now(), workspaceId, row.subscription]);
+    } else {
+      await deps.db.batch([
+        {
+          sql: "UPDATE workspace SET subscription_status = ?, subscription_ended_at = ? WHERE id = ? AND stripe_subscription_id = ?",
+          params: [cancelled.status, cancelled.endedAt ?? deps.now(), workspaceId, row.subscription],
+        },
+        auditStatement(deps, { event: "billing_cancelled_for_deletion", userId: adminId, workspaceId }, { onlyAfterOneChange: true }),
+      ]);
+    }
+  }
+  if (!room(1)) return "more";
+  const open = await deps.db.all<{ id: string }>("SELECT id FROM stripe_checkout WHERE workspace_id = ? AND expires_at > ? ORDER BY id LIMIT 20", [workspaceId, deps.now()]);
+  for (const c of open) {
+    if (!room(CALLS_PER_CHECKOUT)) return "more";
+    if ((await settleCheckout(deps, workspaceId, adminId, c.id, row.subscription)) === "failed") return "failed";
+  }
+  return open.length === 20 ? "more" : "ok";
+}
+
+/**
+ * The audit rows that are billing problems: a paid checkout no workspace stored, a second paid
+ * subscription of one workspace, and a paid checkout that named a workspace's checkout but not
+ * its reference or its customer (customer_taken, customer_differs, reference_differs). Each is
+ * money taken without access, for the admin to look at in Stripe.
+ */
+const PROBLEM = "(event IN ('billing_checkout_unmatched', 'billing_second_subscription') OR (event = 'billing_checkout_mismatch' AND json_extract(detail, '$.paid') = 1))";
 
 /** The billing problems the site's admin should look at: the count, and the newest rows (event, workspace, time). */
 export async function billingProblems(deps: Deps): Promise<{ count: number; recent: { event: string; workspace_id: string | null; at: number }[] }> {
   const rows = await deps.db.all<{ event: string; workspace_id: string | null; at: number; n: number }>(
-    `SELECT event, workspace_id, at, (SELECT count(*) FROM audit WHERE event IN ('billing_checkout_unmatched', 'billing_second_subscription')) AS n
-       FROM audit WHERE event IN ('billing_checkout_unmatched', 'billing_second_subscription') ORDER BY at DESC, id LIMIT ?`,
+    `SELECT event, workspace_id, at, (SELECT count(*) FROM audit WHERE ${PROBLEM}) AS n FROM audit WHERE ${PROBLEM} ORDER BY at DESC, id LIMIT ?`,
     [BILLING_PROBLEMS_LISTED],
   );
   return { count: rows[0]?.n ?? 0, recent: rows.map((r) => ({ event: r.event, workspace_id: r.workspace_id, at: r.at })) };
