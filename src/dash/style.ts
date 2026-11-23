@@ -363,4 +363,13 @@ h1 { font-size: 20px; line-height: 28px; font-weight: 700; margin: 0 0 4px; }
   .terms-card { padding: 16px; }
   .terms-actions .btn { flex: 1 1 auto; }
 }
+
+/* Billing (src/dash/billing.ts), on a site with billing switched on: the notice at the top of a page, and the Subscribe page's box for Stripe's form. */
+.billing-strip { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; justify-content: space-between; margin: 0 0 16px; padding: 10px 14px; border: 1px solid var(--border); border-left-width: 4px; background: var(--surface); color: var(--text); }
+.billing-strip.warn { border-color: var(--caution-border); background: var(--caution-tint); color: var(--caution-text); }
+.billing-strip.bad { border-color: var(--danger-border); background: var(--danger-tint); color: var(--danger-text); }
+.billing-strip-text { flex: 1 1 300px; min-width: 0; }
+.billing-strip .btn { flex: 0 0 auto; }
+.billing-strip .message { flex: 1 1 100%; margin: 0; }
+.checkout { min-height: 320px; margin: 0 0 16px; }
 `;

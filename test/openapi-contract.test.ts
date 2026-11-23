@@ -23,6 +23,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
 import { encodeAccountCursor } from "../src/admin-api.ts";
 import { createApp } from "../src/app.ts";
+import { SUBSCRIPTION_ENDED } from "../src/billing.ts";
+import { TRIAL_MS } from "../src/billing-rules.ts";
 import { newId } from "../src/auth.ts";
 import { MAX_CHAPTERS } from "../src/chapters.ts";
 import { setClientAddress } from "../src/client.ts";
@@ -36,8 +38,9 @@ import { DELETE_FILES_PER_CALL } from "../src/tours.ts";
 import { DEFAULT_MAX_OPEN_UPLOADS } from "../src/uploads.ts";
 import { VERSION } from "../src/version.ts";
 import { useViewerGate } from "../src/viewers.ts";
-import { ORIGIN, clone, fixtures, gif, jpeg, logoPng, mp4, png, send, sha256Hex, stepImage, type Call, type Json } from "./bundle.ts";
+import { ORIGIN, clone, fixtures, gif, jpeg, logoPng, mp4, png, send, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 import { check, deref, KEYWORDS, keywordsOf } from "./openapi-schema.ts";
+import { sessionOf, withBilling } from "./fake-stripe.ts";
 
 /**
  * Documented cases no test reaches, each with the reason. A case is written as the last
@@ -1661,6 +1664,30 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const other = await api.upload(a.token, small(1, "No mail"));
     refused(await api.publish(a.token, other.tour_id, { access: "me" }), 409, "cannot_restrict");
   });
+  it("on a site with billing, a read-only workspace's refusals of upload, publish and share are as documented", async () => {
+    const { deps } = await makeDeps();
+    withBilling(deps);
+    let now = 1_800_000_000_000;
+    deps.now = () => now;
+    await seedAccount(deps, { username: "siteadmin", admin: true });
+    const owner = await seedAccount(deps, { username: "lapsed" });
+    const m = clone(fixtures.v2 as Json);
+    m.steps = [{ ...clone(m.steps[1]), image: "step-001.png", width: 64, height: 64, bytes: 120 }];
+    const tour = await uploadTour(deps, owner.token, m);
+    now += TRIAL_MS + 86_400_000;
+    const session = await sessionOf(deps, owner.userId);
+    const api = client(deps);
+    const refused = (r: Call) => expect([r.status, r.json?.error]).toEqual([402, "subscription_ended"]);
+    refused(await api.call("POST", "/api/v1/uploads", { token: owner.token, body: JSON.stringify({ manifest: m, target: NEW }), headers: JSON_HEADERS }));
+    refused(await api.call("POST", "/api/v1/media", { token: owner.token, body: JSON.stringify({ kind: "image", content_type: "image/png", bytes: 100, width: 8, height: 8, title: "x" }), headers: JSON_HEADERS }));
+    refused(await api.call("POST", `/api/v1/tours/${tour.tour_id}/publish`, { token: owner.token }));
+    refused(await api.call("PUT", `/api/v1/tours/${tour.tour_id}/access`, { body: JSON.stringify({ access: "public" }), headers: { ...JSON_HEADERS, ...session.headers } }));
+    refused(await api.call("PUT", `/api/v1/media/med_${"0".repeat(24)}/access`, { body: JSON.stringify({ access: "public" }), headers: { ...JSON_HEADERS, ...session.headers } }));
+    // The admin's summary on a site with billing carries its billing problems.
+    const admin = await deps.db.first<{ id: string }>("SELECT id FROM user WHERE is_admin = 1");
+    const summary = await api.call("GET", "/api/v1/admin/summary", { headers: (await sessionOf(deps, admin!.id)).headers });
+    expect(summary.json.billing_problems).toEqual({ count: 0, recent: [] });
+  });
 });
 
 describe("the two 403s of a change made with a session, on each route that takes a session alone", () => {
@@ -1907,9 +1934,13 @@ describe("the error codes in the code", () => {
     expect([...terms.matchAll(/\berror: "/g)], "terms.ts: an error answer not built by apiError").toHaveLength(0);
     for (const m of termsLiteral) inCode.add(`${m[1]} ${m[2]}`);
     expect([...inCode]).toEqual(expect.arrayContaining(["409 terms_changed"]));
+    // Billing (src/billing.ts): its own routes are the dashboard's and Stripe's, left out of the
+    // description (UNDOCUMENTED_ROUTES); the one refusal it gives a described route is subscription_ended.
+    expect(source("billing.ts")).toContain("apiError(SUBSCRIPTION_ENDED.status, SUBSCRIPTION_ENDED.error, SUBSCRIPTION_ENDED.detail)");
+    inCode.add(`${SUBSCRIPTION_ENDED.status} ${SUBSCRIPTION_ENDED.error}`);
     // These are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/access.ts", "../src/account-removal.ts", "../src/admin-api.ts", "../src/chapters.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media-access.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/terms.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts", "../src/viewing.ts"]);
+    expect(callers).toEqual(["../src/access.ts", "../src/account-removal.ts", "../src/admin-api.ts", "../src/billing.ts", "../src/chapters.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media-access.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/terms.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts", "../src/viewing.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.

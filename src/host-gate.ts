@@ -106,6 +106,13 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /api/v1/terms": "app",
   "GET /api/v1/terms/agreed": "app",
   "POST /api/v1/terms/agree": "app",
+  // Billing (src/billing.ts), registered only with the three Stripe settings: the dashboard's
+  // three requests take a session alone, so they live where the cookie does; Stripe's notices
+  // are sent to the address registered in Stripe, the app address.
+  "GET /api/v1/billing": "app",
+  "POST /api/v1/billing/checkout": "app",
+  "POST /api/v1/billing/portal": "app",
+  "POST /api/v1/billing/webhook": "app",
 
   // Connecting the desktop app (src/connect.ts). The app has no credential yet and talks to
   // whichever address it was set up with (an install from before this had only the tours
@@ -187,6 +194,12 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /dash/connections.js": "app",
   "GET /admin": "app",
   "GET /dash/admin.js": "app",
+  // Billing's pages and scripts (src/dash/billing.ts), registered only with billing switched on.
+  "GET /billing/subscribe": "app",
+  "GET /dash/billing-subscribe.js": "app",
+  "GET /billing/return": "app",
+  "GET /dash/billing-return.js": "app",
+  "GET /dash/billing.js": "app",
   "GET /account": "app",
   "GET /dash/account.js": "app",
   "GET /account/email": "app",

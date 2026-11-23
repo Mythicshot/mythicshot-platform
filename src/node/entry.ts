@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp } from "../app.ts";
+import { stripeOverFetch } from "../stripe.ts";
 import { withBudget } from "../budget.ts";
 import { setClientAddress } from "../client.ts";
 import { downloadUrlSetting, homeUrlSetting } from "../https-address.ts";
@@ -89,6 +90,8 @@ async function main(): Promise<void> {
     // No mailer at all while mail is off, so the deps are then the ones of a site without mail.
     ...(mail.mode === "smtp" ? { mail: mail.mailer } : {}),
     defer: background.defer,
+    // Only with billing on: the client that reaches Stripe, made from the key, which goes nowhere else.
+    ...(config.billing ? { stripe: stripeOverFetch(config.billing.apiKey) } : {}),
   };
 
   // Each request gets its own metered ports, as on Cloudflare, so one that goes over the

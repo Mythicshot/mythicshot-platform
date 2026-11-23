@@ -38,6 +38,7 @@ import { json } from "./http.ts";
 import type { Manifest } from "./manifest.ts";
 import type { Deps, Value } from "./ports.ts";
 import { LOGO_RULE } from "./sniff.ts";
+import { allowanceSqlOf } from "./billing-rules.ts";
 
 /** The line shown when STORAGE_ALLOWANCE_BYTES cannot be used. It never repeats the value. */
 const BAD_SETTING = "STORAGE_ALLOWANCE_BYTES is not a number of bytes. Write digits only, such as 1073741824, or leave it out for no limit.";
@@ -136,6 +137,21 @@ export const USED_SQL = `(SELECT ${PICTURES} + ${LOGOS} + ${UPLOADS} + ${MEDIA} 
 export const ALLOWANCE_SQL = "coalesce(workspace.storage_allowance_bytes, ?)";
 
 /**
+ * ALLOWANCE_SQL as this site has it: exactly ALLOWANCE_SQL without billing; with billing, the
+ * rule of src/billing-rules.ts (allowanceSqlOf): the workspace's own number, else the site's
+ * default for an exempt workspace, the plan's for a subscription, the trial's otherwise. Either
+ * way it takes the one parameter, the site's default.
+ */
+export function allowanceSqlFor(deps: Pick<Deps, "config">): string {
+  return allowanceSqlOf(deps.config);
+}
+
+/** ALLOWANCE_OF_SQL as this site has it (allowanceSqlFor in place of ALLOWANCE_SQL); the same three parameters. */
+export function allowanceOfSqlFor(deps: Pick<Deps, "config">): string {
+  return `coalesce((SELECT ${allowanceSqlFor(deps)} FROM workspace WHERE workspace.id = ?), ?)`;
+}
+
+/**
  * The allowance of a workspace by id, as a scalar expression for use inside another
  * statement: the workspace's own number, else the site's default, and the site's default
  * also when no workspace has that id, so a missing row never reads as "no limit" on a
@@ -190,7 +206,7 @@ export async function usageOf(deps: Deps, workspaceId: string): Promise<Usage> {
   const site = deps.config.storageAllowanceBytes ?? null;
   const row = await deps.db.first<UsageRow>(
     `SELECT ${USAGE_COLUMNS},
-            coalesce((SELECT ${ALLOWANCE_SQL} FROM workspace WHERE workspace.id = p.ws), ?) AS allowance
+            coalesce((SELECT ${allowanceSqlFor(deps)} FROM workspace WHERE workspace.id = p.ws), ?) AS allowance
        FROM ${PARAMS}`,
     // In the order the placeholders stand in the text: the site's default twice (for a
     // workspace without a number of its own, and for an id no workspace has), then the row p.

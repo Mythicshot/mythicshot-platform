@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { accessRoutes } from "./access.ts";
 import { accountRemovalRoutes } from "./account-removal.ts";
 import { adminRoutes } from "./admin-api.ts";
+import { billingRoutes } from "./billing.ts";
 import { brandRoutes } from "./brand-routes.ts";
 import { chapterRoutes } from "./chapters.ts";
 import { connectRoutes } from "./connect.ts";
@@ -62,6 +63,8 @@ export function createApp(deps: Deps): Hono {
   mediaViewerRoutes(app, deps);
   accountRemovalRoutes(app, deps);
   termsRoutes(app, deps);
+  // Only with the three Stripe settings: without them no billing route exists.
+  billingRoutes(app, deps);
   pageRoutesForAccounts(app, deps);
   dashRoutes(app, deps.config);
   publishRoutes(app, deps);

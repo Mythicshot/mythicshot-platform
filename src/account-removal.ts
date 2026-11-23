@@ -23,6 +23,7 @@
 // the one 404 `not_found` and changes nothing. An account id that is malformed or names no
 // account is that same 404. Every answer is `cache-control: no-store`.
 import type { Hono } from "hono";
+import { cancelForDeletion } from "./billing.ts";
 import { auditStatement } from "./audit.ts";
 import { requireAuth } from "./auth.ts";
 import { SUBREQUEST_BUDGET, metered } from "./budget.ts";
@@ -195,6 +196,8 @@ async function finalStatements(deps: Deps, t: Target, adminId: string): Promise<
     { sql: "DELETE FROM signin_method WHERE user_id = ?", params: [uid] },
     { sql: "DELETE FROM membership WHERE user_id = ? AND workspace_id = ?", params: [uid, ws] },
     { sql: "DELETE FROM user WHERE id = ? AND status = 'disabled'", params: [uid] },
+    // The checkouts this site made for it (migration 0021), which name the workspace.
+    { sql: "DELETE FROM stripe_checkout WHERE workspace_id = ?", params: [ws] },
     { sql: "DELETE FROM workspace WHERE id = ?", params: [ws] },
   ];
 }
@@ -435,6 +438,12 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
     if (t.is_admin === 1 && t.other_admins === 0) return lastAdmin();
     if (t.shared === 1) return sharedWorkspace();
     if (t.site_workspace === 1) return siteOwner();
+
+    // Billing (src/billing.ts): a workspace's subscription is cancelled at Stripe before
+    // anything of it is deleted; without Stripe's confirmation nothing is. No call without billing.
+    if ((await cancelForDeletion(d, t.workspace_id, adminId)) === "failed") {
+      return apiError(500, "cleanup_pending", "the account is being deleted, but some of its files could not be removed yet; delete it again to retry");
+    }
 
     if (t.removing === 0) {
       // Recorded only while the account is still disabled and no delete of it is recorded,

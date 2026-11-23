@@ -57,6 +57,7 @@
 // audit row. Of two accepts of one code only one can remove the row. A username or an
 // address another account took meanwhile is refused by the user table's unique rules, the
 // whole batch is undone, and the answer says which; a refused accept never uses up the invite.
+import { newWorkspaceStatement } from "./billing-rules.ts";
 import type { Hono } from "hono";
 import { parseEmail } from "./accounts.ts";
 import { auditStatement } from "./audit.ts";
@@ -431,7 +432,7 @@ export function inviteRoutes(app: Hono, deps: Deps): void {
         // Right after it: unless exactly that one row went, this fails and undoes the batch.
         auditStatement(deps, { event: "invite_accepted", userId, workspaceId, subject: found.id }, { onlyAfterOneChange: true }),
         // No allowance of its own (null): the workspace follows the site's standard.
-        { sql: "INSERT INTO workspace (id, name, created_at) VALUES (?, ?, ?)", params: [workspaceId, username, now] },
+        newWorkspaceStatement(deps, workspaceId, username, now),
         {
           sql: "INSERT INTO user (id, workspace_id, email, created_at, username, status, is_admin) VALUES (?, ?, ?, ?, ?, 'active', 0)",
           params: [userId, workspaceId, found.email, now, username],

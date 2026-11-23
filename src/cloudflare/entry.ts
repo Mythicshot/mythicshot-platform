@@ -1,4 +1,7 @@
 import { createApp } from "../app.ts";
+import { billingFromSettings, type BillingSettings } from "../billing-rules.ts";
+import { billingAddressProblem } from "../billing.ts";
+import { stripeOverFetch } from "../stripe.ts";
 import { mediaLimitsProblem } from "../limits.ts";
 import { withBudget } from "../budget.ts";
 import { setClientAddress } from "../client.ts";
@@ -19,9 +22,11 @@ import { R2FileStore } from "./files.ts";
  * DOWNLOAD_URL, the address of the desktop app's download page an install may add, or
  * HOME_URL, the site's home page the brand links to, which an install may add, or
  * the three sign-in lifetimes, SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and
- * CONNECTION_MAX_DAYS (src/lifetimes.ts), which an install may add to change a default.
+ * CONNECTION_MAX_DAYS (src/lifetimes.ts), which an install may add to change a default, nor
+ * the four billing settings (src/billing-rules.ts): STRIPE_API_KEY and STRIPE_WEBHOOK_SECRET
+ * as secrets, STRIPE_PRICE_ID and STRIPE_PUBLISHABLE_KEY as vars, only on an install that bills.
  */
-type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown; IMG_HOST?: unknown; DOWNLOAD_URL?: unknown; HOME_URL?: unknown } & Partial<Record<LifetimeSetting, unknown>>;
+type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown; IMG_HOST?: unknown; DOWNLOAD_URL?: unknown; HOME_URL?: unknown; STRIPE_API_KEY?: unknown; STRIPE_WEBHOOK_SECRET?: unknown; STRIPE_PRICE_ID?: unknown; STRIPE_PUBLISHABLE_KEY?: unknown } & Partial<Record<LifetimeSetting, unknown>>;
 
 /**
  * Who to ask for an invite, from the Worker's var INVITE_CONTACT, trimmed, or null when it
@@ -93,6 +98,7 @@ export function depsFromEnv(
   hosts: Hosts | null,
   storageAllowanceBytes: number | null = null,
   ctx?: { waitUntil(work: Promise<unknown>): void },
+  billing: BillingSettings | null = null,
 ): Deps {
   const siteHost = siteHostFromWorkerEnv(env, hosts);
   const inviteContact = inviteContactFromWorkerEnv(env);
@@ -121,8 +127,10 @@ export function depsFromEnv(
       ...(downloadUrl === null ? {} : { downloadUrl }),
       ...(homeUrl === null ? {} : { homeUrl }),
       ...(sameLifetimes(lifetimes, DEFAULT_LIFETIMES) ? {} : { lifetimes }),
+      ...(billing === null ? {} : { billing }),
     },
     now: () => Date.now(),
+    ...(billing === null ? {} : { stripe: stripeOverFetch(billing.apiKey) }),
     ...(ctx === undefined
       ? {}
       : {
@@ -132,6 +140,11 @@ export function depsFromEnv(
           },
         }),
   };
+}
+
+/** The billing settings from the Worker's secrets and vars (billingFromSettings): all four, or billing is off. */
+export function billingFromWorkerEnv(env: { STRIPE_API_KEY?: unknown; STRIPE_WEBHOOK_SECRET?: unknown; STRIPE_PRICE_ID?: unknown; STRIPE_PUBLISHABLE_KEY?: unknown }): ReturnType<typeof billingFromSettings> {
+  return billingFromSettings({ STRIPE_API_KEY: env.STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET: env.STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID: env.STRIPE_PRICE_ID, STRIPE_PUBLISHABLE_KEY: env.STRIPE_PUBLISHABLE_KEY });
 }
 
 /** Whether this isolate has said the line for a DOWNLOAD_URL that cannot be used. */
@@ -169,6 +182,12 @@ export default {
       console.error(`storage: ${allowance.problem}`);
       return misconfigured();
     }
+    // The same for billing settings of the wrong shape: the line names the setting, never its value.
+    const billing = billingFromWorkerEnv(env);
+    if (!billing.ok) {
+      console.error(billing.problem);
+      return misconfigured();
+    }
     // The client address, for rate limits only: the connecting address as Cloudflare gives
     // it, which a visitor cannot set. No other header is read for it, and it is kept only
     // when it is one bare IP address (setClientAddress checks); else it is unknown.
@@ -199,7 +218,13 @@ export default {
     }
     // Each request gets its own metered ports, so one that goes over the call budget is logged.
     const defers = typeof (ctx as { waitUntil?: unknown } | undefined)?.waitUntil === "function" ? ctx : undefined;
-    const deps = depsFromEnv(env, hosts.hosts, allowance.bytes, defers);
+    const deps = depsFromEnv(env, hosts.hosts, allowance.bytes, defers, billing.billing);
+    // With billing on, Stripe's return address must be the site's own https address.
+    const address = billingAddressProblem(deps.config);
+    if (address !== null) {
+      console.error(address);
+      return misconfigured();
+    }
     // And limits of shared items that would need more parts than an item may have.
     const media = mediaLimitsProblem(deps.config);
     if (media !== null) {

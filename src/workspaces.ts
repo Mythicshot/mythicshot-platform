@@ -1,3 +1,4 @@
+import { newWorkspaceStatement } from "./billing-rules.ts";
 import { hashToken, newId, newToken } from "./auth.ts";
 import type { Deps, Stmt } from "./ports.ts";
 
@@ -26,7 +27,7 @@ export async function workspaceStatements(
   const hash = await hashToken(token);
   const now = deps.now();
   const stmts: Stmt[] = [
-    { sql: "INSERT INTO workspace (id, name, created_at) VALUES (?, ?, ?)", params: [workspaceId, name, now] },
+    newWorkspaceStatement(deps, workspaceId, name, now),
     {
       sql: "INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, ?, ?)",
       params: [userId, workspaceId, email.toLowerCase(), now],

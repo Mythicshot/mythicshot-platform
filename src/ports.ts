@@ -1,9 +1,11 @@
 // The two interfaces every route reaches data through, and the rules both adapters
 // share. Nothing in this file, or in any file outside src/cloudflare/ and src/node/,
 // may import a platform API.
+import type { BillingSettings } from "./billing-rules.ts";
 import type { Hosts } from "./hosts.ts";
 import type { Lifetimes } from "./lifetimes.ts";
 import { NO_MAIL, linkOrigin, type Mailer } from "./mail.ts";
+import type { Stripe } from "./stripe.ts";
 
 /**
  * A bound parameter. Both back ends bind every JS number as REAL, so a TEXT column
@@ -157,6 +159,12 @@ export type Config = {
    * default (90, 90 and off); null is off. Read it through lifetimesOf.
    */
   lifetimes?: Partial<Lifetimes> | null;
+  /**
+   * Billing (src/billing-rules.ts, src/billing.ts), from STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET
+   * and STRIPE_PRICE_ID as billingFromSettings checked them. Absent or null: billing is off, and
+   * the site is as it was before billing in every answer. Never logged, answered or put in an error.
+   */
+  billing?: BillingSettings | null;
 };
 
 export type Deps = {
@@ -172,6 +180,12 @@ export type Deps = {
    * can keep it alive and wait for it. Absent: the work just runs. Use it through deferOf.
    */
   defer?: (work: Promise<unknown>) => void;
+  /**
+   * The client billing reaches Stripe through (src/stripe.ts). The entries make it from the key
+   * when billing is on; tests hand in a fake. Absent: no request can reach Stripe, and a billing
+   * route that needs it answers that the payment service is unavailable.
+   */
+  stripe?: Stripe;
 };
 
 /** The mailer of these deps: the one they carry, or the one that is off and sends nothing. */

@@ -64,6 +64,7 @@
 // access_switching); unpublish cancels the switch. The public page and the picture route
 // serve a tour only while its setting is 'public'.
 import type { Hono } from "hono";
+import { readOnlyRefusal } from "./billing.ts";
 import { CARRY_CALLS, RESTRICTED_STUB, alreadySet, carryOnSwitch, planFirstPublish, type FirstPublishPlan } from "./access.ts";
 import { beforeAccountsToo, noDisabledAccount } from "./accounts.ts";
 import { requireAuth, type Auth } from "./auth.ts";
@@ -755,6 +756,9 @@ export function publishRoutes(app: Hono, deps: Deps): void {
 
     const auth = await requireAuth(c.req.raw, d);
     if (auth instanceof Response) return auth;
+    // Billing (src/billing.ts): a read-only workspace cannot start this; no call without billing.
+    const ended = await readOnlyRefusal(d, auth.workspaceId);
+    if (ended !== null) return ended;
     const body = await readPublishBody(c.req.raw);
     if (body instanceof Response) return body;
     const id = c.req.param("id");

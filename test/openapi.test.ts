@@ -14,6 +14,7 @@ import { DEFAULT_MAX_OPEN_UPLOADS, UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { OPENAPI_JSON, OPENAPI_JSON_ETAG, OPENAPI_YAML, OPENAPI_YAML_ETAG } from "../src/docs/site-assets.ts";
 import { VERSION } from "../src/version.ts";
 import { send } from "./bundle.ts";
+import { BILLING_CONFIG } from "./fake-stripe.ts";
 
 type Json = Record<string, any>;
 
@@ -105,7 +106,8 @@ function walk(node: unknown, visit: (node: Json) => void): void {
 
 describe("the API description", () => {
   it("every route in the route table is described or listed as left out, and nothing else is", () => {
-    const app = createApp({ config: { publicImageBase: "", setupCode: null } } as Deps);
+    // With billing on, so its routes are in the table (each is listed in UNDOCUMENTED_ROUTES).
+    const app = createApp({ config: BILLING_CONFIG } as Deps);
     const routes = app.routes.filter((r) => r.method !== "ALL").map((r) => `${r.method} ${r.path}`);
     const described = routeKeys(openapi());
     const leftOut = Object.keys(UNDOCUMENTED_ROUTES);
@@ -496,7 +498,8 @@ describe("the API description", () => {
     expect([summary.tags, summary.operationId, Object.keys(summary.responses)]).toEqual([["Admin"], "adminSummary", ["200", "404"]]);
     expect(summary.responses["200"].content["application/json"].schema).toEqual({ $ref: "#/components/schemas/AdminSummary" });
     const fields = ["accounts", "used_bytes", "standard_allowance_bytes"];
-    expect([Object.keys(s.AdminSummary.properties), s.AdminSummary.required, s.AdminSummary.additionalProperties]).toEqual([fields, fields, false]);
+    // billing_problems only on a site with billing switched on.
+    expect([Object.keys(s.AdminSummary.properties), s.AdminSummary.required, s.AdminSummary.additionalProperties]).toEqual([[...fields, "billing_problems"], fields, false]);
     expect(s.AdminSummary.properties.standard_allowance_bytes.type).toEqual(["integer", "null"]);
   });
 

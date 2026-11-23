@@ -2,6 +2,8 @@
 // of the app. Pure: no file, no network and no listener, so all of it can be tested
 // without starting the app. (The mailer it makes for a usable mail block starts its
 // worker thread, and opens its first connection, only when a mail is sent.)
+import { billingFromSettings } from "../billing-rules.ts";
+import { billingAddressProblem } from "../billing.ts";
 import { canonicalAddress } from "../client.ts";
 import { hasNetwork } from "../rate.ts";
 import { parseEmail } from "../accounts.ts";
@@ -25,7 +27,7 @@ export const NODE_SETTINGS: readonly string[] = [
   "APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE",
   "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST",
   "INVITE_CONTACT", "IMG_HOST", "DOWNLOAD_URL", "SESSION_MAX_DAYS", "CONNECTION_IDLE_DAYS", "CONNECTION_MAX_DAYS",
-  "HOME_URL",
+  "HOME_URL", "STRIPE_API_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_ID", "STRIPE_PUBLISHABLE_KEY",
 ];
 
 /**
@@ -72,6 +74,11 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   if (!hosts.ok) throw new Error(hosts.problem);
   const allowance = allowanceFromSetting(env.STORAGE_ALLOWANCE_BYTES);
   if (!allowance.ok) throw new Error(allowance.problem);
+  // Billing: all four settings, or none of it. A setting of the wrong shape stops the start
+  // with a line that names it and never its value. Read by name: env.STRIPE_API_KEY,
+  // env.STRIPE_WEBHOOK_SECRET, env.STRIPE_PRICE_ID, env.STRIPE_PUBLISHABLE_KEY.
+  const billing = billingFromSettings({ STRIPE_API_KEY: env.STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET: env.STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID: env.STRIPE_PRICE_ID, STRIPE_PUBLISHABLE_KEY: env.STRIPE_PUBLISHABLE_KEY });
+  if (!billing.ok) throw new Error(billing.problem);
   const siteHost = hosts.hosts === null && typeof env.SITE_HOST === "string" ? normaliseHost(env.SITE_HOST) : null;
   // Who to ask for an invite: passed on as written, checked by the sign-in page, never a reason to stop.
   const inviteContact = typeof env.INVITE_CONTACT === "string" ? env.INVITE_CONTACT.trim() : "";
@@ -83,7 +90,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   const homeUrl = homeUrlSetting(env.HOME_URL).url;
   // The sign-in lifetimes, read by name: env.SESSION_MAX_DAYS, env.CONNECTION_IDLE_DAYS, env.CONNECTION_MAX_DAYS.
   const { lifetimes } = lifetimesSetting({ SESSION_MAX_DAYS: env.SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS: env.CONNECTION_IDLE_DAYS, CONNECTION_MAX_DAYS: env.CONNECTION_MAX_DAYS });
-  return {
+  const config: Config = {
     publicImageBase: env.PUBLIC_IMAGE_BASE ?? "",
     setupCode: setupCodeFromEnv(env.SETUP_CODE),
     hosts: hosts.hosts,
@@ -93,7 +100,12 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
     ...(downloadUrl === null ? {} : { downloadUrl }),
     ...(homeUrl === null ? {} : { homeUrl }),
     ...(sameLifetimes(lifetimes, DEFAULT_LIFETIMES) ? {} : { lifetimes }),
+    ...(billing.billing === null ? {} : { billing: billing.billing }),
   };
+  // With billing on, Stripe's return address is the site's own https address, never a request's Host.
+  const address = billingAddressProblem(config);
+  if (address !== null) throw new Error(address);
+  return config;
 }
 
 /** The line for a mail setting that is missing or cannot be used. It names the setting and never repeats a value. */

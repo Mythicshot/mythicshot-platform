@@ -94,6 +94,7 @@
 // signed-in session alone (a token gets its count), never by another route, an audit row (which holds counts) or a log line, and a refusal of
 // a malformed address names its position only.
 import type { Hono } from "hono";
+import { accessNarrows, readOnlyRefusal } from "./billing.ts";
 import { noDisabledAccount } from "./accounts.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
@@ -1062,6 +1063,9 @@ export function accessRoutes(app: Hono, deps: Deps): void {
     if (body instanceof Response) return body;
     const id = c.req.param("id");
     if (!TOUR_ID.test(id)) return notFound();
+    // Billing (src/billing.ts): a read-only workspace may narrow who views, never widen it; no call without billing.
+    const ended = await readOnlyRefusal(d, auth.workspaceId, () => accessNarrows(d, "tour", auth.workspaceId, id, body));
+    if (ended !== null) return ended;
     return putAccess({ d, calls: meter.calls, auth }, id, body);
   });
 }

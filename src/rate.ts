@@ -100,6 +100,18 @@ export const LIMITS_MEDIA = {
 } as const satisfies Record<string, Limit>;
 
 /**
+ * The limits on billing's requests that ask Stripe (src/billing.ts), counted per workspace,
+ * keyed by `workspaceKey`: starting a checkout, opening Stripe's customer page, and asking what
+ * Stripe says of a checkout (the return page, which asks only a few times). The plain state,
+ * which asks Stripe nothing, is not counted.
+ */
+export const LIMITS_BILLING = {
+  checkout: { bucket: "billing_checkout", windowMs: 3_600_000, most: 20 },
+  portal: { bucket: "billing_portal", windowMs: 3_600_000, most: 30 },
+  checkoutState: { bucket: "billing_checkout_state", windowMs: 3_600_000, most: 60 },
+} as const satisfies Record<string, Limit>;
+
+/**
  * The limits on connecting the desktop app (src/connect.ts).
  *
  * Asking for a pair of codes and asking for the token come from a client that is not signed

@@ -11,6 +11,7 @@
 // it fetched the description from. The one example carries a placeholder address.
 import { ACCESS_BODY_BYTES, MAX_VIEWERS } from "../access.ts";
 import { ADMIN_PAGE, MAX_ALLOWANCE_BYTES } from "../admin-api.ts";
+import { BILLING_PROBLEMS_LISTED } from "../billing.ts";
 import { CHAPTERS_BODY_BYTES, MAX_CHAPTERS } from "../chapters.ts";
 import { PAGE_CACHE } from "../page.ts";
 import { LIMITS } from "../manifest.ts";
@@ -108,6 +109,15 @@ export const UNDOCUMENTED_ROUTES: Readonly<Record<string, string>> = {
   "GET /dash/account-email.js": "the email-change link page's own script",
   "GET /terms": "the page that asks a signed-in person to agree to the site's terms, and with ?read shows the terms they agreed to, for people in a browser; it calls the terms requests described here",
   "GET /dash/terms.js": "the terms page's own script",
+  "GET /api/v1/billing": "billing's own request for the dashboard's notice, Billing card and return page; a session alone, and it exists only on a site with the Stripe settings",
+  "POST /api/v1/billing/checkout": "billing's own request from the dashboard's Subscribe page; a session alone, and it exists only on a site with the Stripe settings",
+  "POST /api/v1/billing/portal": "billing's own request from the dashboard's Manage subscription button; a session alone, and it exists only on a site with the Stripe settings",
+  "POST /api/v1/billing/webhook": "the address Stripe sends its signed notices to; nothing else may call it, and it exists only on a site with the Stripe settings",
+  "GET /billing/subscribe": "the dashboard's Subscribe page, for people in a browser, only on a site with the Stripe settings",
+  "GET /dash/billing-subscribe.js": "the Subscribe page's own script",
+  "GET /billing/return": "the page Stripe sends a person back to after the checkout, only on a site with the Stripe settings",
+  "GET /dash/billing-return.js": "the return page's own script",
+  "GET /dash/billing.js": "the dashboard's billing script, loaded on every page of a site with the Stripe settings",
   "GET /t/:slug": "the public tour page, for visitors; not part of the token API",
   "GET /p/:name": "a published picture, for visitors; not part of the token API",
   "GET /t/:slug/v/:name": "a restricted tour's picture, for a visitor whose browser proved an address the tour may be viewed by; not part of the token API",
@@ -226,6 +236,11 @@ const SESSION = [{ session: [] }] as [{ session: [] }];
 const VIEWER = [{ viewer: [] }] as [{ viewer: [] }];
 const MEDIA_VIEWER = [{ mediaViewer: [] }] as [{ mediaViewer: [] }];
 /** The caller guard's two refusals of a change made with a session (src/auth.ts), on each route that takes a session alone and changes something. */
+/** The refusal of upload, publish and share on a site with billing, while the workspace is read-only (src/billing.ts). */
+const SUBSCRIPTION_ENDED_REFUSED = refusal(
+  "Only on a site with billing switched on: the workspace's subscription has ended, or its trial is over. It can still view, download and delete; this request was refused and nothing was changed. Subscribing again in the dashboard lifts it.",
+  "subscription_ended",
+);
 const SESSION_CHANGE_REFUSED = refusal("bad_origin: the request did not come from a page of this address. bad_csrf: the X-Csrf-Token header is missing or is not this session's anti-forgery value.", "bad_origin", "bad_csrf");
 const UNAUTHORIZED = { $ref: "#/components/responses/Unauthorized" };
 /** Said on every request that takes only a session. */
@@ -928,8 +943,29 @@ function schemas(): Record<string, Schema> {
         accounts: whole("How many accounts the site has."),
         used_bytes: whole("What all workspaces use together, in bytes: the sum of every account's used_bytes in the list of accounts."),
         standard_allowance_bytes: { type: ["integer", "null"], description: "The site's standard allowance from the server's settings, in bytes, which every workspace without a number of its own has. null when none is set: no limit." },
+        billing_problems: object(
+          ["count", "recent"],
+          {
+            count: whole("How many billing problems the audit record holds: paid checkouts no workspace stored, and second paid subscriptions of one workspace."),
+            recent: {
+              type: "array",
+              maxItems: BILLING_PROBLEMS_LISTED,
+              description: `The newest of them, newest first, at most ${BILLING_PROBLEMS_LISTED}.`,
+              items: object(
+                ["event", "workspace_id", "at"],
+                {
+                  event: { type: "string", enum: ["billing_checkout_unmatched", "billing_second_subscription"], description: "What happened." },
+                  workspace_id: { type: ["string", "null"], description: "The workspace it was about, or null when no workspace could be told." },
+                  at: whole("When, in milliseconds since 1970."),
+                },
+                "One billing problem.",
+              ),
+            },
+          },
+          "Only on a site with billing switched on: billing problems the admin should look at in Stripe.",
+        ),
       },
-      "The site's storage in all. Three numbers, nothing of any workspace.",
+      "The site's storage in all. Three numbers, nothing of any workspace, and on a site with billing its billing problems.",
     ),
     AdminAccountList: object(["accounts", "next", "current_terms"], {
       current_terms: orNull(object(["version"], { version: { type: "string", description: "Its label. Show it as text." } }, "The site's current terms: the newest version published.")),
@@ -1209,6 +1245,7 @@ function paths(): OpenApiDoc["paths"] {
         parameters: [tourId],
         requestBody: { required: false, description: "Empty to start (or access and viewers, on a tour's first publish); the previous answer's publish_id to continue.", content: json(ref("PublishBody")) },
         responses: {
+          "402": SUBSCRIPTION_ENDED_REFUSED,
           "200": answer("The new version is live. The same answer on any repeat.", ref("Published")),
           "202": answer("Images are being copied. Send the request again with this publish_id.", ref("PublishInProgress")),
           "400": refusal(
@@ -1254,6 +1291,7 @@ function paths(): OpenApiDoc["paths"] {
         parameters: [tourId],
         requestBody: { required: true, content: json(ref("AccessBody")) },
         responses: {
+          "402": SUBSCRIPTION_ENDED_REFUSED,
           "200": answer("Done: who may view the tour now.", ref("TourAccess")),
           "202": answer("The live pictures are moving. Send the same request again.", ref("AccessSwitching")),
           "400": refusal(
@@ -1360,6 +1398,7 @@ function paths(): OpenApiDoc["paths"] {
         security: TOKEN,
         requestBody: { required: true, content: json(ref("UploadCreate")) },
         responses: {
+          "402": SUBSCRIPTION_ENDED_REFUSED,
           "201": answer("The upload exists. For the target replace the answer also has have and settings.", { oneOf: [ref("UploadCreated"), ref("ReplaceCreated")] }),
           "400": refusal(
             `bad_request: the body is not a JSON object, or sha256 is not one 64-character lowercase hex text per step, or comes with another target than replace, or logo_bytes is not a whole number from 1 to ${n(LOGO_RULE.maxBytes)}. bad_manifest: the manifest breaks a rule; the detail names the field. bad_target: the target is missing or its kind is not new, chapter or replace.`,
@@ -1465,6 +1504,7 @@ function paths(): OpenApiDoc["paths"] {
         security: TOKEN,
         requestBody: { required: true, content: json(ref("MediaCreate")) },
         responses: {
+          "402": SUBSCRIPTION_ENDED_REFUSED,
           "201": answer("The item exists. Send its parts.", ref("MediaCreated")),
           "400": refusal(
             `bad_request: the body is not a JSON object, or a field breaks its rule (viewers that is not a list included); the detail names it. bad_access: access is not public, people or me, or viewers came without it. bad_viewer: an entry of viewers is not an email address; the detail gives its position. too_many_viewers: more than ${MAX_VIEWERS} different addresses. Nothing was made.`,
@@ -1518,6 +1558,7 @@ function paths(): OpenApiDoc["paths"] {
         parameters: [mediaId],
         requestBody: { required: true, content: json(ref("AccessBody")) },
         responses: {
+          "402": SUBSCRIPTION_ENDED_REFUSED,
           "200": answer("Done: who may view the item now.", ref("MediaAccess")),
           "400": refusal(
             `bad_request: the body is not a JSON object, or viewers is not a list. bad_access: access is not public, people or me. bad_viewer: an entry of viewers is not an email address; the detail gives its position. too_many_viewers: more than ${MAX_VIEWERS} different addresses. Nothing was changed.`,

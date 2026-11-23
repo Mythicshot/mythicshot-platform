@@ -33,6 +33,7 @@
 // default size settings no item reaches it; restricting a larger one is refused with 409
 // too_large_to_restrict, and it stays as it is.
 import type { Hono } from "hono";
+import { accessNarrows, readOnlyRefusal } from "./billing.ts";
 import { newLinkId, requireAuth, type Auth } from "./auth.ts";
 import { apiError, json } from "./http.ts";
 import { PART_BYTES, RESTRICTED_SERVED_PARTS } from "./limits.ts";
@@ -273,6 +274,9 @@ export function mediaAccessRoutes(app: Hono, deps: Deps): void {
     if (body instanceof Response) return body;
     const id = c.req.param("id");
     if (!ITEM_ID.test(id)) return notFound();
+    // Billing (src/billing.ts): a read-only workspace may narrow who views, never widen it; no call without billing.
+    const ended = await readOnlyRefusal(deps, auth.workspaceId, () => accessNarrows(deps, "media", auth.workspaceId, id, body));
+    if (ended !== null) return ended;
     return putAccess(deps, auth, id, body);
   });
 }

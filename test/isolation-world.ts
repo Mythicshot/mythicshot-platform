@@ -488,6 +488,8 @@ export const OWNED: Readonly<Record<string, string>> = {
   workspace: "id = ?",
   user: "workspace_id = ? OR id IN (SELECT user_id FROM membership WHERE workspace_id = ?)",
   membership: "workspace_id = ?",
+  // The checkouts this site made for a workspace (migration 0021).
+  stripe_checkout: "workspace_id = ?",
   signin_method: BY_USER,
   signin_code: BY_USER,
   session: BY_USER,
@@ -541,6 +543,8 @@ export const SHARED: Readonly<Record<string, string>> = {
   media_viewer_code: "mailed viewer codes for shared items: an address, an item's page path and the digest of a code; no workspace, account or item row is named",
   media_viewer_session: "viewer sessions for shared items: an address that proved it reads its mail and the digest of the cookie's secret; no workspace or account is named",
   // The site's terms (migration 0018): published by the server command, the same for every account.
+  // Billing (migration 0021): the ids of Stripe's notices already taken, so one sent twice works once.
+  stripe_event: "the ids of Stripe's signed notices the listener has taken, and when; no workspace, account or customer is named",
   terms_version: "the versions of the site's terms, published by the server command and the same for everyone; who agreed to one is terms_agreement, the account's own",
 };
 

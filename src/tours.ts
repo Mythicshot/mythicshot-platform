@@ -31,6 +31,7 @@
 // that no publish job exists, so a publish that starts at the same moment either makes
 // the batch a no-op (409) or, landing after it, finds no tour and writes nothing.
 import type { Hono } from "hono";
+import { readOnlyRefusal } from "./billing.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, readCapped } from "./http.ts";
 import { parseTitle } from "./manifest.ts";
@@ -253,6 +254,9 @@ export function tourRoutes(app: Hono, deps: Deps): void {
   app.patch("/api/v1/tours/:id", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
+    // Billing (src/billing.ts): a rename changes the live title, so a read-only workspace cannot; no call without billing.
+    const ended = await readOnlyRefusal(deps, auth.workspaceId);
+    if (ended !== null) return ended;
     const bad = () => apiError(400, "bad_request", 'the body must be JSON such as {"title": "New name"}');
     const raw = await readCapped(c.req.raw, RENAME_BODY_BYTES);
     if (raw === "too_large") return apiError(413, "too_large", `the request is over ${RENAME_BODY_BYTES} bytes`);
