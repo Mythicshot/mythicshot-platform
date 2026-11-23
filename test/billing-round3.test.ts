@@ -138,6 +138,21 @@ describe("N3: deleting an account expires its open checkouts first, after record
   });
 });
 
+describe("N3 within the call budget", () => {
+  it("a workspace with many open checkouts is closed over several delete requests, each within the budget", async () => {
+    const s = await site();
+    for (let i = 0; i < 25; i++) {
+      const id = `cs_test_many${i}`;
+      s.stripe.sessions.set(id, { id, status: "open", client_secret: `${id}_secret_FAKE`, form: {} });
+      await s.deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES (?, ?, ?, ?)", [id, s.a.workspaceId, T0, T0 + 30 * MIN]);
+    }
+    // send() fails any request over the budget; the delete answers 202 until the last checkout is closed.
+    const r = await deleteAccount(s.deps, s.admin.userId, s.a.userId, "alpha");
+    expect(r.status, r.text).toBe(200);
+    expect([...s.stripe.sessions.values()].filter((c) => String(c.id).startsWith("cs_test_many") && c.status !== "expired")).toEqual([]);
+  });
+});
+
 describe("N4, N5: the settings", () => {
   const all = { STRIPE_API_KEY: "rk_test_FAKE", STRIPE_WEBHOOK_SECRET: "whsec_FAKE", STRIPE_PRICE_ID: "price_FAKE", STRIPE_PUBLISHABLE_KEY: "pk_test_FAKE" };
   it("the key and the publishable key must be of one mode; the line names both settings and no value", () => {
