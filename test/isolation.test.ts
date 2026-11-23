@@ -531,8 +531,9 @@ const ADMIN: Record<string, { reason: string; request: (w: World) => Sample; fie
   "GET /api/v1/admin/summary": {
     reason: "the admin's summary line: how many accounts there are, the bytes they use in all and the site's standard allowance; three numbers, nothing of any workspace",
     request: () => ({ method: "GET", path: "/api/v1/admin/summary" }),
-    // With billing on (as in this world): the billing problems for the admin, as counts, events, workspace ids and times.
-    fields: ["accounts", "used_bytes", "standard_allowance_bytes", "billing_problems", "billing_problems.count", "billing_problems.recent", "billing_problems.recent[].event", "billing_problems.recent[].workspace_id", "billing_problems.recent[].at"],
+    // With billing on (as in this world, which has no billing problem): their count and an empty list
+    // (an entry's event, workspace id and time are checked in test/billing-rework.test.ts).
+    fields: ["accounts", "used_bytes", "standard_allowance_bytes", "billing_problems", "billing_problems.count", "billing_problems.recent"],
   },
   "PATCH /api/v1/admin/workspaces/:id": {
     reason: "the admin sets or clears one workspace's storage allowance, by the workspace's id; it answers the numbers only",
