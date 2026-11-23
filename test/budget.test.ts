@@ -650,10 +650,27 @@ describe("the call budget, route by route", () => {
     expect(dispute.calls).toBeLessThanOrEqual(5);
     expect((await call(deps, "POST", "/api/v1/billing/portal", { headers: session.headers })).status).toBe(200);
     // A read-only workspace's refusal costs its one read.
-    await deps.db.run("UPDATE workspace SET subscription_status = 'canceled' WHERE id = ?", [a.workspaceId]);
+    await deps.db.run("UPDATE workspace SET subscription_status = 'canceled', billing_trial = 1 WHERE id = ?", [a.workspaceId]);
     const refused = await call(deps, "POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: big, target: { kind: "new" } }), headers: { "content-type": "application/json" } });
     expect(refused.status).toBe(402);
     expect(refused.calls).toBeLessThanOrEqual(3);
+    // A live status not confirmed for too long: the worst create reads it back first (Stripe and one write more).
+    await deps.db.run("UPDATE workspace SET subscription_status = 'active', subscription_period_end = ? WHERE id = ?", [deps.now() - 4 * 24 * HOUR, a.workspaceId]);
+    stripe.subscription("sub_B", "cus_B", "active", { periodEnd: Math.floor(deps.now() / 1000) + 86_400 });
+    const healed = await call(deps, "POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: big, target: { kind: "new" } }), headers: { "content-type": "application/json" } });
+    expect(healed.status, healed.text).toBe(201);
+    // The rate-limited routes and the checkout's state.
+    noted(await call(deps, "GET", "/api/v1/billing?session_id=cs_test_2", { headers: session.headers }), "GET /api/v1/billing");
+    // Deleting the subscribed account: the cancel at Stripe comes first, then the delete's own work, within the budget.
+    const adminRow = await deps.db.first<{ id: string }>("SELECT id FROM user WHERE is_admin = 1");
+    const adminSession = await sessionOf(deps, adminRow!.id);
+    const target = owner!.user_id;
+    await call(deps, "POST", `/api/v1/admin/accounts/${target}/disable`, { headers: adminSession.headers });
+    const name = (await deps.db.first<{ email: string; username: string | null }>("SELECT email, username FROM user WHERE id = ?", [target]))!;
+    let removed = await call(deps, "DELETE", `/api/v1/admin/accounts/${target}`, { headers: { ...adminSession.headers, "content-type": "application/json" }, body: JSON.stringify({ username: name.username ?? name.email }) });
+    for (let i = 0; i < 50 && removed.status === 202; i++) removed = await call(deps, "DELETE", `/api/v1/admin/accounts/${target}`, { headers: { ...adminSession.headers, "content-type": "application/json" }, body: JSON.stringify({ username: name.username ?? name.email }) });
+    expect(removed.status, removed.text).toBe(200);
+    expect(stripe.calls.some((c) => c.method === "DELETE" && c.path === "/v1/subscriptions/sub_B")).toBe(true);
   });
 
   it("reports the highest count seen per route (run with --silent=false to see it)", () => {

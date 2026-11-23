@@ -1683,6 +1683,10 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     refused(await api.call("POST", `/api/v1/tours/${tour.tour_id}/publish`, { token: owner.token }));
     refused(await api.call("PUT", `/api/v1/tours/${tour.tour_id}/access`, { body: JSON.stringify({ access: "public" }), headers: { ...JSON_HEADERS, ...session.headers } }));
     refused(await api.call("PUT", `/api/v1/media/med_${"0".repeat(24)}/access`, { body: JSON.stringify({ access: "public" }), headers: { ...JSON_HEADERS, ...session.headers } }));
+    // The admin's summary on a site with billing carries its billing problems.
+    const admin = await deps.db.first<{ id: string }>("SELECT id FROM user WHERE is_admin = 1");
+    const summary = await api.call("GET", "/api/v1/admin/summary", { headers: (await sessionOf(deps, admin!.id)).headers });
+    expect(summary.json.billing_problems).toEqual({ count: 0, recent: [] });
   });
 });
 

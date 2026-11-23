@@ -1,9 +1,9 @@
 // Migration 0021 (billing) on a database that already holds workspaces at the version before it
 // (Node only: the shared harness always applies every migration to an empty database). Every
-// workspace there is marked as an existing account, so billing never puts it on the trial
-// clock; every row keeps what it had; the statements of the version before it still run; a
-// workspace made later is not marked; the new columns take only their shapes; and a second
-// application stops at its first statement.
+// workspace there is off the trial clock (billing_trial 0), so billing never puts it on it;
+// every row keeps what it had; the statements of the version before it still run and make
+// workspaces off the trial clock too; the new columns and the checkout record take only their
+// shapes; and a second application stops at its first statement.
 import { copyFile, mkdir, mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +15,7 @@ import { migrate } from "../src/node/migrate.ts";
 const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url));
 const NAME = "0021_billing.sql";
 const NEW_COLUMNS = [
-  "billing_existing",
+  "billing_trial",
   "stripe_customer_id",
   "stripe_subscription_id",
   "subscription_status",
@@ -58,19 +58,22 @@ describe("migration 0021 on an existing install", () => {
       const after = await everything(db);
       const strip = (rows: unknown[]) => rows.map((r) => Object.fromEntries(Object.entries(r as Record<string, unknown>).filter(([k]) => !NEW_COLUMNS.includes(k))));
       expect({ ...after, workspace: strip(after.workspace) }).toEqual(old);
-      expect(await db.all("SELECT id, billing_existing, stripe_customer_id, subscription_status, subscription_cancel_at_period_end, checkout_session_id FROM workspace ORDER BY id")).toEqual([
-        { id: "ws_1", billing_existing: 1, stripe_customer_id: null, subscription_status: null, subscription_cancel_at_period_end: 0, checkout_session_id: null },
-        { id: "ws_2", billing_existing: 1, stripe_customer_id: null, subscription_status: null, subscription_cancel_at_period_end: 0, checkout_session_id: null },
+      expect(await db.all("SELECT id, billing_trial, stripe_customer_id, subscription_status, subscription_cancel_at_period_end, checkout_session_id FROM workspace ORDER BY id")).toEqual([
+        { id: "ws_1", billing_trial: 0, stripe_customer_id: null, subscription_status: null, subscription_cancel_at_period_end: 0, checkout_session_id: null },
+        { id: "ws_2", billing_trial: 0, stripe_customer_id: null, subscription_status: null, subscription_cancel_at_period_end: 0, checkout_session_id: null },
       ]);
       expect(await db.all("SELECT * FROM stripe_event")).toEqual([]);
+      expect(await db.all("SELECT * FROM stripe_checkout")).toEqual([]);
 
-      // The version before it still makes a workspace, which is not marked: it is new.
+      // The version before it still makes a workspace, which is off the trial clock: only a build with billing on puts one on it.
       await db.run("INSERT INTO workspace (id, name, created_at) VALUES ('ws_3', 'Later', 3)");
-      expect(await db.first("SELECT billing_existing FROM workspace WHERE id = 'ws_3'")).toEqual({ billing_existing: 0 });
+      expect(await db.first("SELECT billing_trial FROM workspace WHERE id = 'ws_3'")).toEqual({ billing_trial: 0 });
 
       // The columns take only their shapes, and a customer, subscription or checkout belongs to one workspace.
       for (const sql of [
-        "UPDATE workspace SET billing_existing = 2 WHERE id = 'ws_3'",
+        "UPDATE workspace SET billing_trial = 2 WHERE id = 'ws_3'",
+        "INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES ('cus_1', 'ws_3', 1, 2)",
+        "INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES ('cs_1', 'ws_none', 1, 2)",
         "UPDATE workspace SET stripe_customer_id = 'sub_1' WHERE id = 'ws_3'",
         "UPDATE workspace SET stripe_customer_id = 'cus_a-b' WHERE id = 'ws_3'",
         "UPDATE workspace SET stripe_customer_id = 'cus_a' || char(0) || 'b' WHERE id = 'ws_3'",

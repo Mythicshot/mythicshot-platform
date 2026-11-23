@@ -441,7 +441,9 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
 
     // Billing (src/billing.ts): a workspace's subscription is cancelled at Stripe before
     // anything of it is deleted; without Stripe's confirmation nothing is. No call without billing.
-    if ((await cancelForDeletion(d, t.workspace_id, adminId)) === "failed") return json(500, { error: "internal" });
+    if ((await cancelForDeletion(d, t.workspace_id, adminId)) === "failed") {
+      return apiError(500, "cleanup_pending", "the account is being deleted, but some of its files could not be removed yet; delete it again to retry");
+    }
 
     if (t.removing === 0) {
       // Recorded only while the account is still disabled and no delete of it is recorded,

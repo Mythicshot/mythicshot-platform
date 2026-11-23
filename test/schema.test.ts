@@ -61,6 +61,7 @@ const TABLES = [
   "snapshot",
   "snapshot_object",
   "step",
+  "stripe_checkout",
   "stripe_event",
   "terms_agreement",
   "terms_version",

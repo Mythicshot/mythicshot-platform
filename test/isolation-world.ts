@@ -488,6 +488,8 @@ export const OWNED: Readonly<Record<string, string>> = {
   workspace: "id = ?",
   user: "workspace_id = ? OR id IN (SELECT user_id FROM membership WHERE workspace_id = ?)",
   membership: "workspace_id = ?",
+  // The checkouts this site made for a workspace (migration 0021).
+  stripe_checkout: "workspace_id = ?",
   signin_method: BY_USER,
   signin_code: BY_USER,
   session: BY_USER,

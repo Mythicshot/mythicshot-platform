@@ -11,6 +11,7 @@
 // it fetched the description from. The one example carries a placeholder address.
 import { ACCESS_BODY_BYTES, MAX_VIEWERS } from "../access.ts";
 import { ADMIN_PAGE, MAX_ALLOWANCE_BYTES } from "../admin-api.ts";
+import { BILLING_PROBLEMS_LISTED } from "../billing.ts";
 import { CHAPTERS_BODY_BYTES, MAX_CHAPTERS } from "../chapters.ts";
 import { PAGE_CACHE } from "../page.ts";
 import { LIMITS } from "../manifest.ts";
@@ -942,8 +943,29 @@ function schemas(): Record<string, Schema> {
         accounts: whole("How many accounts the site has."),
         used_bytes: whole("What all workspaces use together, in bytes: the sum of every account's used_bytes in the list of accounts."),
         standard_allowance_bytes: { type: ["integer", "null"], description: "The site's standard allowance from the server's settings, in bytes, which every workspace without a number of its own has. null when none is set: no limit." },
+        billing_problems: object(
+          ["count", "recent"],
+          {
+            count: whole("How many billing problems the audit record holds: paid checkouts no workspace stored, and second paid subscriptions of one workspace."),
+            recent: {
+              type: "array",
+              maxItems: BILLING_PROBLEMS_LISTED,
+              description: `The newest of them, newest first, at most ${BILLING_PROBLEMS_LISTED}.`,
+              items: object(
+                ["event", "workspace_id", "at"],
+                {
+                  event: { type: "string", enum: ["billing_checkout_unmatched", "billing_second_subscription"], description: "What happened." },
+                  workspace_id: { type: ["string", "null"], description: "The workspace it was about, or null when no workspace could be told." },
+                  at: whole("When, in milliseconds since 1970."),
+                },
+                "One billing problem.",
+              ),
+            },
+          },
+          "Only on a site with billing switched on: billing problems the admin should look at in Stripe.",
+        ),
       },
-      "The site's storage in all. Three numbers, nothing of any workspace.",
+      "The site's storage in all. Three numbers, nothing of any workspace, and on a site with billing its billing problems.",
     ),
     AdminAccountList: object(["accounts", "next", "current_terms"], {
       current_terms: orNull(object(["version"], { version: { type: "string", description: "Its label. Show it as text." } }, "The site's current terms: the newest version published.")),

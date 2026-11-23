@@ -1296,6 +1296,7 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `billing_second_subscription` | On a site with billing: a second checkout of a workspace that already has a live subscription was paid; the live one was kept, and the second needs a refund by hand in Stripe |
 | `billing_unlinked_subscription` | On a site with billing: Stripe told of a subscription of this workspace's customer that no checkout of it started; it was not linked |
 | `billing_payment_failed` | On a site with billing: a payment failed, at the checkout (`{"stage":"checkout"}`) or at a renewal (`{"stage":"renewal"}`) |
+| `billing_cancelled_for_deletion` | On a site with billing: the admin's delete of an account cancelled its workspace's subscription at Stripe first, at once and without a refund; the account is the admin |
 | `billing_risk` | On a site with billing: a refund, a dispute or an early fraud warning on this workspace's customer (`{"kind":"refund"}`, `dispute` or `fraud_warning`); the subscription was read back from Stripe after it |
 
 ## Troubleshooting by symptom

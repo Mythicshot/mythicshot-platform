@@ -211,7 +211,7 @@ describe("H3: deleting a subscribed account cancels its subscription first", () 
     await subscribed(s.deps, s.stripe, s.a.workspaceId, s.a.userId, "cus_A", "sub_A");
     s.stripe.down = true;
     const failed = await deleteAccount(s.deps, s.admin.userId, s.a, "alpha");
-    expect([failed.status, failed.json]).toEqual([500, { error: "internal" }]);
+    expect([failed.status, failed.json.error]).toEqual([500, "cleanup_pending"]);
     expect(await row(s.deps, s.a.workspaceId)).not.toBeNull();
     s.stripe.down = false;
     const done = await deleteAccount(s.deps, s.admin.userId, s.a, "alpha");
