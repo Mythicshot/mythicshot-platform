@@ -35,7 +35,8 @@ import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./p
 import { MAX_PUBLISH_STEPS, housekeeping } from "./publish.ts";
 import { chapterPictures, chapterTimesMissing, clearReplaced, findChapter, firstChapterSql, parseHashes, replaceAnswer, replaceStatements, replacedBytes, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, type ImageType } from "./sniff.ts";
-import { ALLOWANCE_OF_SQL, USED_SQL, allowanceParams, reservedFor, storageFull, usageOf } from "./usage.ts";
+import { allowanceOfSqlFor, USED_SQL, allowanceParams, reservedFor, storageFull, usageOf } from "./usage.ts";
+import { readOnlyRefusal } from "./billing.ts";
 
 /** An upload older than this is swept by the workspace's next create. It lives in src/limits.ts; the name stays here for the files that import it from this one. */
 export { UPLOAD_MAX_AGE_MS };
@@ -329,6 +330,9 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
   app.post("/api/v1/uploads", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
+    // Billing (src/billing.ts): a read-only workspace cannot start this; no call without billing.
+    const ended = await readOnlyRefusal(deps, auth.workspaceId);
+    if (ended !== null) return ended;
     const raw = await readCapped(c.req.raw, CREATE_BODY_WITH_HASHES_BYTES);
     if (raw === "too_large") return apiError(413, "too_large", `the request is over ${CREATE_BODY_WITH_HASHES_BYTES} bytes`);
     let body: unknown;
@@ -441,7 +445,7 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     const insert: Stmt = {
       sql: `INSERT INTO upload (id, workspace_id, tour_id, manifest, created_at, replaces_chapter_id, base_revision, logo_declared_bytes, reserved_bytes)
             SELECT ?, ?, ?, ?, ?, ?, ?, ?, r.reserved
-              FROM (SELECT CAST(max(0, ? - ${current === null ? "0" : current.sql}) AS INTEGER) AS reserved, ${USED_SQL} AS used, ${ALLOWANCE_OF_SQL} AS allowance) r
+              FROM (SELECT CAST(max(0, ? - ${current === null ? "0" : current.sql}) AS INTEGER) AS reserved, ${USED_SQL} AS used, ${allowanceOfSqlFor(deps)} AS allowance) r
              WHERE (SELECT count(*) FROM upload WHERE workspace_id = ? AND closing_at IS NULL AND created_at >= ?) < ?
                AND (r.reserved = 0 OR r.allowance IS NULL OR r.used + r.reserved <= r.allowance)${stillAsRead === null ? "" : ` AND ${stillAsRead.sql}`}`,
       params: [

@@ -19,6 +19,7 @@
 // status, body and headers, after the same database calls in the same order. Everything
 // only an account gets (its code, the audit row, the mail) is one job handed to the target
 // to run after the answer, so nothing an account costs can be timed from outside.
+import { billingConfigured } from "./billing-rules.ts";
 import type { Hono } from "hono";
 import { parseEmail } from "./accounts.ts";
 import { auditStatement } from "./audit.ts";
@@ -339,6 +340,9 @@ export function signinRoutes(app: Hono, deps: Deps): void {
       // connection ends without a request more.
       limits: limitsAnswer(deps),
       ...agreed,
+      // Only on a site with billing switched on: the dashboard then loads its billing screens.
+      // Without the settings the answer is as before, with no such key.
+      ...(billingConfigured(deps.config) ? { billing: true } : {}),
     });
     return withHeader(answer, "set-cookie", sessionCookie(secret));
   });

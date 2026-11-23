@@ -350,6 +350,13 @@ export const DASH_JS = `var Dash = (function () {
       $("dash-user").textContent = name;
       var admin = who.admin === true;
       if (admin) $("tab-admin").hidden = false;
+      // A site with billing switched on: its screens are a script of their own, loaded only then.
+      if (d.billing === true && $("dash-billing") === null) {
+        var billing = document.createElement("script");
+        billing.id = "dash-billing";
+        billing.src = "/dash/billing.js";
+        document.head.appendChild(billing);
+      }
       return page({
         username: name,
         admin: admin,

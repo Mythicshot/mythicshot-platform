@@ -71,7 +71,8 @@ import { apiError, json, noContent, readCapped } from "./http.ts";
 import { isNotNullViolation, isUniqueViolation, type Config, type Deps, type Stmt } from "./ports.ts";
 import { LIMITS_MEDIA, hitLimit, workspaceKey, type Limit } from "./rate.ts";
 import { checkImage, mediaInfo, type ImageType, type MediaType } from "./sniff.ts";
-import { ALLOWANCE_OF_SQL, USED_SQL, allowanceParams, storageFull, usageOf } from "./usage.ts";
+import { allowanceOfSqlFor, USED_SQL, allowanceParams, storageFull, usageOf } from "./usage.ts";
+import { readOnlyRefusal } from "./billing.ts";
 import { itemCreationAccess } from "./media-access.ts";
 import { ACCESS_BODY_BYTES, creationAccess, hasAccessFields, type Access } from "./viewing.ts";
 
@@ -659,6 +660,9 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
   app.post("/api/v1/media", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
+    // Billing (src/billing.ts): a read-only workspace cannot start this; no call without billing.
+    const ended = await readOnlyRefusal(deps, auth.workspaceId);
+    if (ended !== null) return ended;
     // A body that states who may view the item may carry up to MAX_VIEWERS addresses, so it
     // may be longer than CREATE_BODY_BYTES by up to ACCESS_BODY_BYTES; every other body is
     // held to CREATE_BODY_BYTES exactly as before, with the same answer.
@@ -708,7 +712,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
       const insert: Stmt = {
         sql: `INSERT INTO media (id, workspace_id, link_id, kind, content_type, bytes, parts, width, height, duration_ms, title, state, created_at${access === null ? "" : ", access, private_link_id"})
            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?${access === null ? "" : ", ?, ?"}
-             FROM (SELECT ${USED_SQL} AS used, ${ALLOWANCE_OF_SQL} AS allowance) r
+             FROM (SELECT ${USED_SQL} AS used, ${allowanceOfSqlFor(deps)} AS allowance) r
             WHERE r.allowance IS NULL OR r.used + ? <= r.allowance`,
         params: [
           id, auth.workspaceId, access === null ? newLinkId() : access.rowLinkId, d.kind, d.contentType, d.bytes, parts, d.width, d.height, d.durationMs, d.title, now,
@@ -823,7 +827,7 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
               SELECT id, -1, ?, ?, ?, ?, 0 FROM media WHERE id = ? AND ${OPEN_ITEM} AND ${FEW_LOOSE}
                 AND (SELECT r.allowance IS NULL
                             OR r.used - coalesce((SELECT o.bytes FROM media_object o WHERE o.media_id = media.id AND o.n = -1 AND o.current = 1), 0) + ? <= r.allowance
-                       FROM (SELECT ${USED_SQL} AS used, ${ALLOWANCE_OF_SQL} AS allowance) r)`,
+                       FROM (SELECT ${USED_SQL} AS used, ${allowanceOfSqlFor(deps)} AS allowance) r)`,
         params: [token, type, data.byteLength, now, item.id, auth.workspaceId, now - MEDIA_MAX_AGE_MS, data.byteLength, auth.workspaceId, ...allowanceParams(deps, auth.workspaceId)],
       }),
       async () => {

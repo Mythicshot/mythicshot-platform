@@ -30,7 +30,7 @@ import { requireAuth } from "./auth.ts";
 import { apiError, json, readCapped } from "./http.ts";
 import { isNotNullViolation, type Deps } from "./ports.ts";
 import { isBeforeTerms } from "./sessions.ts";
-import { ALLOWANCE_SQL, USAGE_COLUMNS, usageFromRow, usageOf, type Usage } from "./usage.ts";
+import { allowanceSqlFor, USAGE_COLUMNS, usageFromRow, usageOf, type Usage } from "./usage.ts";
 
 /** The most accounts one page of the list holds. */
 export const ADMIN_PAGE = 100;
@@ -175,7 +175,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
       `SELECT p.id, p.username, p.email, p.status, p.is_admin, p.created_at, p.deleting, p.ws AS workspace_id, p.ws_name AS workspace_name, p.own, p.allowance, ${USAGE_COLUMNS}, ${agreements}
          FROM (SELECT u.id, u.username, u.email, u.status, u.is_admin, u.created_at, m.workspace_id AS ws, workspace.name AS ws_name,
                       EXISTS (SELECT 1 FROM account_removal r WHERE r.user_id = u.id) AS deleting,
-                      workspace.storage_allowance_bytes AS own, ${ALLOWANCE_SQL} AS allowance
+                      workspace.storage_allowance_bytes AS own, ${allowanceSqlFor(deps)} AS allowance
                  FROM user u
                  JOIN membership m ON m.user_id = u.id
                  JOIN workspace ON workspace.id = m.workspace_id

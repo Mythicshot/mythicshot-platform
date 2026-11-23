@@ -94,6 +94,7 @@
 // signed-in session alone (a token gets its count), never by another route, an audit row (which holds counts) or a log line, and a refusal of
 // a malformed address names its position only.
 import type { Hono } from "hono";
+import { readOnlyRefusal } from "./billing.ts";
 import { noDisabledAccount } from "./accounts.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
@@ -1058,6 +1059,9 @@ export function accessRoutes(app: Hono, deps: Deps): void {
     const d = meter.deps;
     const auth = await requireAuth(c.req.raw, d, { only: "session" });
     if (auth instanceof Response) return auth;
+    // Billing (src/billing.ts): a read-only workspace cannot start this; no call without billing.
+    const ended = await readOnlyRefusal(d, auth.workspaceId);
+    if (ended !== null) return ended;
     const body = await readAccessBody(c.req.raw, "a tour's");
     if (body instanceof Response) return body;
     const id = c.req.param("id");

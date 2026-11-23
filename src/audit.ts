@@ -40,6 +40,14 @@ export const AUDIT_EVENTS = [
   "viewer_link_sent",
   "viewer_signin",
   "terms_agreed",
+  "billing_checkout_started",
+  "billing_changed",
+  "billing_checkout_mismatch",
+  "billing_checkout_unmatched",
+  "billing_second_subscription",
+  "billing_unlinked_subscription",
+  "billing_payment_failed",
+  "billing_risk",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 
