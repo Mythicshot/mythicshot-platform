@@ -592,6 +592,59 @@ describe("chapters: at most MAX_CHAPTERS in a tour (0.1.56)", { timeout: 120_000
     expect(await chapterCount(deps, first.tour_id)).toBe(MAX_CHAPTERS);
   });
 
+  it("refused for the cap at its insert, an upload that is still open is never answered as not found, even when room appears at once; its next commit lands", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const first = await upload(deps, a.token, [1], "First");
+    const bare = await bareChapters(deps, first.tour_id, MAX_CHAPTERS - 2);
+    const m = manifestOf([5], "Late");
+    const created = await createUpload(deps, a.token, m, { kind: "chapter", tour_id: first.tour_id });
+    expect(created.status, created.text).toBe(201);
+    const id = created.json.upload_id as string;
+    expect((await putStep(deps, a.token, id, 1, picture(m, 0, 5))).status).toBe(204);
+    await bareChapters(deps, first.tour_id, 1);
+    expect(await chapterCount(deps, first.tour_id)).toBe(MAX_CHAPTERS);
+    // Between the refused insert and the look that follows it, a change of the chapters makes room.
+    const real = deps.db.first.bind(deps.db);
+    let fired = false;
+    deps.db.first = async (sql: string, params?: unknown[]) => {
+      if (!fired && sql.includes("FROM chapter c JOIN tour t ON t.id = c.tour_id WHERE c.id = ?")) {
+        fired = true;
+        await deps.db.run("DELETE FROM chapter WHERE id = ?", [bare[0]]);
+      }
+      return real(sql, params as never) as never;
+    };
+    const refused = await commit(deps, a.token, id);
+    deps.db.first = real;
+    expect(fired).toBe(true);
+    expect([refused.status, refused.json]).toEqual([409, FULL]);
+    expect(await deps.db.first("SELECT closing_at FROM upload WHERE id = ?", [id])).toEqual({ closing_at: null });
+    // Sent again, now that there is room, the same upload lands.
+    const again = await commit(deps, a.token, id);
+    expect(again.status, again.text).toBe(201);
+    expect(again.json.chapter_id).toBe("ch_" + id.slice(3));
+    expect(await chapterCount(deps, first.tour_id)).toBe(MAX_CHAPTERS);
+    expect(await deps.db.all("SELECT id FROM upload")).toEqual([]);
+  });
+
+  it("refused for the cap, an open upload can be cancelled, and another workspace's commit of it is no upload, byte for byte", async () => {
+    const ctx = await setup();
+    const { deps, a, b } = ctx;
+    const first = await upload(deps, a.token, [1], "First");
+    await bareChapters(deps, first.tour_id, MAX_CHAPTERS - 2);
+    const m = manifestOf([5], "Late");
+    const id = (await createUpload(deps, a.token, m, { kind: "chapter", tour_id: first.tour_id })).json.upload_id as string;
+    expect((await putStep(deps, a.token, id, 1, picture(m, 0, 5))).status).toBe(204);
+    await bareChapters(deps, first.tour_id, 1);
+    expect((await commit(deps, a.token, id)).json).toEqual(FULL);
+    const theirs = await commit(deps, b.token, id);
+    const nobodys = await commit(deps, b.token, "up_" + "0".repeat(24));
+    expect([theirs.status, theirs.text]).toEqual([404, '{"error":"not_found","detail":"no such upload"}']);
+    expect([nobodys.status, nobodys.text]).toEqual([theirs.status, theirs.text]);
+    expect((await send(deps, "DELETE", `/api/v1/uploads/${id}`, { token: a.token })).status).toBe(204);
+    expect(await deps.db.all("SELECT id FROM upload")).toEqual([]);
+  });
+
   it("the cap counts the caller's own tour only: another workspace's full tour is no tour, and its count changes nothing here", async () => {
     const ctx = await setup();
     const { deps, a, b } = ctx;

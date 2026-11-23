@@ -233,16 +233,6 @@ async function committed(deps: Deps, auth: Auth, uploadId: string): Promise<{ to
   return row === null ? null : { tour_id: row.tour_id, chapter_id: row.chapter_id, steps: row.steps };
 }
 
-/** Whether the upload is still open and its tour, of this workspace, has MAX_CHAPTERS. One statement. */
-async function tourIsFull(deps: Deps, auth: Auth, uploadId: string): Promise<boolean> {
-  const row = await deps.db.first<{ full: number }>(
-    `SELECT (SELECT count(*) FROM chapter c WHERE c.tour_id = t.id) >= ? AS full
-       FROM upload u JOIN tour t ON t.id = u.tour_id WHERE u.id = ? AND u.workspace_id = ? AND u.closing_at IS NULL AND t.workspace_id = ?`,
-    [MAX_CHAPTERS, uploadId, auth.workspaceId, auth.workspaceId],
-  );
-  return row !== null && row.full === 1;
-}
-
 /** The lowercase hex SHA-256 of `bytes`. Web Crypto, so not a storage or database call. */
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>));
@@ -737,10 +727,15 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
         const prior = await committed(deps, auth, up.id);
         if (prior !== null) return json(201, prior);
         if (!unique) {
-          // Aborted meanwhile, or (a new chapter) its tour reached MAX_CHAPTERS since the
-          // create, by another upload started beside this one: then the upload stays open,
-          // to be cancelled, and nothing of it was written.
-          if (up.tour_id !== null && (await tourIsFull(deps, auth, up.id))) return tourFull();
+          // The insert took no row. Decided from the upload itself, as the insert saw it: one
+          // that is gone or closing was aborted meanwhile. A new chapter's upload that is still
+          // open was refused for the cap: its tour (which exists while an upload into it does;
+          // a tour's delete removes them in its batch) had MAX_CHAPTERS at that moment. It
+          // stays open, to be cancelled or committed again, and nothing of it was written. The
+          // tour's count is not looked at again: a change of the chapters may have made room
+          // since, and an open upload is never answered as not found.
+          const still = up.tour_id === null ? null : await loadUpload(deps, auth, up.id);
+          if (still !== null && still.closing_at === null) return tourFull();
           return notFound("upload");
         }
         if (up.tour_id !== null || attempt >= SLUG_ATTEMPTS) throw err;

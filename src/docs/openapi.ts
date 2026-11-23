@@ -1437,7 +1437,7 @@ function paths(): OpenApiDoc["paths"] {
           "401": UNAUTHORIZED,
           "404": noUpload(""),
           "409": refusal(
-            `incomplete: a step's image, or a logo the upload must carry, has not been sent; nothing changes. chapter_changed: another upload replaced the chapter since this one started; nothing changes: cancel this upload and start again. too_many_chapters: a new chapter only (since version 0.1.56): another upload into the same tour, started beside this one, gave the tour its ${n(MAX_CHAPTERS)}th chapter first; nothing changes and the upload stays open: cancel it, or remove a chapter and send the commit again.`,
+            `incomplete: a step's image, or a logo the upload must carry, has not been sent; nothing changes. chapter_changed: another upload replaced the chapter since this one started; nothing changes: cancel this upload and start again. too_many_chapters: a new chapter only (since version 0.1.56): the tour had ${n(MAX_CHAPTERS)} chapters at the moment of the commit (another upload into it, started beside this one, got there first); nothing changes and the upload stays open: cancel it, or remove a chapter and send the commit again.`,
             "incomplete",
             "chapter_changed",
             "too_many_chapters",
