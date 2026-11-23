@@ -407,7 +407,7 @@ function schemas(): Record<string, Schema> {
       position: whole("Its place in the tour, from 0: visitors see the chapters in this order."),
       steps: whole("How many steps it has."),
       pictures: whole("How many picture files its steps use (two steps may share one); removing the chapter deletes them."),
-      uploaded_at: { type: ["integer", "null"], minimum: 0, description: "When it was last uploaded (a new chapter or a replace of it), in milliseconds since 1970. null when that was before version 0.1.55 and is not known, which is so for every chapter but the one a tour was made with." },
+      uploaded_at: { type: ["integer", "null"], minimum: 0, description: "When it was last uploaded (a new chapter or a replace of it), in milliseconds since 1970. null when that is not known: when it was before version 0.1.55, which is so for every chapter but the one a tour was made with, and (since version 0.1.56) when the last replace was made by a version before 0.1.55 run on the same database." },
     }),
     ChapterList: object(["revision", "chapters"], {
       revision: whole("The tour's revision: every upload, replace or change of the chapters moves it on. Send it back with a change."),

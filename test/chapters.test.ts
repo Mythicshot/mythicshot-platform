@@ -632,3 +632,43 @@ describe("chapters: at most MAX_CHAPTERS in a tour (0.1.56)", { timeout: 120_000
   });
 });
 
+describe("chapters: the upload time always belongs to the chapter's present pictures (0.1.56)", { timeout: 60_000 }, () => {
+  it("a replace written without the time (an older build on the migrated database) leaves no time rather than the earlier one", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const made = ctx.at();
+    const t = await upload(deps, a.token, [1, 2], "First");
+    expect((await list(deps, a.token, t.tour_id)).json.chapters[0].uploaded_at).toBe(made);
+    // What every build before 0.1.55 writes when a replace commits: the revision and the
+    // versions, never uploaded_at, which it does not know.
+    ctx.advance(60_000);
+    await deps.db.run(
+      "UPDATE chapter SET revision = ?, replaced_version = (SELECT draft_version FROM tour WHERE id = ?), replaced_from = (SELECT draft_version FROM tour WHERE id = ?) WHERE id = ?",
+      ["up_" + "0".repeat(24), t.tour_id, t.tour_id, t.chapter_id],
+    );
+    expect((await list(deps, a.token, t.tour_id)).json.chapters[0].uploaded_at).toBeNull();
+    // This build's next replace dates it again.
+    ctx.advance(60_000);
+    const replaced = await openReplace(deps, a.token, t, [3]);
+    expect((await commit(deps, a.token, replaced.json.upload_id)).status).toBe(201);
+    expect((await list(deps, a.token, t.tour_id)).json.chapters[0].uploaded_at).toBe(made + 120_000);
+  });
+
+  it("two replaces in the same millisecond both leave the chapter dated; a reorder and a rename keep the dates", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const made = ctx.at();
+    const t = await upload(deps, a.token, [1], "First");
+    const second = await upload(deps, a.token, [2], "Second", t.tour_id);
+    for (const pic of [3, 4]) {
+      const r = await openReplace(deps, a.token, t, [pic]);
+      expect((await commit(deps, a.token, r.json.upload_id)).status).toBe(201);
+      expect((await list(deps, a.token, t.tour_id)).json.chapters[0].uploaded_at).toBe(made);
+    }
+    ctx.advance(60_000);
+    const read = (await list(deps, a.token, t.tour_id)).json;
+    expect((await change(deps, a.token, t.tour_id, { revision: read.revision, chapters: [second.chapter_id, t.chapter_id] })).status).toBe(200);
+    expect((await send(deps, "PATCH", `/api/v1/tours/${t.tour_id}`, { token: a.token, body: JSON.stringify({ title: "Renamed" }), headers: JSON_HEADERS })).status).toBe(200);
+    expect((await list(deps, a.token, t.tour_id)).json.chapters.map((c: Json) => c.uploaded_at)).toEqual([made, made]);
+  });
+});
