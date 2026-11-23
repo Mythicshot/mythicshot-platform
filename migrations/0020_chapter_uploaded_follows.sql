@@ -9,6 +9,11 @@
 -- the time is emptied (shown as no date: not known), in the same statement as the change; this
 -- build then sets its own time in a later statement of the same batch (src/replace.ts).
 --
+-- So after this migration, a replace made by ANY earlier version, 0.1.55 included, leaves the
+-- chapter with no upload time until 0.1.56 or later replaces it again: 0.1.55 writes its time in
+-- the same statement as the revision, and the trigger, which runs after that statement, empties
+-- it. That is deliberate: no time is a correct "not known", a stale one is not.
+--
 -- The trigger writes one column of the very row being changed, never another row, so it can
 -- reach nothing of another tour or workspace. Rows already written are left as they are: a
 -- time an older build left stale before this migration cannot be told from a right one.

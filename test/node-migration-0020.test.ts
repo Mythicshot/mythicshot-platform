@@ -93,9 +93,26 @@ describe("migration 0020", () => {
     expect(await timeOf(made.chapter_id)).toBe(T0 + 120_000);
     await db.run("UPDATE chapter SET revision = revision WHERE id = ?", [made.chapter_id]);
     expect(await timeOf(made.chapter_id)).toBe(T0 + 120_000);
+    // 0.1.55's own replace (its exact UPDATE: the revision and the time in one statement, as in
+    // src/replace.ts at 3e98323) on the migrated database: the trigger runs after that statement
+    // and empties the time, so the chapter has none until 0.1.56 or later replaces it again.
+    // Deliberate and documented: no time is a correct "not known".
+    now += 60_000;
+    const version = "(SELECT draft_version FROM tour WHERE id = ? AND workspace_id = ?)";
+    const ws = (await db.first<{ workspace_id: string }>("SELECT workspace_id FROM tour WHERE id = ?", [made.tour_id]))!.workspace_id;
+    await db.run(
+      `UPDATE chapter SET revision = ?, replaced_version = ${version},
+                               replaced_from = CASE WHEN replaced_version = ${version} - 1 THEN replaced_from ELSE ${version} END, uploaded_at = ?
+             WHERE id = ? AND tour_id IN (SELECT id FROM tour WHERE id = ? AND workspace_id = ?)`,
+      ["up_" + "3".repeat(24), made.tour_id, ws, made.tour_id, ws, made.tour_id, ws, now, made.chapter_id, made.tour_id, ws],
+    );
+    expect(await db.first("SELECT revision, uploaded_at FROM chapter WHERE id = ?", [made.chapter_id])).toEqual({ revision: "up_" + "3".repeat(24), uploaded_at: null });
+    now += 60_000;
+    await uploadInto(deps, token, { kind: "replace", tour_id: made.tour_id, chapter_id: made.chapter_id }, "Made", 5);
+    expect(await timeOf(made.chapter_id)).toBe(T0 + 240_000);
     // A reorder or a rename of another row moves no time.
     await db.run("UPDATE chapter SET position = position + 1 WHERE id = ?", [made.chapter_id]);
-    expect([await timeOf(made.chapter_id), await timeOf(other.chapter_id)]).toEqual([T0 + 120_000, T0 + 60_000]);
+    expect([await timeOf(made.chapter_id), await timeOf(other.chapter_id)]).toEqual([T0 + 240_000, T0 + 60_000]);
 
     // Applied again by hand, its statement fails and nothing changes.
     const sql = await readFile(join(MIGRATIONS_DIR, NAME), "utf8");
