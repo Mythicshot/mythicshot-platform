@@ -43,6 +43,15 @@ describe("billing on the Worker", () => {
     expect("stripe" in without).toBe(false);
   });
 
+  it("answers 500 misconfigured with billing on and no https address of its own for Stripe's return address", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await entry.default.fetch(new Request("https://tours.example.com/healthz"), { ...bindings(), ...FOUR }, {});
+    expect([res.status, await res.text()]).toEqual([500, '{"error":"misconfigured"}']);
+    expect(logged.mock.calls.map((c) => c.join(" ")).join(" ")).toMatch(/SITE_HOST/);
+    const ok = await entry.default.fetch(new Request("https://tours.example.com/no/such"), { ...bindings(), ...FOUR, SITE_HOST: "tours.example.com" }, {});
+    expect(ok.status).toBe(404);
+  });
+
   it("answers 500 misconfigured to every request for a setting of the wrong shape, with a line that names it and never a value", async () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     for (const name of Object.keys(FOUR)) {

@@ -3,6 +3,7 @@
 // without starting the app. (The mailer it makes for a usable mail block starts its
 // worker thread, and opens its first connection, only when a mail is sent.)
 import { billingFromSettings } from "../billing-rules.ts";
+import { billingAddressProblem } from "../billing.ts";
 import { canonicalAddress } from "../client.ts";
 import { hasNetwork } from "../rate.ts";
 import { parseEmail } from "../accounts.ts";
@@ -89,7 +90,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   const homeUrl = homeUrlSetting(env.HOME_URL).url;
   // The sign-in lifetimes, read by name: env.SESSION_MAX_DAYS, env.CONNECTION_IDLE_DAYS, env.CONNECTION_MAX_DAYS.
   const { lifetimes } = lifetimesSetting({ SESSION_MAX_DAYS: env.SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS: env.CONNECTION_IDLE_DAYS, CONNECTION_MAX_DAYS: env.CONNECTION_MAX_DAYS });
-  return {
+  const config: Config = {
     publicImageBase: env.PUBLIC_IMAGE_BASE ?? "",
     setupCode: setupCodeFromEnv(env.SETUP_CODE),
     hosts: hosts.hosts,
@@ -101,6 +102,10 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
     ...(sameLifetimes(lifetimes, DEFAULT_LIFETIMES) ? {} : { lifetimes }),
     ...(billing.billing === null ? {} : { billing: billing.billing }),
   };
+  // With billing on, Stripe's return address is the site's own https address, never a request's Host.
+  const address = billingAddressProblem(config);
+  if (address !== null) throw new Error(address);
+  return config;
 }
 
 /** The line for a mail setting that is missing or cannot be used. It names the setting and never repeats a value. */

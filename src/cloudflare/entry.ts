@@ -1,5 +1,6 @@
 import { createApp } from "../app.ts";
 import { billingFromSettings, type BillingSettings } from "../billing-rules.ts";
+import { billingAddressProblem } from "../billing.ts";
 import { stripeOverFetch } from "../stripe.ts";
 import { mediaLimitsProblem } from "../limits.ts";
 import { withBudget } from "../budget.ts";
@@ -218,6 +219,12 @@ export default {
     // Each request gets its own metered ports, so one that goes over the call budget is logged.
     const defers = typeof (ctx as { waitUntil?: unknown } | undefined)?.waitUntil === "function" ? ctx : undefined;
     const deps = depsFromEnv(env, hosts.hosts, allowance.bytes, defers, billing.billing);
+    // With billing on, Stripe's return address must be the site's own https address.
+    const address = billingAddressProblem(deps.config);
+    if (address !== null) {
+      console.error(address);
+      return misconfigured();
+    }
     // And limits of shared items that would need more parts than an item may have.
     const media = mediaLimitsProblem(deps.config);
     if (media !== null) {

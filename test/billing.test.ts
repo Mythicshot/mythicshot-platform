@@ -151,8 +151,8 @@ describe("the allowance and the read-only rule", () => {
     expect(await allowance(s.a.workspaceId)).toBe(123);
     await s.deps.db.run("UPDATE workspace SET subscription_status = 'active' WHERE id = ?", [s.a.workspaceId]);
     expect(await allowance(s.a.workspaceId)).toBe(123);
-    // An existing account (marked by migration 0021) and an admin keep the site's default.
-    await s.deps.db.run("UPDATE workspace SET billing_existing = 1 WHERE id = ?", [s.b.workspaceId]);
+    // A workspace made while billing was off (billing_trial 0) and an admin keep the site's default.
+    await s.deps.db.run("UPDATE workspace SET billing_trial = 0 WHERE id = ?", [s.b.workspaceId]);
     expect(await allowance(s.b.workspaceId)).toBe(777_000);
     const admin = await seedAccount(s.deps, { username: "boss", admin: true });
     expect(await allowance(admin.workspaceId)).toBe(777_000);
@@ -216,9 +216,9 @@ describe("the allowance and the read-only rule", () => {
     await s.deps.db.run("UPDATE workspace SET storage_allowance_bytes = 999999999 WHERE id = ?", [s.a.workspaceId]);
     await s.deps.db.run("UPDATE workspace SET subscription_status = NULL WHERE id = ?", [s.a.workspaceId]);
     await expectAllowed("an admin-set allowance");
-    await s.deps.db.run("UPDATE workspace SET storage_allowance_bytes = NULL, billing_existing = 1 WHERE id = ?", [s.a.workspaceId]);
+    await s.deps.db.run("UPDATE workspace SET storage_allowance_bytes = NULL, billing_trial = 0 WHERE id = ?", [s.a.workspaceId]);
     await expectAllowed("an existing account");
-    await s.deps.db.run("UPDATE workspace SET billing_existing = 0 WHERE id = ?", [s.a.workspaceId]);
+    await s.deps.db.run("UPDATE workspace SET billing_trial = 1 WHERE id = ?", [s.a.workspaceId]);
     await s.deps.db.run("UPDATE user SET is_admin = 1 WHERE id = ?", [s.a.userId]);
     await expectAllowed("an admin");
     await s.deps.db.run("UPDATE user SET is_admin = 0 WHERE id = ?", [s.a.userId]);
@@ -228,9 +228,9 @@ describe("the allowance and the read-only rule", () => {
     expect((await rowOf(s.deps, s.b.workspaceId))!.subscription_status).toBeNull();
   });
 
-  it("migration 0021 marks only the workspaces that existed: a new one is on the trial clock", async () => {
+  it("a workspace made with billing on is on the trial clock", async () => {
     const s = await site();
-    expect((await rowOf(s.deps, s.a.workspaceId))!.billing_existing).toBe(0);
+    expect((await rowOf(s.deps, s.a.workspaceId))!.billing_trial).toBe(1);
   });
 });
 
@@ -244,13 +244,14 @@ describe("Subscribe", () => {
     expect(call.method).toBe("POST");
     expect(call.key).toMatch(/^checkout_ws_[0-9a-f]{24}_none_[0-9a-f]{32}$/);
     const form = Object.fromEntries(call.form!);
-    expect(Object.keys(form).sort()).toEqual(["client_reference_id", "customer_email", "line_items[0][price]", "line_items[0][quantity]", "managed_payments[enabled]", "mode", "return_url", "ui_mode"]);
+    expect(Object.keys(form).sort()).toEqual(["client_reference_id", "customer_email", "expires_at", "line_items[0][price]", "line_items[0][quantity]", "managed_payments[enabled]", "mode", "return_url", "ui_mode"]);
     expect(form).toEqual({
       mode: "subscription",
       "line_items[0][price]": "price_FAKE",
       "line_items[0][quantity]": "1",
       "managed_payments[enabled]": "true",
       ui_mode: "embedded_page",
+      expires_at: String(T0 / 1000 + 31 * 60),
       return_url: "https://tours.example.com/billing/return?session_id={CHECKOUT_SESSION_ID}",
       client_reference_id: s.a.workspaceId,
       customer_email: s.a.email,
@@ -475,8 +476,8 @@ describe("the listener", () => {
     const s = await site();
     await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
     s.stripe.subscription("sub_A", "cus_A", "canceled", { endedAt: 1_800_000_100 });
-    // Deleted first: no workspace holds sub_A yet, so nothing happens.
-    expect((await notify(s.deps, eventOf("customer.subscription.deleted", { id: "sub_A", customer: "cus_A", status: "canceled" }))).status).toBe(200);
+    // Deleted first: no workspace holds sub_A yet, and a checkout is pending: answered 500, to come back after the link.
+    expect((await notify(s.deps, eventOf("customer.subscription.deleted", { id: "sub_A", customer: "cus_A", status: "canceled" }))).status).toBe(500);
     expect((await rowOf(s.deps, s.a.workspaceId))!.subscription_status).toBeNull();
     // Then the completed checkout: Stripe says canceled now, so canceled is stored.
     await notify(s.deps, eventOf("checkout.session.completed", { id: "cs_test_1", client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A", payment_status: "paid" }));
@@ -533,6 +534,7 @@ describe("the listener", () => {
     const s = await site();
     await subscribe(s.deps, s.stripe, s.a.workspaceId, s.sa.headers, { customer: "cus_A", subscription: "sub_A" });
     // A checkout stored by a request that raced the first one (stored after it went live).
+    await s.deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES ('cs_test_race', ?, ?, ?)", [s.a.workspaceId, T0, T0 + 1_860_000]);
     await s.deps.db.run("UPDATE workspace SET checkout_session_id = 'cs_test_race', checkout_created_at = ? WHERE id = ?", [T0, s.a.workspaceId]);
     s.stripe.subscription("sub_A2", "cus_A", "active");
     await notify(s.deps, eventOf("checkout.session.completed", { id: "cs_test_race", client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A2", payment_status: "paid" }));
@@ -590,6 +592,7 @@ describe("the state the dashboard reads", () => {
       links_until: null,
       removed_at: T0 + TRIAL_MS,
       manage: false,
+      confirming: false,
       checkout: null,
     });
     await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
@@ -616,7 +619,7 @@ describe("the state the dashboard reads", () => {
     const ended = 1_800_000_000_000 + 5 * DAY;
     await s.deps.db.run("UPDATE workspace SET stripe_customer_id = 'cus_A', stripe_subscription_id = 'sub_A', subscription_status = 'canceled', subscription_ended_at = ? WHERE id = ?", [ended, s.a.workspaceId]);
     expect((await asSession(s.deps, "GET", BILLING_PATHS.state, s.sa.headers)).json).toMatchObject({ state: "ended", ended_at: ended, links_until: ended + 30 * DAY, removed_at: ended + 90 * DAY, manage: true });
-    await s.deps.db.run("UPDATE workspace SET billing_existing = 1 WHERE id = ?", [s.b.workspaceId]);
+    await s.deps.db.run("UPDATE workspace SET billing_trial = 0 WHERE id = ?", [s.b.workspaceId]);
     expect((await asSession(s.deps, "GET", BILLING_PATHS.state, s.sb.headers)).json.state).toBe("exempt");
     // The session says billing is on.
     expect((await asSession(s.deps, "GET", "/api/v1/session", s.sa.headers)).json.billing).toBe(true);

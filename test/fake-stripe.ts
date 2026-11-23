@@ -10,7 +10,7 @@ import { ORIGIN, send, type Call } from "./bundle.ts";
 export const BILLING: BillingSettings = { apiKey: "rk_test_FAKE", webhookSecret: "whsec_FAKE", priceId: "price_FAKE", publishableKey: "pk_test_FAKE" };
 
 /** The config of a site with billing switched on (the route table's tests build their app from it). */
-export const BILLING_CONFIG = { publicImageBase: "", setupCode: null, billing: BILLING };
+export const BILLING_CONFIG = { publicImageBase: "", setupCode: null, siteHost: "tours.example.com", billing: BILLING };
 
 /** Billing's nine routes, which exist only with the settings. */
 export const BILLING_ROUTE_KEYS = [
@@ -37,19 +37,31 @@ export class FakeStripe implements Stripe {
   down = false;
   /** Paths answered 500. */
   failing = new Set<string>();
+  /**
+   * Runs after an answer is made and before it is returned, so a test can make something else
+   * happen in between, deterministically (another notice, Stripe changing its mind).
+   */
+  hook: ((call: StripeCall, answer: StripeAnswer) => Promise<void>) | null = null;
   private byKey = new Map<string, StripeAnswer>();
   private n = 0;
 
-  async call(method: "GET" | "POST", path: string, form?: StripeForm, key?: string): Promise<StripeAnswer> {
-    this.calls.push({ method, path, form: form === undefined ? null : form.map(([k, v]) => [k, v] as [string, string]), key });
+  async call(method: "GET" | "POST" | "DELETE", path: string, form?: StripeForm, key?: string): Promise<StripeAnswer> {
+    const call: StripeCall = { method, path, form: form === undefined ? null : form.map(([k, v]) => [k, v] as [string, string]), key };
+    this.calls.push(call);
     if (this.down) throw new Error("stripe: unreachable");
+    const answer = this.answer(method, path, form, key);
+    if (this.hook !== null) await this.hook(call, answer);
+    return answer;
+  }
+
+  private answer(method: string, path: string, form?: StripeForm, key?: string): StripeAnswer {
     if (this.failing.has(path)) return { status: 500, body: { error: { type: "api_error" } } };
     const parts = path.split("/");
     if (method === "POST" && path === "/v1/checkout/sessions") {
       if (key !== undefined && this.byKey.has(key)) return this.byKey.get(key)!;
       this.n += 1;
       const id = `cs_test_${this.n}`;
-      const session = { id, object: "checkout.session", status: "open", client_secret: `${id}_secret_FAKE${this.n}`, url: null, form: Object.fromEntries(form ?? []) };
+      const session: Json = { id, object: "checkout.session", status: "open", client_secret: `${id}_secret_FAKE${this.n}`, url: null, form: Object.fromEntries(form ?? []), noSecret: false };
       this.sessions.set(id, session);
       const answer = { status: 200, body: { id, object: "checkout.session", status: "open", client_secret: session.client_secret, url: null } };
       if (key !== undefined) this.byKey.set(key, answer);
@@ -57,17 +69,28 @@ export class FakeStripe implements Stripe {
     }
     if (method === "GET" && parts[2] === "checkout" && parts[3] === "sessions" && parts.length === 5) {
       const s = this.sessions.get(parts[4]);
-      return s === undefined ? { status: 404, body: { error: { code: "resource_missing" } } } : { status: 200, body: { id: s.id, status: s.status, client_secret: s.status === "open" ? s.client_secret : null } };
+      return s === undefined
+        ? { status: 404, body: { error: { code: "resource_missing" } } }
+        : { status: 200, body: { id: s.id, status: s.status, client_secret: s.status === "open" && !s.noSecret ? s.client_secret : null, customer: s.customer ?? null, subscription: s.subscription ?? null, client_reference_id: s.form?.client_reference_id ?? null } };
     }
     if (method === "POST" && parts[3] === "sessions" && parts[5] === "expire") {
       const s = this.sessions.get(parts[4]);
-      if (s !== undefined) s.status = "expired";
+      if (s === undefined) return { status: 404, body: { error: { code: "resource_missing" } } };
+      if (s.status !== "open") return { status: 400, body: { error: { type: "invalid_request_error" } } };
+      s.status = "expired";
       return { status: 200, body: { id: parts[4], status: "expired" } };
     }
     if (method === "POST" && path === "/v1/billing_portal/sessions") return { status: 200, body: { id: "bps_FAKE", url: "https://billing.stripe.com/p/session/test_FAKE" } };
     if (method === "GET" && parts[2] === "subscriptions") {
       const s = this.subscriptions.get(parts[3]);
       return s === undefined ? { status: 404, body: { error: { code: "resource_missing" } } } : { status: 200, body: s };
+    }
+    if (method === "DELETE" && parts[2] === "subscriptions") {
+      const s = this.subscriptions.get(parts[3]);
+      if (s === undefined) return { status: 404, body: { error: { code: "resource_missing" } } };
+      s.status = "canceled";
+      s.ended_at = s.ended_at ?? 1_800_000_000;
+      return { status: 200, body: s };
     }
     if (method === "GET" && parts[2] === "charges") {
       const c = this.charges.get(parts[3]);
@@ -90,6 +113,12 @@ export class FakeStripe implements Stripe {
     });
   }
 
+  /** Marks a checkout paid at Stripe, as a completed one is. */
+  complete(id: string, customer: string, subscription: string): void {
+    const s = this.sessions.get(id)!;
+    Object.assign(s, { status: "complete", customer, subscription });
+  }
+
   /** The calls to one path. */
   to(path: string): StripeCall[] {
     return this.calls.filter((c) => c.path === path);
@@ -99,7 +128,9 @@ export class FakeStripe implements Stripe {
 /** Deps with billing on and a fresh fake Stripe. */
 export function withBilling(deps: Deps): FakeStripe {
   const stripe = new FakeStripe();
-  deps.config = { ...deps.config, billing: BILLING };
+  // Billing needs the app's own https address for Stripe's return address (never the request's Host).
+  const own = (deps.config.hosts ?? null) !== null || typeof deps.config.siteHost === "string" ? {} : { siteHost: "tours.example.com" };
+  deps.config = { ...deps.config, ...own, billing: BILLING };
   deps.stripe = stripe;
   return stripe;
 }

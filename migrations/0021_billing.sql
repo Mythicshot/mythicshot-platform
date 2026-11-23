@@ -14,12 +14,12 @@
 -- The first statement fails on a database that already has this migration, so a second
 -- application stops before it changes anything.
 
--- 1 for a workspace that existed before this migration: an account made before billing is not
--- put on the trial clock, and is treated as before (the site's default allowance, no notice,
--- never read-only). The one statement after it marks every row there is now; a workspace made
--- later gets the default, 0. A workspace an older build makes after this migration also gets 0.
-ALTER TABLE workspace ADD COLUMN billing_existing INTEGER NOT NULL DEFAULT 0 CHECK (billing_existing IN (0, 1));
-UPDATE workspace SET billing_existing = 1;
+-- 1 for a workspace made while billing was switched on: only such a workspace is put on the
+-- trial clock. Every workspace that exists before this migration, and every one made while
+-- billing is off (a self-hosted install, or a build before billing), has 0 and is treated as
+-- before (the site's default allowance, no notice, never read-only), also if billing is
+-- switched on later. Only code that runs with billing on ever writes 1.
+ALTER TABLE workspace ADD COLUMN billing_trial INTEGER NOT NULL DEFAULT 0 CHECK (billing_trial IN (0, 1));
 
 -- Stripe's customer for this workspace, set by the first completed checkout. Unique among the
 -- workspaces that have one: a customer belongs to one workspace only.
@@ -35,8 +35,8 @@ ALTER TABLE workspace ADD COLUMN subscription_cancel_at INTEGER CHECK (subscript
 ALTER TABLE workspace ADD COLUMN subscription_cancel_at_period_end INTEGER NOT NULL DEFAULT 0 CHECK (subscription_cancel_at_period_end IN (0, 1));
 ALTER TABLE workspace ADD COLUMN subscription_ended_at INTEGER CHECK (subscription_ended_at IS NULL OR subscription_ended_at > 0);
 
--- The checkout Subscribe started, stored before the person is sent to Stripe, and when. A
--- completed checkout finds its workspace by this id alone; it is cleared when it is taken.
+-- The checkout Subscribe started last, stored before the person is shown Stripe's form, and
+-- when: the one Subscribe offers again while Stripe holds it open. Cleared when it is taken.
 ALTER TABLE workspace ADD COLUMN checkout_session_id TEXT CHECK (checkout_session_id IS NULL OR (length(CAST(checkout_session_id AS BLOB)) = length(checkout_session_id) AND length(checkout_session_id) BETWEEN 4 AND 255 AND substr(checkout_session_id, 1, 3) = 'cs_' AND substr(checkout_session_id, 4) NOT GLOB '*[^A-Za-z0-9_]*'));
 ALTER TABLE workspace ADD COLUMN checkout_created_at INTEGER CHECK (checkout_created_at IS NULL OR checkout_created_at > 0);
 
@@ -50,3 +50,15 @@ CREATE TABLE stripe_event (
   id TEXT PRIMARY KEY NOT NULL CHECK (length(CAST(id AS BLOB)) = length(id) AND length(id) BETWEEN 5 AND 255 AND substr(id, 1, 4) = 'evt_' AND substr(id, 5) NOT GLOB '*[^A-Za-z0-9_]*'),
   received_at INTEGER NOT NULL
 ) STRICT;
+
+-- Every checkout this site made, and for which workspace, written before its client secret is
+-- handed out and kept after the workspace's pending checkout moved on: a completed checkout
+-- finds its workspace by this id alone, so one paid after it was replaced is never orphaned.
+-- Rows go with their workspace when an account is deleted.
+CREATE TABLE stripe_checkout (
+  id TEXT PRIMARY KEY NOT NULL CHECK (length(CAST(id AS BLOB)) = length(id) AND length(id) BETWEEN 4 AND 255 AND substr(id, 1, 3) = 'cs_' AND substr(id, 4) NOT GLOB '*[^A-Za-z0-9_]*'),
+  workspace_id TEXT NOT NULL REFERENCES workspace (id),
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX stripe_checkout_workspace ON stripe_checkout (workspace_id);

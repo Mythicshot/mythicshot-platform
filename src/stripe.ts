@@ -29,7 +29,7 @@ export interface Stripe {
    * match STRIPE_PATH, else the call throws before anything is sent. `form` is sent as the
    * form-encoded body of a POST. Throws Error("stripe: unreachable") when no answer came.
    */
-  call(method: "GET" | "POST", path: string, form?: StripeForm, idempotencyKey?: string): Promise<StripeAnswer>;
+  call(method: "GET" | "POST" | "DELETE", path: string, form?: StripeForm, idempotencyKey?: string): Promise<StripeAnswer>;
 }
 
 /** The paths the platform calls: /v1/ and letters, digits, underscores and slashes only. */

@@ -2,7 +2,8 @@
 // on (src/dash/routes.ts registers them only then; without the settings each is the app's own
 // 404 and no page, script or request of billing exists). Every sentence is from the approved
 // mockups (Files/Mythicshot billing/billing-mockups.html), sections 2, 3 and 5; the Subscribe
-// page's three sentences are the owner's embedded-checkout wording, each one constant below.
+// page's three sentences are the owner's approved embedded-checkout wording, and the run-out
+// trial's two (TRIAL_OVER_WORDS) are the owner's wording pending approval, each one constant.
 //
 // - BILLING_JS, /dash/billing.js: loaded by the shared script (src/dash/script.ts) on every
 //   dashboard page when the session answer says `billing: true`. It asks GET /api/v1/billing
@@ -25,12 +26,21 @@ import { RETURN_PATH, SUBSCRIBE_PATH } from "../billing-rules.ts";
 import { STRIPE_JS_URL } from "../stripe.ts";
 import { dashHtml } from "./shell.ts";
 
-/** The Subscribe page's wording (pending the owner's approval), one sentence each. */
+/** The Subscribe page's wording (approved by the owner), one sentence each. */
 export const SUBSCRIBE_WORDS = {
   heading: "Subscribe to Mythicshot Essentials",
   summary: "$7 a month, plus tax where it applies. 5 GB for tours, images and clips. Cancel any time.",
   seller: "The payment form below is run by Stripe. The seller is Link, a Stripe company, so your receipt and card statement show Link, not Mythicshot. We never see your card.",
   back: "Back to your account",
+} as const;
+
+/**
+ * A trial that has run out (wording pending the owner's approval): the notice strip's sentences
+ * (the first in bold, as every notice's lead) and the Billing card's row in place of "Trial ends".
+ */
+export const TRIAL_OVER_WORDS = {
+  strip: "Your trial has ended. You can view, download and delete, but not publish. Subscribe to keep your tours, images and clips.",
+  row: "Trial ended",
 } as const;
 
 /** The approved words of the notices and the Billing card (mockup sections 2 and 3). */
@@ -94,6 +104,7 @@ const COMMON = `  var MONTHS = ${JSON.stringify(MONTHS)};
 export const BILLING_JS = `(function () {
   "use strict";
   var W = ${JSON.stringify(WORDS)};
+  var OVER = ${JSON.stringify(TRIAL_OVER_WORDS)};
 ${COMMON}
 
   // A link to the Subscribe page, as a button.
@@ -148,6 +159,11 @@ ${COMMON}
     } else if (s.state === "trial" && days !== null) {
       kind = "warn";
       text = [[W.endsIn + days + (days === 1 ? W.endsInDay : W.endsInDays), true], [W.keep + dateOf(s.removed_at) + W.removed, false]];
+      action = subscribeLink(W.subscribe);
+    } else if (s.state === "trial_over") {
+      kind = "bad";
+      var cut = OVER.strip.indexOf(". ") + 1;
+      text = [[OVER.strip.slice(0, cut), true], [OVER.strip.slice(cut), false]];
       action = subscribeLink(W.subscribe);
     } else if (s.state === "past_due") {
       kind = "warn";
@@ -206,7 +222,7 @@ ${COMMON}
     if (s.state === "trial" || s.state === "trial_over") {
       title.textContent = W.trial;
       meter(c, s);
-      c.appendChild(row(W.trialEnds, dateOf(s.trial_ends_at)));
+      c.appendChild(row(s.state === "trial_over" ? OVER.row : W.trialEnds, dateOf(s.trial_ends_at)));
       c.appendChild(row(W.afterThat, W.contentRemovedAfter));
       c.appendChild(el("p", "hint", W.trialText));
       acts.appendChild(subscribeLink(W.subscribe));
@@ -321,9 +337,16 @@ const RETURN_MAIN = `  <section class="billing-page" aria-live="polite">
 
 export const RETURN_HTML = dashHtml({ title: "Account", active: "account", main: RETURN_MAIN, script: "/dash/billing-return.js" });
 
-/** How often, and how many times, the return page asks the workspace's state while it waits. */
-const POLL_MS = 2000;
-const POLLS = 90;
+/**
+ * How the return page waits, within LIMITS_BILLING.checkoutState: it asks Stripe about the
+ * checkout (with session_id) at most CHECKOUT_ASKS times, and otherwise reads the workspace's
+ * own stored state, which asks Stripe nothing, with a wait that grows from POLL_FIRST_MS to
+ * POLL_MOST_MS, at most POLLS times in all.
+ */
+const CHECKOUT_ASKS = 3;
+const POLL_FIRST_MS = 2000;
+const POLL_MOST_MS = 15000;
+const POLLS = 60;
 
 export const RETURN_JS = `(function () {
   "use strict";
@@ -334,12 +357,24 @@ export const RETURN_JS = `(function () {
   }
   // The checkout's id Stripe put in the address, when it is of a checkout's shape; else none.
   var match = /(?:^|&)session_id=(cs_[A-Za-z0-9_]{1,250})(?:&|$)/.exec(location.search.slice(1));
-  var path = "/api/v1/billing" + (match !== null ? "?session_id=" + match[1] : "");
+  var CHECKOUT_ASKS = ${CHECKOUT_ASKS};
+  var asks = 0;
   var tries = 0;
+  var wait = ${POLL_FIRST_MS};
+  // The checkout's state is asked only while it may tell something new: first, and after Stripe could not be asked.
+  var askCheckout = match !== null;
+  function later() {
+    if (tries >= ${POLLS}) return;
+    setTimeout(look, wait);
+    wait = Math.min(Math.round(wait * 1.5), ${POLL_MOST_MS});
+  }
   function look() {
     tries += 1;
-    Dash.api("GET", path).then(function (res) {
+    var withCheckout = askCheckout && asks < CHECKOUT_ASKS;
+    if (withCheckout) asks += 1;
+    Dash.api("GET", "/api/v1/billing" + (withCheckout ? "?session_id=" + match[1] : "")).then(function (res) {
       var s = res.data;
+      if (res.status === 429) { show("return-waiting"); askCheckout = false; later(); return; }
       if (res.status !== 200 || s === null || typeof s !== "object") {
         $("dash-load").textContent = Dash.failure(res);
         return;
@@ -348,13 +383,27 @@ export const RETURN_JS = `(function () {
         show("return-done");
         return;
       }
-      // Paid at Stripe, and the notice not taken yet (or Stripe could not be asked): wait for it.
-      if (s.checkout === "complete" || s.checkout === "unknown") {
+      // Stripe is still confirming the payment: wait for its notice.
+      if (s.confirming === true) {
         show("return-waiting");
-        if (tries < ${POLLS}) setTimeout(look, ${POLL_MS});
+        askCheckout = false;
+        later();
         return;
       }
-      // Still open, expired, or no checkout of this workspace: nothing was paid.
+      if (withCheckout) {
+        // Paid at Stripe and the notice not taken yet, or Stripe could not be asked: wait.
+        if (s.checkout === "complete" || s.checkout === "unknown") {
+          show("return-waiting");
+          askCheckout = s.checkout === "unknown";
+          later();
+          return;
+        }
+        // Still open, expired, or no checkout of this workspace: nothing was paid.
+        show("return-left");
+        return;
+      }
+      // Waiting on the workspace's own state only.
+      if (!$("return-waiting").hidden) { later(); return; }
       show("return-left");
     }, function () {
       $("dash-load").textContent = Dash.failure(null);
