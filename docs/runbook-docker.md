@@ -1281,7 +1281,7 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `invite_resent` | The admin sent an invite again with a new link; the subject is the invite |
 | `invite_cancelled` | The admin cancelled an invite; the subject is the invite |
 | `invite_accepted` | An invite was accepted and its account made; the account and the workspace are the new ones, and the subject is the invite. A `signin` row for the new session comes with it |
-| `account_disabled` | The admin disabled an account; the account is the admin, the subject the disabled account |
+| `account_disabled` | The admin disabled an account; the account is the admin, the subject the disabled account. On a site with billing a disable does not cancel the workspace's subscription (it can be undone); only deleting the account does |
 | `account_enabled` | The admin enabled a disabled account again; the account is the admin, the subject the enabled account |
 | `account_deleted` | The admin's delete of a disabled account finished: the account, its workspace and everything in it are gone. The account is the admin who sent the last delete request, the workspace and the subject are the deleted workspace's and account's ids. Nothing else of the person is recorded, and the rows recorded about the account before stay |
 | `tour_access_changed` | Who may view a tour changed, or its list of addresses did; the subject is the tour, the account is the one signed in (none when a token made the change), and the detail holds the settings and the list's sizes, such as `{"from":"public","to":"people","viewers_before":0,"viewers":3,"by":"session"}`. Made public from a published tour, it is written when the move of its pictures finishes. No address is recorded |
@@ -1297,6 +1297,7 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `billing_unlinked_subscription` | On a site with billing: Stripe told of a subscription of this workspace's customer that no checkout of it started; it was not linked |
 | `billing_payment_failed` | On a site with billing: a payment failed, at the checkout (`{"stage":"checkout"}`) or at a renewal (`{"stage":"renewal"}`) |
 | `billing_cancelled_for_deletion` | On a site with billing: the admin's delete of an account cancelled its workspace's subscription at Stripe first, at once and without a refund; the account is the admin |
+| `billing_stale_confirmed` | On a site with billing: Stripe confirmed a subscription live although its paid period ended more than 3 days ago; it is trusted for a day without asking again |
 | `billing_risk` | On a site with billing: a refund, a dispute or an early fraud warning on this workspace's customer (`{"kind":"refund"}`, `dispute` or `fraud_warning`); the subscription was read back from Stripe after it |
 
 ## Troubleshooting by symptom

@@ -946,7 +946,7 @@ function schemas(): Record<string, Schema> {
         billing_problems: object(
           ["count", "recent"],
           {
-            count: whole("How many billing problems the audit record holds: paid checkouts no workspace stored, and second paid subscriptions of one workspace."),
+            count: whole("How many billing problems the audit record holds: paid checkouts no workspace stored, second paid subscriptions of one workspace, and paid checkouts that named a workspace's checkout but not its reference or customer."),
             recent: {
               type: "array",
               maxItems: BILLING_PROBLEMS_LISTED,
@@ -954,7 +954,7 @@ function schemas(): Record<string, Schema> {
               items: object(
                 ["event", "workspace_id", "at"],
                 {
-                  event: { type: "string", enum: ["billing_checkout_unmatched", "billing_second_subscription"], description: "What happened." },
+                  event: { type: "string", enum: ["billing_checkout_unmatched", "billing_second_subscription", "billing_checkout_mismatch"], description: "What happened: a paid checkout no workspace stored, a second paid subscription of one workspace, or a paid checkout that named a workspace's checkout but not its reference or customer." },
                   workspace_id: { type: ["string", "null"], description: "The workspace it was about, or null when no workspace could be told." },
                   at: whole("When, in milliseconds since 1970."),
                 },
