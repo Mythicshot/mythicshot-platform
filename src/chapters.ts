@@ -56,15 +56,15 @@ import type { Hono } from "hono";
 import { requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, readCapped } from "./http.ts";
 import { isNotNullViolation, type Deps, type Stmt } from "./ports.ts";
-import { MAX_PUBLISH_STEPS } from "./publish.ts";
 import { REPLACED_FILES_PER_CALL, clearReplaced } from "./replace.ts";
-import { removeClosedReplaces } from "./uploads.ts";
+import { MAX_CHAPTERS, removeClosedReplaces } from "./uploads.ts";
 
 /**
- * The most ids one PUT lists. Every chapter has at least one step and a tour publishes at most
- * MAX_PUBLISH_STEPS, so a tour that can be published has no more chapters than this.
+ * The most ids one PUT lists: the most chapters a tour has, which uploads hold it to
+ * (src/uploads.ts). A tour that got more before 0.1.56 is brought down to it by one PUT that
+ * removes the rest, and from then on takes any change.
  */
-export const MAX_CHAPTERS = MAX_PUBLISH_STEPS;
+export { MAX_CHAPTERS };
 /** The PUT body: MAX_CHAPTERS ids of 27 characters, quoted and separated, and the revision. */
 export const CHAPTERS_BODY_BYTES = 16_384;
 /** Pages of the removed pictures' files one PUT deletes (three calls each); later requests delete the rest. */

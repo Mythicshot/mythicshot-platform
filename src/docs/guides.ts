@@ -176,7 +176,7 @@ export const CODE_MEANINGS: Readonly<Record<string, string>> = {
   publish_busy: "A publish of the tour is in progress or just starting; try again.",
   tour_changed: "The tour changed since its chapters were read (an upload, a replace or another change of its chapters); read them again. Nothing was changed.",
   last_chapter: "A tour keeps at least one chapter; to remove them all, delete the tour. Nothing was changed.",
-  too_many_chapters: "A change of a tour's chapters lists at most 400 ids. Nothing was changed.",
+  too_many_chapters: "A tour has at most 400 chapters: a change of its chapters lists at most 400 ids, and a new chapter for a tour that has 400 is refused. Nothing was changed.",
   publish_cancelled: "That publish was stopped before it finished; publish again to start over.",
   too_many_uploads: "The workspace has its number of open uploads; finish or cancel one. The retry-after header says how long to wait.",
   too_many_items: "The workspace started, or sent parts or previews of, as many shared items as it may in an hour, or too many sends of one item have not finished. The retry-after header says how long to wait.",
