@@ -5,6 +5,7 @@
 // through test/bundle.ts, which holds each one to the call budget.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
+import { newId } from "../src/auth.ts";
 import { MAX_CHAPTERS } from "../src/chapters.ts";
 import type { Deps, Stmt } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
@@ -521,5 +522,206 @@ describe("chapters: interleavings", { timeout: 120_000 }, () => {
     expect((await snapshotOf(deps, t.tour))!.chapters.map((c: Json) => c.title)).toEqual(["Third", "First"]);
     expect((await tours(deps, a.token))[0].unpublished_changes).toBe(false);
     expect(await ctx.draftKeys()).toEqual(await stepKeys(deps, t.tour));
+  });
+});
+
+/**
+ * Adds `n` chapters without steps to the end of `tourId`, straight into the database: the
+ * quickest way to a tour at or over MAX_CHAPTERS (through the routes each would be an upload).
+ */
+async function bareChapters(deps: Deps, tourId: string, n: number): Promise<string[]> {
+  const ids = Array.from({ length: n }, () => newId("ch"));
+  await deps.db.run(
+    `INSERT INTO chapter (id, tour_id, title, description, position)
+     SELECT j.value, ?, 'Bare ' || j.key, NULL, (SELECT coalesce(max(position) + 1, 0) FROM chapter WHERE tour_id = ?) + j.key FROM json_each(?) j`,
+    [tourId, tourId, JSON.stringify(ids)],
+  );
+  return ids;
+}
+const chapterCount = async (deps: Deps, tourId: string) => (await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM chapter WHERE tour_id = ?", [tourId]))!.n;
+const FULL = { error: "too_many_chapters", detail: `the tour already has ${MAX_CHAPTERS} chapters, the most a tour may have; remove a chapter first (PUT /api/v1/tours/{id}/chapters)` };
+
+describe("chapters: at most MAX_CHAPTERS in a tour (0.1.56)", { timeout: 120_000 }, () => {
+  it("a new chapter is refused at its create once the tour has MAX_CHAPTERS, changing nothing; a replace and another tour still work", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const first = await upload(deps, a.token, [1], "First");
+    await bareChapters(deps, first.tour_id, MAX_CHAPTERS - 1);
+    expect(await chapterCount(deps, first.tour_id)).toBe(MAX_CHAPTERS);
+    const before = await everything(ctx);
+    const r = await createUpload(deps, a.token, manifestOf([2], "One too many"), { kind: "chapter", tour_id: first.tour_id });
+    expect([r.status, r.json]).toEqual([409, FULL]);
+    expect(await everything(ctx)).toEqual(before);
+    // A replace keeps the number of chapters, so it is not held to the cap.
+    const replaced = await openReplace(deps, a.token, first, [3]);
+    expect(replaced.status, replaced.text).toBe(201);
+    expect((await commit(deps, a.token, replaced.json.upload_id)).status).toBe(201);
+    // Another tour has its own count.
+    await upload(deps, a.token, [4], "Another tour");
+    expect(await chapterCount(deps, first.tour_id)).toBe(MAX_CHAPTERS);
+  });
+
+  it("two uploads started below the cap: the one that would go over it is refused at its commit, changing nothing, and can be cancelled", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const first = await upload(deps, a.token, [1], "First");
+    await bareChapters(deps, first.tour_id, MAX_CHAPTERS - 2);
+    const opened: string[] = [];
+    for (const pic of [5, 6]) {
+      const m = manifestOf([pic], `Late ${pic}`);
+      const created = await createUpload(deps, a.token, m, { kind: "chapter", tour_id: first.tour_id });
+      expect(created.status, created.text).toBe(201);
+      expect((await putStep(deps, a.token, created.json.upload_id, 1, picture(m, 0, pic))).status).toBe(204);
+      opened.push(created.json.upload_id);
+    }
+    expect((await commit(deps, a.token, opened[0])).status).toBe(201);
+    expect(await chapterCount(deps, first.tour_id)).toBe(MAX_CHAPTERS);
+    const before = await everything(ctx);
+    const refused = await commit(deps, a.token, opened[1]);
+    expect([refused.status, refused.json]).toEqual([409, FULL]);
+    expect(await everything(ctx)).toEqual(before);
+    // The upload is still open: it is cancelled as any other, and takes its picture with it.
+    expect((await send(deps, "DELETE", `/api/v1/uploads/${opened[1]}`, { token: a.token })).status).toBe(204);
+    expect(await deps.db.all("SELECT id FROM upload")).toEqual([]);
+    expect(await ctx.draftKeys()).toEqual(await stepKeys(deps, first.tour_id));
+    // Once a chapter is removed, there is room for one again.
+    const read = (await list(deps, a.token, first.tour_id)).json;
+    const keep = read.chapters.slice(1).map((c: Json) => c.id);
+    expect((await change(deps, a.token, first.tour_id, { revision: read.revision, chapters: keep })).status).toBe(200);
+    await upload(deps, a.token, [7], "Room again", first.tour_id);
+    expect(await chapterCount(deps, first.tour_id)).toBe(MAX_CHAPTERS);
+  });
+
+  it("refused for the cap at its insert, an upload that is still open is never answered as not found, even when room appears at once; its next commit lands", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const first = await upload(deps, a.token, [1], "First");
+    const bare = await bareChapters(deps, first.tour_id, MAX_CHAPTERS - 2);
+    const m = manifestOf([5], "Late");
+    const created = await createUpload(deps, a.token, m, { kind: "chapter", tour_id: first.tour_id });
+    expect(created.status, created.text).toBe(201);
+    const id = created.json.upload_id as string;
+    expect((await putStep(deps, a.token, id, 1, picture(m, 0, 5))).status).toBe(204);
+    await bareChapters(deps, first.tour_id, 1);
+    expect(await chapterCount(deps, first.tour_id)).toBe(MAX_CHAPTERS);
+    // Between the refused insert and the look that follows it, a change of the chapters makes room.
+    const real = deps.db.first.bind(deps.db);
+    let fired = false;
+    deps.db.first = async (sql: string, params?: unknown[]) => {
+      if (!fired && sql.includes("FROM chapter c JOIN tour t ON t.id = c.tour_id WHERE c.id = ?")) {
+        fired = true;
+        await deps.db.run("DELETE FROM chapter WHERE id = ?", [bare[0]]);
+      }
+      return real(sql, params as never) as never;
+    };
+    const refused = await commit(deps, a.token, id);
+    deps.db.first = real;
+    expect(fired).toBe(true);
+    expect([refused.status, refused.json]).toEqual([409, FULL]);
+    expect(await deps.db.first("SELECT closing_at FROM upload WHERE id = ?", [id])).toEqual({ closing_at: null });
+    // Sent again, now that there is room, the same upload lands.
+    const again = await commit(deps, a.token, id);
+    expect(again.status, again.text).toBe(201);
+    expect(again.json.chapter_id).toBe("ch_" + id.slice(3));
+    expect(await chapterCount(deps, first.tour_id)).toBe(MAX_CHAPTERS);
+    expect(await deps.db.all("SELECT id FROM upload")).toEqual([]);
+  });
+
+  it("refused for the cap, an open upload can be cancelled, and another workspace's commit of it is no upload, byte for byte", async () => {
+    const ctx = await setup();
+    const { deps, a, b } = ctx;
+    const first = await upload(deps, a.token, [1], "First");
+    await bareChapters(deps, first.tour_id, MAX_CHAPTERS - 2);
+    const m = manifestOf([5], "Late");
+    const id = (await createUpload(deps, a.token, m, { kind: "chapter", tour_id: first.tour_id })).json.upload_id as string;
+    expect((await putStep(deps, a.token, id, 1, picture(m, 0, 5))).status).toBe(204);
+    await bareChapters(deps, first.tour_id, 1);
+    expect((await commit(deps, a.token, id)).json).toEqual(FULL);
+    const theirs = await commit(deps, b.token, id);
+    const nobodys = await commit(deps, b.token, "up_" + "0".repeat(24));
+    expect([theirs.status, theirs.text]).toEqual([404, '{"error":"not_found","detail":"no such upload"}']);
+    expect([nobodys.status, nobodys.text]).toEqual([theirs.status, theirs.text]);
+    expect((await send(deps, "DELETE", `/api/v1/uploads/${id}`, { token: a.token })).status).toBe(204);
+    expect(await deps.db.all("SELECT id FROM upload")).toEqual([]);
+  });
+
+  it("the cap counts the caller's own tour only: another workspace's full tour is no tour, and its count changes nothing here", async () => {
+    const ctx = await setup();
+    const { deps, a, b } = ctx;
+    const mine = await upload(deps, a.token, [1], "Mine");
+    const theirs = await upload(deps, b.token, [2], "Theirs");
+    await bareChapters(deps, theirs.tour_id, MAX_CHAPTERS - 1);
+    const before = await everything(ctx);
+    const r = await createUpload(deps, a.token, manifestOf([3], "Into theirs"), { kind: "chapter", tour_id: theirs.tour_id });
+    expect([r.status, r.text]).toEqual([404, '{"error":"not_found","detail":"no such tour"}']);
+    expect(await everything(ctx)).toEqual(before);
+    // The caller's own tour takes a chapter while theirs is full.
+    await upload(deps, a.token, [4], "Mine too", mine.tour_id);
+    expect(await chapterCount(deps, mine.tour_id)).toBe(2);
+    expect(await chapterCount(deps, theirs.tour_id)).toBe(MAX_CHAPTERS);
+  });
+
+  it("a tour already over the cap (made before it) is never stuck: one change down to MAX_CHAPTERS is taken, and from then on any change", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const first = await upload(deps, a.token, [1], "First");
+    await bareChapters(deps, first.tour_id, MAX_CHAPTERS + 49);
+    const read = (await list(deps, a.token, first.tour_id)).json;
+    expect(read.chapters).toHaveLength(MAX_CHAPTERS + 50);
+    const all = read.chapters.map((c: Json) => c.id as string);
+    // Keeping every chapter lists more ids than a change takes: refused, nothing changed.
+    const before = await everything(ctx);
+    const tooMany = await change(deps, a.token, first.tour_id, { revision: read.revision, chapters: all });
+    expect([tooMany.status, tooMany.json.error]).toEqual([400, "too_many_chapters"]);
+    expect(await everything(ctx)).toEqual(before);
+    // Removing the 50 over the cap, and moving one, in one change (the box's Save) is taken.
+    const kept = [all[1], all[0], ...all.slice(2, MAX_CHAPTERS)];
+    const down = await change(deps, a.token, first.tour_id, { revision: read.revision, chapters: kept });
+    expect(down.status, down.text).toBe(200);
+    expect(down.json.chapters.map((c: Json) => c.id)).toEqual(kept);
+    // At the cap, a reorder alone is taken, and a new chapter is refused.
+    expect((await change(deps, a.token, first.tour_id, { revision: down.json.revision, chapters: [...kept].reverse() })).status).toBe(200);
+    expect((await createUpload(deps, a.token, manifestOf([2], "More"), { kind: "chapter", tour_id: first.tour_id })).json).toEqual(FULL);
+  });
+});
+
+describe("chapters: the upload time always belongs to the chapter's present pictures (0.1.56)", { timeout: 60_000 }, () => {
+  it("a replace written without the time (an older build on the migrated database) leaves no time rather than the earlier one", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const made = ctx.at();
+    const t = await upload(deps, a.token, [1, 2], "First");
+    expect((await list(deps, a.token, t.tour_id)).json.chapters[0].uploaded_at).toBe(made);
+    // What every build before 0.1.55 writes when a replace commits: the revision and the
+    // versions, never uploaded_at, which it does not know.
+    ctx.advance(60_000);
+    await deps.db.run(
+      "UPDATE chapter SET revision = ?, replaced_version = (SELECT draft_version FROM tour WHERE id = ?), replaced_from = (SELECT draft_version FROM tour WHERE id = ?) WHERE id = ?",
+      ["up_" + "0".repeat(24), t.tour_id, t.tour_id, t.chapter_id],
+    );
+    expect((await list(deps, a.token, t.tour_id)).json.chapters[0].uploaded_at).toBeNull();
+    // This build's next replace dates it again.
+    ctx.advance(60_000);
+    const replaced = await openReplace(deps, a.token, t, [3]);
+    expect((await commit(deps, a.token, replaced.json.upload_id)).status).toBe(201);
+    expect((await list(deps, a.token, t.tour_id)).json.chapters[0].uploaded_at).toBe(made + 120_000);
+  });
+
+  it("two replaces in the same millisecond both leave the chapter dated; a reorder and a rename keep the dates", async () => {
+    const ctx = await setup();
+    const { deps, a } = ctx;
+    const made = ctx.at();
+    const t = await upload(deps, a.token, [1], "First");
+    const second = await upload(deps, a.token, [2], "Second", t.tour_id);
+    for (const pic of [3, 4]) {
+      const r = await openReplace(deps, a.token, t, [pic]);
+      expect((await commit(deps, a.token, r.json.upload_id)).status).toBe(201);
+      expect((await list(deps, a.token, t.tour_id)).json.chapters[0].uploaded_at).toBe(made);
+    }
+    ctx.advance(60_000);
+    const read = (await list(deps, a.token, t.tour_id)).json;
+    expect((await change(deps, a.token, t.tour_id, { revision: read.revision, chapters: [second.chapter_id, t.chapter_id] })).status).toBe(200);
+    expect((await send(deps, "PATCH", `/api/v1/tours/${t.tour_id}`, { token: a.token, body: JSON.stringify({ title: "Renamed" }), headers: JSON_HEADERS })).status).toBe(200);
+    expect((await list(deps, a.token, t.tour_id)).json.chapters.map((c: Json) => c.uploaded_at)).toEqual([made, made]);
   });
 });

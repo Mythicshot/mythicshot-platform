@@ -23,6 +23,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
 import { encodeAccountCursor } from "../src/admin-api.ts";
 import { createApp } from "../src/app.ts";
+import { newId } from "../src/auth.ts";
+import { MAX_CHAPTERS } from "../src/chapters.ts";
 import { setClientAddress } from "../src/client.ts";
 import { openapi } from "../src/docs/openapi.ts";
 import type { Deps } from "../src/ports.ts";
@@ -772,6 +774,23 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     };
     refused(await api.create(a.token, small(1, "Late"), { kind: "replace", tour_id: t.tour_id, chapter_id: second.chapter_id }), 409, "chapter_changed");
     expect(fired).toBe(true);
+    deps.db.first = real;
+
+    // A tour with MAX_CHAPTERS - 1 chapters (filled in straight, as each would be an upload):
+    // two new chapters started side by side, and the second commit and any later create refused.
+    const ids = Array.from({ length: MAX_CHAPTERS - 3 }, () => newId("ch"));
+    await deps.db.run("INSERT INTO chapter (id, tour_id, title, description, position) SELECT j.value, ?, 'Bare', NULL, 10 + j.key FROM json_each(?) j", [t.tour_id, JSON.stringify(ids)]);
+    const sideBySide: string[] = [];
+    for (const pic of [8, 9]) {
+      const created = await api.create(a.token, small(1, "Side"), { kind: "chapter", tour_id: t.tour_id });
+      expect(created.status, created.text).toBe(201);
+      expect((await api.step(a.token, created.json.upload_id, 1, stepImage(small(1).steps[0], pic))).status).toBe(204);
+      sideBySide.push(created.json.upload_id);
+    }
+    expect((await api.commit(a.token, sideBySide[0])).status).toBe(201);
+    refused(await api.commit(a.token, sideBySide[1]), 409, "too_many_chapters");
+    expect((await api.cancel(a.token, sideBySide[1])).status).toBe(204);
+    refused(await api.create(a.token, small(1, "Full"), { kind: "chapter", tour_id: t.tour_id }), 409, "too_many_chapters");
   });
 
   it("me has addresses only with two addresses, and health names the address it was asked on", async () => {

@@ -244,15 +244,25 @@ export function replaceStatements(deps: Deps, auth: Auth, up: ReplaceUpload, m: 
   // keeps the version of the first replace of a run: it stays when the chapter's previous
   // replace made the version just before this one, so nothing else changed the draft in
   // between, and starts again at this version otherwise. (Every right-hand side reads the
-  // row as it was before this statement.) With `stamped` the chapter also records when it
-  // was uploaded (migration 0019; chapterTimesMissing tells a database before it).
+  // row as it was before this statement.)
   const version = "(SELECT draft_version FROM tour WHERE id = ? AND workspace_id = ?)";
   stmts.push({
     sql: `UPDATE chapter SET revision = ?, replaced_version = ${version},
-                             replaced_from = CASE WHEN replaced_version = ${version} - 1 THEN replaced_from ELSE ${version} END${stamped ? ", uploaded_at = ?" : ""}
+                             replaced_from = CASE WHEN replaced_version = ${version} - 1 THEN replaced_from ELSE ${version} END
            WHERE id = ? AND tour_id IN (SELECT id FROM tour WHERE id = ? AND workspace_id = ?)`,
-    params: [up.id, tourId, ws, tourId, ws, tourId, ws, ...(stamped ? [now] : []), chapterId, tourId, ws],
+    params: [up.id, tourId, ws, tourId, ws, tourId, ws, chapterId, tourId, ws],
   });
+  // With `stamped` the chapter records when it was uploaded (migration 0019;
+  // chapterTimesMissing tells a database before it), in a statement of its own after the
+  // revision's: migration 0020's trigger empties the time whenever the revision changes, so
+  // that a replace by a build that does not know the column (an older build on a migrated
+  // database) leaves no time rather than the time of the pictures it replaced.
+  if (stamped) {
+    stmts.push({
+      sql: "UPDATE chapter SET uploaded_at = ? WHERE id = ? AND revision = ? AND tour_id IN (SELECT id FROM tour WHERE id = ? AND workspace_id = ?)",
+      params: [now, chapterId, up.id, tourId, ws],
+    });
+  }
   stmts.push({ sql: "DELETE FROM upload_step WHERE upload_id IN (SELECT id FROM upload WHERE id = ? AND workspace_id = ?)", params: [up.id, ws] });
   stmts.push({ sql: "DELETE FROM upload WHERE id = ? AND workspace_id = ?", params: [up.id, ws] });
   return stmts;

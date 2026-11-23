@@ -1265,6 +1265,29 @@ describe("one workspace against another", () => {
     }
   });
 
+  it("the most chapters a tour has (0.1.56) counts the caller's own tour only: the other's full tour answers as no tour, and neither count moves the other", SLOW, async () => {
+    const w = await build();
+    const max = 400;
+    for (const [mine, theirs] of directions(w)) {
+      // Their draft tour is full (filled in straight: through the routes each chapter would be an upload).
+      const have = (await w.deps.db.first<{ n: number }>("SELECT count(*) AS n FROM chapter WHERE tour_id = ?", [theirs.ids.draft.tour]))!.n;
+      const fill = Array.from({ length: max - have }, () => newId("ch"));
+      await w.deps.db.run("INSERT INTO chapter (id, tour_id, title, description, position) SELECT j.value, ?, 'Bare', NULL, 1000 + j.key FROM json_each(?) j", [theirs.ids.draft.tour, JSON.stringify(fill)]);
+      for (const credential of CREDENTIALS) {
+        const what = `(as ${mine.name}, by ${credential.name})`;
+        const before = await snapshotOf(w.deps, theirs, w.keys);
+        const req: Req = { what: "a new chapter for their full tour", method: "POST", path: "/api/v1/uploads", json: createInto(theirs.ids, { kind: "chapter", tour_id: theirs.ids.draft.tour }), field: "tour_id", expect: NO_TOUR };
+        expectAnswer(await fire(w.deps, req, credential.of(mine)), req, `${req.what} ${what}`, credential.name);
+        // The caller's own tour, far from full, still takes a new chapter.
+        const own = await fire(w.deps, { what: "own", method: "POST", path: "/api/v1/uploads", json: createInto(mine.ids, { kind: "chapter", tour_id: mine.ids.draft.tour }), expect: NO_TOUR }, credential.of(mine));
+        expect(own.status, `${what}: ${own.text}`).toBe(201);
+        await send(w.deps, "DELETE", `/api/v1/uploads/${own.json.upload_id}`, { token: mine.token });
+        expect(await snapshotOf(w.deps, theirs, w.keys), `${what} changed something of ${theirs.name}`).toEqual(before);
+      }
+      await w.deps.db.run("DELETE FROM chapter WHERE id IN (SELECT value FROM json_each(?))", [JSON.stringify(fill)]);
+    }
+  });
+
   it("who may view, stated at a create or a first publish on a site that can mail, reaches nothing of the other workspace", SLOW, async () => {
     const w = await build({ siteHost: "tours.example.com" });
     for (const [mine, theirs] of directions(w)) {

@@ -32,7 +32,7 @@ import { apiError, json, noContent, readCapped } from "./http.ts";
 import { UPLOAD_MAX_AGE_MS } from "./limits.ts";
 import { LIMITS, parseManifest, type Manifest } from "./manifest.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
-import { housekeeping } from "./publish.ts";
+import { MAX_PUBLISH_STEPS, housekeeping } from "./publish.ts";
 import { chapterPictures, chapterTimesMissing, clearReplaced, findChapter, firstChapterSql, parseHashes, replaceAnswer, replaceStatements, replacedBytes, reusedStatement, reusedSteps, type Reused } from "./replace.ts";
 import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, type ImageType } from "./sniff.ts";
 import { ALLOWANCE_OF_SQL, USED_SQL, allowanceParams, reservedFor, storageFull, usageOf } from "./usage.ts";
@@ -52,6 +52,14 @@ const CREATE_BODY_WITH_HASHES_BYTES = CREATE_BODY_BYTES + 14_000;
 const SLUG_ATTEMPTS = 5;
 /** Open uploads per workspace when the config sets no other number. */
 export const DEFAULT_MAX_OPEN_UPLOADS = 5;
+/**
+ * The most chapters a tour has (0.1.56). Every chapter has at least one step and a tour
+ * publishes at most MAX_PUBLISH_STEPS, so a tour with more could never be published, and a
+ * change of its chapters (src/chapters.ts) lists at most this many ids. A new chapter is
+ * refused at its create and, for uploads started side by side, at its commit, once the tour
+ * has this many; a replace keeps the number and a new tour has one.
+ */
+export const MAX_CHAPTERS = MAX_PUBLISH_STEPS;
 /** Seconds a client refused by the open-upload cap is told to wait. */
 const CAP_RETRY_AFTER_S = 60;
 /** An unfinished step claim older than this may be taken over by a resend. */
@@ -206,6 +214,9 @@ async function sweep(deps: Deps, workspaceId: string): Promise<void> {
   }
 }
 
+/** A new chapter for a tour that already has MAX_CHAPTERS. */
+const tourFull = () => apiError(409, "too_many_chapters", `the tour already has ${MAX_CHAPTERS} chapters, the most a tour may have; remove a chapter first (PUT /api/v1/tours/{id}/chapters)`);
+
 /** A random token naming one request's claim on a step. */
 function claimToken(): string {
   return newId("up").slice(3);
@@ -233,7 +244,8 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 const json01 = (v: unknown) => (v === null || v === undefined ? null : JSON.stringify(v));
 
 /**
- * The commit's statements. Each insert of a tour or chapter takes a value only an open upload of this workspace supplies, so it fails (NOT NULL) once the upload is closing or gone.
+ * The commit's statements. Each insert of a tour or chapter takes a value only an open upload of this workspace supplies, so it fails (NOT NULL) once the upload is closing or gone,
+ * and a new chapter's also only while its tour has fewer than MAX_CHAPTERS.
  * With `stamped` the new chapter records when it was uploaded (migration 0019); without, on a
  * database before it, as before.
  */
@@ -265,9 +277,10 @@ function commitStatements(deps: Deps, auth: Auth, up: UploadRow, m: Manifest, to
   } else {
     stmts.push({
       sql: `INSERT INTO chapter (id, tour_id, title, description, position${timeColumn})
-            VALUES (?, (SELECT t.id FROM upload u JOIN tour t ON t.id = u.tour_id WHERE u.id = ? AND u.workspace_id = ? AND u.closing_at IS NULL AND t.workspace_id = ?), ?, NULL,
+            VALUES (?, (SELECT t.id FROM upload u JOIN tour t ON t.id = u.tour_id WHERE u.id = ? AND u.workspace_id = ? AND u.closing_at IS NULL AND t.workspace_id = ?
+                                AND (SELECT count(*) FROM chapter fc WHERE fc.tour_id = t.id) < ?), ?, NULL,
                     (SELECT coalesce(max(position) + 1, 0) FROM chapter WHERE tour_id = ?)${timeValue})`,
-      params: [chapterId, up.id, auth.workspaceId, auth.workspaceId, m.title, tourId, ...time],
+      params: [chapterId, up.id, auth.workspaceId, auth.workspaceId, MAX_CHAPTERS, m.title, tourId, ...time],
     });
     stmts.push({
       sql: "UPDATE tour SET spotlight_dim = coalesce(spotlight_dim, ?), updated_at = ?, draft_version = draft_version + 1 WHERE id = ? AND workspace_id = ?",
@@ -359,8 +372,12 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
     if (t.kind === "chapter") {
       const id = t.tour_id;
       if (typeof id !== "string" || !TOUR_ID.test(id)) return notFound("tour");
-      const tour = await deps.db.first<{ id: string }>("SELECT id FROM tour WHERE id = ? AND workspace_id = ?", [id, auth.workspaceId]);
+      const tour = await deps.db.first<{ id: string; chapters: number }>(
+        "SELECT t.id, (SELECT count(*) FROM chapter c WHERE c.tour_id = t.id) AS chapters FROM tour t WHERE t.id = ? AND t.workspace_id = ?",
+        [id, auth.workspaceId],
+      );
       if (tour === null) return notFound("tour");
+      if (tour.chapters >= MAX_CHAPTERS) return tourFull();
       tourId = tour.id;
     } else if (t.kind === "replace") {
       const id = t.tour_id;
@@ -709,7 +726,18 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
         // Another commit of this upload may have won; then this one answers the same.
         const prior = await committed(deps, auth, up.id);
         if (prior !== null) return json(201, prior);
-        if (!unique) return notFound("upload"); // aborted meanwhile
+        if (!unique) {
+          // The insert took no row. Decided from the upload itself, as the insert saw it: one
+          // that is gone or closing was aborted meanwhile. A new chapter's upload that is still
+          // open was refused for the cap: its tour (which exists while an upload into it does;
+          // a tour's delete removes them in its batch) had MAX_CHAPTERS at that moment. It
+          // stays open, to be cancelled or committed again, and nothing of it was written. The
+          // tour's count is not looked at again: a change of the chapters may have made room
+          // since, and an open upload is never answered as not found.
+          const still = up.tour_id === null ? null : await loadUpload(deps, auth, up.id);
+          if (still !== null && still.closing_at === null) return tourFull();
+          return notFound("upload");
+        }
         if (up.tour_id !== null || attempt >= SLUG_ATTEMPTS) throw err;
         // A new tour's slug or id collided: try again with fresh ones.
       }

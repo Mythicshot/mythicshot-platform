@@ -10,12 +10,21 @@ const ACCOUNT_TABLES = ["audit", "membership", "rate_counter", "session", "signi
  * The triggers of the schema: only migration 0014's four guards, which refuse a public
  * picture or a published text for a restricted tour (an older build's publish or rename), and
  * migration 0016's four, which hold a restricted item's link id apart and keep a link id from
- * naming two items; they do nothing else: each body is one RAISE(ABORT, ...) and no statement
- * that writes.
+ * naming two items, and migration 0018's two, which keep published terms as they are; they do
+ * nothing else: each body is one RAISE(ABORT, ...) and no statement that writes.
  */
 const GUARD_TRIGGERS = ["media_link_names_one_insert", "media_link_names_one_update", "media_restricted_link_insert", "media_restricted_link_update", "restricted_tour_no_public_picture", "restricted_tour_no_public_picture_update", "restricted_tour_stub_insert", "restricted_tour_stub_update", "terms_version_kept", "terms_version_never_deleted"];
+/**
+ * The one trigger that writes (migration 0020): when a chapter's revision changes it empties
+ * that same row's upload time, and nothing else. Held to this exact text, so it can never
+ * grow into a cascade or reach another row.
+ */
+const UPLOAD_TIME_TRIGGER =
+  "CREATE TRIGGER chapter_uploaded_follows_revision AFTER UPDATE OF revision ON chapter WHEN NEW.revision IS NOT OLD.revision BEGIN UPDATE chapter SET uploaded_at = NULL WHERE id = NEW.id; END";
 async function guardTriggers(deps: Deps): Promise<string[]> {
-  const rows = await deps.db.all<{ name: string; sql: string }>("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name");
+  const all = await deps.db.all<{ name: string; sql: string }>("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name");
+  expect(all.filter((r) => r.name === "chapter_uploaded_follows_revision").map((r) => r.sql)).toEqual([UPLOAD_TIME_TRIGGER]);
+  const rows = all.filter((r) => r.name !== "chapter_uploaded_follows_revision");
   for (const r of rows) {
     const body = r.sql.slice(r.sql.toUpperCase().indexOf("BEGIN"));
     expect(body, r.name).toMatch(/^BEGIN\s+SELECT RAISE\(ABORT, '[^;]*'\);\s+END$/);

@@ -407,7 +407,7 @@ function schemas(): Record<string, Schema> {
       position: whole("Its place in the tour, from 0: visitors see the chapters in this order."),
       steps: whole("How many steps it has."),
       pictures: whole("How many picture files its steps use (two steps may share one); removing the chapter deletes them."),
-      uploaded_at: { type: ["integer", "null"], minimum: 0, description: "When it was last uploaded (a new chapter or a replace of it), in milliseconds since 1970. null when that was before version 0.1.55 and is not known, which is so for every chapter but the one a tour was made with." },
+      uploaded_at: { type: ["integer", "null"], minimum: 0, description: "When it was last uploaded (a new chapter or a replace of it), in milliseconds since 1970. null when that is not known: when it was before version 0.1.55, which is so for every chapter but the one a tour was made with, and (since version 0.1.56) when the last replace was made by an earlier version, 0.1.55 included, run on the same database after it was updated to 0.1.56: such a chapter has no upload time until version 0.1.56 or later replaces it again." },
     }),
     ChapterList: object(["revision", "chapters"], {
       revision: whole("The tour's revision: every upload, replace or change of the chapters moves it on. Send it back with a change."),
@@ -1292,7 +1292,7 @@ function paths(): OpenApiDoc["paths"] {
       put: {
         tags: ["Tours"],
         summary: "Reorder and remove a tour's chapters",
-        description: `Sends the ids of the chapters to keep, in their new order, with the revision they were read at. A chapter of the tour that is not listed is removed with its steps, and its pictures are deleted for good. It is one change: all of it is made, or nothing. It changes the draft only: visitors keep seeing the published version until the tour is published again, and until then the tour list says unpublished_changes. The tour keeps its title, link, settings and logo, whichever chapter comes first. When someone uploaded, replaced or changed the chapters since they were read, the answer is 409 tour_changed and nothing is changed: read them again. A replace still being uploaded for a removed chapter, or for the first chapter when another one becomes first, is cancelled (its upload answers 404). A list that changes nothing answers 200 and changes nothing. At most ${n(MAX_CHAPTERS)} ids.`,
+        description: `Sends the ids of the chapters to keep, in their new order, with the revision they were read at. A chapter of the tour that is not listed is removed with its steps, and its pictures are deleted for good. It is one change: all of it is made, or nothing. It changes the draft only: visitors keep seeing the published version until the tour is published again, and until then the tour list says unpublished_changes. The tour keeps its title, link, settings and logo, whichever chapter comes first. When someone uploaded, replaced or changed the chapters since they were read, the answer is 409 tour_changed and nothing is changed: read them again. A replace still being uploaded for a removed chapter, or for the first chapter when another one becomes first, is cancelled (its upload answers 404). A list that changes nothing answers 200 and changes nothing. At most ${n(MAX_CHAPTERS)} ids: since version 0.1.56 a tour has at most ${n(MAX_CHAPTERS)} chapters (an upload of another chapter is refused with 409 too_many_chapters), and a tour that got more before then is brought down to ${n(MAX_CHAPTERS)} by one change that removes the rest, after which it takes any change.`,
         operationId: "changeChapters",
         security: TOKEN,
         parameters: [tourId],
@@ -1369,7 +1369,11 @@ function paths(): OpenApiDoc["paths"] {
           ),
           "401": UNAUTHORIZED,
           "404": refusal("The target's tour is not in this workspace (detail: no such tour), or the chapter is not a chapter of that tour (detail: no such chapter).", "not_found"),
-          "409": refusal("A replace only: the tour's chapters were reordered or removed while this request was being decided, so whether it carries the tour's settings may have changed. Nothing was stored; start again.", "chapter_changed"),
+          "409": refusal(
+            `chapter_changed: a replace only: the tour's chapters were reordered or removed while this request was being decided, so whether it carries the tour's settings may have changed. Nothing was stored; start again. too_many_chapters: a new chapter only (since version 0.1.56): the tour already has ${n(MAX_CHAPTERS)} chapters, the most a tour may have; nothing was stored. Remove a chapter first.`,
+            "chapter_changed",
+            "too_many_chapters",
+          ),
           "413": answer(
             "too_large: the request body is too long. storage_full: the upload would take the workspace over its storage allowance; nothing was stored, and the answer carries the numbers in bytes. Deleting tours, or a larger allowance, makes room; waiting does not.",
             { oneOf: [refusalSchema("too_large"), ref("StorageFull")] },
@@ -1433,9 +1437,10 @@ function paths(): OpenApiDoc["paths"] {
           "401": UNAUTHORIZED,
           "404": noUpload(""),
           "409": refusal(
-            "incomplete: a step's image, or a logo the upload must carry, has not been sent; nothing changes. chapter_changed: another upload replaced the chapter since this one started; nothing changes: cancel this upload and start again.",
+            `incomplete: a step's image, or a logo the upload must carry, has not been sent; nothing changes. chapter_changed: another upload replaced the chapter since this one started; nothing changes: cancel this upload and start again. too_many_chapters: a new chapter only (since version 0.1.56): the tour had ${n(MAX_CHAPTERS)} chapters at the moment of the commit (another upload into it, started beside this one, got there first); nothing changes and the upload stays open: cancel it, or remove a chapter and send the commit again.`,
             "incomplete",
             "chapter_changed",
+            "too_many_chapters",
           ),
         },
       },
