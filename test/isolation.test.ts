@@ -58,6 +58,7 @@ import { hashToken, newId, newToken } from "../src/auth.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { openapi, type OpenApiDoc } from "../src/docs/openapi.ts";
 import { BILLING_CONFIG, eventOf, notify, withBilling, type FakeStripe } from "./fake-stripe.ts";
+import { TRIAL_BYTES } from "../src/billing-rules.ts";
 import type { Hosts } from "../src/hosts.ts";
 import type { Deps } from "../src/ports.ts";
 import { LIMITS_SIGNIN } from "../src/rate.ts";
@@ -1128,7 +1129,8 @@ describe("one workspace against another", () => {
       const online = (kind: string) => of(kind).filter((m) => m.state === "online").length;
       return {
         used_bytes: pictures + logos + uploads + images + gifs,
-        allowance_bytes: null,
+        // Billing is on in this world (no site default): the admin's own workspace is exempt and has no limit, the other is on its trial.
+        allowance_bytes: s.rows.user.some((u) => u.is_admin === 1) ? null : TRIAL_BYTES,
         over: false,
         tours: s.rows.tour.length,
         images: online("image"),
@@ -1363,11 +1365,18 @@ describe("one workspace against another", () => {
     stripe.subscription("sub_ISO_B", "cus_ISO_B", "active");
     const checkoutB = await checkoutOf(w.b);
     expect((await notify(w.deps, eventOf("checkout.session.completed", { id: checkoutB, client_reference_id: w.b.workspaceId, customer: "cus_ISO_B", subscription: "sub_ISO_B", payment_status: "paid" }))).status).toBe(200);
-    // A's own checkout completing with B's reference, or with B's customer, is ignored.
+    // A's own checkout completing with B's reference, or with B's customer, is ignored: B is untouched,
+    // and of A only its audit record gains the two refusals (it is A's own checkout).
+    const bPaid = await snapshotOf(w.deps, w.b, w.keys);
+    const aRow = await w.deps.db.first("SELECT * FROM workspace WHERE id = ?", [w.a.workspaceId]);
     stripe.subscription("sub_ISO_X", "cus_ISO_B", "active");
     const checkoutA = await checkoutOf(w.a);
     await notify(w.deps, eventOf("checkout.session.completed", { id: checkoutA, client_reference_id: w.b.workspaceId, customer: "cus_ISO_B", subscription: "sub_ISO_X", payment_status: "paid" }));
     await notify(w.deps, eventOf("checkout.session.completed", { id: checkoutA, client_reference_id: w.a.workspaceId, customer: "cus_ISO_B", subscription: "sub_ISO_X", payment_status: "paid" }));
+    expect(await snapshotOf(w.deps, w.b, w.keys)).toEqual(bPaid);
+    expect(await w.deps.db.first("SELECT * FROM workspace WHERE id = ?", [w.a.workspaceId])).toEqual(aRow);
+    expect((await w.deps.db.all<{ detail: string }>("SELECT detail FROM audit WHERE event = 'billing_checkout_mismatch' AND workspace_id = ? ORDER BY rowid", [w.a.workspaceId])).map((r) => r.detail)).toEqual(['{"reason":"reference_differs"}', '{"reason":"customer_taken"}']);
+    const aAfterOwn = await snapshotOf(w.deps, w.a, w.keys);
     stripe.subscription("sub_ISO_B", "cus_ISO_B", "past_due");
     stripe.charges.set("ch_ISO", { id: "ch_ISO", customer: "cus_ISO_B" });
     for (const e of [
@@ -1375,7 +1384,8 @@ describe("one workspace against another", () => {
       eventOf("invoice.payment_failed", { id: "in_ISO", customer: "cus_ISO_B" }),
       eventOf("charge.dispute.created", { id: "dp_ISO", charge: "ch_ISO" }),
     ]) expect((await notify(w.deps, e)).status).toBe(200);
-    expect(await snapshotOf(w.deps, w.a, w.keys), "a notice of B's changed something of A").toEqual(aBefore);
+    expect(await snapshotOf(w.deps, w.a, w.keys), "a notice of B's changed something of A").toEqual(aAfterOwn);
+    expect(aBefore.rows.workspace).toEqual(aAfterOwn.rows.workspace);
     expect((await w.deps.db.first<{ s: string }>("SELECT subscription_status AS s FROM workspace WHERE id = ?", [w.b.workspaceId]))!.s).toBe("past_due");
     expect((await fire(w.deps, { method: "POST", path: "/api/v1/billing/portal" }, BY_SESSION.of(w.a))).status).toBe(409);
     expect(stripe.to("/v1/billing_portal/sessions").every((c) => !JSON.stringify(c.form).includes("cus_ISO_B"))).toBe(true);
@@ -1836,7 +1846,9 @@ describe("routes with no owner", () => {
     expect(statuses["GET /r/:name"]).toEqual([200, 200, 404, 404, 404]);
     expect(statuses["GET /r/:name/download"]).toEqual([200, 404]);
     expect(statuses["GET /r/:name/preview"]).toEqual([404, 404]);
-    for (const key of Object.keys(OPEN).filter((k) => !k.includes(" /setup") && !k.includes(":slug") && !k.includes(":name") && !k.endsWith("/signin/complete") && k !== "GET /")) for (const s of statuses[key]) expect(s, key).toBe(200);
+    for (const key of Object.keys(OPEN).filter((k) => !k.includes(" /setup") && !k.includes(":slug") && !k.includes(":name") && !k.endsWith("/signin/complete") && k !== "GET /" && k !== "POST /api/v1/billing/webhook")) for (const s of statuses[key]) expect(s, key).toBe(200);
+    // Stripe's listener refuses a notice without a valid signature, whoever sends it.
+    expect(statuses["POST /api/v1/billing/webhook"]).toEqual([400]);
 
     // A draft's link, the link of a tour whose publish has not finished, and a picture that
     // publish has already copied answer exactly as a name that never existed.
