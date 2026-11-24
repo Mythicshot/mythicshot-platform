@@ -18,12 +18,14 @@
 // the shared script), with a link that opens it in a new tab; hidden otherwise, so without
 // the setting the page reads as before.
 //
-// "Download all my data" (billing mockups, section 7), after the download card, in every state
-// of the account and whether billing is on or off: its heading, its one sentence and a Download
-// button. Download asks POST /api/v1/account/data, then opens the address it answers as a plain
-// download (Dash.saveFile, src/dash/script.ts), so the browser saves the zip as
-// it arrives and the page stays. While it asks, the button is disabled, with no words more; a
-// request that fails says the dashboard's own failure sentence (Dash.failure) under it.
+// "Download all my data" (billing mockups, section 7), after the download card, in every billing
+// state and whether or not billing is on or the site's terms are agreed to: its heading, its one
+// sentence and a Download button. Download asks POST /api/v1/account/data, then opens the address
+// it answers as a plain link (Dash.saveFile, src/dash/script.ts), so the browser saves the zip as
+// it arrives and the page stays; a refused address answers the failure sentence as plain text,
+// which the browser shows and never saves. The button stays disabled, with no words more, until
+// the download has ended: the page asks GET /api/v1/account/data every 3 seconds while it says
+// one is going. An ask that fails says the dashboard's own failure sentence (Dash.failure).
 //
 // Changing the email address, mockup 8's first two boxes: Change is shown only when the
 // session says the site can mail the link (email_change); otherwise one line under the
@@ -325,9 +327,26 @@ export const ACCOUNT_JS = `(function () {
       var url = res.status === 200 && res.data !== null && typeof res.data === "object" ? res.data.url : null;
       if (typeof url !== "string" || !DATA_URL.test(url)) { back(res); return; }
       // A plain download of this site's own address: the browser writes the file as it comes.
-      Dash.saveFile(url, "mythicshot-data.zip");
-      ready();
+      Dash.saveFile(url);
+      watch(ready);
     }, function () { back(null); });
+  }
+
+  // Until the download has ended: the button stays disabled while the server says one of this
+  // workspace is being prepared or sent, asking again every POLL_MS; any other answer gives it back.
+  var POLL_MS = 3000;
+  function wait(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+  function watch(ready) {
+    Dash.api("GET", "/api/v1/account/data").then(function (res) {
+      if (res.status === 401) { Dash.signedOut(); return; }
+      if (res.status === 200 && res.data !== null && typeof res.data === "object" && res.data.running === true) {
+        wait(POLL_MS).then(function () { watch(ready); });
+        return;
+      }
+      ready();
+    }, function () { ready(); });
   }
 
   function startPage() {

@@ -106,6 +106,7 @@ export const UNDOCUMENTED_ROUTES: Readonly<Record<string, string>> = {
   "GET /dash/admin.js": "the Admin page's own script",
   "GET /dash/account.js": "the Account page's own script",
   "GET /account/email": "the page an email-change link opens, for people in a browser; it calls the email-change confirm request described here",
+  "GET /api/v1/account/data": "the Account page's own request saying whether a download of all the workspace's data is still going; a session alone, never a token",
   "POST /api/v1/account/data": "the Account page's own request for Download all my data; a session alone, from the site's own page, never a token",
   "GET /api/v1/account/data/:ticket": "the address of the zip that request answers, opened once by the same browser session as a download; never a token",
   "GET /dash/account-email.js": "the email-change link page's own script",

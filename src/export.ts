@@ -12,11 +12,21 @@
 //   is the time the row was taken and an HMAC, keyed by the session's own secret from its
 //   cookie, of the workspace, the session and that time: no other session, and no other site,
 //   can make one, and a GET without the cookie is refused before the ticket is looked at. The
-//   first GET that uses it marks the row running, with the audit row of the export, in one
-//   batch; a second use finds no ready row and answers as an unknown ticket.
+//   first GET that uses it claims it BEFORE anything is read: one batch marks the row running
+//   (exactly one row, ready and within its minute) with the audit row of the export, which the
+//   batch writes only after that one change. A second use, at once or later, loses the claim
+//   and is answered at once, having read nothing. A refused ticket (unknown, used, expired, or
+//   a workspace grown too large) answers the dashboard's own failure sentence as plain text
+//   with no file name, so a browser shows it and saves no file. A HEAD of the address answers as
+//   an unknown path does and touches no ticket. A download whose reader takes no bytes for
+//   EXPORT_IDLE_MS, or that is still going after EXPORT_MAX_MS, is stopped and its row released.
+// - GET /api/v1/account/data says whether a download of the workspace is being prepared or
+//   sent ({running}), so the page keeps its button disabled until it has ended.
 //
 // Allowed in every state of billing, read-only included: an ended subscription or a finished
-// trial may still take its data away, so readOnlyRefusal (src/billing.ts) is not asked.
+// trial may still take its data away, so readOnlyRefusal (src/billing.ts) is not asked. And
+// allowed before the account has agreed to the site's current terms (terms: "open", as the
+// sign-outs are): taking one's data away needs no agreement. A disabled account has no session.
 //
 // What is read, and from where. Every row comes from ONE statement (LISTING_SQL), scoped to
 // the session's workspace at every level, so the zip is a consistent copy of one moment and
@@ -49,10 +59,11 @@ import { auditStatement } from "./audit.ts";
 import { constantTimeEqual, requireAuth, type Auth } from "./auth.ts";
 import { SUBREQUEST_BUDGET } from "./budget.ts";
 import { apiError, json } from "./http.ts";
-import { objectKey } from "./media.ts";
+import { normaliseHost, originOf } from "./hosts.ts";
+import { mediaLink, objectKey } from "./media.ts";
 import { MalformedSnapshot, escapeHtml, pageTour, scriptJson, type PageData, type PageTour } from "./page.ts";
 import { PLAYER_CSS, PLAYER_JS } from "./player/assets.ts";
-import { isNotNullViolation, isUniqueViolation, type Deps, type FileStore } from "./ports.ts";
+import { isNotNullViolation, isUniqueViolation, type Config, type Deps, type FileStore } from "./ports.ts";
 import { buildSnapshot, type DraftRow, type DraftTour, type Snapshot } from "./publish.ts";
 import { EXPORT_RUNNING_BUCKET, LIMITS_EXPORT, hitLimit, workspaceKey } from "./rate.ts";
 import { readSessionCookie } from "./sessions.ts";
@@ -61,12 +72,19 @@ import { zipStream, type ZipEntry } from "./zip.ts";
 
 /** How long the address POST answers can be opened: the page opens it at once. */
 export const TICKET_MS = 60_000;
+/** A download whose reader takes no bytes for this long is stopped, and its row released. */
+export const EXPORT_IDLE_MS = 5 * 60_000;
+/** The longest a download may go on, however fast its reader takes bytes; then it is stopped and its row released. */
+export const EXPORT_MAX_MS = 6 * 3_600_000;
 /**
  * How long a download that was started counts as running when nothing ended it (a server that
- * stopped while sending): after this a new one may start. A download that ends, fails or is
- * cancelled lets the next one start at once.
+ * stopped while sending): after this a new one may start. As long as the longest download may
+ * go on, so two can never run at once. A download that ends, fails, stops or is cancelled lets
+ * the next one start at once.
  */
-export const RUNNING_MS = 60 * 60_000;
+export const RUNNING_MS = EXPORT_MAX_MS;
+/** What a refused ticket answers, as plain text: the dashboard's own failure sentence (src/dash/script.ts, TEXT.failed). */
+export const FAILURE_SENTENCE = "Something went wrong. Try again in a moment.";
 /** The calls a download makes besides its files: the session (two), the rows, the start, the end. */
 export const EXPORT_FIXED_CALLS = 5;
 /** The most stored files one download reads on Workers, within the call budget. */
@@ -80,7 +98,22 @@ const TICKET = /^[0-9a-f]{76}$/;
 const READY = 1;
 const RUNNING = 2;
 
-const noDownload = () => apiError(404, "not_found", "no such download");
+/**
+ * The answer to a ticket that cannot be followed: the failure sentence as plain text, with no
+ * Content-Disposition, so the browser that opened it shows it as a page and saves no file.
+ */
+function refusedPage(status: 404 | 409): Response {
+  return new Response(FAILURE_SENTENCE, {
+    status,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'; sandbox",
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
 const busy = () => apiError(409, "export_busy", "a download of this workspace's data is already being prepared or sent; wait for it to finish");
 const tooLarge = (files: number, most: number) =>
   apiError(409, "too_large_to_export", `this workspace has ${files} stored files, more than the ${most} one download can hold on this server`);
@@ -98,7 +131,7 @@ export function exportFileLimit(deps: Deps): number | null {
 /** The stored files of the workspace a download would read, as a scalar over the CTE `p`. */
 const FILES_EXPR = `(
   (SELECT count(*) FROM step s JOIN tour t ON t.id = s.tour_id JOIN p ON t.workspace_id = p.ws)
-  + (SELECT count(*) FROM tour t JOIN p ON t.workspace_id = p.ws WHERE t.logo_key IS NOT NULL)
+  + (SELECT count(*) FROM tour t JOIN p ON t.workspace_id = p.ws WHERE t.logo_key IS NOT NULL AND t.logo_type IS NOT NULL)
   + (SELECT count(*) FROM media_object o JOIN media m ON m.id = o.media_id JOIN p ON m.workspace_id = p.ws
       WHERE m.state = 'online' AND o.current = 1 AND o.n >= 0))`;
 
@@ -177,7 +210,7 @@ type MediaRow = {
   viewers: string[];
   objects: [number, string, number][];
 };
-type Listing = {
+export type Listing = {
   account: { email: string; username: string | null } | null;
   workspace: string | null;
   tours: TourRow[];
@@ -187,7 +220,7 @@ type Listing = {
 };
 
 /** The rows of a download, or the count of files when it is over the limit. */
-async function readListing(deps: Deps, auth: Auth, limit: number | null): Promise<{ files: number; listing: Listing | null }> {
+export async function readListing(deps: Deps, auth: Auth, limit: number | null): Promise<{ files: number; listing: Listing | null }> {
   const userId = auth.session?.userId ?? "";
   const row = await deps.db.first<{ files: number; data: string | null }>(LISTING_SQL, [auth.workspaceId, limit ?? Number.MAX_SAFE_INTEGER, userId]);
   const files = row?.files ?? 0;
@@ -326,22 +359,46 @@ type MediaOut = {
   height: number;
   duration_ms?: number | null;
 };
-type Plan = {
+/**
+ * One file of the zip, in its order: a tour's page, which is built only when the zip reaches it
+ * (from its data, a few kilobytes, not the page of some 80 KB), a small text, or a stored file.
+ */
+type PlannedFile =
+  | { kind: "page"; path: string; tour: PageTour; modified: number | null }
+  | { kind: "text"; path: string; text: string; modified: number | null }
+  | ({ kind: "stored" } & StoredItem);
+export type Plan = {
   exportedAt: number;
   account: { email: string; username: string | null };
   workspace: string;
   tours: TourOut[];
   images: MediaOut[];
   clips: MediaOut[];
-  /** In the order they go in the zip: written ones (text) and stored ones. */
-  files: ({ kind: "text"; path: string; text: string; modified: number | null } | ({ kind: "stored" } & StoredItem))[];
+  files: PlannedFile[];
 };
 
 /** Viewers only for "people": "public" and "me" have no list. Sorted, so the lists read the same each time. */
 const viewersOf = (access: string, viewers: unknown): string[] => (access === "people" && Array.isArray(viewers) ? viewers.filter((v): v is string => typeof v === "string").sort() : []);
 
-/** The tour's draft as the publish would build it, with the zip's own picture names in place of live keys. */
-async function tourFiles(t: TourRow, chapters: ChapterRow[], steps: StepRow[], folder: string): Promise<{ readable: unknown; page: string | null; stored: StoredItem[] }> {
+/**
+ * A tour's public address, from the configuration alone, as a shared item's is (mediaLink): the
+ * tours address, else SITE_HOST, else no host, and the link is then the path the API answers.
+ * Nothing of the request is read.
+ */
+function tourLink(config: Config, slug: string): string {
+  const hosts = config.hosts ?? null;
+  const site = typeof config.siteHost === "string" ? normaliseHost(config.siteHost) : null;
+  const origin = hosts !== null ? originOf(hosts.tours) : site !== null ? originOf(site) : "";
+  return `${origin}/t/${slug}`;
+}
+
+/**
+ * The tour's draft as the publish would build it, with the zip's own picture names in place of
+ * live keys: the data the page is built from (null when the page cannot show it), the readable
+ * data, the stored files, and the steps and chapters the page shows. A logo of no known type is
+ * no file.
+ */
+function tourFiles(t: TourRow, chapters: ChapterRow[], steps: StepRow[], folder: string): { page: PageTour | null; readable: unknown; stored: StoredItem[]; steps: number; chapters: number } {
   const order = new Map(chapters.map((c) => [c.id, c]));
   const own = steps
     .filter((s) => order.has(s.chapter_id))
@@ -384,14 +441,14 @@ async function tourFiles(t: TourRow, chapters: ChapterRow[], steps: StepRow[], f
       steps: c.steps.map(({ id: _id, image, ...rest }) => ({ picture: image, ...rest })),
     })),
   };
-  let page: string | null = null;
+  let page: PageTour | null = null;
   try {
-    page = await offlinePageHtml(pageTour(offline));
+    page = pageTour(offline);
   } catch (err) {
     // A draft the page cannot show (the public page answers 404 for such a snapshot) still has its data and pictures.
     if (!(err instanceof MalformedSnapshot)) throw err;
   }
-  return { readable, page, stored };
+  return { page, readable, stored, steps: offline.chapters.reduce((k, c) => k + c.steps.length, 0), chapters: offline.chapters.length };
 }
 
 function tourPart(t: TourRow): DraftTour {
@@ -409,21 +466,25 @@ function tourPart(t: TourRow): DraftTour {
   };
 }
 
-async function planOf(listing: Listing, now: number): Promise<Plan> {
+/** What the zip holds and in which order, and what the lists say; no page is built here. */
+export function planOf(config: Config, listing: Listing, now: number): Plan {
   // Oldest first; made at the same moment, by title, then by id, so the same data always gives the same names.
   // Images before clips, as the zip's folders are.
   const cmp = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
   const byAge = (a: { created_at: number; id: string; title: string | null; kind?: string }, b: { created_at: number; id: string; title: string | null; kind?: string }) =>
     (a.kind === "clip" ? 1 : 0) - (b.kind === "clip" ? 1 : 0) || a.created_at - b.created_at || cmp(a.title ?? "", b.title ?? "") || cmp(a.id, b.id);
-  const files: Plan["files"] = [];
+  const files: PlannedFile[] = [];
   const tours: TourOut[] = [];
   const folders = new Set<string>();
   for (const t of [...listing.tours].sort(byAge)) {
     const folder = safeName(t.title, "tour", folders);
-    const chapters = listing.chapters.filter((c) => c.tour_id === t.id);
-    const steps = listing.steps.filter((s) => s.tour_id === t.id);
-    const made = await tourFiles(t, chapters, steps, folder);
-    if (made.page !== null) files.push({ kind: "text", path: `tours/${folder}/index.html`, text: made.page, modified: t.updated_at });
+    const made = tourFiles(
+      t,
+      listing.chapters.filter((c) => c.tour_id === t.id),
+      listing.steps.filter((s) => s.tour_id === t.id),
+      folder,
+    );
+    if (made.page !== null) files.push({ kind: "page", path: `tours/${folder}/index.html`, tour: made.page, modified: t.updated_at });
     files.push({ kind: "text", path: `tours/${folder}/tour.json`, text: JSON.stringify(made.readable, null, 2) + "\n", modified: t.updated_at });
     for (const s of made.stored) files.push({ kind: "stored", ...s });
     const published = t.status === "published";
@@ -434,12 +495,12 @@ async function planOf(listing: Listing, now: number): Promise<Plan> {
       updated_at: iso(t.updated_at),
       published,
       published_at: published ? iso(t.published_at) : null,
-      link: published ? `/t/${t.slug}` : null,
+      link: published ? tourLink(config, t.slug) : null,
       sharing: t.access,
       viewers: viewersOf(t.access, t.viewers),
-      chapters: new Set(steps.map((s) => s.chapter_id)).size,
-      steps: steps.length,
-      bytes: steps.reduce((n, s) => n + s.bytes, 0) + (t.logo_bytes ?? 0),
+      chapters: made.chapters,
+      steps: made.steps,
+      bytes: made.stored.reduce((k, s) => k + s.bytes, 0),
       page: made.page !== null,
       files: made.stored.map((s) => ({ path: s.path, bytes: s.bytes })),
     });
@@ -452,7 +513,7 @@ async function planOf(listing: Listing, now: number): Promise<Plan> {
     const file = `${folder}/${safeName(m.title, m.kind, names[m.kind])}.${extOf(m.content_type)}`;
     // The current parts, in order: an item whose rows do not make its whole file is left out of the zip, and the lists say so.
     const parts = [...(Array.isArray(m.objects) ? m.objects : [])].sort((a, b) => a[0] - b[0]);
-    const whole = parts.length === m.parts && parts.every((p, i) => p[0] === i) && parts.reduce((n, p) => n + p[2], 0) === m.bytes;
+    const whole = parts.length === m.parts && parts.every((p, i) => p[0] === i) && parts.reduce((k, p) => k + p[2], 0) === m.bytes;
     if (whole) files.push({ kind: "stored", path: file, keys: parts.map((p) => objectKey(m.id, { n: p[0], claim: p[1], ext: null })), bytes: m.bytes, modified: m.online_at ?? m.created_at });
     const out: MediaOut = {
       title: m.title,
@@ -461,7 +522,7 @@ async function planOf(listing: Listing, now: number): Promise<Plan> {
       shared_at: iso(m.online_at ?? m.created_at),
       sharing: m.access,
       viewers: viewersOf(m.access, m.viewers),
-      link: `${m.kind === "image" ? "/i/" : "/r/"}${m.link_id}`,
+      link: mediaLink(config, { kind: m.kind, link_id: m.link_id }),
       bytes: m.bytes,
       width: m.width,
       height: m.height,
@@ -482,10 +543,46 @@ async function planOf(listing: Listing, now: number): Promise<Plan> {
 
 // ---- The two lists ---------------------------------------------------------------------
 
-const SHARING_WORDS: Record<string, string> = { public: "anyone with the link", people: "only the people listed", me: "only you" };
-/** One line of user text in README.txt: no control or format character, no line break. */
-const oneLine = (s: string) => s.replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, " ").trim();
-const day = (s: string | null) => (s === null ? "unknown" : s.slice(0, 10));
+/**
+ * Every sentence of README.txt, in one place, so the wording can change in one edit. Each
+ * function puts the values of one line in place; the text around them is fixed.
+ */
+export const README_WORDS = {
+  title: "Your data",
+  savedOn: (when: string) => `Saved on ${when} UTC.`,
+  account: (email: string, username: string | null) => `Account: ${email}${username === null ? "" : ` (username ${username})`}`,
+  workspace: (name: string) => `Workspace: ${name}`,
+  whatIsInIt: "What is in this file",
+  aboutTours:
+    "- tours: one folder for each tour. Open index.html in a tour's folder to click through the tour in your browser. It needs no internet connection. tour.json holds the tour's chapters, steps and settings, and the pictures folder its pictures.",
+  aboutImages: "- images: your shared images.",
+  aboutClips: "- clips: your shared GIFs and clips.",
+  aboutList: "- account.json: this same list, for programs.",
+  tours: (n: number) => `Tours (${n})`,
+  images: (n: number) => `Images (${n})`,
+  clips: (n: number) => `Clips (${n})`,
+  none: "None.",
+  folder: (path: string) => `  Folder: ${path}`,
+  made: (made: string, changed: string) => `  Made ${made}, last changed ${changed}`,
+  publishedYes: (on: string, link: string) => `  Published: yes, on ${on}, at ${link}`,
+  publishedNo: "  Published: no",
+  sharedWith: (who: string, viewers: string[]) => `  Shared with: ${who}${viewers.length > 0 ? ` (${viewers.join(", ")})` : ""}`,
+  sharing: { public: "anyone with the link", people: "only the people listed", me: "only you" } as Record<string, string>,
+  counts: (chapters: number, steps: number, bytes: number) => `  ${chapters} chapter${chapters === 1 ? "" : "s"}, ${steps} step${steps === 1 ? "" : "s"}, ${bytes} bytes`,
+  noPage: "  This tour could not be made into a page; its data and pictures are in its folder.",
+  noTitle: "(no title)",
+  file: (path: string) => `  File: ${path}`,
+  shared: (on: string, link: string) => `  Shared ${on}, at ${link}`,
+  size: (width: number, height: number, bytes: number) => `  ${width} x ${height} pixels, ${bytes} bytes`,
+  notIncluded: "Not included",
+  missing: "the file could not be read",
+  incomplete: "only part of the file could be read",
+  unknownDay: "unknown",
+};
+
+/** One line of user text in README.txt: no control, format, line or paragraph separator character. */
+const oneLine = (s: string) => s.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, " ").trim();
+const day = (s: string | null) => (s === null ? README_WORDS.unknownDay : s.slice(0, 10));
 
 /** What the lists say of a file that could not be put in the zip, by its path. */
 type Missing = Map<string, "missing" | "incomplete">;
@@ -498,54 +595,88 @@ function accountJson(plan: Plan, missing: Missing): string {
     tours: plan.tours,
     images: plan.images,
     clips: plan.clips,
-    not_included: [...missing].map(([path, why]) => ({ path, reason: why === "missing" ? "the file could not be read" : "only part of the file could be read" })),
+    not_included: [...missing].map(([path, why]) => ({ path, reason: README_WORDS[why] })),
   };
   return JSON.stringify(out, null, 2) + "\n";
 }
 
 function readme(plan: Plan, missing: Missing): string {
+  const W = README_WORDS;
   const lines: string[] = [];
   const add = (...l: string[]) => lines.push(...l);
-  add("Your data", "", `Saved on ${iso(plan.exportedAt)!.replace("T", " ").slice(0, 16)} UTC.`, "");
-  add(`Account: ${oneLine(plan.account.email)}${plan.account.username === null ? "" : ` (username ${oneLine(plan.account.username)})`}`);
-  add(`Workspace: ${oneLine(plan.workspace)}`, "");
-  add("What is in this file", "");
-  add("- tours: one folder for each tour. Open index.html in a tour's folder to click through the tour in your browser. It needs no internet connection. tour.json holds the tour's chapters, steps and settings, and the pictures folder its pictures.");
-  add("- images: your shared images.");
-  add("- clips: your shared GIFs and clips.");
-  add("- account.json: this same list, for programs.", "");
-  add(`Tours (${plan.tours.length})`, "");
-  if (plan.tours.length === 0) add("None.", "");
+  add(W.title, "", W.savedOn(iso(plan.exportedAt)!.replace("T", " ").slice(0, 16)), "");
+  add(W.account(oneLine(plan.account.email), plan.account.username === null ? null : oneLine(plan.account.username)));
+  add(W.workspace(oneLine(plan.workspace)), "");
+  add(W.whatIsInIt, "");
+  add(W.aboutTours);
+  add(W.aboutImages);
+  add(W.aboutClips);
+  add(W.aboutList, "");
+  add(W.tours(plan.tours.length), "");
+  if (plan.tours.length === 0) add(W.none, "");
   for (const t of plan.tours) {
-    add(`${oneLine(t.title)}`);
-    add(`  Folder: ${t.folder}`);
-    add(`  Made ${day(t.created_at)}, last changed ${day(t.updated_at)}`);
-    add(`  Published: ${t.published ? `yes, on ${day(t.published_at)}, at ${t.link}` : "no"}`);
-    add(`  Shared with: ${SHARING_WORDS[t.sharing]}${t.viewers.length > 0 ? ` (${t.viewers.join(", ")})` : ""}`);
-    add(`  ${t.chapters} chapter${t.chapters === 1 ? "" : "s"}, ${t.steps} step${t.steps === 1 ? "" : "s"}, ${t.bytes} bytes`);
-    if (!t.page) add("  This tour could not be made into a page; its data and pictures are in its folder.");
+    add(oneLine(t.title));
+    add(W.folder(t.folder));
+    add(W.made(day(t.created_at), day(t.updated_at)));
+    add(t.published ? W.publishedYes(day(t.published_at), t.link ?? "") : W.publishedNo);
+    add(W.sharedWith(W.sharing[t.sharing], t.viewers));
+    add(W.counts(t.chapters, t.steps, t.bytes));
+    if (!t.page) add(W.noPage);
     add("");
   }
-  for (const [what, list] of [
-    ["Images", plan.images],
-    ["Clips", plan.clips],
+  for (const [heading, list] of [
+    [W.images, plan.images],
+    [W.clips, plan.clips],
   ] as const) {
-    add(`${what} (${list.length})`, "");
-    if (list.length === 0) add("None.", "");
+    add(heading(list.length), "");
+    if (list.length === 0) add(W.none, "");
     for (const m of list) {
-      add(`${m.title === null ? "(no title)" : oneLine(m.title)}`);
-      add(`  File: ${m.file}`);
-      add(`  Shared ${day(m.shared_at)}, at ${m.link}`);
-      add(`  Shared with: ${SHARING_WORDS[m.sharing]}${m.viewers.length > 0 ? ` (${m.viewers.join(", ")})` : ""}`);
-      add(`  ${m.width} x ${m.height} pixels, ${m.bytes} bytes`, "");
+      add(m.title === null ? W.noTitle : oneLine(m.title));
+      add(W.file(m.file));
+      add(W.shared(day(m.shared_at), m.link));
+      add(W.sharedWith(W.sharing[m.sharing], m.viewers));
+      add(W.size(m.width, m.height, m.bytes), "");
     }
   }
   if (missing.size > 0) {
-    add("Not included", "");
-    for (const [path, why] of missing) add(`- ${path}: ${why === "missing" ? "the file could not be read" : "only part of the file could be read"}`);
+    add(W.notIncluded, "");
+    for (const [path, why] of missing) add(`- ${path}: ${W[why]}`);
     add("");
   }
   return lines.join("\r\n");
+}
+
+/**
+ * The zip's files, in the plan's order, each opened only when the zip reaches it: a tour's page
+ * is built then (by `render`) and dropped once written, a stored file is read part by part, and
+ * the two lists come last, so they can name a file that could not be read. So memory holds
+ * about one page and one part at a time, however many tours there are.
+ */
+export async function* exportEntries(plan: Plan, store: FileStore, missing: Missing, now: number, render: (tour: PageTour) => Promise<string> = offlinePageHtml): AsyncGenerator<ZipEntry> {
+  const encode = (s: string) => new TextEncoder().encode(s);
+  for (const f of plan.files) {
+    if (f.kind === "page") {
+      yield { name: f.path, modified: f.modified, size: 0, open: async () => encode(await render(f.tour)) };
+      continue;
+    }
+    if (f.kind === "text") {
+      yield { name: f.path, modified: f.modified, size: 0, open: async () => encode(f.text) };
+      continue;
+    }
+    let short = false;
+    yield {
+      name: f.path,
+      modified: f.modified,
+      size: f.bytes,
+      open: () => storedBody(store, f, () => (short = true)),
+      done: (written) => {
+        if (written === null) missing.set(f.path, "missing");
+        else if (short || written !== f.bytes) missing.set(f.path, "incomplete");
+      },
+    };
+  }
+  yield { name: "README.txt", modified: now, size: 0, open: async () => encode(readme(plan, missing)) };
+  yield { name: "account.json", modified: now, size: 0, open: async () => encode(accountJson(plan, missing)) };
 }
 
 // ---- Reading the files -----------------------------------------------------------------
@@ -614,6 +745,18 @@ async function ticketOf(secret: string, auth: Auth, start: number): Promise<stri
 /** The condition, over `rate_counter` in scope, that its row is a download that still counts. Parameters: the two floors (ready, running). */
 const LIVE = "((count = 1 AND window_start > ?) OR (count = 2 AND window_start > ?))";
 
+/**
+ * True when the workspace has a download in progress: a ticket asked for in the last TICKET_MS
+ * and not opened yet, or a download started in the last RUNNING_MS and not ended. The same row
+ * and rule the two routes use. One database call. For the removal sweep, which must not remove
+ * a workspace's files while it is downloading them.
+ */
+export async function exportInProgress(deps: Deps, workspaceId: string, now: number): Promise<boolean> {
+  const key = await workspaceKey(workspaceId);
+  const row = await deps.db.first<{ one: number }>(`SELECT 1 AS one FROM rate_counter WHERE bucket = ? AND key = ? AND ${LIVE} LIMIT 1`, [EXPORT_RUNNING_BUCKET, key, now - TICKET_MS, now - RUNNING_MS]);
+  return row !== null;
+}
+
 const ZIP_HEADERS: Record<string, string> = {
   "content-type": "application/zip",
   "content-disposition": `attachment; filename="${EXPORT_FILE_NAME}"`,
@@ -623,10 +766,20 @@ const ZIP_HEADERS: Record<string, string> = {
   "referrer-policy": "no-referrer",
 };
 
+/** Every request here takes a browser session alone, and is open before the site's terms are agreed to. */
+const SESSION_OPEN = { only: "session", terms: "open" } as const;
+
 export function exportRoutes(app: Hono, deps: Deps): void {
+  // Whether a download of the workspace is in progress: 200 {running}. Two calls at most besides the session.
+  app.get(EXPORT_PATH, async (c) => {
+    const auth = await requireAuth(c.req.raw, deps, SESSION_OPEN);
+    if (auth instanceof Response) return auth;
+    return json(200, { running: await exportInProgress(deps, auth.workspaceId, deps.now()) });
+  });
+
   // Ask for a download. 200 {url}; 409 too_large_to_export (Workers only) or export_busy; 429 rate_limited. At most 5 calls.
   app.post(EXPORT_PATH, async (c) => {
-    const auth = await requireAuth(c.req.raw, deps, { only: "session" });
+    const auth = await requireAuth(c.req.raw, deps, SESSION_OPEN);
     if (auth instanceof Response) return auth;
     const secret = readSessionCookie(c.req.raw);
     if (auth.session === undefined || secret === null) return json(401, { error: "unauthorized" });
@@ -657,105 +810,118 @@ export function exportRoutes(app: Hono, deps: Deps): void {
     return json(200, { url: `${EXPORT_PATH}/${await ticketOf(secret, auth, now)}` });
   });
 
-  // The file. 200 with the zip as a stream; 404 for a ticket that is not this session's, used,
-  // or older than TICKET_MS; 409 too_large_to_export (Workers only). Before the first byte: at
-  // most 4 calls (the session, the rows, the start); then one per stored file, and one at the end.
+  // The file. 200 with the zip as a stream; the plain-text refusal (404) for a ticket that is not
+  // this session's, used, or older than TICKET_MS, and (409) for a workspace grown past this
+  // target's limit. The claim comes first: a request that does not win it makes no other call.
+  // Then the rows (one call), the files (one each) and the end (one).
   app.get(`${EXPORT_PATH}/:ticket`, async (c) => {
-    const auth = await requireAuth(c.req.raw, deps, { only: "session" });
+    // Hono answers a HEAD with this route and drops the body: a HEAD would use the ticket up and
+    // hold the row while sending nothing. It is answered as an unknown path, before anything.
+    if (c.req.method === "HEAD") return c.json({ error: "not_found" }, 404);
+    const auth = await requireAuth(c.req.raw, deps, SESSION_OPEN);
     if (auth instanceof Response) return auth;
     const secret = readSessionCookie(c.req.raw);
     if (auth.session === undefined || secret === null) return json(401, { error: "unauthorized" });
     const ticket = c.req.param("ticket");
-    if (!TICKET.test(ticket)) return noDownload();
+    if (!TICKET.test(ticket)) return refusedPage(404);
     const start = Number.parseInt(ticket.slice(0, 12), 16);
     const now = deps.now();
     // Judged before any call: a ticket that is not this session's costs nothing.
-    if (!constantTimeEqual(ticket, await ticketOf(secret, auth, start)) || start <= now - TICKET_MS || start > now + TICKET_MS) return noDownload();
+    if (!constantTimeEqual(ticket, await ticketOf(secret, auth, start)) || start <= now - TICKET_MS || start > now + TICKET_MS) return refusedPage(404);
     const key = await workspaceKey(auth.workspaceId);
     const release = () => deps.db.run("DELETE FROM rate_counter WHERE bucket = ? AND key = ? AND window_start = ?", [EXPORT_RUNNING_BUCKET, key, start]);
 
-    const limit = exportFileLimit(deps);
-    const { files, listing } = await readListing(deps, auth, limit);
-    if (listing === null) {
-      // Over the limit since it was asked for: the row goes while it is still only ready (never a
-      // download already running from this ticket), so the next ask is answered at once.
-      await deps.db.run(`DELETE FROM rate_counter WHERE bucket = ? AND key = ? AND window_start = ? AND count = ${READY}`, [EXPORT_RUNNING_BUCKET, key, start]);
-      return tooLarge(files, limit ?? 0);
-    }
-    const plan = await planOf(listing, now);
-    // The row becomes running, and the export is recorded, together; a ticket used before finds no ready row.
+    // The claim: exactly one ready row within its minute becomes running, and only then is the
+    // export recorded (the audit row fails the batch unless that one row changed). A ticket
+    // used before, at once or later, finds no ready row and is refused here, having read nothing.
     try {
       await deps.db.batch([
-        { sql: `UPDATE rate_counter SET count = ${RUNNING} WHERE bucket = ? AND key = ? AND window_start = ? AND count = ${READY}`, params: [EXPORT_RUNNING_BUCKET, key, start] },
-        auditStatement(
-          deps,
-          {
-            event: "data_exported",
-            userId: auth.session.userId,
-            workspaceId: auth.workspaceId,
-            detail: { tours: plan.tours.length, images: plan.images.length, clips: plan.clips.length, files: plan.files.filter((f) => f.kind === "stored").length },
-          },
-          { onlyAfterOneChange: true },
-        ),
+        {
+          sql: `UPDATE rate_counter SET count = ${RUNNING} WHERE bucket = ? AND key = ? AND window_start = ? AND count = ${READY} AND window_start > ?`,
+          params: [EXPORT_RUNNING_BUCKET, key, start, now - TICKET_MS],
+        },
+        auditStatement(deps, { event: "data_exported", userId: auth.session.userId, workspaceId: auth.workspaceId }, { onlyAfterOneChange: true }),
       ]);
     } catch (err) {
-      if (isNotNullViolation(err)) return noDownload();
+      if (isNotNullViolation(err)) return refusedPage(404);
       throw err;
     }
 
-    const missing: Missing = new Map();
-    async function* entries(): AsyncGenerator<ZipEntry> {
-      for (const f of plan.files) {
-        if (f.kind === "text") {
-          const bytes = new TextEncoder().encode(f.text);
-          yield { name: f.path, modified: f.modified, size: bytes.length, open: async () => bytes };
-          continue;
-        }
-        let short = false;
-        yield {
-          name: f.path,
-          modified: f.modified,
-          size: f.bytes,
-          open: () => storedBody(deps.drafts, f, () => (short = true)),
-          done: (written) => {
-            if (written === null) missing.set(f.path, "missing");
-            else if (short || written !== f.bytes) missing.set(f.path, "incomplete");
-          },
-        };
-      }
-      // Last, so they can name a file that could not be read.
-      const readmeBytes = new TextEncoder().encode(readme(plan, missing));
-      yield { name: "README.txt", modified: now, size: readmeBytes.length, open: async () => readmeBytes };
-      const listBytes = new TextEncoder().encode(accountJson(plan, missing));
-      yield { name: "account.json", modified: now, size: listBytes.length, open: async () => listBytes };
+    const limit = exportFileLimit(deps);
+    let listing: Listing | null;
+    try {
+      listing = (await readListing(deps, auth, limit)).listing;
+    } catch (err) {
+      await release().catch(() => {});
+      throw err;
     }
+    if (listing === null) {
+      // Grown past the limit since it was asked for: the row this request holds goes, so the next ask is answered at once.
+      await release();
+      return refusedPage(409);
+    }
+    const plan = planOf(deps.config, listing, now);
+    listing = null;
 
-    // The row goes when the zip has been sent, when it fails, and when the browser stops taking it.
-    const zip = zipStream(entries()).getReader();
-    let released = false;
+    const zip = zipStream(exportEntries(plan, deps.drafts, new Map(), now)).getReader();
+    // The row goes when the zip has been sent, when it fails, when the browser stops taking it,
+    // when the browser takes nothing for EXPORT_IDLE_MS, and after EXPORT_MAX_MS whatever happens.
+    let ended = false;
+    let idle: ReturnType<typeof setTimeout> | null = null;
+    let total: ReturnType<typeof setTimeout> | null = null;
+    const clear = (t: ReturnType<typeof setTimeout> | null) => {
+      if (t !== null) clearTimeout(t);
+    };
+    let out: ReadableStreamDefaultController<Uint8Array> | null = null;
     const end = async () => {
-      if (released) return;
-      released = true;
-      await release().catch(() => console.error("export: the end of a download could not be recorded; the next one may start after an hour"));
+      if (ended) return;
+      ended = true;
+      clear(idle);
+      clear(total);
+      await release().catch(() => console.error("export: the end of a download could not be recorded; the next one may start after six hours"));
+    };
+    const stop = async () => {
+      if (ended) return;
+      await zip.cancel().catch(() => {});
+      await end();
+      try {
+        out?.error(new Error("export stopped"));
+      } catch {
+        // Already closed.
+      }
+    };
+    const waitForReader = () => {
+      clear(idle);
+      idle = setTimeout(() => void stop(), EXPORT_IDLE_MS);
     };
     const body = new ReadableStream<Uint8Array>(
       {
+        start(controller) {
+          out = controller;
+          total = setTimeout(() => void stop(), EXPORT_MAX_MS);
+          waitForReader();
+        },
         async pull(controller) {
+          // The reader wants bytes: it is not idle while the next ones are being read.
+          clear(idle);
           let next: Awaited<ReturnType<typeof zip.read>>;
           try {
             next = await zip.read();
           } catch {
+            if (ended) return;
             // Fixed text only: the error could carry a key or anything a store put in it.
             console.error("export: a download stopped because a file could not be read");
             await end();
             controller.error(new Error("export failed"));
             return;
           }
+          if (ended) return;
           if (next.done) {
             await end();
             controller.close();
           } else {
             controller.enqueue(next.value);
+            waitForReader();
           }
         },
         async cancel(reason) {

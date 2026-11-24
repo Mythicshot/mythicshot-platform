@@ -102,6 +102,7 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "POST /api/v1/account/email": "app",
   "POST /api/v1/account/email/confirm": "app",
   // "Download all my data" (src/export.ts): asked for and sent to a session alone, where the cookie lives.
+  "GET /api/v1/account/data": "app",
   "POST /api/v1/account/data": "app",
   "GET /api/v1/account/data/:ticket": "app",
   // The site's terms (src/terms.ts): the screen's three requests take a session alone, so they

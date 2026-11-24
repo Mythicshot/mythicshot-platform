@@ -55,7 +55,7 @@ import { describe, expect, it } from "vitest";
 import { makeDeps } from "#harness";
 import { createApp } from "../src/app.ts";
 import { hashToken, newId, newToken } from "../src/auth.ts";
-import { EXPORT_PATH, TICKET_MS } from "../src/export.ts";
+import { EXPORT_PATH, FAILURE_SENTENCE, TICKET_MS } from "../src/export.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { openapi, type OpenApiDoc } from "../src/docs/openapi.ts";
 import { BILLING_CONFIG, eventOf, notify, withBilling, type FakeStripe } from "./fake-stripe.ts";
@@ -82,7 +82,8 @@ const SETUP_CODE = "correct-horse-battery-staple";
 
 // ---- The answers ----
 
-type Expect = { status: number; body: Json | null };
+/** `body`: the JSON answered; a string: the plain text answered; null: no body. */
+type Expect = { status: number; body: Json | string | null };
 const notFound = (what: string): Expect => ({ status: 404, body: { error: "not_found", detail: `no such ${what}` } });
 const NO_TOUR = notFound("tour");
 const NO_CHAPTER = notFound("chapter");
@@ -92,7 +93,8 @@ const NO_SESSION = notFound("session");
 const NO_ITEM = notFound("item");
 const NO_TOKEN = notFound("token");
 const NO_REQUEST = notFound("request");
-const NO_DOWNLOAD = notFound("download");
+/** A download ticket that cannot be followed: the failure sentence as plain text, never a file (src/export.ts). */
+const NO_DOWNLOAD: Expect = { status: 404, body: FAILURE_SENTENCE };
 /** What a credential that may not be used here gets: a token on a route that takes only a session, a session on the tours address. */
 const NOBODY: Expect = { status: 401, body: { error: "unauthorized" } };
 /** Aborting an upload answers 204 whatever the id: there is nothing to tell apart. */
@@ -314,6 +316,7 @@ const LISTS: Record<string, { path: string; holds: string; only?: "token" | "ses
   "GET /api/v1/tokens": { path: "/api/v1/tokens", holds: "the caller's workspace's tokens that are not revoked: ids, names, times and kinds", only: "session" },
   "GET /api/v1/terms": { path: "/api/v1/terms", holds: "the site's current terms, the caller's own account's newest agreement and its session's anti-forgery value", only: "session" },
   "GET /api/v1/terms/agreed": { path: "/api/v1/terms/agreed", holds: "the version of the site's terms the caller's own account agreed to last, and when", only: "session" },
+  "GET /api/v1/account/data": { path: "/api/v1/account/data", holds: "whether a download of all of the caller's own workspace's data is being prepared or sent", only: "session" },
   "GET /api/v1/billing": { path: "/api/v1/billing", holds: "where the caller's own workspace stands with billing: its state, dates, usage and allowance", only: "session" },
 };
 
@@ -768,7 +771,7 @@ function wanted(r: Req, credential: string, onTours = false): Expect {
 
 function expectAnswer(c: Call, r: Req, label: string, credential: string, onTours = false): void {
   const want = wanted(r, credential, onTours);
-  expect({ status: c.status, body: want.body === null ? c.text : c.json }, label).toEqual({ status: want.status, body: want.body ?? "" });
+  expect({ status: c.status, body: want.body === null || typeof want.body === "string" ? c.text : c.json }, label).toEqual({ status: want.status, body: want.body ?? "" });
 }
 
 /** Every request of CASES and BODY_IDS with its route key. */
@@ -1076,8 +1079,8 @@ describe("one workspace against another", () => {
     expect(mine.a.length).toBeGreaterThan(80);
 
     const first = { a: await answers(w.a), b: await answers(w.b) };
-    // Six lists take one credential, the others both.
-    expect(Object.keys(first.a)).toHaveLength(Object.keys(LISTS).length * 2 - 7);
+    // Eight lists take one credential, the others both.
+    expect(Object.keys(first.a)).toHaveLength(Object.keys(LISTS).length * 2 - 8);
     for (const key of Object.keys(first.a)) {
       expect(first.a[key].status, key).toBe(200);
       expect(first.b[key].status, key).toBe(200);

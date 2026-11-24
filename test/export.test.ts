@@ -8,7 +8,7 @@ import { makeDeps, seedAccount } from "#harness";
 import { createApp } from "../src/app.ts";
 import { newLinkId } from "../src/auth.ts";
 import { SUBREQUEST_BUDGET } from "../src/budget.ts";
-import { EXPORT_FILE_NAME, EXPORT_FIXED_CALLS, EXPORT_PATH, EXPORT_WORKER_FILES, OFFLINE_CSS, RUNNING_MS, TICKET_MS, exportFileLimit, offlinePolicy, safeName } from "../src/export.ts";
+import { EXPORT_FILE_NAME, EXPORT_FIXED_CALLS, EXPORT_PATH, EXPORT_WORKER_FILES, FAILURE_SENTENCE, OFFLINE_CSS, RUNNING_MS, TICKET_MS, exportFileLimit, offlinePolicy, safeName } from "../src/export.ts";
 import { PART_BYTES } from "../src/media.ts";
 import { PLAYER_CSS, PLAYER_JS } from "../src/player/assets.ts";
 import type { Deps } from "../src/ports.ts";
@@ -66,6 +66,7 @@ async function zipOf(deps: Deps, s: Session): Promise<Map<string, Uint8Array>> {
   return filesOf((await download(deps, s)).file.bytes);
 }
 
+const seenAs = (c: Call) => ({ status: c.status, text: c.text });
 const text = (b: Uint8Array | undefined) => (b === undefined ? "" : new TextDecoder().decode(b));
 const listOf = (files: Map<string, Uint8Array>) => JSON.parse(text(files.get("account.json"))) as Json;
 
@@ -301,7 +302,7 @@ describe("Download all my data: the zip", () => {
     }
   });
 
-  it("writes one audit row for each download started, naming the account and the workspace and only counts", async () => {
+  it("writes one audit row for each download started, naming the account and the workspace, before anything is read", async () => {
     const { deps, advance } = await clocked();
     const a = await account(deps);
     await full(deps, a);
@@ -310,7 +311,7 @@ describe("Download all my data: the zip", () => {
     // A ticket asked for and never used starts nothing.
     expect((await ask(deps, a.session)).status).toBe(200);
     const rows = await deps.db.all<{ event: string; user_id: string; workspace_id: string; subject: string | null; detail: string }>("SELECT event, user_id, workspace_id, subject, detail FROM audit WHERE event = 'data_exported'");
-    expect(rows).toEqual([{ event: "data_exported", user_id: a.userId, workspace_id: a.workspaceId, subject: null, detail: JSON.stringify({ tours: 2, images: 1, clips: 2, files: 12 }) }]);
+    expect(rows).toEqual([{ event: "data_exported", user_id: a.userId, workspace_id: a.workspaceId, subject: null, detail: null }]);
   });
 
   it("a file that cannot be read is left out, the zip is still whole, and both lists say so", async () => {
@@ -422,7 +423,7 @@ describe("Download all my data: who may ask, how often, and when", () => {
     expect((await send(deps, "GET", asked.json.url, { token: a.token })).status).toBe(401);
     expect((await send(deps, "GET", asked.json.url)).status).toBe(401);
     expect((await send(deps, "GET", asked.json.url, { token: a.token, headers: { cookie: a.session.cookie } })).status).toBe(400);
-    expect((await fetchFile(deps, a.session, asked.json.url)).status).toBe(200);
+    expect(seenAs(await fetchFile(deps, a.session, asked.json.url)).status).toBe(200);
   });
 
   it("a ticket is good once, for its own session, for a minute, and nothing else is one", async () => {
@@ -430,24 +431,25 @@ describe("Download all my data: who may ask, how often, and when", () => {
     const a = await account(deps);
     const other = await signInAs(deps, a.userId);
     const b = await account(deps);
-    const noSuch = { error: "not_found", detail: "no such download" };
+    // A refused ticket answers the dashboard's failure sentence as plain text (src/export.ts, refusedPage).
+    const noSuch = { status: 404, text: FAILURE_SENTENCE };
     const asked = await ask(deps, a.session);
     const ticket = asked.json.url.split("/").pop() as string;
     // Another session of the same account, another account, a changed ticket, a malformed one: no such download.
-    expect((await fetchFile(deps, other, asked.json.url)).json).toEqual(noSuch);
-    expect((await fetchFile(deps, b.session, asked.json.url)).json).toEqual(noSuch);
+    expect(seenAs(await fetchFile(deps, other, asked.json.url))).toEqual(noSuch);
+    expect(seenAs(await fetchFile(deps, b.session, asked.json.url))).toEqual(noSuch);
     const flipped = ticket.slice(0, -1) + (ticket.endsWith("0") ? "1" : "0");
-    for (const bad of [flipped, ticket.slice(0, -1), ticket.toUpperCase(), "0".repeat(76), "x", `${ticket}0`]) expect((await fetchFile(deps, a.session, `${EXPORT_PATH}/${bad}`)).json, bad).toEqual(noSuch);
+    for (const bad of [flipped, ticket.slice(0, -1), ticket.toUpperCase(), "0".repeat(76), "x", `${ticket}0`]) expect(seenAs(await fetchFile(deps, a.session, `${EXPORT_PATH}/${bad}`)), bad).toEqual(noSuch);
     // The same ticket with an earlier time is not this download's.
     const earlier = (Number.parseInt(ticket.slice(0, 12), 16) - 1).toString(16).padStart(12, "0") + ticket.slice(12);
-    expect((await fetchFile(deps, a.session, `${EXPORT_PATH}/${earlier}`)).json).toEqual(noSuch);
+    expect(seenAs(await fetchFile(deps, a.session, `${EXPORT_PATH}/${earlier}`))).toEqual(noSuch);
     // Good once.
-    expect((await fetchFile(deps, a.session, asked.json.url)).status).toBe(200);
-    expect((await fetchFile(deps, a.session, asked.json.url)).json).toEqual(noSuch);
+    expect(seenAs(await fetchFile(deps, a.session, asked.json.url)).status).toBe(200);
+    expect(seenAs(await fetchFile(deps, a.session, asked.json.url))).toEqual(noSuch);
     // And only for TICKET_MS.
     const late = await ask(deps, a.session);
     advance(TICKET_MS);
-    expect((await fetchFile(deps, a.session, late.json.url)).json).toEqual(noSuch);
+    expect(seenAs(await fetchFile(deps, a.session, late.json.url))).toEqual(noSuch);
   });
 
   it("one download at a time per workspace: a second ask is busy while one is ready or being sent, and free once it ended or its time ran out", async () => {
@@ -490,7 +492,7 @@ describe("Download all my data: who may ask, how often, and when", () => {
     for (let i = 0; i < LIMITS_EXPORT.start.most; i++) {
       const r = await ask(deps, a.session);
       expect(r.status, `ask ${i + 1}`).toBe(200);
-      expect((await fetchFile(deps, a.session, r.json.url)).status).toBe(200);
+      expect(seenAs(await fetchFile(deps, a.session, r.json.url)).status).toBe(200);
     }
     const over = await ask(deps, a.session);
     expect([over.status, over.json.error, over.headers.get("retry-after")]).toEqual([429, "rate_limited", "3600"]);
@@ -555,9 +557,10 @@ describe("Download all my data: the limit within the call budget", () => {
     await uploadTour(deps, a.token, smallManifest(2, "More"), { kind: "chapter", tour_id: made.tour_id });
     const refusal = { error: "too_large_to_export", detail: "this workspace has 5 stored files, more than the 4 one download can hold on this server" };
     const opened = await fetchFile(deps, a.session, asked.json.url);
-    expect([opened.status, opened.json, opened.headers.get("content-type")]).toEqual([409, refusal, "application/json"]);
+    expect([opened.status, opened.text, opened.headers.get("content-type")]).toEqual([409, FAILURE_SENTENCE, "text/plain; charset=utf-8"]);
     expect(await deps.db.all("SELECT * FROM rate_counter WHERE bucket = ?", [EXPORT_RUNNING_BUCKET])).toEqual([]);
-    expect(await deps.db.all("SELECT * FROM audit WHERE event = 'data_exported'")).toEqual([]);
+    // The ticket was claimed, and so recorded, before anything was read: the claim comes first (review M1).
+    expect(await deps.db.all("SELECT * FROM audit WHERE event = 'data_exported'")).toHaveLength(1);
     const again = await ask(deps, a.session);
     expect([again.status, again.json]).toEqual([409, refusal]);
     expect(again.calls).toBeLessThanOrEqual(5);

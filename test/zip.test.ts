@@ -112,6 +112,12 @@ describe("the zip writer", () => {
     await expect(bytesOf(zipStream([file("Same.txt", pattern(3)), file("same.TXT", pattern(3))]))).rejects.toThrow("zip: a name given twice");
   });
 
+  it("refuses every part a Windows or macOS folder could not hold as written: ending in a dot, only dots, a device name with or without an extension, a control character", () => {
+    const bad = ["a./b", "a/b.", "x/...", "...", "con", "CON", "con.txt", "a/Nul.tar.gz", "aux", "prn.x", "com1", "COM9.png", "lpt0", "tours/lpt5/index.html", "a\tb", "a\u007fb"];
+    for (const name of bad) expect(() => checkZipName(name), JSON.stringify(name)).toThrow("zip: a name that cannot be written");
+    for (const ok of ["console.txt", "con-tour/index.html", "comx", "com10", "lpt", "a.b.c", ".hidden", "a/.b"]) expect(() => checkZipName(ok), ok).not.toThrow();
+  });
+
   it("leaves out a file that cannot be opened, and tells its done", async () => {
     const told: (number | null)[] = [];
     const entries: ZipEntry[] = [

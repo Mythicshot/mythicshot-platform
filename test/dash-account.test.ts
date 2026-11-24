@@ -310,7 +310,10 @@ describe("the Account page and the page an email-change link opens", () => {
     expect(ACCOUNT_JS).toContain('Dash.api("POST", "/api/v1/account/data").then(');
     expect(ACCOUNT_JS).toContain("var DATA_URL = /^\\/api\\/v1\\/account\\/data\\/[0-9a-f]{76}$/;");
     expect(ACCOUNT_JS).toContain('if (typeof url !== "string" || !DATA_URL.test(url)) { back(res); return; }');
-    expect(ACCOUNT_JS).toContain('Dash.saveFile(url, "mythicshot-data.zip");');
+    expect(ACCOUNT_JS).toContain("Dash.saveFile(url);\n      watch(ready);");
+    // It stays disabled while the server says the download is going, asking every 3 seconds.
+    expect(ACCOUNT_JS).toContain('Dash.api("GET", "/api/v1/account/data").then(');
+    expect(ACCOUNT_JS).toContain("var POLL_MS = 3000;");
     // While it asks, the button is disabled with no new words; a failure is the dashboard's own sentence.
     expect(ACCOUNT_JS).toContain("sayIn(message, Dash.failure(res));");
     const block = ACCOUNT_JS.slice(ACCOUNT_JS.indexOf("function downloadData()"), ACCOUNT_JS.indexOf("function startPage()"));
@@ -381,13 +384,16 @@ describe("the Account page and the page an email-change link opens", () => {
   it("the Account page's script keeps to this site: its requests, the anti-forgery header from the shared script, and leaving only for /signin", () => {
     const js = ACCOUNT_JS;
     const requests = [...js.matchAll(/\bapi\("([A-Z]+)", ("[^"]*")/g)].map((m) => `${m[1]} ${m[2]}`);
-    expect(requests.sort()).toEqual(['DELETE "/api/v1/sessions/"', 'GET "/api/v1/sessions"', 'POST "/api/v1/account/data"', 'POST "/api/v1/account/email"', 'POST "/api/v1/signout"', 'POST "/api/v1/signout/everywhere"'].sort());
+    expect(requests.sort()).toEqual(['DELETE "/api/v1/sessions/"', 'GET "/api/v1/sessions"', 'GET "/api/v1/account/data"', 'POST "/api/v1/account/data"', 'POST "/api/v1/account/email"', 'POST "/api/v1/signout"', 'POST "/api/v1/signout/everywhere"'].sort());
     expect(js).toContain('Dash.api("DELETE", "/api/v1/sessions/" + encodeURIComponent(id))');
     expect(js).toContain('Dash.api("POST", "/api/v1/account/email", { email: value })');
     // Every change carries the X-Csrf-Token header: Dash.api adds it to every request that is not a GET.
     expect(DASH_JS).toContain('if (method !== "GET" && method !== "HEAD") headers["X-Csrf-Token"] = csrf;');
-    const forbidden = ["fetch(", "csrf", "localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "setTimeout(", "document.referrer", "navigator", "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "confirm(", "alert(", "prompt("];
+    const forbidden = ["fetch(", "csrf", "localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer", "navigator", "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "confirm(", "alert(", "prompt("];
     for (const api of forbidden) expect(js, api).not.toContain(api);
+    // One timer only: the wait between two asks whether a download is still going (0.1.60).
+    expect(js.match(/setTimeout\(/g)).toHaveLength(1);
+    expect(js).toContain("return new Promise(function (resolve) { setTimeout(resolve, ms); });");
     expect(js).toContain("Dash.signedOut()");
     // The shared script hands the page what the session says, and leaves the one who is signed out to a page that asks for it.
     expect(DASH_JS).toContain("emailChange: d.email_change === true");

@@ -53,15 +53,24 @@ export const ZIP_LIMITS: ZipLimits = { u16: 0xffff, u32: 0xffffffff };
 
 /**
  * A name the writer takes: ASCII letters, digits, ".", "_" and "-" in parts of 1 to 100
- * characters separated by "/", no part that is "." or "..", and at most 240 characters in
- * all: nothing that could leave the folder it is unpacked into, on any system.
+ * characters separated by "/" (so no control character and no space), and at most 240
+ * characters in all; and no part a folder on Windows or macOS could not hold as written: one
+ * made only of dots (".", ".." and more), one ending in a dot, or a Windows device name (CON,
+ * PRN, AUX, NUL, COM0 to COM9, LPT0 to LPT9) in any case, alone or before an extension.
+ * Nothing that could leave the folder it is unpacked into, on any system.
  */
 export const ZIP_NAME = /^[A-Za-z0-9._-]{1,100}(\/[A-Za-z0-9._-]{1,100})*$/;
 const ZIP_NAME_MAX = 240;
+const DEVICE_PART = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|$)/i;
 
 /** Throws unless `name` is a name the writer takes. */
 export function checkZipName(name: string): void {
-  if (typeof name !== "string" || name.length > ZIP_NAME_MAX || !ZIP_NAME.test(name) || name.split("/").some((p) => p === "." || p === "..")) {
+  if (
+    typeof name !== "string" ||
+    name.length > ZIP_NAME_MAX ||
+    !ZIP_NAME.test(name) ||
+    name.split("/").some((p) => /^\.+$/.test(p) || p.endsWith(".") || DEVICE_PART.test(p))
+  ) {
     throw new Error("zip: a name that cannot be written");
   }
 }

@@ -9,10 +9,10 @@ import { existsSync, mkdirSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
 import { createApp } from "../src/app.ts";
-import { EXPORT_PATH, EXPORT_WORKER_FILES } from "../src/export.ts";
+import { EXPORT_IDLE_MS, EXPORT_MAX_MS, EXPORT_PATH, EXPORT_WORKER_FILES, RUNNING_MS, exportInProgress } from "../src/export.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { zipStream } from "../src/zip.ts";
 import { ORIGIN, clone, fixtures, png, uploadTour, type Json } from "./bundle.ts";
@@ -128,5 +128,54 @@ describe("Download all my data on the Node server", () => {
     if (skipped.length > 0) console.log(`unzip programs not found, skipped: ${skipped.join("; ")}`);
     // On Windows both are part of the system: neither may be skipped there.
     if (process.platform === "win32") expect(skipped).toEqual([]);
+  });
+});
+
+describe("Download all my data: a reader that stops taking bytes (L1, a fake clock)", () => {
+  afterEach(() => void vi.useRealTimers());
+
+  /** A started download, read through the app a chunk at a time, and a way to ask again. */
+  async function started() {
+    const s = await signedIn({ exportFileReads: null });
+    await uploadTour(s.deps, s.a.token, manifest(60, "Long"));
+    const app = createApp(s.deps);
+    const askAgain = async () =>
+      (await app.fetch(new Request(ORIGIN + EXPORT_PATH, { method: "POST", headers: { cookie: s.cookie, "x-csrf-token": s.csrf, origin: ORIGIN, "sec-fetch-site": "same-origin" } }))).status;
+    const asked = await app.fetch(new Request(ORIGIN + EXPORT_PATH, { method: "POST", headers: { cookie: s.cookie, "x-csrf-token": s.csrf, origin: ORIGIN, "sec-fetch-site": "same-origin" } }));
+    const { url } = (await asked.json()) as { url: string };
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const res = await app.fetch(new Request(ORIGIN + url, { headers: { cookie: s.cookie } }));
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    await reader.read();
+    return { s, reader, askAgain };
+  }
+
+  it("no bytes taken for EXPORT_IDLE_MS: the zip is cancelled and the workspace may ask again", async () => {
+    const { s, reader, askAgain } = await started();
+    await vi.advanceTimersByTimeAsync(EXPORT_IDLE_MS - 1);
+    expect(await askAgain()).toBe(409);
+    expect(await exportInProgress(s.deps, s.a.workspaceId, s.deps.now())).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(reader.read()).rejects.toThrow();
+    expect(await exportInProgress(s.deps, s.a.workspaceId, s.deps.now())).toBe(false);
+    expect(await askAgain()).toBe(200);
+  });
+
+  it("a reader that keeps taking bytes slowly is stopped at EXPORT_MAX_MS all the same, and the workspace may ask again", async () => {
+    const { s, reader, askAgain } = await started();
+    let taken = 0;
+    for (let at = 0; at + 4 * 60_000 < EXPORT_MAX_MS; at += 4 * 60_000) {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      const next = await reader.read();
+      expect(next.done, `at ${at}`).toBe(false);
+      taken++;
+    }
+    expect(taken).toBeGreaterThan(80);
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    await expect(reader.read()).rejects.toThrow();
+    expect(await exportInProgress(s.deps, s.a.workspaceId, s.deps.now())).toBe(false);
+    expect(await askAgain()).toBe(200);
+    expect(RUNNING_MS).toBe(EXPORT_MAX_MS);
   });
 });
