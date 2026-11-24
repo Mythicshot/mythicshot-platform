@@ -150,8 +150,8 @@ const ROWS: Record<string, Row> = {
   "GET /api/v1/tokens": session("GET", "/api/v1/tokens", 401),
   "PATCH /api/v1/tokens/:id": session("PATCH", `/api/v1/tokens/${TOKEN}`, 401, { name: "Laptop" }),
   "DELETE /api/v1/tokens/:id": session("DELETE", `/api/v1/tokens/${TOKEN}`, 401),
-  // A token ending itself: a token alone, on the same address as the token list.
-  "DELETE /api/v1/token": session("DELETE", "/api/v1/token", 401),
+  // A token ending itself: a token alone, on both addresses like every route a token calls.
+  "DELETE /api/v1/token": api("DELETE", "/api/v1/token"),
   // The site admin's routes: on the app address only, and nobody here is an admin.
   "GET /api/v1/admin/accounts": admin("GET", "/api/v1/admin/accounts"),
   "GET /api/v1/admin/summary": admin("GET", "/api/v1/admin/summary"),
@@ -260,9 +260,9 @@ const ROWS: Record<string, Row> = {
 
 const KEYS = Object.keys(ROWS);
 const DESCRIPTION_KEYS = KEYS.filter((k) => k.includes(" /api/v1/openapi."));
-/** Signing in, the session, looking up and accepting an invite, typing a short code, the workspace's tokens and a token ending itself: the app address's own part of the API. */
+/** Signing in, the session, looking up and accepting an invite, typing a short code and the workspace's tokens: the app address's own part of the API. */
 // The change of who may view a tour takes a session alone, so it is one of these too.
-const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account|invite|connect\/(?:lookup|confirm|refuse)|tokens?|terms)(?:\/|$)/.test(k) || k === "PUT /api/v1/tours/:id/access" || k === "PUT /api/v1/media/:id/access");
+const SESSION_KEYS = KEYS.filter((k) => /^[A-Z]+ \/api\/v1\/(?:signin|signout|sessions?|account|invite|connect\/(?:lookup|confirm|refuse)|tokens|terms)(?:\/|$)/.test(k) || k === "PUT /api/v1/tours/:id/access" || k === "PUT /api/v1/media/:id/access");
 /** The app's two requests while it connects: no credential, on both addresses. */
 const CONNECT_KEYS = ["POST /api/v1/connect/start", "POST /api/v1/connect/token"];
 /** The site admin's routes. */
@@ -401,13 +401,13 @@ describe("the host-routing matrix", () => {
     // Every dashboard page and its script is in one of the two lists, and nothing is in both.
     for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES, TERMS_PAGE]) for (const key of [`GET ${p.path}`, `GET ${p.script.path}`]) expect([PAGE_KEYS.includes(key), DASH_KEYS.includes(key)].filter(Boolean), key).toEqual([true]);
     for (const key of ["GET /dash/dash.css", "GET /dash/dash.js", "GET /dash/mark.svg"]) expect(DASH_KEYS, key).toContain(key);
-    // 9, the two requests of an invite, the three requests that take a short code, the three of the token list, a token ending itself, the change of who may view a tour or an item, and the three of the site's terms, and the three of Download all my data.
-    expect(SESSION_KEYS.length).toBe(26);
+    // 9, the two requests of an invite, the three requests that take a short code, the three of the token list, the change of who may view a tour or an item, and the three of the site's terms, and the three of Download all my data.
+    expect(SESSION_KEYS.length).toBe(25);
     expect(ADMIN_KEYS.length).toBe(12);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
-    // 15, the eight routes of shared items, the read of who may view one, and a tour's chapters read and changed.
-    expect(API_KEYS.length).toBe(27);
+    // 15, the eight routes of shared items, the read of who may view one, a tour's chapters read and changed, and a token ending itself.
+    expect(API_KEYS.length).toBe(28);
     expect(WIZARD_KEYS.length).toBe(5);
     // The shared items' routes are the media routes, and the img address has them and health alone.
     expect(MEDIA_KEYS.length).toBe(19);

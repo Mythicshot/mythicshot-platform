@@ -25,7 +25,7 @@ import { encodeAccountCursor } from "../src/admin-api.ts";
 import { createApp } from "../src/app.ts";
 import { SUBSCRIPTION_ENDED } from "../src/billing.ts";
 import { TRIAL_MS } from "../src/billing-rules.ts";
-import { newId } from "../src/auth.ts";
+import { hashToken, newId, newToken } from "../src/auth.ts";
 import { MAX_CHAPTERS } from "../src/chapters.ts";
 import { setClientAddress } from "../src/client.ts";
 import { UNDOCUMENTED_ROUTES, openapi } from "../src/docs/openapi.ts";
@@ -1536,12 +1536,17 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     refused(await api.call("DELETE", `/api/v1/tokens/${id}`, { origin: APP, token: a.token }), 401, "unauthorized");
     expect((await api.call("DELETE", `/api/v1/tokens/${id}`, { origin: APP, headers: page })).status).toBe(204);
     refused(await api.call("DELETE", `/api/v1/tokens/${id}`, { origin: APP, headers: page }), 404, "not_found");
-    // A token ending itself: the token alone. A session is refused; the token ends, and is refused from then on.
+    // A token ending itself: the token alone. A session is refused; the setup token is no connection
+    // and keeps working; a connection ends, and is refused from then on.
     refused(await api.call("DELETE", "/api/v1/token", { origin: APP, headers: page }), 401, "unauthorized");
-    const ended = await api.call("DELETE", "/api/v1/token", { origin: APP, token: a.token });
+    refused(await api.call("DELETE", "/api/v1/token", { origin: TOURS, token: a.token }), 409, "not_a_connection");
+    expect((await api.call("GET", "/api/v1/me", { origin: APP, token: a.token })).status).toBe(200);
+    const laptop = newToken();
+    await deps.db.run("INSERT INTO api_token (id, workspace_id, name, hash, created_at, kind, user_id) VALUES (?, ?, 'Laptop', ?, ?, 'sign_in', ?)", [newId("tok"), a.workspaceId, await hashToken(laptop), deps.now(), a.userId]);
+    const ended = await api.call("DELETE", "/api/v1/token", { origin: TOURS, token: laptop });
     expect([ended.status, ended.text, ended.headers.get("cache-control")]).toEqual([204, "", "no-store"]);
-    refused(await api.call("DELETE", "/api/v1/token", { origin: APP, token: a.token }), 401, "unauthorized");
-    refused(await api.call("GET", "/api/v1/me", { origin: APP, token: a.token }), 401, "unauthorized");
+    refused(await api.call("DELETE", "/api/v1/token", { origin: APP, token: laptop }), 401, "unauthorized");
+    refused(await api.call("GET", "/api/v1/me", { origin: APP, token: laptop }), 401, "unauthorized");
 
     // One address: the connected answer has no addresses.
     const one = await makeDeps();

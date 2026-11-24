@@ -314,7 +314,7 @@ function introduction(): string {
     "",
     `The desktop app gets its token with a pair of codes, so nobody has to copy one. It asks POST /api/v1/connect/start, with no credential, for a long secret device code and a short user code such as ABCD-EFGH, shows the short one and opens verify_url, the dashboard's Connections page. A signed-in person types the short code there; the page shows the device's name (POST /api/v1/connect/lookup, with the code in the body) and the person confirms it (POST /api/v1/connect/confirm) or refuses it (POST /api/v1/connect/refuse). Meanwhile the app asks POST /api/v1/connect/token with the device code every ${POLL_INTERVAL_S} seconds: pending, until it is answered connected with a token for that person's workspace, once; the person who confirmed is then mailed at their address that a computer was connected, after the answer, which is the same whether or not that mail goes. The codes live ${CONNECT_MS / 60_000} minutes. Neither is ever put in an address.`,
     "",
-    "The workspace's tokens are listed, renamed and revoked with GET /api/v1/tokens, PATCH /api/v1/tokens/{id} and DELETE /api/v1/tokens/{id}. Like the requests that take a short code, they need the session: a token cannot list, rename or revoke tokens, its own included. The one thing a token can do to tokens is end itself, with DELETE /api/v1/token, which takes the token alone and revokes exactly the token that sent it, as an app does when it disconnects. A revoked token is refused from the next request on.",
+    "The workspace's tokens are listed, renamed and revoked with GET /api/v1/tokens, PATCH /api/v1/tokens/{id} and DELETE /api/v1/tokens/{id}. Like the requests that take a short code, they need the session: a token cannot list, rename or revoke tokens, its own included. The one thing a token can do to tokens is end itself, with DELETE /api/v1/token, which takes the token alone and revokes exactly the token that sent it, as an app does when it disconnects; only a connection made by signing in from the app can, and a token made at setup answers 409 not_a_connection. A revoked token is refused from the next request on.",
     "",
     "## Errors",
     "",
@@ -2042,10 +2042,10 @@ function paths(): OpenApiDoc["paths"] {
       delete: {
         tags: ["Connections"],
         summary: "End the token that sends this request",
-        description: "Revokes the token this request is sent with, for good, and nothing else: an app calls it when it disconnects, so the connection ends on the site too. It takes the token alone: a request with only the session cookie, or with no credential, answers 401. No id or other selector is read from the address or the body, which is never read, so it can never end another token. Every request with the token from now on answers 401, this one sent again included (a request already under way finishes). It works whatever the workspace's billing state and whatever the site's terms, since it only takes access away. In the audit record as token_ended_itself.",
+        description: "Revokes the token this request is sent with, for good, and nothing else: an app calls it when it disconnects, so the connection ends on the site too. Only a connection made by signing in from the app (kind sign_in) can end itself; a token made at setup is shared by everything set up with it, so it answers 409 and keeps working. It takes the token alone: a request with only the session cookie, or with no credential, answers 401. No id or other selector is read from the address or the body, which is never read, so it can never end another token. Every request with the token from now on answers 401, this one sent again included (a request already under way finishes). It works whatever the workspace's billing state and whatever the site's terms, since it only takes access away. In the audit record as token_ended_itself.",
         operationId: "endOwnToken",
         security: TOKEN_ONLY,
-        responses: { "204": empty("Ended."), "401": UNAUTHORIZED },
+        responses: { "204": empty("Ended."), "401": UNAUTHORIZED, "409": refusal("The token is no connection: it was made at setup. Nothing was changed, and it keeps working.", "not_a_connection") },
       },
     },
     "/api/v1/admin/summary": {

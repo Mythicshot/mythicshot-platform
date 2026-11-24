@@ -11,9 +11,14 @@
 // this request" ends itself. The desktop app holds only its token, so this is how it tells the
 // site that a connection it drops should end. It revokes exactly the token requireAuth resolved
 // (its id and workspace, never an id from the URL or a body, which is never read), with its
-// record in one batch, guarded like the revoke. It only takes access away, so neither billing's
-// read-only state nor the site's terms hold it back (a token is never held to the terms, and it
-// does not ask readOnlyRefusal). It lives where the other token routes do (src/host-gate.ts).
+// record in one batch, guarded like the revoke. Only a connection (kind `sign_in`) can end
+// itself: a setup token is an installation's first token, which scripts and older app profiles
+// may share, so ending it from one computer would break the others. The kind is a condition of
+// the guarded update itself, so a setup token is never revoked, not even for a moment; it is
+// answered 409 `not_a_connection`. It only takes access away, so neither billing's read-only
+// state nor the site's terms hold it back (a token is never held to the terms, and it does not
+// ask readOnlyRefusal). It answers on both addresses, as every route a token calls does
+// (src/host-gate.ts).
 //
 // Revoking sets revoked_at. requireAuth reads that column on every request a token makes, in
 // the one lookup that resolves the token, so the first request whose lookup runs after the
@@ -22,7 +27,7 @@
 // "at once" means here.
 import type { Hono } from "hono";
 import { auditStatement } from "./audit.ts";
-import { isBeforeTokenAccount, requireAuth, type Auth } from "./auth.ts";
+import { isBeforeKinds, isBeforeTokenAccount, requireAuth, type Auth } from "./auth.ts";
 import { isBeforeAccounts } from "./accounts.ts";
 import { parseDeviceName } from "./connect.ts";
 import { apiError, json, noContent } from "./http.ts";
@@ -61,6 +66,11 @@ function endedMeanwhile(): Response {
   return new Response('{"error":"unauthorized"}', { status: 401, headers: { "content-type": "application/json" } });
 }
 
+/** A valid token that is no connection (a setup token, or any token before migration 0011): it cannot end itself. */
+function notAConnection(): Response {
+  return apiError(409, "not_a_connection", "only a connection made by signing in from the app can end itself; this token was made at setup");
+}
+
 /** Another workspace's token, a revoked one, one that never was and an id that is not one: the one 404. */
 function noToken(): Response {
   return apiError(404, "not_found", "no such token");
@@ -93,9 +103,13 @@ export function tokenRoutes(app: Hono, deps: Deps): void {
   /**
    * The token that sent the request ends itself: 204, and every request it makes from now on is
    * refused (401). A token alone (`only: "token"`): a session, or no credential, is the one 401
-   * of requireAuth. Its use is not recorded (`touch: false`): it is ended, not used. A token
-   * revoked between its lookup and the batch changes nothing and gets the 401 it would get a
-   * moment later.
+   * of requireAuth, and no cookie is read on either address. Its use is not recorded
+   * (`touch: false`): it is ended, not used. Only a token of kind `sign_in` is revoked: the
+   * update names the kind, so for any other token it changes nothing, its record's guard undoes
+   * the batch, and a read after it tells the 409 of a token that is no connection from the 401
+   * of a token revoked between its lookup and the batch. On a database the connections
+   * migration (0011) has not reached there is no kind and no connection: every token is a setup
+   * token there, and gets the 409.
    */
   app.delete("/api/v1/token", async (c) => {
     const auth = await requireAuth(c.req.raw, deps, { only: "token", touch: false });
@@ -103,12 +117,15 @@ export function tokenRoutes(app: Hono, deps: Deps): void {
     const userId = await accountOfToken(deps, auth);
     try {
       await deps.db.batch([
-        { sql: "UPDATE api_token SET revoked_at = ? WHERE id = ? AND workspace_id = ? AND revoked_at IS NULL", params: [deps.now(), auth.tokenId, auth.workspaceId] },
+        { sql: "UPDATE api_token SET revoked_at = ? WHERE id = ? AND workspace_id = ? AND revoked_at IS NULL AND kind = 'sign_in'", params: [deps.now(), auth.tokenId, auth.workspaceId] },
         auditStatement(deps, { event: "token_ended_itself", userId, workspaceId: auth.workspaceId, subject: auth.tokenId }, { onlyAfterOneChange: true }),
       ]);
     } catch (err) {
-      if (isNotNullViolation(err)) return endedMeanwhile();
-      throw err;
+      if (isBeforeKinds(err)) return notAConnection();
+      if (!isNotNullViolation(err)) throw err;
+      // Nothing changed: a token still live is of another kind; one gone was revoked meanwhile.
+      const live = await deps.db.first<{ kind: string }>("SELECT kind FROM api_token WHERE id = ? AND workspace_id = ? AND revoked_at IS NULL", [auth.tokenId, auth.workspaceId]);
+      return live !== null && live.kind !== "sign_in" ? notAConnection() : endedMeanwhile();
     }
     return noContent();
   });

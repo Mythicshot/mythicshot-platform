@@ -101,11 +101,46 @@ describe("a token ends itself", () => {
     const again = await end(deps, laptop.token);
     expect(seen(again)).toEqual(seen(unauthorized));
     expect(await audits(deps)).toHaveLength(1);
-    // The workspace's own first token can end itself too, and names its owner.
-    expect((await end(deps, a.token)).status).toBe(204);
-    expect((await me(deps, a.token)).status).toBe(401);
-    expect((await audits(deps)).at(-1)).toEqual({ event: "token_ended_itself", user_id: a.userId, workspace_id: a.workspaceId, subject: firstA, detail: null });
     expect((await me(deps, b.token)).status).toBe(200);
+  });
+
+  it("only a connection ends itself: a token of kind setup gets 409 not_a_connection, changes nothing and keeps working", async () => {
+    const { deps, a } = await site();
+    const firstA = await firstTokenOf(deps, a.workspaceId);
+    const pasted = await addToken(deps, a.workspaceId, { kind: "setup", userId: a.userId });
+    for (const token of [a.token, pasted.token]) {
+      const before = await everything(deps);
+      const r = await end(deps, token);
+      expect(seen(r)).toEqual({
+        status: 409,
+        headers: [["cache-control", "no-store"], ["content-type", "application/json"], ["x-content-type-options", "nosniff"]],
+        body: '{"error":"not_a_connection","detail":"only a connection made by signing in from the app can end itself; this token was made at setup"}',
+      });
+      expect(await everything(deps)).toEqual(before);
+      expect((await me(deps, token)).status).toBe(200);
+    }
+    expect(await audits(deps)).toEqual([]);
+    expect(await deps.db.first("SELECT revoked_at FROM api_token WHERE id = ?", [firstA])).toEqual({ revoked_at: null });
+    // A connection of the same workspace still ends itself.
+    const laptop = await addToken(deps, a.workspaceId, { userId: a.userId });
+    expect((await end(deps, laptop.token)).status).toBe(204);
+  });
+
+  it("no moment exists in which a setup token is revoked: the guarded update itself leaves it alone", async () => {
+    const { deps, a } = await site();
+    const firstA = await firstTokenOf(deps, a.workspaceId);
+    const batches: string[][] = [];
+    const realBatch = deps.db.batch.bind(deps.db);
+    deps.db.batch = (async (stmts: { sql: string }[]) => {
+      batches.push(stmts.map((s) => s.sql));
+      return realBatch(stmts as never);
+    }) as typeof deps.db.batch;
+    expect((await end(deps, a.token)).status).toBe(409);
+    deps.db.batch = realBatch;
+    expect(batches).toHaveLength(1);
+    expect(batches[0][0]).toBe("UPDATE api_token SET revoked_at = ? WHERE id = ? AND workspace_id = ? AND revoked_at IS NULL AND kind = 'sign_in'");
+    expect(batches[0][1]).toContain("CASE WHEN changes() = 1");
+    expect(await deps.db.first("SELECT revoked_at FROM api_token WHERE id = ?", [firstA])).toEqual({ revoked_at: null });
   });
 
   it("records no account for a token that names none, nor for one whose account no longer belongs to the workspace", async () => {
@@ -133,6 +168,7 @@ describe("a token ends itself", () => {
     const firstA = await firstTokenOf(deps, a.workspaceId);
     const firstB = await firstTokenOf(deps, b.workspaceId);
     const other = await addToken(deps, a.workspaceId, { userId: a.userId });
+    // firstA and firstB are setup tokens: named anywhere, they are never what ends.
     const asks: { path?: string; body?: string; headers?: Record<string, string> }[] = [
       { path: `${PATH}?id=${firstA}` },
       { path: `${PATH}?id=${firstB}&token=${encodeURIComponent(b.token)}` },
@@ -312,30 +348,59 @@ describe("it only reduces access, so nothing holds it back", () => {
     expect((await me(deps, token)).status).toBe(401);
     expect(await deps.db.all("SELECT event, user_id, workspace_id, subject FROM audit WHERE event = 'token_ended_itself'")).toEqual([{ event: "token_ended_itself", user_id: null, workspace_id: ws, subject: id }]);
   });
+
+  it("on a database before connections (migration 0011), where every token is a setup token, the same 409 and nothing changes", async () => {
+    const made = await makeDepsBefore((n) => n < "0011");
+    const { deps } = made;
+    deps.now = () => NOW;
+    const ws = newId("ws");
+    await deps.db.run("INSERT INTO workspace (id, name, created_at) VALUES (?, 'Old', ?)", [ws, NOW]);
+    const token = newToken();
+    await deps.db.run("INSERT INTO api_token (id, workspace_id, name, hash, created_at) VALUES (?, ?, 'Old token', ?, ?)", [newId("tok"), ws, await hashToken(token), NOW]);
+    expect((await me(deps, token)).status).toBe(200);
+    const before = await everything(deps);
+    const r = await end(deps, token);
+    expect([r.status, r.json.error, r.headers.get("cache-control")]).toEqual([409, "not_a_connection", "no-store"]);
+    expect(await everything(deps)).toEqual(before);
+    expect((await me(deps, token)).status).toBe(200);
+  });
 });
 
 describe("where it answers", () => {
-  it("with two addresses: on the app address only; the tours address answers 404 and ends nothing", async () => {
+  it("with two addresses: on the app and the tours address, as every route a token calls; another host is 421 and ends nothing", async () => {
     const { deps, a } = await site(TWO);
-    const laptop = await addToken(deps, a.workspaceId, { userId: a.userId });
+    const stray = await addToken(deps, a.workspaceId, { userId: a.userId });
     const before = await everything(deps);
-    const onTours = await end(deps, laptop.token, { origin: TOURS });
-    expect([onTours.status, onTours.json]).toEqual([404, { error: "not_found" }]);
-    expect((await end(deps, laptop.token, { origin: "https://evil.example.net" })).status).toBe(421);
+    expect((await end(deps, stray.token, { origin: "https://evil.example.net" })).status).toBe(421);
     expect(await everything(deps)).toEqual(before);
-    expect((await end(deps, laptop.token, { origin: APP })).status).toBe(204);
-    expect((await me(deps, laptop.token, APP)).status).toBe(401);
+    for (const origin of [APP, TOURS]) {
+      const laptop = await addToken(deps, a.workspaceId, { userId: a.userId });
+      expect((await end(deps, laptop.token, { origin })).status, origin).toBe(204);
+      expect((await me(deps, laptop.token, origin)).status, origin).toBe(401);
+    }
+    expect((await audits(deps)).map((e) => e.event)).toEqual(["token_ended_itself", "token_ended_itself"]);
+  });
+
+  it("a session cookie alone, on the tours or the app address, is the one 401 and changes nothing: no cookie is read", async () => {
+    const { deps, a } = await site(TWO);
+    await addToken(deps, a.workspaceId, { userId: a.userId });
+    const unauthorized = seen(await send(deps, "GET", "/api/v1/tours", { origin: TOURS }));
+    for (const origin of [TOURS, APP]) {
+      const session = await signIn(deps, a.userId, origin);
+      const before = await everything(deps);
+      const r = await end(deps, null, { origin, headers: session });
+      expect(seen(r), origin).toEqual(unauthorized);
+      expect(await everything(deps), origin).toEqual(before);
+    }
   });
 
   it("with an img address too: never on the img address", async () => {
     const { deps, a } = await site(THREE);
     const laptop = await addToken(deps, a.workspaceId, { userId: a.userId });
     const before = await everything(deps);
-    for (const origin of [IMG, TOURS]) {
-      const r = await end(deps, laptop.token, { origin });
-      expect([r.status, r.json], origin).toEqual([404, { error: "not_found" }]);
-    }
+    const r = await end(deps, laptop.token, { origin: IMG });
+    expect([r.status, r.json]).toEqual([404, { error: "not_found" }]);
     expect(await everything(deps)).toEqual(before);
-    expect((await end(deps, laptop.token, { origin: APP })).status).toBe(204);
+    expect((await end(deps, laptop.token, { origin: TOURS })).status).toBe(204);
   });
 });

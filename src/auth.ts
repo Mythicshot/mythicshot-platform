@@ -245,7 +245,7 @@ const TOKEN_LOOKUP = TOKEN_LOOKUP_BEFORE_LIFETIMES + " AND " + tokenLifeSql("api
  * which has no `kind` column and so no token of kind `sign_in`: the lookup without the
  * lifetimes is then the whole rule.
  */
-function isBeforeKinds(err: unknown): boolean {
+export function isBeforeKinds(err: unknown): boolean {
   for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
     if (/(?:^|: )no such column: (?:api_token\.)?kind(?:$|:| at offset )/.test(e.message)) return true;
   }
