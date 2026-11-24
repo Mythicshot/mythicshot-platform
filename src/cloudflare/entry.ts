@@ -6,6 +6,7 @@ import { stripeOverFetch } from "../stripe.ts";
 import { mediaLimitsProblem } from "../limits.ts";
 import { withBudget } from "../budget.ts";
 import { sweepWithinBudget, type SweepSummary } from "../billing-sweep.ts";
+import { removalSwitchedOn } from "../removal-rules.ts";
 import { setClientAddress } from "../client.ts";
 import { downloadUrlSetting, homeUrlSetting } from "../https-address.ts";
 import { DEFAULT_LIFETIMES, LIFETIME_SETTINGS, lifetimesSetting, sameLifetimes, type LifetimeSetting } from "../lifetimes.ts";
@@ -130,6 +131,8 @@ export function depsFromEnv(
       ...(homeUrl === null ? {} : { homeUrl }),
       ...(sameLifetimes(lifetimes, DEFAULT_LIFETIMES) ? {} : { lifetimes }),
       ...(billing === null ? {} : { billing }),
+      // BILLING_REMOVAL, a var only an install that removes adds: the trial notice promises a removal only with it on.
+      ...(removalSwitchedOn((env as { BILLING_REMOVAL?: unknown }).BILLING_REMOVAL) ? { billingRemoval: true } : {}),
     },
     now: () => Date.now(),
     ...(billing === null ? {} : { stripe: stripeOverFetch(billing.apiKey) }),

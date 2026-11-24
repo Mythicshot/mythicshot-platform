@@ -52,12 +52,10 @@ export const REMOVALS_PER_DAY = 20;
 export const EXPORT_QUIET_MS = 3_600_000;
 
 /**
- * Whether this build has "Download all my data" (Plan 2l item 9), which is built in parallel.
- * False here: the notice strips then say nothing of a download. THE INTEGRATOR FLIPS THIS TO
- * true in the merge that brings the download route in, together with the hook exportInProgress
- * in src/billing-sweep.ts.
+ * Whether this build has "Download all my data" (Plan 2l item 9, 0.1.60, src/export.ts): it has,
+ * so the trial-ending and ended notices say where everything can be downloaded.
  */
-export const DOWNLOAD_ALL_BUILT = false;
+export const DOWNLOAD_ALL_BUILT = true;
 
 /**
  * The account id the sweep's removals are recorded under (account_removal.started_by and the

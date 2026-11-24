@@ -18,7 +18,8 @@ export const REMOVAL_DAY = Date.UTC(2027, 3, 11);
 export const at3 = (month: number, day: number, year = 2027) => Date.UTC(year, month, day, 3, 0);
 export const ORIGIN = "https://tours.example.com";
 export const SUBSCRIBE = `${ORIGIN}/billing/subscribe`;
-export const ACCOUNT = `${ORIGIN}/account`;
+/** The real download place: the "Download all my data" card of the Account page (0.1.60). */
+export const ACCOUNT = `${ORIGIN}/account#h-data`;
 export const DOWNLOAD = `You can download everything in your account first: ${ACCOUNT}`;
 
 export type Side = { workspaceId: string; userId: string; token: string; email: string };

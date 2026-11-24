@@ -2322,6 +2322,7 @@ services:
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       STRIPE_PRICE_ID: ${STRIPE_PRICE_ID:-}
       STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      BILLING_REMOVAL: ${BILLING_REMOVAL:-}
       # The sign-in lifetimes in whole days, each 0 or off to switch it off: a browser session
       # ends this long after its sign-in (default 90), a connection from Mythicshot stops after
       # this long unused (default 90) or this long after it was made (default off).

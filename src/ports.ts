@@ -173,6 +173,12 @@ export type Config = {
    * any byte is sent.
    */
   exportFileReads?: number | null;
+  /**
+   * BILLING_REMOVAL=on (removalSwitchedOn, src/removal-rules.ts): the billing sweep may remove
+   * content. The app reads it only to word the trial notice (it promises a removal only then).
+   * Absent or false: off.
+   */
+  billingRemoval?: boolean;
 };
 
 export type Deps = {

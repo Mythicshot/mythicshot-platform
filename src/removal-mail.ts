@@ -17,8 +17,8 @@ import { fullDate, type WarningStage } from "./removal-rules.ts";
 /** What a warning mail needs: which clock, which warning, the removal day it names, and for an ended subscription when it ended. */
 export type WarningOf = { kind: "trial" | "ended"; stage: WarningStage; removalAt: number; endedAt: number | null };
 
-/** The Account page, where everything in the account can be downloaded. */
-export const ACCOUNT_PATH = "/account";
+/** The "Download all my data" card of the Account page (0.1.60, src/dash/account.ts), where everything can be downloaded. */
+export const ACCOUNT_PATH = "/account#h-data";
 
 /** True for an origin as linkOrigin gives it: a scheme and a host, nothing after. */
 function isOrigin(origin: unknown): origin is string {

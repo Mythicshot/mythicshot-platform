@@ -3,6 +3,7 @@
 // without starting the app. (The mailer it makes for a usable mail block starts its
 // worker thread, and opens its first connection, only when a mail is sent.)
 import { billingFromSettings } from "../billing-rules.ts";
+import { removalSwitchedOn } from "../removal-rules.ts";
 import { billingAddressProblem } from "../billing.ts";
 import { canonicalAddress } from "../client.ts";
 import { hasNetwork } from "../rate.ts";
@@ -27,7 +28,7 @@ export const NODE_SETTINGS: readonly string[] = [
   "APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE",
   "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST",
   "INVITE_CONTACT", "IMG_HOST", "DOWNLOAD_URL", "SESSION_MAX_DAYS", "CONNECTION_IDLE_DAYS", "CONNECTION_MAX_DAYS",
-  "HOME_URL", "STRIPE_API_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_ID", "STRIPE_PUBLISHABLE_KEY",
+  "HOME_URL", "STRIPE_API_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_ID", "STRIPE_PUBLISHABLE_KEY", "BILLING_REMOVAL",
 ];
 
 /**
@@ -101,6 +102,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
     ...(homeUrl === null ? {} : { homeUrl }),
     ...(sameLifetimes(lifetimes, DEFAULT_LIFETIMES) ? {} : { lifetimes }),
     ...(billing.billing === null ? {} : { billing: billing.billing }),
+    // Read by name: env.BILLING_REMOVAL (removalSwitchedOn): only `on` switches removal on.
+    ...(removalSwitchedOn(env.BILLING_REMOVAL) ? { billingRemoval: true } : {}),
   };
   // With billing on, Stripe's return address is the site's own https address, never a request's Host.
   const address = billingAddressProblem(config);

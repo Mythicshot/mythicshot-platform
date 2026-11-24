@@ -53,9 +53,20 @@ export const DOWNLOAD_SENTENCE = "You can download everything from your Account 
  * (DOWNLOAD_ALL_BUILT, src/removal-rules.ts); without it the script is the one before, byte for byte.
  */
 const DOWNLOAD_LINE = DOWNLOAD_ALL_BUILT
-  ? `    if (s.state === "ended" || s.state === "trial_over" || (s.state === "trial" && kind === "warn")) text.push([${JSON.stringify(" " + DOWNLOAD_SENTENCE)}, false]);
+  ? `    if (s.state === "ended" || s.state === "trial_over" || (s.state === "trial" && kind === "warn")) text = text.concat(downloadParts());
 `
   : "";
+
+/** Where "Account page" in DOWNLOAD_SENTENCE leads: the "Download all my data" card (src/dash/account.ts). */
+export const DOWNLOAD_PLACE = "/account#h-data";
+
+/**
+ * The trial notice's sentence about the removal (approved by the owner), around the removal day:
+ * "On <date> your content is permanently removed unless you subscribe." Shown only while
+ * BILLING_REMOVAL is on (the state's `removal_on`): without it nothing is removed, and the notice
+ * keeps its sentence of before.
+ */
+export const TRIAL_REMOVAL_WORDS = { on: " On ", rest: " your content is permanently removed unless you subscribe." } as const;
 
 /** The approved words of the notices and the Billing card (mockup sections 2 and 3). */
 const WORDS = {
@@ -123,6 +134,12 @@ export const BILLING_JS = `(function () {
   "use strict";
   var W = ${JSON.stringify(WORDS)};
   var OVER = ${JSON.stringify(TRIAL_OVER_WORDS)};
+  var REMOVAL = ${JSON.stringify(TRIAL_REMOVAL_WORDS)};
+  var CUT = ${JSON.stringify(DOWNLOAD_SENTENCE.split("Account page"))};
+  // "You can download everything from your Account page.", its "Account page" a link to the download card.
+  function downloadParts() {
+    return [[" " + CUT[0], false], ["Account page", false, ${JSON.stringify(DOWNLOAD_PLACE)}], [CUT[1], false]];
+  }
 ${COMMON}
 
   // A link to the Subscribe page, as a button.
@@ -173,6 +190,8 @@ ${COMMON}
     var days = num(s.days_left);
     if (s.state === "trial" && days !== null && days > 7) {
       text = [[W.trialLead, true], [" " + days + (days === 1 ? W.dayLeft : W.daysLeft) + Dash.formatBytes(s.used_bytes) + W.of + Dash.formatBytes(s.allowance_bytes) + W.stop, false]];
+      // With removal on, the day the content goes and where to download it (owner's wording).
+      if (s.removal_on === true && num(s.removed_at) !== null) text = text.concat([[REMOVAL.on + dateOf(s.removed_at) + REMOVAL.rest, false]], downloadParts());
       action = subscribeLink(W.subscribe);
     } else if (s.state === "trial" && days !== null) {
       kind = "warn";
@@ -201,7 +220,15 @@ ${COMMON}
 ${DOWNLOAD_LINE}    var bar = el("div", kind === "" ? "billing-strip" : "billing-strip " + kind);
     bar.id = "billing-strip";
     var span = el("span", "billing-strip-text");
-    text.forEach(function (part) { span.appendChild(part[1] ? el("b", "", part[0]) : document.createTextNode(part[0])); });
+    text.forEach(function (part) {
+      if (part[2]) {
+        var a = el("a", "", part[0]);
+        a.setAttribute("href", part[2]);
+        span.appendChild(a);
+      } else {
+        span.appendChild(part[1] ? el("b", "", part[0]) : document.createTextNode(part[0]));
+      }
+    });
     bar.appendChild(span);
     if (action !== null) bar.appendChild(action);
     bar.appendChild(line);

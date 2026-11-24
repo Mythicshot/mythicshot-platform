@@ -15,6 +15,11 @@ import { emailSha256 } from "../src/removal-store.ts";
 import { send, type Json } from "./bundle.ts";
 import { sessionOf } from "./fake-stripe.ts";
 import { dumpOf } from "./isolation-world.ts";
+import { FakeDocument, type FakeElement } from "./pages-dom.ts";
+import { EXPORT_PATH } from "../src/export.ts";
+import { EXPORT_RUNNING_BUCKET, workspaceKey } from "../src/rate.ts";
+import { SUBREQUEST_BUDGET } from "../src/budget.ts";
+import { sweepWithinBudget } from "../src/billing-sweep.ts";
 import { ON_TIME, REMOVAL_DAY, T0, TRIAL_END, at3, audits, ended, exists, keysOf, mailsTo, publishedTour, site, sweep, userStatus, visit, warned, type Side, type Site } from "./removal-world.ts";
 
 afterEach(() => vi.restoreAllMocks());
@@ -523,5 +528,136 @@ describe("round 3", () => {
     expect(inner!.alreadyRunning).toBe(true);
   });
 });
+
+describe("round 4: the download wired in", () => {
+  const RUNNING = async (s: Site, side: Side, at: number, count = 2) =>
+    s.deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, ?)", [EXPORT_RUNNING_BUCKET, await workspaceKey(side.workspaceId), at, count]);
+
+  it("the download routes refuse while a removal is recorded, and work again once it is not", async () => {
+    const s = await site();
+    const h = (await sessionOf(s.deps, s.a.userId)).headers;
+    const asked = await send(s.deps, "POST", EXPORT_PATH, { headers: h });
+    expect(asked.status).toBe(200);
+    await s.deps.db.run("INSERT INTO account_removal (user_id, workspace_id, started_by, total, created_at) VALUES (?, ?, ?, 0, ?)", [s.a.userId, s.a.workspaceId, s.admin.userId, s.now()]);
+    for (const r of [await send(s.deps, "POST", EXPORT_PATH, { headers: h }), await send(s.deps, "GET", EXPORT_PATH, { headers: { cookie: h.cookie } })]) {
+      expect([r.status, r.json.error]).toEqual([409, "deleting"]);
+    }
+    const file = await send(s.deps, "GET", asked.json.url, { headers: { cookie: h.cookie } });
+    expect([file.status, file.text]).toEqual([404, "Something went wrong. Try again in a moment."]);
+    await s.deps.db.run("DELETE FROM account_removal");
+    s.at(s.now() + 2 * 60_000);
+    expect((await send(s.deps, "POST", EXPORT_PATH, { headers: h })).status).toBe(200);
+  });
+
+  it("an export in progress holds a removal, before the start and before a pass; a stale export row goes with the workspace", async () => {
+    const s = await site();
+    await s.deps.db.run("UPDATE workspace SET billing_trial = 0 WHERE id = ?", [s.b.workspaceId]);
+    await publishedTourAt(s, s.a);
+    await warned(s, s.a, REMOVAL_DAY, ON_TIME);
+    s.at(at3(3, 11));
+    // Before the start: an export asked a minute ago.
+    await RUNNING(s, s.a, s.now() - 60_000);
+    expect((await sweep(s)).held).toBe(1);
+    expect(await userStatus(s.deps, s.a.userId)).toBe("active");
+    // Started, and cut off by a store that failed; then an export row appears (asked just before the start).
+    await s.deps.db.run("DELETE FROM rate_counter WHERE bucket = ?", [EXPORT_RUNNING_BUCKET]);
+    const real = s.deps.drafts.delete.bind(s.deps.drafts);
+    s.deps.drafts.delete = () => Promise.reject(new Error("store down"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect((await sweep(s)).removalsStarted).toBe(1);
+    s.deps.drafts.delete = real;
+    await RUNNING(s, s.a, s.now() - 60_000);
+    expect((await sweep(s)).held).toBe(1);
+    expect(await exists(s.deps, s.a.workspaceId)).toBe(true);
+    expect(await s.deps.db.first<Json>("SELECT stopped_at FROM account_removal WHERE workspace_id = ?", [s.a.workspaceId])).toEqual({ stopped_at: null });
+    // The export ended long ago without letting its row go: stale, it holds nothing, and it goes with the workspace.
+    await s.deps.db.run("UPDATE rate_counter SET window_start = ? WHERE bucket = ?", [s.now() - 7 * 3_600_000, EXPORT_RUNNING_BUCKET]);
+    await sweep(s);
+    expect(await exists(s.deps, s.a.workspaceId)).toBe(false);
+    expect(await s.deps.db.all("SELECT * FROM rate_counter WHERE bucket = ? AND key = ?", [EXPORT_RUNNING_BUCKET, await workspaceKey(s.a.workspaceId)])).toEqual([]);
+  });
+
+  it("a dry run with an export in progress and paid checkouts to ask about reads only: no database write, no Stripe write", async () => {
+    const s = await site();
+    await warned(s, s.a, REMOVAL_DAY, ON_TIME);
+    await warned(s, s.b, REMOVAL_DAY, ON_TIME);
+    s.at(at3(3, 11));
+    await RUNNING(s, s.a, s.now() - 60_000);
+    await s.deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES ('cs_test_paidb', ?, 1, 2)", [s.b.workspaceId]);
+    s.stripe.sessions.set("cs_test_paidb", { id: "cs_test_paidb", status: "complete", customer: "cus_Q", subscription: "sub_Q", form: { client_reference_id: s.b.workspaceId } });
+    s.stripe.subscription("sub_Q", "cus_Q", "active");
+    const before = await dumpOf(s.deps, keysOf(s), { files: true });
+    const r = await sweep(s, { dryRun: true });
+    expect(r.held).toBe(2);
+    expect(await dumpOf(s.deps, keysOf(s), { files: true })).toEqual(before);
+    expect(s.stripe.calls.filter((c) => c.method !== "GET")).toEqual([]);
+  });
+
+  it("the Workers budget holds with checkout confirmations, invoice voids and the export check in one removal", async () => {
+    const s = await site();
+    s.at(T0 + DAY);
+    await publishedTour(s, s.b);
+    await unpaid(s);
+    for (let i = 0; i < 10; i++) {
+      await s.deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES (?, ?, ?, ?)", [`cs_test_e${i}`, s.b.workspaceId, i + 1, i + 2]);
+      s.stripe.sessions.set(`cs_test_e${i}`, { id: `cs_test_e${i}`, status: "expired" });
+    }
+    for (let i = 0; i < 3; i++) s.stripe.invoice(`in_open${i}`, "sub_B", "open");
+    let runs = 0;
+    while (await exists(s.deps, s.b.workspaceId)) {
+      const { calls } = await sweepWithinBudget(s.deps, "on", () => {});
+      expect(calls).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
+      if (++runs > 20) throw new Error("never finished");
+    }
+    expect([...s.stripe.invoices.values()].map((i) => i.status)).toEqual(["void", "void", "void"]);
+  });
+
+  it("the trial notice names the real removal day and the download only while removal is on", async () => {
+    const { BILLING_JS } = await import("../src/dash/billing.ts");
+    const state = { state: "trial", days_left: 62, used_bytes: 38 * 1024 * 1024, allowance_bytes: 104_857_600, removed_at: REMOVAL_DAY, trial_ends_at: TRIAL_END, manage: false };
+    expect(await stripText(BILLING_JS, { ...state, removal_on: true })).toBe(
+      "Trial: 62 days left. You're using 38 MB of 100 MB. On 11 April 2027 your content is permanently removed unless you subscribe. You can download everything from your Account page.Subscribe",
+    );
+    expect(await stripText(BILLING_JS, { ...state, removal_on: false })).toBe("Trial: 62 days left. You're using 38 MB of 100 MB.Subscribe");
+    // The Account page is a link to the download card.
+    expect(await stripLinks(BILLING_JS, { ...state, removal_on: true })).toContain("/account#h-data");
+    // The billing state says whether removal is on.
+    const s = await site();
+    expect((await send(s.deps, "GET", "/api/v1/billing", { headers: (await sessionOf(s.deps, s.a.userId)).headers })).json.removal_on).toBe(false);
+    s.deps.config = { ...s.deps.config, billingRemoval: true };
+    expect((await send(s.deps, "GET", "/api/v1/billing", { headers: (await sessionOf(s.deps, s.a.userId)).headers })).json.removal_on).toBe(true);
+  });
+});
+
+/** Runs the dashboard's billing script against a fake page with this billing state; the strip's elements. */
+async function runStrip(js: string, state: Json) {
+  const doc = new FakeDocument("<html><body></body></html>");
+  const main = doc.createElement("main");
+  (main as unknown as { insertBefore: (c: FakeElement) => void }).insertBefore = (c) => void main.appendChild(c);
+  const make = (t: string) => {
+    const e = doc.createElement(t);
+    Object.defineProperty(e, "id", { get: () => e.getAttribute("id") ?? "", set: (v: string) => e.setAttribute("id", v) });
+    return e;
+  };
+  const shim = { createElement: make, createTextNode: (t: string) => doc.createTextNode(t), getElementById: () => null, querySelector: () => main, body: { getAttribute: () => "tours" } };
+  const dash = { api: async () => ({ status: 200, data: state }), formatBytes: (n: number) => `${Math.round(n / 1024 / 1024)} MB`, failure: () => "" };
+  new Function("document", "location", "Dash", js)(shim, { pathname: "/tours" }, dash);
+  await new Promise((r) => setTimeout(r, 0));
+  return main;
+}
+async function stripText(js: string, state: Json): Promise<string> {
+  return (await runStrip(js, state)).textContent;
+}
+async function stripLinks(js: string, state: Json): Promise<string[]> {
+  return (await runStrip(js, state)).all().filter((e) => e.tagName === "a").map((e) => e.getAttribute("href") ?? "");
+}
+
+/** A published tour of a side, made at T0 + a day (its trial is still on, so it may publish). */
+async function publishedTourAt(s: Site, side: Side) {
+  const was = s.now();
+  s.at(T0 + DAY);
+  await publishedTour(s, side);
+  s.at(was);
+}
 
 void removalDayOf;

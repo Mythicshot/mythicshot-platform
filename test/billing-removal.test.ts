@@ -702,12 +702,14 @@ describe("undoing a delete that removed nothing yet", () => {
 });
 
 describe("the dashboard's notices", () => {
-  it("say nothing of a download until the build has one, and write dates as the UTC day", async () => {
+  it("say where to download everything, now that the build has the download, and write dates as the UTC day", async () => {
     const { BILLING_JS, DOWNLOAD_SENTENCE } = await import("../src/dash/billing.ts");
     const { DOWNLOAD_ALL_BUILT } = await import("../src/removal-rules.ts");
-    expect(DOWNLOAD_ALL_BUILT).toBe(false);
+    // 0.1.61 with 0.1.60 merged: the download exists, so the notices say where; "Account page" links to its card.
+    expect(DOWNLOAD_ALL_BUILT).toBe(true);
     expect(DOWNLOAD_SENTENCE).toBe("You can download everything from your Account page.");
-    expect(BILLING_JS).not.toContain(DOWNLOAD_SENTENCE);
+    expect(BILLING_JS).toContain('"You can download everything from your ","."');
+    expect(BILLING_JS).toContain('"/account#h-data"');
     expect(BILLING_JS).toContain("d.getUTCDate() + \" \" + MONTHS[d.getUTCMonth()] + \" \" + d.getUTCFullYear()");
     expect(BILLING_JS).not.toMatch(/d\.getDate\(\)|d\.getMonth\(\)|d\.getFullYear\(\)/);
   });

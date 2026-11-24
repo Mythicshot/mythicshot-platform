@@ -601,6 +601,8 @@ describe("the state the dashboard reads", () => {
       removed_at: removalDayOf(T0 + TRIAL_MS),
       manage: false,
       confirming: false,
+      // 0.1.61: whether BILLING_REMOVAL is on, for the trial notice's wording.
+      removal_on: false,
       checkout: null,
     });
     await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);

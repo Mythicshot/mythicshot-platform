@@ -45,6 +45,7 @@
 // rows: billing_removal_started (counts), billing_removal_step (files left after each pass), the
 // deletion's own account_deleted, and billing_removal_finished, with ids and counts only.
 import { CALLS_AT_THE_END, FILES_SQL, aloneIn, filesParams, readTarget, work } from "./account-removal.ts";
+import { exportInProgress } from "./export.ts";
 import { auditStatement } from "./audit.ts";
 import { BILLING_COLUMNS_SQL, DAY, LAPSED_STATUSES, LIVE_STATUSES, REMOVAL_MS, TRIAL_MS, WORKSPACE_IS_ADMIN_SQL, billingConfigured, isFinal, isLive, type BillingRow } from "./billing-rules.ts";
 import { checkoutBeforeRemoval, prepareDeletion, repairPaidCheckout, subscriptionBeforeRemoval } from "./billing.ts";
@@ -56,14 +57,12 @@ import { CLOCK_SKEW_MS, ONE_ACCOUNT_SQL, REMOVALS_PER_DAY, REMOVALS_PER_RUN, SWE
 import { WARNINGS_JSON_SQL, emailSha256, warningsOf } from "./removal-store.ts";
 
 /**
- * INTEGRATOR HOOK (condition 6): whether an export of the workspace ("Download all my data",
- * built in parallel) is in progress or was started within EXPORT_QUIET_MS. This build has no
- * export, so nothing is ever in progress. The merge that brings the download in replaces this
- * body with a read of its own table or flag, and flips DOWNLOAD_ALL_BUILT (src/removal-rules.ts).
+ * Condition 6: whether a download of the workspace ("Download all my data", src/export.ts) is in
+ * progress, on the sweep's own clock: a ticket asked for and not opened yet, or a download not
+ * ended (the export's own rule and row). One database call, a read. Asked before the start and
+ * before every pass: an export in progress holds the removal (never stops it).
  */
-export async function exportInProgress(_deps: Deps, _workspaceId: string): Promise<boolean> {
-  return false;
-}
+export const exportCheck = (deps: Deps, workspaceId: string): Promise<boolean> => exportInProgress(deps, workspaceId, deps.now());
 
 /** The most checkouts of one workspace the last check asks Stripe about; more holds the removal back. */
 export const CHECKOUTS_ASKED = 10;
@@ -96,6 +95,7 @@ export type SweepOptions = {
   perRun?: number;
   perDay?: number;
   mailsPerRun?: number;
+  /** Replaces the export check (exportCheck), for tests. */
   exportInProgress?: (deps: Deps, workspaceId: string) => Promise<boolean>;
 };
 
@@ -273,7 +273,7 @@ async function sweepUnderLock(
   const perRun = opts.perRun ?? REMOVALS_PER_RUN;
   const perDay = opts.perDay ?? REMOVALS_PER_DAY;
   const mailCap = opts.mailsPerRun ?? MAILS_PER_RUN;
-  const busy = opts.exportInProgress ?? exportInProgress;
+  const busy = opts.exportInProgress ?? exportCheck;
   let touched = 0;
   let mailsTried = 0;
   let startedToday: number | null = null;
@@ -318,7 +318,7 @@ async function sweepUnderLock(
       continue;
     }
     touched += 1;
-    const outcome = await continueRemoval(deps, r.user_id, r.workspace_id, room, calls);
+    const outcome = await continueRemoval(deps, r.user_id, r.workspace_id, room, calls, busy);
     count(s, outcome);
     if (outcome === "out_of_budget") return void stop(s);
   }
@@ -395,7 +395,7 @@ async function sweepUnderLock(
         continue;
       }
       s.removalsStarted += 1;
-      const outcome = await continueRemoval(deps, c.user_id, c.id, room, calls);
+      const outcome = await continueRemoval(deps, c.user_id, c.id, room, calls, busy);
       count(s, outcome);
       if (outcome === "out_of_budget") return void stop(s);
     }
@@ -597,9 +597,16 @@ async function recheck(deps: Deps, ws: string, userId: string, startedAt: number
  * failed or an undo took the record away (nothing is lost), "stopped" when it stopped for good,
  * "out_of_budget" when the invocation's budget ran out.
  */
-async function continueRemoval(deps: Deps, userId: string, ws: string, room: (cost: number) => boolean, calls: (() => number) | undefined): Promise<Outcome> {
-  // Its reads, the re-check (a read and Stripe), prepareDeletion's own read and a pass's audit row fit.
-  if (!room(8)) return "out_of_budget";
+async function continueRemoval(
+  deps: Deps,
+  userId: string,
+  ws: string,
+  room: (cost: number) => boolean,
+  calls: (() => number) | undefined,
+  busy: (deps: Deps, ws: string) => Promise<boolean>,
+): Promise<Outcome> {
+  // Its reads, the re-check (the export, a read and Stripe), prepareDeletion's own read and a pass's audit row fit.
+  if (!room(9)) return "out_of_budget";
   const t = await readTarget(deps, userId);
   if (t === null || t.workspace_id !== ws || t.removing !== 1 || t.status !== "disabled") return "held";
   const record = await deps.db.first<{ total: number; created_at: number; stopped_at: number | null }>(
@@ -608,7 +615,9 @@ async function continueRemoval(deps: Deps, userId: string, ws: string, room: (co
   );
   if (record === null || record.stopped_at !== null) return "held";
   for (let pass = 0; pass < PASSES_AT_MOST; pass++) {
-    if (calls !== undefined && !room(6)) return "out_of_budget";
+    if (calls !== undefined && !room(7)) return "out_of_budget";
+    // A download of the workspace in progress holds the pass: its files are being read.
+    if (await busy(deps, ws)) return "held";
     const check = await recheck(deps, ws, userId, record.created_at);
     if (check === "hold") return "held";
     if (check !== "go") {

@@ -537,7 +537,7 @@ async function removalShown(deps: Deps, row: BillingRow, standing: Standing, use
   return { linksUntil: clock.linksDownAt, removedAt: plan.removalAt };
 }
 
-function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, allowance: number | null, removal: { linksUntil: number; removedAt: number } | null = null) {
+function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, allowance: number | null, removal: { linksUntil: number; removedAt: number } | null = null, removalOn = false) {
   const base = {
     plan: PLAN_NAME,
     used_bytes: used,
@@ -553,6 +553,8 @@ function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, al
     manage: row.customer !== null,
     // A checkout's payment Stripe is still confirming: the return page keeps waiting.
     confirming: row.status === "incomplete",
+    // BILLING_REMOVAL is on: only then does the trial notice promise a removal (0.1.61).
+    removal_on: removalOn,
   };
   const daysTo = (at: number) => Math.max(0, Math.ceil((at - now) / 86_400_000));
   switch (s.kind) {
@@ -768,7 +770,7 @@ async function voidOpenInvoices(deps: Deps, subscriptionId: string, room: (cost:
 }
 
 /** True when a removal of the workspace or of the account is recorded, or the account is not active (0.1.61). One call. */
-async function closing(deps: Deps, workspaceId: string, userId: string): Promise<boolean> {
+export async function closing(deps: Deps, workspaceId: string, userId: string): Promise<boolean> {
   const found = await deps.db.first<{ removing: number; status: string | null }>(
     "SELECT EXISTS (SELECT 1 FROM account_removal r WHERE r.workspace_id = ? OR r.user_id = ?) AS removing, (SELECT u.status FROM user u WHERE u.id = ?) AS status",
     [workspaceId, userId, userId],
@@ -776,9 +778,9 @@ async function closing(deps: Deps, workspaceId: string, userId: string): Promise
   return found === null || found.removing === 1 || found.status !== "active";
 }
 
-/** The refusal of a checkout for an account being deleted: the admin API's own `deleting`. */
-function deletingAccount(): Response {
-  return apiError(409, "deleting", "this account is being deleted; nothing can be bought for it");
+/** The refusal of a checkout (and of a download, src/export.ts) for an account being deleted: the admin API's own `deleting`. */
+export function deletingAccount(): Response {
+  return apiError(409, "deleting", "this account is being deleted; nothing can be bought or downloaded for it");
 }
 
 function alreadySubscribed(): Response {
@@ -824,7 +826,7 @@ export function billingRoutes(app: Hono, deps: Deps): void {
       checkout = (await checkoutNow(deps, asked))?.status ?? "unknown";
     }
     const removal = await removalShown(deps, row, standing, auth.session?.userId ?? "", now);
-    return json(200, { ...stateAnswer(standing, row, now, usage.used, usage.allowance, removal), checkout });
+    return json(200, { ...stateAnswer(standing, row, now, usage.used, usage.allowance, removal, deps.config.billingRemoval === true), checkout });
   });
 
   /**
