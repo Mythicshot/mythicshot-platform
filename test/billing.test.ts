@@ -11,7 +11,7 @@ import type { Deps } from "../src/ports.ts";
 import { removalDayOf } from "../src/removal-rules.ts";
 import { STRIPE_API_VERSION, stripeOverFetch } from "../src/stripe.ts";
 import { usageOf } from "../src/usage.ts";
-import { BILLING, BILLING_CONFIG, FakeStripe, eventOf, notify, sessionOf, v1Of, withBilling } from "./fake-stripe.ts";
+import { BILLING, BILLING_CONFIG, FakeStripe, eventOf, notify, sessionOf, v1Of, CS, SECRET, withBilling } from "./fake-stripe.ts";
 import { clone, fixtures, send, uploadTour, type Json } from "./bundle.ts";
 
 const T0 = 1_800_000_000_000;
@@ -245,7 +245,7 @@ describe("Subscribe", () => {
     const s = await site();
     const r = await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
     expect(r.status, r.text).toBe(200);
-    expect(r.json).toEqual({ client_secret: "cs_test_1_secret_FAKE1", publishable_key: "pk_test_FAKE" });
+    expect(r.json).toEqual({ client_secret: SECRET(1), publishable_key: "pk_test_FAKE" });
     const [call] = s.stripe.to("/v1/checkout/sessions");
     expect(call.method).toBe("POST");
     expect(call.key).toMatch(/^checkout_ws_[0-9a-f]{24}_none_[0-9a-f]{32}$/);
@@ -266,16 +266,16 @@ describe("Subscribe", () => {
       expect(call.form!.some(([k]) => k.startsWith(banned)), banned).toBe(false);
     }
     const row = (await rowOf(s.deps, s.a.workspaceId))!;
-    expect([row.checkout_session_id, row.checkout_created_at]).toEqual(["cs_test_1", T0]);
+    expect([row.checkout_session_id, row.checkout_created_at]).toEqual([CS(1), T0]);
     // The secret is in no audit row and no stored column.
     const everything = JSON.stringify(await s.deps.db.all("SELECT * FROM audit")) + JSON.stringify(await s.deps.db.all("SELECT * FROM workspace"));
     expect(everything).not.toContain("secret");
     expect(await s.deps.db.all("SELECT event, workspace_id FROM audit WHERE event LIKE 'billing%'")).toEqual([{ event: "billing_checkout_started", workspace_id: s.a.workspaceId }]);
     // The other workspace's own Subscribe is its own checkout, never A's.
     const rb = await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sb.headers);
-    expect(rb.json.client_secret).toBe("cs_test_2_secret_FAKE2");
-    expect((await rowOf(s.deps, s.b.workspaceId))!.checkout_session_id).toBe("cs_test_2");
-    expect((await rowOf(s.deps, s.a.workspaceId))!.checkout_session_id).toBe("cs_test_1");
+    expect(rb.json.client_secret).toBe(SECRET(2));
+    expect((await rowOf(s.deps, s.b.workspaceId))!.checkout_session_id).toBe(CS(2));
+    expect((await rowOf(s.deps, s.a.workspaceId))!.checkout_session_id).toBe(CS(1));
   });
 
   it("takes a signed-in session alone: a token gets 401 and Stripe is not asked", async () => {
@@ -295,15 +295,15 @@ describe("Subscribe", () => {
     expect(s.stripe.sessions.size).toBe(1);
     const again = await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
     expect(again.json.client_secret).toBe(one.json.client_secret);
-    expect(s.stripe.to("/v1/checkout/sessions/cs_test_1").length).toBe(1);
+    expect(s.stripe.to(`/v1/checkout/sessions/${CS(1)}`).length).toBe(1);
     // An expired checkout is replaced by a new one, stored in its place.
-    s.stripe.sessions.get("cs_test_1")!.status = "expired";
+    s.stripe.sessions.get(CS(1))!.status = "expired";
     const fresh = await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
-    expect(fresh.json.client_secret).toBe("cs_test_2_secret_FAKE2");
-    expect((await rowOf(s.deps, s.a.workspaceId))!.checkout_session_id).toBe("cs_test_2");
+    expect(fresh.json.client_secret).toBe(SECRET(2));
+    expect((await rowOf(s.deps, s.a.workspaceId))!.checkout_session_id).toBe(CS(2));
     // Paid: live, so Subscribe is refused without asking Stripe.
     s.stripe.subscription("sub_A", "cus_A", "active");
-    await notify(s.deps, eventOf("checkout.session.completed", { id: "cs_test_2", client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A", payment_status: "paid" }));
+    await notify(s.deps, eventOf("checkout.session.completed", { id: CS(2), client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A", payment_status: "paid" }));
     const before = s.stripe.calls.length;
     const live = await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
     expect([live.status, live.json.error]).toEqual([409, "already_subscribed"]);
@@ -351,7 +351,7 @@ describe("Manage subscription", () => {
     expect([none.status, none.json.error]).toEqual([409, "no_subscription"]);
     await subscribe(s.deps, s.stripe, s.a.workspaceId, s.sa.headers, { customer: "cus_A", subscription: "sub_A" });
     const r = await asSession(s.deps, "POST", BILLING_PATHS.portal, s.sa.headers);
-    expect(r.json).toEqual({ url: "https://billing.stripe.com/p/session/test_FAKE" });
+    expect(r.json.url).toMatch(/^https:\/\/billing\.stripe\.com\/p\/session\/test_[A-Za-z0-9]+$/);
     expect(Object.fromEntries(s.stripe.to("/v1/billing_portal/sessions")[0].form!)).toEqual({ customer: "cus_A", return_url: "https://tours.example.com/account" });
     // B has no customer: B's portal is refused, never A's customer.
     expect((await asSession(s.deps, "POST", BILLING_PATHS.portal, s.sb.headers)).status).toBe(409);
@@ -426,7 +426,7 @@ describe("the listener", () => {
     const s = await site();
     await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
     s.stripe.subscription("sub_A", "cus_A", "active");
-    const e = eventOf("checkout.session.completed", { id: "cs_test_1", client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A" });
+    const e = eventOf("checkout.session.completed", { id: CS(1), client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A" });
     expect((await notify(s.deps, e)).status).toBe(200);
     expect((await notify(s.deps, e)).status).toBe(200);
     expect(s.stripe.to("/v1/subscriptions/sub_A").length).toBe(1);
@@ -438,7 +438,7 @@ describe("the listener", () => {
     await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
     s.stripe.subscription("sub_A", "cus_A", "active");
     const before = await rowOf(s.deps, s.a.workspaceId);
-    const e = eventOf("checkout.session.completed", { id: "cs_test_1", client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A" });
+    const e = eventOf("checkout.session.completed", { id: CS(1), client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A" });
     s.stripe.failing.add("/v1/subscriptions/sub_A");
     const r = await notify(s.deps, e);
     expect(r.status).toBe(500);
@@ -463,14 +463,14 @@ describe("the listener", () => {
     // A's stored checkout, but the reference names B.
     await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
     const mid = await dump();
-    expect((await notify(s.deps, eventOf("checkout.session.completed", { id: "cs_test_1", client_reference_id: s.b.workspaceId, customer: "cus_X", subscription: "sub_X" }))).status).toBe(200);
+    expect((await notify(s.deps, eventOf("checkout.session.completed", { id: CS(1), client_reference_id: s.b.workspaceId, customer: "cus_X", subscription: "sub_X" }))).status).toBe(200);
     expect(await dump()).toEqual(mid);
     // B pays first and holds cus_B; A's checkout then completes for B's customer.
     await subscribe(s.deps, s.stripe, s.b.workspaceId, s.sb.headers, { customer: "cus_B", subscription: "sub_B" });
     s.stripe.subscription("sub_Y", "cus_B", "active");
     const aBefore = await rowOf(s.deps, s.a.workspaceId);
     const bBefore = await rowOf(s.deps, s.b.workspaceId);
-    expect((await notify(s.deps, eventOf("checkout.session.completed", { id: "cs_test_1", client_reference_id: s.a.workspaceId, customer: "cus_B", subscription: "sub_Y" }))).status).toBe(200);
+    expect((await notify(s.deps, eventOf("checkout.session.completed", { id: CS(1), client_reference_id: s.a.workspaceId, customer: "cus_B", subscription: "sub_Y" }))).status).toBe(200);
     expect(await rowOf(s.deps, s.a.workspaceId)).toEqual(aBefore);
     expect(await rowOf(s.deps, s.b.workspaceId)).toEqual(bBefore);
     const events = (await s.deps.db.all<{ event: string }>("SELECT event FROM audit WHERE event LIKE 'billing_checkout_%' ORDER BY at, rowid")).map((x) => x.event);
@@ -486,7 +486,7 @@ describe("the listener", () => {
     expect((await notify(s.deps, eventOf("customer.subscription.deleted", { id: "sub_A", customer: "cus_A", status: "canceled", created: Math.floor(T0 / 1000) }))).status).toBe(500);
     expect((await rowOf(s.deps, s.a.workspaceId))!.subscription_status).toBeNull();
     // Then the completed checkout: Stripe says canceled now, so canceled is stored.
-    await notify(s.deps, eventOf("checkout.session.completed", { id: "cs_test_1", client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A", payment_status: "paid" }));
+    await notify(s.deps, eventOf("checkout.session.completed", { id: CS(1), client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A", payment_status: "paid" }));
     expect(await rowOf(s.deps, s.a.workspaceId)).toMatchObject({ subscription_status: "canceled", subscription_ended_at: 1_800_000_100_000 });
     // A late "updated" whose snapshot says active changes nothing: Stripe still says canceled.
     expect((await notify(s.deps, eventOf("customer.subscription.updated", { id: "sub_A", customer: "cus_A", status: "active" }))).status).toBe(200);
@@ -499,7 +499,7 @@ describe("the listener", () => {
     const s = await site();
     await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
     s.stripe.subscription("sub_A", "cus_A", "active");
-    const obj = { id: "cs_test_1", client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A" };
+    const obj = { id: CS(1), client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A" };
     await notify(s.deps, eventOf("checkout.session.async_payment_failed", obj));
     await notify(s.deps, eventOf("checkout.session.async_payment_succeeded", { ...obj, payment_status: "unpaid" }));
     expect((await rowOf(s.deps, s.a.workspaceId))!.subscription_status).toBeNull();
@@ -574,7 +574,7 @@ describe("the listener", () => {
     await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
     s.stripe.subscription("sub_A", "cus_A", "active");
     s.stripe.failing.add("/v1/subscriptions/sub_A");
-    await notify(s.deps, eventOf("checkout.session.completed", { id: "cs_test_1", client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A" }));
+    await notify(s.deps, eventOf("checkout.session.completed", { id: CS(1), client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A" }));
     await notify(s.deps, eventOf("invoice.paid", { id: "in_1" }), { secret: "whsec_OTHER" });
     const all = lines.join("\n");
     for (const needle of ["rk_test_FAKE", "whsec_FAKE", "pk_test_FAKE", "_secret_", "v1=", "cus_A", "sub_A"]) expect(all).not.toContain(needle);
@@ -604,16 +604,16 @@ describe("the state the dashboard reads", () => {
     });
     await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sa.headers);
     await asSession(s.deps, "POST", BILLING_PATHS.checkout, s.sb.headers);
-    const own = await asSession(s.deps, "GET", `${BILLING_PATHS.state}?session_id=cs_test_1`, s.sa.headers);
+    const own = await asSession(s.deps, "GET", `${BILLING_PATHS.state}?session_id=${CS(1)}`, s.sa.headers);
     expect(own.json.checkout).toBe("open");
     const calls = s.stripe.calls.length;
-    const theirs = await asSession(s.deps, "GET", `${BILLING_PATHS.state}?session_id=cs_test_2`, s.sa.headers);
+    const theirs = await asSession(s.deps, "GET", `${BILLING_PATHS.state}?session_id=${CS(2)}`, s.sa.headers);
     const invented = await asSession(s.deps, "GET", `${BILLING_PATHS.state}?session_id=cs_test_999`, s.sa.headers);
     expect(theirs.text).toBe(invented.text);
     expect(theirs.json.checkout).toBeNull();
     expect(s.stripe.calls.length).toBe(calls);
-    s.stripe.sessions.get("cs_test_1")!.status = "expired";
-    expect((await asSession(s.deps, "GET", `${BILLING_PATHS.state}?session_id=cs_test_1`, s.sa.headers)).json.checkout).toBe("expired");
+    s.stripe.sessions.get(CS(1))!.status = "expired";
+    expect((await asSession(s.deps, "GET", `${BILLING_PATHS.state}?session_id=${CS(1)}`, s.sa.headers)).json.checkout).toBe("expired");
     // The day before the trial ends: one day left. After it: trial_over.
     s.advance(TRIAL_MS - DAY + 1);
     expect((await asSession(s.deps, "GET", BILLING_PATHS.state, (await sessionOf(s.deps, s.a.userId)).headers)).json.days_left).toBe(1);

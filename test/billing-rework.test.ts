@@ -11,7 +11,7 @@ import { BILLING_JS, RETURN_JS, TRIAL_OVER_WORDS } from "../src/dash/billing.ts"
 import type { Deps } from "../src/ports.ts";
 import { usageOf } from "../src/usage.ts";
 import { clone, fixtures, send, uploadTour, type Json } from "./bundle.ts";
-import { BILLING, FakeStripe, eventOf, notify, sessionOf, withBilling } from "./fake-stripe.ts";
+import { BILLING, FakeStripe, eventOf, notify, sessionOf, CS, SECRET, withBilling } from "./fake-stripe.ts";
 
 const T0 = 1_800_000_000_000;
 const DAY = 86_400_000;
@@ -131,12 +131,12 @@ describe("H2: a paid checkout is never orphaned", () => {
     const s = await site();
     const h = await headers(s.deps, s.a.userId);
     await send(s.deps, "POST", BILLING_PATHS.checkout, { headers: h });
-    s.stripe.sessions.get("cs_test_1")!.noSecret = true;
+    s.stripe.sessions.get(CS(1))!.noSecret = true;
     const r = await send(s.deps, "POST", BILLING_PATHS.checkout, { headers: h });
     expect(r.status).toBe(200);
-    expect(s.stripe.to("/v1/checkout/sessions/cs_test_1/expire").length).toBe(1);
-    expect(s.stripe.sessions.get("cs_test_1")!.status).toBe("expired");
-    expect((await row(s.deps, s.a.workspaceId))!.checkout_session_id).toBe("cs_test_2");
+    expect(s.stripe.to(`/v1/checkout/sessions/${CS(1)}/expire`).length).toBe(1);
+    expect(s.stripe.sessions.get(CS(1))!.status).toBe("expired");
+    expect((await row(s.deps, s.a.workspaceId))!.checkout_session_id).toBe(CS(2));
   });
 
   it("a stored checkout that turns out paid is never replaced: the subscription is read back and Subscribe answers already_subscribed", async () => {
@@ -144,7 +144,7 @@ describe("H2: a paid checkout is never orphaned", () => {
     const h = await headers(s.deps, s.a.userId);
     await send(s.deps, "POST", BILLING_PATHS.checkout, { headers: h });
     s.stripe.subscription("sub_A", "cus_A", "active");
-    s.stripe.complete("cs_test_1", "cus_A", "sub_A");
+    s.stripe.complete(CS(1), "cus_A", "sub_A");
     // Past its expiry here, so it is not offered again, and the GET would not be enough.
     s.advance(2 * 60 * 60 * 1000);
     const r = await send(s.deps, "POST", BILLING_PATHS.checkout, { headers: await headers(s.deps, s.a.userId) });
@@ -157,8 +157,8 @@ describe("H2: a paid checkout is never orphaned", () => {
     const s = await site();
     const h = await headers(s.deps, s.a.userId);
     await send(s.deps, "POST", BILLING_PATHS.checkout, { headers: h });
-    s.stripe.failing.add("/v1/checkout/sessions/cs_test_1");
-    s.stripe.failing.add("/v1/checkout/sessions/cs_test_1/expire");
+    s.stripe.failing.add(`/v1/checkout/sessions/${CS(1)}`);
+    s.stripe.failing.add(`/v1/checkout/sessions/${CS(1)}/expire`);
     const r = await send(s.deps, "POST", BILLING_PATHS.checkout, { headers: h });
     expect([r.status, r.json.error]).toEqual([502, "stripe_unavailable"]);
     expect(s.stripe.sessions.size).toBe(1);
@@ -174,25 +174,25 @@ describe("H2: a paid checkout is never orphaned", () => {
     expect(at - T0 / 1000).toBeGreaterThanOrEqual(32 * 60);
     expect(at - T0 / 1000).toBeLessThanOrEqual(33 * 60);
     s.advance(31 * 60 * 1000);
-    s.stripe.sessions.get("cs_test_1")!.status = "expired";
+    s.stripe.sessions.get(CS(1))!.status = "expired";
     const r = await send(s.deps, "POST", BILLING_PATHS.checkout, { headers: h });
-    expect(r.json.client_secret).toBe("cs_test_2_secret_FAKE2");
+    expect(r.json.client_secret).toBe(SECRET(2));
   });
 
   it("a completed checkout this site made still finds its workspace after the pending checkout moved on, and a second one is audited and shown to the admin", async () => {
     const s = await site();
     const h = await headers(s.deps, s.a.userId);
     await send(s.deps, "POST", BILLING_PATHS.checkout, { headers: h });
-    s.stripe.sessions.get("cs_test_1")!.noSecret = true;
+    s.stripe.sessions.get(CS(1))!.noSecret = true;
     await send(s.deps, "POST", BILLING_PATHS.checkout, { headers: h });
-    expect((await row(s.deps, s.a.workspaceId))!.checkout_session_id).toBe("cs_test_2");
+    expect((await row(s.deps, s.a.workspaceId))!.checkout_session_id).toBe(CS(2));
     // The first was paid after all (Stripe's expire raced the payment).
     s.stripe.subscription("sub_A", "cus_A", "active");
-    expect((await notify(s.deps, eventOf("checkout.session.completed", { id: "cs_test_1", client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A", payment_status: "paid" }))).status).toBe(200);
+    expect((await notify(s.deps, eventOf("checkout.session.completed", { id: CS(1), client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A", payment_status: "paid" }))).status).toBe(200);
     expect(await row(s.deps, s.a.workspaceId)).toMatchObject({ subscription_status: "active", stripe_subscription_id: "sub_A" });
     // The second completes too: kept apart, audited, and counted for the admin.
     s.stripe.subscription("sub_A2", "cus_A", "active");
-    await notify(s.deps, eventOf("checkout.session.completed", { id: "cs_test_2", client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A2", payment_status: "paid" }));
+    await notify(s.deps, eventOf("checkout.session.completed", { id: CS(2), client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A2", payment_status: "paid" }));
     expect((await row(s.deps, s.a.workspaceId))!.stripe_subscription_id).toBe("sub_A");
     await notify(s.deps, eventOf("checkout.session.completed", { id: "cs_test_nobody", client_reference_id: s.a.workspaceId, customer: "cus_Z", subscription: "sub_Z" }));
     const summary = await send(s.deps, "GET", "/api/v1/admin/summary", { headers: await headers(s.deps, s.admin.userId) });
@@ -302,7 +302,7 @@ describe("M5: rate limits on the routes that ask Stripe", () => {
     expect(last).toBe(429);
     for (let i = 0; i < 35; i++) last = (await send(s.deps, "POST", BILLING_PATHS.portal, { headers: h })).status;
     expect(last).toBe(429);
-    for (let i = 0; i < 65; i++) last = (await send(s.deps, "GET", `${BILLING_PATHS.state}?session_id=cs_test_1`, { headers: h })).status;
+    for (let i = 0; i < 65; i++) last = (await send(s.deps, "GET", `${BILLING_PATHS.state}?session_id=${CS(1)}`, { headers: h })).status;
     expect(last).toBe(429);
     expect((await send(s.deps, "GET", BILLING_PATHS.state, { headers: h })).status).toBe(200);
     // B has counts of its own.
@@ -348,9 +348,9 @@ describe("the small items", () => {
     const s = await site();
     await send(s.deps, "POST", BILLING_PATHS.checkout, { headers: await headers(s.deps, s.a.userId) });
     s.stripe.subscription("sub_A", "cus_A", "incomplete");
-    s.stripe.complete("cs_test_1", "cus_A", "sub_A");
-    await notify(s.deps, eventOf("checkout.session.completed", { id: "cs_test_1", client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A", payment_status: "unpaid" }));
-    const state = await send(s.deps, "GET", `${BILLING_PATHS.state}?session_id=cs_test_1`, { headers: await headers(s.deps, s.a.userId) });
+    s.stripe.complete(CS(1), "cus_A", "sub_A");
+    await notify(s.deps, eventOf("checkout.session.completed", { id: CS(1), client_reference_id: s.a.workspaceId, customer: "cus_A", subscription: "sub_A", payment_status: "unpaid" }));
+    const state = await send(s.deps, "GET", `${BILLING_PATHS.state}?session_id=${CS(1)}`, { headers: await headers(s.deps, s.a.userId) });
     expect(state.json.confirming).toBe(true);
     expect(RETURN_JS).toContain("s.confirming === true");
     expect(TRIAL_OVER_WORDS).toEqual({ strip: "Your trial has ended. You can view, download and delete, but not publish. Subscribe to keep your tours, images and clips.", row: "Trial ended" });

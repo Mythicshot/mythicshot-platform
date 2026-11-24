@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp } from "../app.ts";
 import { stripeOverFetch } from "../stripe.ts";
+import { PRICE_MISSING, checkPrice } from "../billing.ts";
 import { withBudget } from "../budget.ts";
 import { setClientAddress } from "../client.ts";
 import { downloadUrlSetting, homeUrlSetting } from "../https-address.ts";
@@ -93,6 +94,13 @@ async function main(): Promise<void> {
     // Only with billing on: the client that reaches Stripe, made from the key, which goes nowhere else.
     ...(config.billing ? { stripe: stripeOverFetch(config.billing.apiKey) } : {}),
   };
+
+  // With billing on: Stripe is asked once for the configured price with the configured key. A
+  // definite "no such price" stops the start; a key that may not read prices, or no answer, does
+  // not (the admin's summary says it could not be checked).
+  if (config.billing) {
+    if ((await checkPrice(deps)) === "missing") throw new Error(PRICE_MISSING);
+  }
 
   // Each request gets its own metered ports, as on Cloudflare, so one that goes over the
   // call budget is logged here too. Building the route table per request is cheap.

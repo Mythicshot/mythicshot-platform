@@ -954,7 +954,7 @@ function schemas(): Record<string, Schema> {
               items: object(
                 ["event", "workspace_id", "at"],
                 {
-                  event: { type: "string", enum: ["billing_checkout_unmatched", "billing_second_subscription", "billing_checkout_mismatch"], description: "What happened: a paid checkout no workspace stored, a second paid subscription of one workspace, or a paid checkout that named a workspace's checkout but not its reference or customer." },
+                  event: { type: "string", enum: ["billing_checkout_unmatched", "billing_second_subscription", "billing_checkout_mismatch", "billing_answer_refused"], description: "What happened: a paid checkout no workspace stored, a second paid subscription of one workspace, a paid checkout that named a workspace's checkout but not its reference or customer, or an answer of Stripe the site refused for its shape (the audit row names the call and the field)." },
                   workspace_id: { type: ["string", "null"], description: "The workspace it was about, or null when no workspace could be told." },
                   at: whole("When, in milliseconds since 1970."),
                 },
@@ -964,6 +964,11 @@ function schemas(): Record<string, Schema> {
           },
           "Only on a site with billing switched on: billing problems the admin should look at in Stripe.",
         ),
+        billing_price: {
+          type: "string",
+          enum: ["ok", "could_not_check", "not_checked"],
+          description: "Only on a site with billing switched on: whether Stripe answered the configured price with the configured key when the site started (on Cloudflare, on the isolate's first request). could_not_check: the key may not read prices (give it Prices: read), or Stripe did not answer; not_checked: not asked yet. A price Stripe says does not exist stops the start instead.",
+        },
       },
       "The site's storage in all. Three numbers, nothing of any workspace, and on a site with billing its billing problems.",
     ),

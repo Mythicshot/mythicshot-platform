@@ -500,8 +500,8 @@ describe("the API description", () => {
     expect([summary.tags, summary.operationId, Object.keys(summary.responses)]).toEqual([["Admin"], "adminSummary", ["200", "404"]]);
     expect(summary.responses["200"].content["application/json"].schema).toEqual({ $ref: "#/components/schemas/AdminSummary" });
     const fields = ["accounts", "used_bytes", "standard_allowance_bytes"];
-    // billing_problems only on a site with billing switched on.
-    expect([Object.keys(s.AdminSummary.properties), s.AdminSummary.required, s.AdminSummary.additionalProperties]).toEqual([[...fields, "billing_problems"], fields, false]);
+    // billing_problems and billing_price only on a site with billing switched on.
+    expect([Object.keys(s.AdminSummary.properties), s.AdminSummary.required, s.AdminSummary.additionalProperties]).toEqual([[...fields, "billing_problems", "billing_price"], fields, false]);
     expect(s.AdminSummary.properties.standard_allowance_bytes.type).toEqual(["integer", "null"]);
   });
 

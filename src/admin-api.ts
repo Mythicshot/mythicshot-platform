@@ -25,7 +25,7 @@
 // - The numbers are read with the SQL of the account's own usage answer (USAGE_COLUMNS
 //   and usageFromRow in src/usage.ts), so the two can never disagree.
 import type { Hono } from "hono";
-import { billingProblems } from "./billing.ts";
+import { billingProblems, priceCheckOf } from "./billing.ts";
 import { billingConfigured } from "./billing-rules.ts";
 import { auditStatement } from "./audit.ts";
 import { requireAuth } from "./auth.ts";
@@ -124,7 +124,7 @@ export function adminRoutes(app: Hono, deps: Deps): void {
     );
     // On a site with billing: the billing problems for the admin to look at (a paid checkout no
     // workspace stored, a second paid subscription of one workspace), as the audit has them.
-    const billing = billingConfigured(deps.config) ? { billing_problems: await billingProblems(deps) } : {};
+    const billing = billingConfigured(deps.config) ? { billing_problems: await billingProblems(deps), billing_price: priceCheckOf(deps.config) } : {};
     return json(200, { accounts: row?.accounts ?? 0, used_bytes: row?.used ?? 0, standard_allowance_bytes: deps.config.storageAllowanceBytes ?? null, ...billing });
   });
 
