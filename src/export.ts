@@ -102,7 +102,7 @@ const RUNNING = 2;
  * The answer to a ticket that cannot be followed: the failure sentence as plain text, with no
  * Content-Disposition, so the browser that opened it shows it as a page and saves no file.
  */
-function refusedPage(status: 404 | 409): Response {
+function refusedPage(status: 404 | 409 | 500): Response {
   return new Response(FAILURE_SENTENCE, {
     status,
     headers: {
@@ -860,7 +860,17 @@ export function exportRoutes(app: Hono, deps: Deps): void {
       await release();
       return refusedPage(409);
     }
-    const plan = planOf(deps.config, listing, now);
+    // Planning reads nothing more, but should it ever fail, the row this request holds goes at
+    // once (not after RUNNING_MS) and the browser is shown the refusal, never a broken file.
+    let plan: Plan;
+    try {
+      plan = planOf(deps.config, listing, now);
+    } catch {
+      // Fixed text only: the error could carry anything of the rows.
+      console.error("export: a download could not be planned; nothing was sent");
+      await release().catch(() => {});
+      return refusedPage(500);
+    }
     listing = null;
 
     const zip = zipStream(exportEntries(plan, deps.drafts, new Map(), now)).getReader();
