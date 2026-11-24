@@ -677,8 +677,9 @@ export function exportRoutes(app: Hono, deps: Deps): void {
     const limit = exportFileLimit(deps);
     const { files, listing } = await readListing(deps, auth, limit);
     if (listing === null) {
-      // Over the limit since it was asked for: the row goes, so the next ask is answered at once.
-      await release();
+      // Over the limit since it was asked for: the row goes while it is still only ready (never a
+      // download already running from this ticket), so the next ask is answered at once.
+      await deps.db.run(`DELETE FROM rate_counter WHERE bucket = ? AND key = ? AND window_start = ? AND count = ${READY}`, [EXPORT_RUNNING_BUCKET, key, start]);
       return tooLarge(files, limit ?? 0);
     }
     const plan = await planOf(listing, now);
