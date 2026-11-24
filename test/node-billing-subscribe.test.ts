@@ -88,7 +88,9 @@ describe("the Subscribe page's box for Stripe's form", () => {
     expect(base).not.toMatch(/background|border/);
     const framed = rule(".checkout.mounted");
     expect(framed).not.toBeNull();
-    for (const d of ["max-width: 480px", "margin-inline: auto", "border: 1px solid var(--border)", "border-radius: var(--radius-lg)", "background: var(--on-primary)", "overflow: hidden"]) expect(framed, d).toContain(d);
+    for (const d of ["max-width: 480px", "margin-inline: auto", "border: 1px solid var(--border)", "border-radius: var(--radius-lg)", "overflow: hidden"]) expect(framed, d).toContain(d);
+    // No fill of its own: Stripe's form paints the box, dark or light.
+    expect(framed).not.toMatch(/background/);
     // The card never sets a height of its own, so Stripe's form grows it with no inner scrollbar.
     expect(framed).not.toMatch(/(?:^|[\s;])(?:height|max-height|overflow-y|overflow:\s*(?:auto|scroll))/);
   });
