@@ -33,6 +33,14 @@ const IMAGE_KEY = /^p\/[0-9a-f]{32}\.(png|jpg)$/;
  */
 const RESTRICTED_BASE = /^\/t\/[a-z2-7]{10}$/;
 const RESTRICTED_KEY = /^v\/[0-9a-f]{32}\.(png|jpg)$/;
+/**
+ * A tour page in the zip of "Download all my data" (src/export.ts), opened from disk, gives
+ * "." as its base and its pictures as names in the `pictures` folder beside it, so every
+ * picture is a relative address and nothing is asked of any server. Such a name is taken
+ * only with that base, and that base takes no other name.
+ */
+const OFFLINE_BASE = ".";
+const OFFLINE_KEY = /^pictures\/[a-z0-9][a-z0-9-]{0,62}\.(png|jpg)$/;
 const ZOOM_MS = 550;
 const FADE_MS = 400;
 const ENTER_MS = 280;
@@ -139,8 +147,9 @@ function boot(): void {
   const tour: PageTour = { ...data.tour, chapters };
   // The base is written by the server alone, never from customer data: the public image base
   // from the configuration (or "" for this origin's /p/), or a restricted tour's own path
-  // from its slug (src/restricted.ts). Anything else is no base, and no picture is asked for.
-  const base = data.base === "" || /^https:\/\/[^\s"'<>\\]+$/.test(data.base) || RESTRICTED_BASE.test(data.base) ? data.base : null;
+  // from its slug (src/restricted.ts), or "." for a page opened from disk (src/export.ts).
+  // Anything else is no base, and no picture is asked for.
+  const base = data.base === "" || /^https:\/\/[^\s"'<>\\]+$/.test(data.base) || RESTRICTED_BASE.test(data.base) || data.base === OFFLINE_BASE ? data.base : null;
   player(root, tour, base);
 }
 
@@ -187,7 +196,8 @@ function player(root: HTMLElement, tour: PageTour, base: string | null): void {
 
   function imageUrl(key: unknown): string | null {
     if (base === null || typeof key !== "string") return null;
-    return (RESTRICTED_BASE.test(base) ? RESTRICTED_KEY : IMAGE_KEY).test(key) ? base + "/" + key : null;
+    const rule = base === OFFLINE_BASE ? OFFLINE_KEY : RESTRICTED_BASE.test(base) ? RESTRICTED_KEY : IMAGE_KEY;
+    return rule.test(key) ? base + "/" + key : null;
   }
 
   // ---- Theme ----

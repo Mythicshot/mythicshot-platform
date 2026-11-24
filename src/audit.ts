@@ -50,6 +50,7 @@ export const AUDIT_EVENTS = [
   "billing_risk",
   "billing_cancelled_for_deletion",
   "billing_stale_confirmed",
+  "data_exported",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 

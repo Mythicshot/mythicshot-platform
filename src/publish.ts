@@ -206,7 +206,8 @@ export async function deleteKeys(deps: Deps, keys: string[]): Promise<void> {
 
 const notFound = () => apiError(404, "not_found", "no such tour");
 
-type DraftRow = {
+/** One row of DRAFT_SQL: a step, with its chapter's and its tour's columns. src/export.ts builds the same rows. */
+export type DraftRow = {
   title: string;
   slug: string;
   draft_version: number;
@@ -284,10 +285,12 @@ async function publicChapterId(chapterId: string): Promise<string> {
 
 /**
  * Builds the snapshot and the copies it needs, choosing a fresh live key for each image:
- * a public one, or for a restricted tour (`restricted`) a private one.
+ * a public one, or for a restricted tour (`restricted`) a private one. The tour's own columns
+ * are the first row's, or `tour`'s when given (src/export.ts, for a tour that has no step).
  */
-export function buildSnapshot(rows: DraftRow[], chapterIds: Map<string, string>, restricted = false): { snapshot: Snapshot; copies: Copy[] } {
-  const t = rows[0];
+export type DraftTour = Pick<DraftRow, "title" | "spotlight_dim" | "theme" | "t_zoom" | "cover" | "cta" | "end_card" | "autoplay" | "logo_key" | "logo_type">;
+export function buildSnapshot(rows: DraftRow[], chapterIds: Map<string, string>, restricted = false, tour: DraftTour = rows[0]): { snapshot: Snapshot; copies: Copy[] } {
+  const t = tour;
   const legacy = legacySettings();
   const copies: Copy[] = [];
   const chapters: SnapshotChapter[] = [];

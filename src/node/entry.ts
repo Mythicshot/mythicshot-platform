@@ -85,7 +85,8 @@ async function main(): Promise<void> {
     db,
     drafts: new NodeFileStore(join(root, "drafts")),
     pub: new NodeFileStore(join(root, "public")),
-    config,
+    // "Download all my data" streams every file from disk here: no per-request limit on reads (src/export.ts).
+    config: { ...config, exportFileReads: null },
     now: () => Date.now(),
     // No mailer at all while mail is off, so the deps are then the ones of a site without mail.
     ...(mail.mode === "smtp" ? { mail: mail.mailer } : {}),
