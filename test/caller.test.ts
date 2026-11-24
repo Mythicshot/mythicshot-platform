@@ -136,7 +136,8 @@ describe("the caller", () => {
     // Through the app, on either address, with no cookie anywhere: as 0.1.8 answered.
     const me = await send(deps, "GET", "/api/v1/me", { token: a.token });
     expect(me.status).toBe(200);
-    expect(Object.keys(me.json)).toEqual(["workspace", "version"]);
+    // The two ids came later (migration 0025), read in the same one statement: no call more.
+    expect(Object.keys(me.json)).toEqual(["workspace", "workspace_id", "account_id", "version"]);
     expect(me.calls).toBe(3);
     expect(me.headers.get("set-cookie")).toBeNull();
     const none = await send(deps, "GET", "/api/v1/me");
@@ -482,6 +483,8 @@ describe("the caller", () => {
     // A workspace with no account row at all (the oldest databases) resolves as it always did.
     const bare = await seedWorkspace(deps, "Bare");
     await deps.db.batch([
+      // Its token names no account either, as no token did before migration 0025.
+      { sql: "UPDATE api_token SET user_id = NULL WHERE workspace_id = ?", params: [bare.workspaceId] },
       { sql: "DELETE FROM membership WHERE workspace_id = ?", params: [bare.workspaceId] },
       { sql: "DELETE FROM signin_method WHERE user_id IN (SELECT id FROM user WHERE workspace_id = ?)", params: [bare.workspaceId] },
       { sql: "DELETE FROM user WHERE workspace_id = ?", params: [bare.workspaceId] },

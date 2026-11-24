@@ -43,13 +43,13 @@
 // the same database calls: the network's count and one read.
 import type { Hono } from "hono";
 import { auditStatement } from "./audit.ts";
-import { hashToken, newId, newToken, requireAuth } from "./auth.ts";
+import { hashToken, isBeforeTokenAccount, newId, newToken, requireAuth } from "./auth.ts";
 import { clientAddressOf } from "./client.ts";
 import { mailConnection } from "./connect-mail.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
 import { SESSION_AGE_SQL, sessionParams } from "./lifetimes.ts";
 import { linkOrigin } from "./mail.ts";
-import { isNotNullViolation, isUniqueViolation, type Deps } from "./ports.ts";
+import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 import { LIMITS_CONNECT, accountKey, hitLimit, hitLimitRefundable, networkKey, refundStatement, sweepCounters, type CountedHit, type Limit } from "./rate.ts";
 import { sessionCookiePresent } from "./sessions.ts";
 import { ownJsonBody, withHeader } from "./signin.ts";
@@ -364,12 +364,13 @@ export function connectRoutes(app: Hono, deps: Deps): void {
     // 3. the request is marked collected.
     // Of two collections at once the second finds the request collected (and the token's id
     // taken) and makes nothing.
+    // The token names the account that confirmed (migration 0025), so GET /api/v1/me can; on a
+    // database the migration has not reached, the same row without it, as before.
     const token = newToken();
-    try {
-      await deps.db.batch([
-        {
-          sql: `INSERT INTO api_token (id, workspace_id, name, hash, created_at, kind)
-                SELECT r.token_id, r.workspace_id, r.device_name, ?, ?, 'sign_in'
+    const tokenHash = await hashToken(token);
+    const made = (account: boolean): Stmt => ({
+      sql: `INSERT INTO api_token (id, workspace_id, name, hash, created_at, kind${account ? ", user_id" : ""})
+                SELECT r.token_id, r.workspace_id, r.device_name, ?, ?, 'sign_in'${account ? ", r.confirmed_by" : ""}
                   FROM connect_request r
                   JOIN user u ON u.id = r.confirmed_by
                   JOIN membership m ON m.user_id = u.id AND m.workspace_id = r.workspace_id
@@ -379,11 +380,19 @@ export function connectRoutes(app: Hono, deps: Deps): void {
                    AND u.status = 'active'
                    AND NOT EXISTS (SELECT 1 FROM user d WHERE d.status = 'disabled'
                                      AND (d.workspace_id = r.workspace_id OR d.id IN (SELECT m2.user_id FROM membership m2 WHERE m2.workspace_id = r.workspace_id)))`,
-          params: [await hashToken(token), now, row.id, now, now, ...sessionParams(deps.config, now)],
-        },
-        auditStatement(deps, { event: "connection_collected", userId: row.confirmed_by, workspaceId: row.workspace_id, subject: row.token_id, detail: { request: row.id } }, { onlyAfterOneChange: true }),
-        { sql: "UPDATE connect_request SET collected_at = ?, last_poll_at = ? WHERE id = ? AND collected_at IS NULL", params: [now, now, row.id] },
-      ]);
+      params: [tokenHash, now, row.id, now, now, ...sessionParams(deps.config, now)],
+    });
+    const rest: Stmt[] = [
+      auditStatement(deps, { event: "connection_collected", userId: row.confirmed_by, workspaceId: row.workspace_id, subject: row.token_id, detail: { request: row.id } }, { onlyAfterOneChange: true }),
+      { sql: "UPDATE connect_request SET collected_at = ?, last_poll_at = ? WHERE id = ? AND collected_at IS NULL", params: [now, now, row.id] },
+    ];
+    try {
+      try {
+        await deps.db.batch([made(true), ...rest]);
+      } catch (err) {
+        if (!isBeforeTokenAccount(err)) throw err;
+        await deps.db.batch([made(false), ...rest]);
+      }
     } catch (err) {
       if (isNotNullViolation(err) || isUniqueViolation(err)) return expired();
       throw err;

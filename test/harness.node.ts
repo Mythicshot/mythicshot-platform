@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,11 +20,21 @@ const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url))
  */
 export type MakeOptions = { mail?: boolean };
 
+/** The database under each deps makeDeps made, uncounted, for makeDepsBefore's runner. */
+const rawDbOf = new WeakMap<Deps, NodeDb>();
+
 /** A fresh database file and two empty folders in a new temporary directory. */
-export async function makeDeps(config?: Partial<Config>, opts: MakeOptions = {}) {
+export async function makeDeps(config?: Partial<Config>, opts: MakeOptions = {}, keep?: (name: string) => boolean) {
   const root = await mkdtemp(join(tmpdir(), "demo-platform-test-"));
   const db = new NodeDb(join(root, "db.sqlite"));
-  await migrate(db, MIGRATIONS_DIR);
+  if (keep === undefined) {
+    await migrate(db, MIGRATIONS_DIR);
+  } else {
+    const some = join(root, "migrations");
+    await mkdir(some);
+    for (const f of await readdir(MIGRATIONS_DIR)) if (f.endsWith(".sql") && keep(f)) await copyFile(join(MIGRATIONS_DIR, f), join(some, f));
+    await migrate(db, some);
+  }
   const drafts = new NodeFileStore(join(root, "drafts"));
   const pub = new NodeFileStore(join(root, "public"));
   const c = counted(db, drafts, pub);
@@ -39,6 +49,7 @@ export async function makeDeps(config?: Partial<Config>, opts: MakeOptions = {})
     ...(opts.mail === false ? {} : { mail }),
     defer: background.defer,
   };
+  rawDbOf.set(deps, db);
   // The test that made these deps fails if it ends with deferred work still running.
   checkAtEndOfTest(background);
   return {
@@ -54,6 +65,19 @@ export async function makeDeps(config?: Partial<Config>, opts: MakeOptions = {})
     publicKeys: () => pub.keys(),
     calls: c.calls,
   };
+}
+
+/**
+ * Deps as makeDeps gives them, on a database that has only the migrations `keep` takes, as a
+ * site that has not applied the others yet. `migrate()` then applies the rest with this
+ * target's own runner (src/node/migrate.ts: every file whose name is not on record, in name
+ * order) and answers what it applied.
+ */
+export async function makeDepsBefore(keep: (name: string) => boolean, config?: Partial<Config>, opts: MakeOptions = {}) {
+  const made = await makeDeps(config, opts, keep);
+  const raw = rawDbOf.get(made.deps)!;
+  const applied = async () => (await raw.all<{ name: string }>("SELECT name FROM _migrations ORDER BY applied_at, rowid")).map((r) => r.name);
+  return { ...made, applied, migrate: () => migrate(raw, MIGRATIONS_DIR) };
 }
 
 /**

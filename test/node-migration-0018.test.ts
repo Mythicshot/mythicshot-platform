@@ -20,7 +20,7 @@ import { migrate } from "../src/node/migrate.ts";
 import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { parseTerms, publishTerms } from "../src/terms.ts";
-import { workspaceStatements } from "../src/workspaces.ts";
+import { withoutTokenAccount, workspaceStatements } from "../src/workspaces.ts";
 import { ORIGIN, send } from "./bundle.ts";
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url));
@@ -45,7 +45,8 @@ describe("migration 0018", () => {
 
     const account = async (email: string, username: string, admin: boolean) => {
       const w = await workspaceStatements(deps, username, email);
-      await db.batch([...w.stmts, { sql: "UPDATE user SET username = ?, is_admin = ? WHERE id = ?", params: [username, admin ? 1 : 0, w.userId] }]);
+      // As a site before migration 0025 writes them: the token names no account.
+      await db.batch([...withoutTokenAccount(w.stmts), { sql: "UPDATE user SET username = ?, is_admin = ? WHERE id = ?", params: [username, admin ? 1 : 0, w.userId] }]);
       const made = await redeemSignInCode(deps, await createSignInCode(deps, w.userId), null, null);
       if (made === null) throw new Error("the sign-in was refused");
       return { token: w.token, cookie: `${SESSION_COOKIE}=${made.secret}`, csrf: await csrfFor(made.secret), userId: w.userId };

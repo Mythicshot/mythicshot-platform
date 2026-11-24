@@ -19,6 +19,12 @@ const THREE: Hosts = { ...HOSTS, img: "img.example.com" };
 const TOURS = "https://tours.example.com";
 const APP = "https://app.example.com";
 const IMG = "https://img.example.com";
+
+/** The two ids GET /api/v1/me names for a seeded workspace's first token, as its JSON writes them: the workspace's and its owner's. */
+async function idsOf(deps: Deps, workspaceId: string): Promise<string> {
+  const owner = await deps.db.first<{ id: string }>("SELECT id FROM user WHERE workspace_id = ?", [workspaceId]);
+  return `"workspace_id":"${workspaceId}","account_id":"${owner!.id}"`;
+}
 const UNKNOWN = "https://evil.example.net";
 const OTHER = "https://other.example.net"; // any host, for one-address mode
 const CODE = "correct-horse-battery-staple";
@@ -765,7 +771,7 @@ describe("two addresses", () => {
   it("me lists both addresses in two-address mode and is unchanged in one-address mode", async () => {
     const two = await twoAddress({ hosts: { tours: "tours.example.com", app: "app.example.com:8443" } });
     const a = await seedWorkspace(two.deps, "Acme");
-    const want = `{"workspace":"Acme","version":"${VERSION}","addresses":{"tours":"tours.example.com","app":"app.example.com:8443"}}`;
+    const want = `{"workspace":"Acme",${await idsOf(two.deps, a.workspaceId)},"version":"${VERSION}","addresses":{"tours":"tours.example.com","app":"app.example.com:8443"}}`;
     expect((await send(two.deps, "GET", "/api/v1/me", { token: a.token, origin: TOURS })).text).toBe(want);
     expect((await send(two.deps, "GET", "/api/v1/me", { token: a.token, origin: "https://app.example.com:8443" })).text).toBe(want);
     const anon = await send(two.deps, "GET", "/api/v1/me", { origin: TOURS });
@@ -776,7 +782,7 @@ describe("two addresses", () => {
     const plain = await twoAddress();
     const p = await seedWorkspace(plain.deps, "Acme");
     expect((await send(plain.deps, "GET", "/api/v1/me", { token: p.token, origin: APP })).text).toBe(
-      `{"workspace":"Acme","version":"${VERSION}","addresses":{"tours":"tours.example.com","app":"app.example.com"}}`,
+      `{"workspace":"Acme",${await idsOf(plain.deps, p.workspaceId)},"version":"${VERSION}","addresses":{"tours":"tours.example.com","app":"app.example.com"}}`,
     );
 
     for (const config of [{}, { hosts: null }]) {
@@ -785,7 +791,7 @@ describe("two addresses", () => {
       for (const origin of [TOURS, OTHER]) {
         const r = await send(one.deps, "GET", "/api/v1/me", { token: b.token, origin });
         expect(r.status).toBe(200);
-        expect(r.text, origin).toBe(`{"workspace":"Acme","version":"${VERSION}"}`);
+        expect(r.text, origin).toBe(`{"workspace":"Acme",${await idsOf(one.deps, b.workspaceId)},"version":"${VERSION}"}`);
       }
     }
   });
@@ -883,7 +889,7 @@ describe("three addresses", () => {
     const { deps } = await threeAddress();
     const a = await seedWorkspace(deps, "Acme");
     expect((await send(deps, "GET", "/api/v1/me", { token: a.token, origin: APP })).text).toBe(
-      `{"workspace":"Acme","version":"${VERSION}","addresses":{"tours":"tours.example.com","app":"app.example.com"}}`,
+      `{"workspace":"Acme",${await idsOf(deps, a.workspaceId)},"version":"${VERSION}","addresses":{"tours":"tours.example.com","app":"app.example.com"}}`,
     );
   });
 });

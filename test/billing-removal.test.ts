@@ -220,6 +220,9 @@ describe("the warning mails", () => {
 describe("removal", () => {
   it("removes a trial's tours, images, clips and files on its removal day, closes the account, audits every step, and touches nothing of another workspace due the same day", SLOW(), async () => {
     const s = await site();
+    // A's tokens name A's account (migration 0025): its first token, and a connection added here.
+    await s.deps.db.run("INSERT INTO api_token (id, workspace_id, name, hash, created_at, kind, user_id) VALUES (?, ?, 'Laptop', ?, ?, 'sign_in', ?)", ["tok_" + "e".repeat(24), s.a.workspaceId, "e".repeat(64), T0, s.a.userId]);
+    expect((await s.deps.db.first<{ n: number }>("SELECT count(*) AS n FROM api_token WHERE user_id = ?", [s.a.userId]))!.n).toBe(2);
     const tour = await publishedTour(s, s.a);
     const item = await sharedImage(s, s.a);
     const tourB = await publishedTour(s, s.b, "Bravo");
@@ -238,6 +241,8 @@ describe("removal", () => {
     expect(r.removalsFinished).toBe(1);
     expect(await exists(s.deps, s.a.workspaceId)).toBe(false);
     expect(await userStatus(s.deps, s.a.userId)).toBeNull();
+    // The tokens that named the account went before it, so the reference never stopped the delete.
+    expect((await s.deps.db.first<{ n: number }>("SELECT count(*) AS n FROM api_token WHERE user_id = ?", [s.a.userId]))!.n).toBe(0);
     // Every row of it, in every table, is gone; the audit record keeps its rows, ids and counts only.
     for (const [table, where] of Object.entries(OWNED)) {
       if (table === "audit") continue;

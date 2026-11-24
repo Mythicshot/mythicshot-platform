@@ -2,6 +2,12 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.63 (2026-11-24)
+
+- `GET /api/v1/me` also answers `workspace_id`, the caller's own workspace, and `account_id`, the account the token or session belongs to, or `null` when no account is recorded for the token. Both describe only the caller's own credential. Mythicshot uses them to tell signed-in accounts apart.
+- Migration 0025 adds `api_token.user_id` (it may be empty) and fills it for connected computers' tokens from the record written when each was collected, only when every such record names one same account that still belongs to the token's workspace. Tokens made from now on record their account. 0023 stays unused.
+- Nothing else reads the new column, and it takes no part in deciding what a token may do.
+
 ## 0.1.62 (2026-11-24)
 
 - Removal after a trial or an ended subscription, with billing on only (a site without the Stripe settings is unchanged in every answer). Links come down: a trial's published tours, shared images and clips answer visitors exactly as unpublished ones from the moment it ends, an ended subscription's 30 days after it ended, decided on every request in the lookup each public route already makes, so no call is added; nothing is changed or deleted, and a subscription makes them answer again at once.

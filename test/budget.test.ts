@@ -127,7 +127,13 @@ describe("the call budget, route by route", () => {
     expect((await call(deps, "POST", "/setup/claim", body({ code: "correct-horse-battery-staple", workspace: "Acme", email: "o2@example.com" }))).status).toBe(404);
     expect((await call(deps, "GET", "/api/v1/setup/connected", { token: claimed.json.token })).status).toBe(200);
     expect((await call(deps, "GET", "/healthz")).status).toBe(200);
-    expect((await call(deps, "GET", "/api/v1/me", { token: claimed.json.token })).status).toBe(200);
+    const me = await call(deps, "GET", "/api/v1/me", { token: claimed.json.token });
+    expect(me.status).toBe(200);
+    // The claim's token is its owner's, and /me says so with the calls it always made: the
+    // token's lookup, its use, and the one read of the workspace that also reads the account.
+    const owner = await deps.db.first<{ id: string; workspace_id: string }>("SELECT id, workspace_id FROM user WHERE email = ?", ["owner@example.com"]);
+    expect([me.json.workspace_id, me.json.account_id]).toEqual([owner!.workspace_id, owner!.id]);
+    expect(me.calls).toBe(3);
   });
 
   it("uploads: create with five stale 200-step uploads to sweep, every step, the logo, commit, abort", async () => {

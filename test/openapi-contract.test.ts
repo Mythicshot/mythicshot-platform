@@ -348,7 +348,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const api = client(deps);
 
     expect((await api.health()).json).toEqual({ ok: true });
-    expect((await api.me(a.token)).json).toEqual({ workspace: "Workspace A", version: VERSION });
+    expect((await api.me(a.token)).json).toEqual({ workspace: "Workspace A", workspace_id: a.workspaceId, account_id: expect.stringMatching(/^usr_[0-9a-f]{24}$/), version: VERSION });
     // Usage: nothing yet, and no limit unless the site or the workspace has one.
     expect((await api.usage(a.token)).json).toEqual({ used_bytes: 0, allowance_bytes: null, over: false, tours: 0, images: 0, gifs: 0, counted: { pictures: 0, logos: 0, uploads_in_progress: 0, images: 0, gifs: 0 } });
 
@@ -638,7 +638,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     // Help: a token whose workspace is gone cannot exist, since a token's row must name a
     // workspace; the read of the workspace's name is made to find nothing.
     const realFirst = deps.db.first.bind(deps.db);
-    deps.db.first = (async (sql: string, params?: unknown[]) => (sql.startsWith("SELECT name FROM workspace") ? null : realFirst(sql, params as never))) as typeof deps.db.first;
+    deps.db.first = (async (sql: string, params?: unknown[]) => (/^SELECT (?:w\.)?name[\s\S]*FROM workspace/.test(sql) ? null : realFirst(sql, params as never))) as typeof deps.db.first;
     const orphan = await api.me(a.token);
     deps.db.first = realFirst;
     refused(orphan, 404, "not_found");
@@ -804,7 +804,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     const { deps, a } = await setup({ hosts });
     const api = client(deps);
     for (const origin of ["https://tours.example.com", "https://app.example.com"]) {
-      expect((await api.me(a.token, origin)).json, origin).toEqual({ workspace: "Workspace A", version: VERSION, addresses: hosts });
+      expect((await api.me(a.token, origin)).json, origin).toEqual({ workspace: "Workspace A", workspace_id: a.workspaceId, account_id: expect.stringMatching(/^usr_[0-9a-f]{24}$/), version: VERSION, addresses: hosts });
     }
     expect((await api.health("https://tours.example.com")).json).toEqual({ ok: true, address: "tours" });
     expect((await api.health("https://app.example.com")).json).toEqual({ ok: true, address: "app" });
