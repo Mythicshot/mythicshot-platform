@@ -15,7 +15,7 @@ import { COPY_BATCH, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../src/publish
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { FakeMailer } from "./fake-mail.ts";
 import { eventOf, notify, sessionOf, CS, SECRET, withBilling } from "./fake-stripe.ts";
-import { clone, commit, createUpload, fixtures, logoPng, mp4, ORIGIN, putLogo, putStep, routeOf, send, sendAll, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
+import { clone, commit, createUpload, fixtures, logoPng, mp4, ORIGIN, png, putLogo, putStep, routeOf, send, sendAll, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 
 const v3 = fixtures.v3 as Json;
 const T0 = 1_800_000_000_000;
@@ -675,6 +675,59 @@ describe("the call budget, route by route", () => {
     expect(stripe.calls.some((c) => c.method === "DELETE" && c.path === "/v1/subscriptions/sub_B")).toBe(true);
     // Five 200-step uploads and a 1,500-row sweep: over 20 s on a busy machine, as the other heavy cases here.
   }, 120_000);
+
+  it("links down (0.1.62): the public page, picture and shared item cost the same calls with billing off and with links up, and a link that is down costs what a link that never existed costs", async () => {
+    const costs = async (billing: boolean) => {
+      const { deps, advance } = await clocked();
+      if (billing) withBilling(deps);
+      const owner = await seedAccount(deps, { username: "owner" });
+      const tour = await uploadTour(deps, owner.token, heavyManifest(2, "Cost"));
+      await publishAll(deps, owner.token, tour.tour_id);
+      const slug = (await deps.db.first<{ slug: string }>("SELECT slug FROM tour WHERE id = ?", [tour.tour_id]))!.slug;
+      const key = (await deps.db.first<{ image_key: string }>("SELECT image_key FROM snapshot_object WHERE tour_id = ?", [tour.tour_id]))!.image_key;
+      const made = await send(deps, "POST", "/api/v1/media", { token: owner.token, headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "image", content_type: "image/png", bytes: 300, width: 8, height: 8 }) });
+      await send(deps, "PUT", `/api/v1/media/${made.json.id}/parts/0`, { token: owner.token, body: png(8, 8, 300, 1) as NonNullable<RequestInit["body"]> });
+      const item = (await send(deps, "POST", `/api/v1/media/${made.json.id}/commit`, { token: owner.token })).json.path as string;
+      const letter = item.split("/")[1];
+      const look = async (paths: string[]) => {
+        const out: [number, number][] = [];
+        for (const p of paths) {
+          const r = await call(deps, "GET", p);
+          out.push([r.status, r.calls]);
+        }
+        return out;
+      };
+      const real = [`/t/${slug}`, "/" + key, item, `${item}/download`];
+      const never = [`/t/${"a".repeat(10)}`, `/p/${"0".repeat(32)}.png`, `/${letter}/${"a".repeat(20)}`, `/${letter}/${"a".repeat(20)}/download`];
+      const up = await look(real);
+      const unknown = await look(never);
+      // Past the trial's 90 days: with billing the links are down.
+      advance(91 * 24 * HOUR);
+      return { up, unknown, later: await look(real) };
+    };
+    const off = await costs(false);
+    const on = await costs(true);
+    expect(off.up.map(([s]) => s)).toEqual([200, 200, 200, 200]);
+    expect(off.later).toEqual(off.up);
+    // With billing on and the links up: the very same calls, so no call is added on the hot paths.
+    expect(on.up).toEqual(off.up);
+    // Down: the status and the calls of a link that never existed.
+    expect(on.later).toEqual(on.unknown);
+    expect(on.unknown).toEqual(off.unknown);
+  }, 120_000);
+
+  it("the billing state (0.1.62) reads the removal's dates in one call more, only for a workspace on the clock", async () => {
+    const { deps } = await clocked();
+    withBilling(deps);
+    await seedAccount(deps, { username: "siteadmin", admin: true });
+    const trial = await seedAccount(deps, { username: "trial" });
+    const exempt = await seedAccount(deps, { username: "exempt" });
+    await deps.db.run("UPDATE workspace SET billing_trial = 0 WHERE id = ?", [exempt.workspaceId]);
+    const onClock = await call(deps, "GET", "/api/v1/billing", { headers: (await sessionOf(deps, trial.userId)).headers });
+    const plain = await call(deps, "GET", "/api/v1/billing", { headers: (await sessionOf(deps, exempt.userId)).headers });
+    expect([onClock.status, plain.status]).toEqual([200, 200]);
+    expect(onClock.calls - plain.calls).toBe(1);
+  });
 
   it("Download all my data (0.1.60): the ask, the file of a workspace at the most files a download reads, and the refusal of one more file, each within the budget", async () => {
     const { deps } = await clocked();

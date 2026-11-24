@@ -131,6 +131,7 @@ const GATE: Record<string, Entry> = {
   "POST /api/v1/admin/accounts/:id/disable": heldAdmin("POST", `/api/v1/admin/accounts/${ACCOUNT}/disable`),
   "POST /api/v1/admin/accounts/:id/enable": heldAdmin("POST", `/api/v1/admin/accounts/${ACCOUNT}/enable`),
   "GET /api/v1/admin/accounts/:id/removal": heldAdmin("GET", `/api/v1/admin/accounts/${ACCOUNT}/removal`),
+  "POST /api/v1/admin/accounts/:id/undo-removal": heldAdmin("POST", `/api/v1/admin/accounts/${ACCOUNT}/undo-removal`),
   "DELETE /api/v1/admin/accounts/:id": heldAdmin("DELETE", `/api/v1/admin/accounts/${ACCOUNT}`, { username: "nobody" }),
   // Invites take no credential.
   "POST /api/v1/invite/check": none("POST", "/api/v1/invite/check", { code: "dpi_" + "0".repeat(40) }),
@@ -352,7 +353,7 @@ describe("before the account agrees to the site's terms", () => {
     const id = await publish(w.deps);
     const before = await dumpAll(w.deps);
     const heldKeys = Object.keys(GATE).filter((k) => GATE[k].kind === "held");
-    expect(heldKeys.length).toBe(53);
+    expect(heldKeys.length).toBe(54);
     for (const key of heldKeys) {
       const e = GATE[key];
       const r = await fire(w.deps, e.sample!, e.admin ? adminSession : memberSession);

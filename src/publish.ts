@@ -68,6 +68,7 @@ import type { Hono } from "hono";
 import { readOnlyRefusal } from "./billing.ts";
 import { CARRY_CALLS, RESTRICTED_STUB, alreadySet, carryOnSwitch, planFirstPublish, type FirstPublishPlan } from "./access.ts";
 import { beforeAccountsToo, noDisabledAccount } from "./accounts.ts";
+import { linksUpSql } from "./removal-rules.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
@@ -452,15 +453,6 @@ export const RETIRE_ABANDONED_SQL = `UPDATE public_object SET state = 'retired',
    WHERE tour_id IN (${WORKSPACE_TOURS}) AND state = 'pending' AND created_at < ?
      AND NOT EXISTS (SELECT 1 FROM publish_job j WHERE j.publish_id = public_object.publish_id AND j.touched_at >= ?)
      AND NOT EXISTS (SELECT 1 FROM access_switch w WHERE public_object.publish_id IN (w.switch_id, 'sws_' || substr(w.switch_id, 4)))`;
-/** How long past its expiry a checkout's record is kept (stripe_checkout), for a late notice of it. */
-export const CHECKOUT_KEPT_MS = 7 * 24 * 60 * 60 * 1000;
-/**
- * Removes one workspace's checkout records that expired before a moment, but its pending one.
- * Parameters: the workspace, the moment, the workspace. Named by the workspace in both places,
- * so it never reaches another workspace's rows.
- */
-export const SWEEP_CHECKOUTS_SQL =
-  "DELETE FROM stripe_checkout WHERE workspace_id = ? AND expires_at < ? AND id IS NOT (SELECT w.checkout_session_id FROM workspace w WHERE w.id = ?)";
 /** Drops a workspace's jobs that are stale or have no pending rows left. Parameters: the workspace, the stale moment. */
 export const DROP_ABANDONED_JOBS_SQL = `DELETE FROM publish_job WHERE tour_id IN (${WORKSPACE_TOURS})
     AND (touched_at < ? OR NOT EXISTS (SELECT 1 FROM public_object o WHERE o.publish_id = publish_job.publish_id AND o.state = 'pending'))`;
@@ -483,9 +475,9 @@ export async function housekeeping(deps: Deps, workspaceId: string, tourId: stri
     await deps.db.batch([
       { sql: RETIRE_ABANDONED_SQL, params: [now, workspaceId, stale, stale] },
       { sql: DROP_ABANDONED_JOBS_SQL, params: [workspaceId, stale] },
-      // Billing (migration 0021): this workspace's own record of checkouts long past their
-      // expiry, which no notice can find any more; not its pending one. Only with billing on.
-      ...(billingConfigured(deps.config) ? [{ sql: SWEEP_CHECKOUTS_SQL, params: [workspaceId, now - CHECKOUT_KEPT_MS, workspaceId] }] : []),
+      // 0.1.62 (second review N1): checkout records are no longer cleared here by age. A record
+      // past its expiry may be of a checkout that was paid and never linked; only the billing
+      // sweep clears one, once Stripe has confirmed that checkout expired (src/billing-sweep.ts).
     ]);
     let result: "clean" | "more" = "more";
     for (let page = 0; page < pages; page++) {
@@ -1023,7 +1015,10 @@ export function publishRoutes(app: Hono, deps: Deps): void {
     // a tour that is restricted, which came later still). A restricted tour, or one becoming
     // restricted, answers as an unknown name, its retired names inside their grace too: its
     // pictures are served only by the app's own check (src/access.ts).
-    const live = await beforeAccountsToo(() => lookup(` AND t.access = 'public' AND ${noDisabledAccount("t.workspace_id")}`), () => lookup(""));
+    // With billing on, a workspace whose links are down (src/removal-rules.ts) answers as an
+    // unknown name too, in the same statement; without billing the statement is as before.
+    const linksUp = linksUpSql(deps.config, "t.workspace_id", deps.now());
+    const live = await beforeAccountsToo(() => lookup(` AND t.access = 'public' AND ${noDisabledAccount("t.workspace_id")}${linksUp}`), () => lookup(""));
     if (live === null) return missing();
     const file = await deps.pub.get(key);
     if (file === null) return missing();

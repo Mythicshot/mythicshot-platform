@@ -90,7 +90,7 @@
 #   update that is not the new version's fault, so no commands to go back are printed.
 #
 # The admin command. `admin` runs the site's own admin command (dist/node/admin.js:
-# first-admin, signin-link, change-email, mail-check, audit, terms) in the installed app,
+# first-admin, signin-link, change-email, mail-check, audit, terms, billing-sweep) in the installed app,
 # beside the running app:
 # - Options of this script (--app-root, --node, --dry-run) go before the command's first
 #   argument; from there on every argument is the command's and reaches it unchanged.
@@ -105,6 +105,8 @@
 #   this terminal only and to no log or file. Its exit code is the command's.
 # - The command changes the database only (in one transaction, beside the running app),
 #   never a file of the app; it applies no migration. --dry-run prints what would be run.
+#   The one exception is billing-sweep with BILLING_REMOVAL=on, which also deletes the stored
+#   files of the workspaces it removes, in the data folder (never a file of the app).
 #
 # Every outside command (cloudlinux-selector, npm, node, sqlite3, curl, and touch for
 # the restart file) is found through PATH, so the tests put stand-ins in front.

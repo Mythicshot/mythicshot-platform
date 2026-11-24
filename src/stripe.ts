@@ -17,8 +17,12 @@ export const STRIPE_JS_URL = "https://js.stripe.com/endive/stripe.js";
 /** Where the API lives. */
 const STRIPE_API = "https://api.stripe.com";
 
-/** Stripe's answer: its HTTP status and its parsed JSON body (null when it is not JSON). */
-export type StripeAnswer = { status: number; body: unknown };
+/**
+ * Stripe's answer: its HTTP status and its parsed JSON body (null when it is not JSON), and its
+ * Date header as sent (0.1.62, optional: absent or null when there was none), which the billing
+ * sweep compares with the server's clock before it removes anything.
+ */
+export type StripeAnswer = { status: number; body: unknown; date?: string | null };
 
 /** A form field: name and value, sent in this order. */
 export type StripeForm = readonly (readonly [string, string])[];
@@ -27,7 +31,8 @@ export interface Stripe {
   /**
    * One request to Stripe. `path` is an API path such as /v1/subscriptions/sub_123: it must
    * match STRIPE_PATH, else the call throws before anything is sent. `form` is sent as the
-   * form-encoded body of a POST. Throws Error("stripe: unreachable") when no answer came.
+   * form-encoded body of a POST, and (0.1.62) as the query of a GET, such as a list's filters.
+   * Throws Error("stripe: unreachable") when no answer came.
    */
   call(method: "GET" | "POST" | "DELETE", path: string, form?: StripeForm, idempotencyKey?: string): Promise<StripeAnswer>;
 }
@@ -63,7 +68,7 @@ export function stripeOverFetch(apiKey: string, fetchFn: typeof fetch = (input, 
       }
       let res: Response;
       try {
-        res = await fetchFn(STRIPE_API + path, init);
+        res = await fetchFn(STRIPE_API + path + (method === "GET" && form !== undefined && form.length > 0 ? `?${formBody(form)}` : ""), init);
       } catch {
         // Fixed text: the error of a failed fetch could carry the request it was making.
         throw new Error("stripe: unreachable");
@@ -74,7 +79,9 @@ export function stripeOverFetch(apiKey: string, fetchFn: typeof fetch = (input, 
       } catch {
         body = null;
       }
-      return { status: res.status, body };
+      // The Date header only when Stripe sent one, so an answer without it is the answer of before.
+      const date = res.headers.get("date");
+      return date === null ? { status: res.status, body } : { status: res.status, body, date };
     },
   };
 }

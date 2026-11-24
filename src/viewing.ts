@@ -8,6 +8,7 @@
 // alone (a token gets its count), never by another route, an audit row (which holds counts)
 // or a log line, and a refusal of a malformed address names its position only.
 import { noDisabledAccount, parseEmail } from "./accounts.ts";
+import { linksUpSql } from "./removal-rules.ts";
 import { auditStatement, type AuditEvent } from "./audit.ts";
 import type { Auth } from "./auth.ts";
 import { apiError, readCapped } from "./http.ts";
@@ -164,11 +165,11 @@ export function cannotRestrict(deps: Deps, from: Access, to: Access, canMail: (d
  * thing's workspace (the owner), and whether that workspace has no disabled account. Two
  * parameters, the address twice, then the thing's id.
  */
-function mayViewSql(place: ListPlace): string {
+function mayViewSql(place: ListPlace, linksUp: string): string {
   return `SELECT t.access,
             EXISTS (SELECT 1 FROM ${place.list} v WHERE v.${place.key} = t.id AND v.email = ?) AS listed,
             EXISTS (SELECT 1 FROM membership m JOIN user u ON u.id = m.user_id WHERE m.workspace_id = t.workspace_id AND u.email = ?) AS owner,
-            CASE WHEN ${noDisabledAccount("t.workspace_id")} THEN 1 ELSE 0 END AS enabled
+            CASE WHEN ${noDisabledAccount("t.workspace_id")}${linksUp} THEN 1 ELSE 0 END AS enabled
        FROM ${place.owner} t WHERE t.id = ?`;
 }
 
@@ -184,7 +185,7 @@ export async function mayViewIn(deps: Deps, place: ListPlace, id: string, proved
   const email = provedEmail === null ? null : parseEmail(provedEmail);
   // An empty address matches no stored one (every stored address has at least 3 characters).
   const asked = email ?? "";
-  const row = await deps.db.first<{ access: Access; listed: number; owner: number; enabled: number }>(mayViewSql(place) + extra, [asked, asked, id]);
+  const row = await deps.db.first<{ access: Access; listed: number; owner: number; enabled: number }>(mayViewSql(place, linksUpSql(deps.config, "t.workspace_id", deps.now())) + extra, [asked, asked, id]);
   if (row === null || row.enabled !== 1) return false;
   if (row.access === "public") return true;
   if (email === null) return false;
