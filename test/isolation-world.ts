@@ -89,6 +89,8 @@ export type Ids = {
   tokens: { live: string; revoked: string; connected: string };
   /** The short codes of the side's requests to connect: confirmed by it and not collected, confirmed and collected, refused by it. */
   connect: { confirmed: string; collected: string; refused: string };
+  /** The ticket of the download of all its data the side's session asked for last and has not opened (src/export.ts). */
+  download: string;
 };
 
 export type Side = {
@@ -185,6 +187,7 @@ export function inventedIds(like?: Ids): Ids {
     otherSession: newId("ses"),
     tokens: { live: newId("tok"), revoked: newId("tok"), connected: newId("tok") },
     connect: { confirmed: formatUserCode(newUserCode()), collected: formatUserCode(newUserCode()), refused: formatUserCode(newUserCode()) },
+    download: randomHex(76),
   };
 }
 
@@ -408,6 +411,7 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
     otherSession: "",
     tokens: { live: tokenId, revoked: revokedTokenId, connected: "" },
     connect: { confirmed: "", collected: "", refused: "" },
+    download: "",
   };
   ids.session = session.id;
   ids.otherSession = (await signIn(deps, account.userId)).id;
@@ -461,6 +465,19 @@ export async function world(deps: Deps, keys: StoreKeys): Promise<World> {
   // heartbeat is put twelve hours on, so only a test that moves the clock a day sees it
   // carried on.
   await deps.db.run("UPDATE access_switch SET touched_at = ?", [now + 12 * 3_600_000]);
+  // Each side asks for a download of all its data and does not open it yet, so its ticket is
+  // live while the suite names it from the other side (src/export.ts). A side holds more files
+  // than one download reads on Workers, so it asks as on the Node server, which has no limit;
+  // the suite's other requests keep the deps' own setting.
+  const appOrigin = (deps.config.hosts ?? null) === null ? ORIGIN : originOf(deps.config.hosts!.app);
+  const config = deps.config;
+  deps.config = { ...config, exportFileReads: null };
+  for (const s of [a, b]) {
+    const page = { cookie: s.session.cookie, origin: appOrigin, "x-csrf-token": s.session.csrf, "sec-fetch-site": "same-origin" };
+    const asked = must(await send(deps, "POST", "/api/v1/account/data", { origin: appOrigin, headers: page }), 200, `${s.name}'s download of its data`);
+    s.ids.download = String(asked.json.url).split("/").pop()!;
+  }
+  deps.config = config;
   log.length = 0;
   return { deps, keys, a, b, invite, tick: (ms = 100) => void (now += ms), writes: () => [...log], forgetWrites: () => void (log.length = 0) };
 }

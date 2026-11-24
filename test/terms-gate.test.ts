@@ -102,6 +102,9 @@ const GATE: Record<string, Entry> = {
   "POST /api/v1/signout/everywhere": open("POST", "/api/v1/signout/everywhere"),
   "POST /api/v1/account/email": held("POST", "/api/v1/account/email", { email: "new-address@example.com" }),
   "POST /api/v1/account/email/confirm": held("POST", "/api/v1/account/email/confirm", { code: "dpe_" + "0".repeat(40) }),
+  // Download all my data (0.1.60): a session alone, held like the rest of the account page.
+  "POST /api/v1/account/data": held("POST", "/api/v1/account/data"),
+  "GET /api/v1/account/data/:ticket": held("GET", `/api/v1/account/data/${"0".repeat(76)}`),
   // The site's terms: open.
   "GET /api/v1/terms": open("GET", "/api/v1/terms"),
   "GET /api/v1/terms/agreed": open("GET", "/api/v1/terms/agreed"),
@@ -338,7 +341,7 @@ describe("before the account agrees to the site's terms", () => {
     const id = await publish(w.deps);
     const before = await dumpAll(w.deps);
     const heldKeys = Object.keys(GATE).filter((k) => GATE[k].kind === "held");
-    expect(heldKeys.length).toBe(53);
+    expect(heldKeys.length).toBe(55);
     for (const key of heldKeys) {
       const e = GATE[key];
       const r = await fire(w.deps, e.sample!, e.admin ? adminSession : memberSession);

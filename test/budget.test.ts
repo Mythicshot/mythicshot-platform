@@ -6,14 +6,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeDeps, seedAccount, seedWorkspace } from "#harness";
 import { metered, SUBREQUEST_BUDGET, withBudget } from "../src/budget.ts";
+import { EXPORT_PATH, EXPORT_WORKER_FILES } from "../src/export.ts";
 import { LIMITS } from "../src/manifest.ts";
+import { PART_BYTES } from "../src/media.ts";
 import { MailOff, NO_MAIL } from "../src/mail.ts";
 import { DEFER_FAILED, deferOf, mailOf, type Deps } from "../src/ports.ts";
 import { COPY_BATCH, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../src/publish.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { FakeMailer } from "./fake-mail.ts";
 import { eventOf, notify, sessionOf, withBilling } from "./fake-stripe.ts";
-import { clone, commit, createUpload, fixtures, logoPng, ORIGIN, putLogo, putStep, routeOf, send, sendAll, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
+import { clone, commit, createUpload, fixtures, logoPng, mp4, ORIGIN, putLogo, putStep, routeOf, send, sendAll, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 
 const v3 = fixtures.v3 as Json;
 const T0 = 1_800_000_000_000;
@@ -671,6 +673,37 @@ describe("the call budget, route by route", () => {
     for (let i = 0; i < 50 && removed.status === 202; i++) removed = await call(deps, "DELETE", `/api/v1/admin/accounts/${target}`, { headers: { ...adminSession.headers, "content-type": "application/json" }, body: JSON.stringify({ username: name.username ?? name.email }) });
     expect(removed.status, removed.text).toBe(200);
     expect(stripe.calls.some((c) => c.method === "DELETE" && c.path === "/v1/subscriptions/sub_B")).toBe(true);
+  });
+
+  it("Download all my data (0.1.60): the ask, the file of a workspace at the most files a download reads, and the refusal of one more file, each within the budget", async () => {
+    const { deps } = await clocked();
+    await seedAccount(deps, { admin: true });
+    const owner = await seedAccount(deps);
+    const session = await sessionOf(deps, owner.userId);
+    // EXPORT_WORKER_FILES stored files: steps of two tours, a logo, and a shared clip of three parts.
+    const tour = (n: number, title: string, logo: boolean) => {
+      const m = clone(v3);
+      m.title = title;
+      if (!logo) m.cover = null;
+      m.steps = Array.from({ length: n }, (_, i) => ({ ...clone(v3.steps[0]), image: `step-${String(i + 1).padStart(3, "0")}.png`, width: 64, height: 64, bytes: 120 }));
+      return m;
+    };
+    const big = await uploadTour(deps, owner.token, tour(EXPORT_WORKER_FILES - 4 - 10, "Big", true), { kind: "new" });
+    await uploadTour(deps, owner.token, tour(10, "Small", false), { kind: "new" });
+    const clip = await send(deps, "POST", "/api/v1/media", { token: owner.token, body: JSON.stringify({ kind: "clip", content_type: "video/mp4", bytes: PART_BYTES * 2 + 5, width: 64, height: 64, duration_ms: 1000, title: "Clip" }), headers: { "content-type": "application/json" } });
+    const file = mp4(PART_BYTES * 2 + 5);
+    for (let n = 0; n < 3; n++) await send(deps, "PUT", `/api/v1/media/${clip.json.id}/parts/${n}`, { token: owner.token, body: file.subarray(n * PART_BYTES, (n + 1) * PART_BYTES) as NonNullable<RequestInit["body"]> });
+    expect((await send(deps, "POST", `/api/v1/media/${clip.json.id}/commit`, { token: owner.token })).status).toBe(200);
+    const asked = await call(deps, "POST", EXPORT_PATH, { headers: session.headers });
+    expect(asked.status, asked.text).toBe(200);
+    const got = await call(deps, "GET", asked.json.url, { headers: { cookie: session.headers.cookie } });
+    expect(got.status).toBe(200);
+    // Every stored file is one call: the most a download makes.
+    expect(got.calls).toBe(SUBREQUEST_BUDGET - 1);
+    // One file more is refused on asking, before anything is read.
+    await uploadTour(deps, owner.token, tour(1, "One more", false), { kind: "chapter", tour_id: big.tour_id });
+    const refused = await call(deps, "POST", EXPORT_PATH, { headers: session.headers });
+    expect([refused.status, refused.json.error]).toEqual([409, "too_large_to_export"]);
   });
 
   it("reports the highest count seen per route (run with --silent=false to see it)", () => {
