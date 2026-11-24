@@ -9,6 +9,7 @@ import { connectRoutes } from "./connect.ts";
 import { dashRoutes } from "./dash/routes.ts";
 import { docsRoutes } from "./docs/page.ts";
 import { emailChangeRoutes } from "./email-change.ts";
+import { exportRoutes } from "./export.ts";
 import { hostGate } from "./host-gate.ts";
 import { requestHost, roleOf } from "./hosts.ts";
 import { inviteRoutes } from "./invites.ts";
@@ -55,6 +56,7 @@ export function createApp(deps: Deps): Hono {
   usageRoutes(app, deps);
   signinRoutes(app, deps);
   emailChangeRoutes(app, deps);
+  exportRoutes(app, deps);
   connectRoutes(app, deps);
   tokenRoutes(app, deps);
   adminRoutes(app, deps);

@@ -93,6 +93,10 @@ const ACCOUNT_WORDING = [
   // Plan 2i: the download card, hidden unless the session names a usable download page.
   "Mythicshot for Windows",
   "Get the installer from the download page. It shows the latest version and its checksum.",
+  // 0.1.60: Download all my data, in every state (billing mockups, section 7).
+  "Download all my data",
+  "One zip file with your tours, images and clips, and a list of what's in your account.",
+  "Download",
   "Where you are signed in",
   "Sign out",
   "Sign out everywhere",
@@ -289,6 +293,34 @@ describe("the Account page and the page an email-change link opens", () => {
     expect(SIGNIN_JS).toContain('sending: "Sending…"');
   });
 
+  it("Download all my data is section 7's card, shown in every state, with no words of its own in the script but the failure sentence it shares", () => {
+    const doc = new FakeDocument(ACCOUNT_HTML);
+    const card = doc.getElementById("data-card")!;
+    // Never hidden: not by billing, not by the session; the page is shown once the session has answered.
+    expect([card.className, card.hidden]).toEqual(["card", false]);
+    expect(doc.getElementById("h-data")!.textContent).toBe("Download all my data");
+    expect(doc.getElementById("data-text")!.textContent).toBe("One zip file with your tours, images and clips, and a list of what's in your account.");
+    const button = doc.getElementById("data-download")!;
+    expect([button.tagName, button.getAttribute("type"), button.textContent]).toEqual(["button", "button", "Download"]);
+    expect(doc.getElementById("data-message")!.hidden).toBe(true);
+    // After the details and the download card, before where the account is signed in.
+    expect(ACCOUNT_HTML.indexOf('id="data-card"')).toBeGreaterThan(ACCOUNT_HTML.indexOf('id="download-card"'));
+    expect(ACCOUNT_HTML.indexOf('id="data-card"')).toBeLessThan(ACCOUNT_HTML.indexOf('id="h-where"'));
+    // The script asks for the download, takes only an address of exactly the server's shape, and opens it as a download of this site.
+    expect(ACCOUNT_JS).toContain('Dash.api("POST", "/api/v1/account/data").then(');
+    expect(ACCOUNT_JS).toContain("var DATA_URL = /^\\/api\\/v1\\/account\\/data\\/[0-9a-f]{76}$/;");
+    expect(ACCOUNT_JS).toContain('if (typeof url !== "string" || !DATA_URL.test(url)) { back(res); return; }');
+    expect(ACCOUNT_JS).toContain("Dash.saveFile(url);\n      watch(ready);");
+    // It stays disabled while the server says the download is going, asking every 3 seconds.
+    expect(ACCOUNT_JS).toContain('Dash.api("GET", "/api/v1/account/data").then(');
+    expect(ACCOUNT_JS).toContain("var POLL_MS = 3000;");
+    // While it asks, the button is disabled with no new words; a failure is the dashboard's own sentence.
+    expect(ACCOUNT_JS).toContain("sayIn(message, Dash.failure(res));");
+    const block = ACCOUNT_JS.slice(ACCOUNT_JS.indexOf("function downloadData()"), ACCOUNT_JS.indexOf("function startPage()"));
+    expect(block).not.toContain("busy(");
+    expect(block).not.toContain("TEXT.");
+  });
+
   it("the link's page has the proposed wording and mockup 8's third box, and its sentence for a dead link is the server's", () => {
     const doc = new FakeDocument(ACCOUNT_EMAIL_HTML);
     expect(textNodes(doc.body)).toEqual(EMAIL_WORDING);
@@ -352,13 +384,16 @@ describe("the Account page and the page an email-change link opens", () => {
   it("the Account page's script keeps to this site: its requests, the anti-forgery header from the shared script, and leaving only for /signin", () => {
     const js = ACCOUNT_JS;
     const requests = [...js.matchAll(/\bapi\("([A-Z]+)", ("[^"]*")/g)].map((m) => `${m[1]} ${m[2]}`);
-    expect(requests.sort()).toEqual(['DELETE "/api/v1/sessions/"', 'GET "/api/v1/sessions"', 'POST "/api/v1/account/email"', 'POST "/api/v1/signout"', 'POST "/api/v1/signout/everywhere"'].sort());
+    expect(requests.sort()).toEqual(['DELETE "/api/v1/sessions/"', 'GET "/api/v1/sessions"', 'GET "/api/v1/account/data"', 'POST "/api/v1/account/data"', 'POST "/api/v1/account/email"', 'POST "/api/v1/signout"', 'POST "/api/v1/signout/everywhere"'].sort());
     expect(js).toContain('Dash.api("DELETE", "/api/v1/sessions/" + encodeURIComponent(id))');
     expect(js).toContain('Dash.api("POST", "/api/v1/account/email", { email: value })');
     // Every change carries the X-Csrf-Token header: Dash.api adds it to every request that is not a GET.
     expect(DASH_JS).toContain('if (method !== "GET" && method !== "HEAD") headers["X-Csrf-Token"] = csrf;');
-    const forbidden = ["fetch(", "csrf", "localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "setTimeout(", "document.referrer", "navigator", "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "confirm(", "alert(", "prompt("];
+    const forbidden = ["fetch(", "csrf", "localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer", "navigator", "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "confirm(", "alert(", "prompt("];
     for (const api of forbidden) expect(js, api).not.toContain(api);
+    // One timer only: the wait between two asks whether a download is still going (0.1.60).
+    expect(js.match(/setTimeout\(/g)).toHaveLength(1);
+    expect(js).toContain("return new Promise(function (resolve) { setTimeout(resolve, ms); });");
     expect(js).toContain("Dash.signedOut()");
     // The shared script hands the page what the session says, and leaves the one who is signed out to a page that asks for it.
     expect(DASH_JS).toContain("emailChange: d.email_change === true");
@@ -401,7 +436,7 @@ describe("the Account page and the page an email-change link opens", () => {
       for (const id of asked) expect(ids.has(id), `${p.path} #${id}`).toBe(true);
     }
     const account = new FakeDocument(ACCOUNT_HTML);
-    expect(account.root.all().filter((e) => /\bmessage\b/.test(e.className) && e.parent?.tagName !== "noscript").map((m) => m.id).sort()).toEqual(["account-message", "change-message"]);
+    expect(account.root.all().filter((e) => /\bmessage\b/.test(e.className) && e.parent?.tagName !== "noscript").map((m) => m.id).sort()).toEqual(["account-message", "change-message", "data-message"]);
     // The two dialogs: tied to their titles and texts, outside the part of the page made inert while one is open.
     const dialogs = account.body.all().filter((e) => e.getAttribute("role") === "dialog");
     expect(dialogs.map((d) => [d.getAttribute("aria-modal"), d.getAttribute("aria-labelledby"), d.getAttribute("aria-describedby")])).toEqual([

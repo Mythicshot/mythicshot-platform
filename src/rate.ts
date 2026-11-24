@@ -223,6 +223,20 @@ export const LIMITS_VIEWER = {
 } as const satisfies Record<string, Limit>;
 
 /**
+ * The limit on "Download all my data" (src/export.ts): asking for a download, counted per
+ * workspace, keyed by `workspaceKey`, for every signed-in request, also one then refused
+ * because a download is already running. Over: 429 with retry-after. A person needs one; a
+ * few more cover a download that broke off.
+ *
+ * `running` is no limit but the bucket of the one row that says a download of the workspace
+ * is being prepared or sent, under the same key (src/export.ts): one at a time.
+ */
+export const LIMITS_EXPORT = {
+  start: { bucket: "export_start", windowMs: 3_600_000, most: 5 },
+} as const satisfies Record<string, Limit>;
+export const EXPORT_RUNNING_BUCKET = "export_running";
+
+/**
  * The key one address's viewer-link requests for one tour are counted under: 64 hex
  * characters, the digest of a fixed prefix, the address as `parseEmail` stores it and the
  * slug. Rejects with "bad email" or "bad slug" for anything that is not text.

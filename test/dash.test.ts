@@ -573,6 +573,12 @@ describe("the dashboard's pages and files", () => {
     const users = every.filter((p) => p.script.body.includes("Dash.downloadLink(")).map((p) => p.path);
     expect(users.sort()).toEqual(["/account", "/connections"]);
     for (const p of every.filter((q) => users.includes(q.path))) expect(p.script.body, p.path).not.toMatch(/setAttribute\("href"|\.href\s*=/);
+    // The one other href the shared script sets is Dash.saveFile's, to a path of this site of the shape Dash.api takes (0.1.60).
+    expect(DASH_JS.match(/\.href\s*=/g)).toHaveLength(1);
+    expect(DASH_JS).toContain('if (typeof path !== "string" || !/^\\/(?![\\/\\\\])/.test(path)) throw new TypeError("path");\n    var a = document.createElement("a");\n    a.href = path;\n    a.hidden = true;');
+    // No download attribute: an answer that is no file (a refusal in plain text) is shown, never saved.
+    expect(DASH_JS).not.toContain(".download =");
+    expect(every.filter((p) => p.script.body.includes("Dash.saveFile(")).map((p) => p.path)).toEqual(["/account"]);
   });
 
   it("the pages are usable with the keyboard and a screen reader, at phone width and in both colour schemes", () => {

@@ -156,6 +156,21 @@ export const DASH_JS = `var Dash = (function () {
     return a;
   }
 
+  // Dash.saveFile(path): opens one path of this site as a plain link, so an answer the server
+  // marks as a file to save (Content-Disposition: attachment) is written to disk as it arrives
+  // and the page stays where it is, while any other answer, such as a refusal in plain text, is
+  // shown, never saved (the Account page's Download all my data). A path of the shape Dash.api
+  // takes only; anything else is refused before anything is asked.
+  function saveFile(path) {
+    if (typeof path !== "string" || !/^\\/(?![\\/\\\\])/.test(path)) throw new TypeError("path");
+    var a = document.createElement("a");
+    a.href = path;
+    a.hidden = true;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
   // ---- A question asked in the page ----
   //
   // Dash.question(o) is the one way a page asks a question in itself (the Tours and Storage
@@ -379,6 +394,6 @@ export const DASH_JS = `var Dash = (function () {
     });
   }
 
-  return { api: api, errorOf: errorOf, failure: failure, formatBytes: formatBytes, dateOf: dateOf, signedOut: signedOut, start: start, question: question, downloadLink: downloadLink, TEXT: TEXT };
+  return { api: api, errorOf: errorOf, failure: failure, formatBytes: formatBytes, dateOf: dateOf, signedOut: signedOut, start: start, question: question, downloadLink: downloadLink, saveFile: saveFile, TEXT: TEXT };
 })();
 `;

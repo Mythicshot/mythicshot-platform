@@ -75,7 +75,11 @@ afterEach(() => {
 });
 
 /** Opens a dashboard page at `url` and runs the shared script and the page's own, in order, as a browser does with two deferred scripts. */
-function openPage(html: string, js: string, url: string, respond: Responder): Tab {
+/** A timer a page set, held by the test, which runs it when it chooses. */
+type Timer = { fn: () => void; ms: number };
+
+/** Opens a dashboard page; with `timers`, setTimeout is allowed and only records what was set there. */
+function openPage(html: string, js: string, url: string, respond: Responder, timers?: Timer[]): Tab {
   const doc = new FakeDocument(html);
   const log: string[] = [];
   const history = [url];
@@ -123,7 +127,9 @@ function openPage(html: string, js: string, url: string, respond: Responder): Ta
     return p;
   };
   const context: Record<string, unknown> = { document: doc, location, history: historyApi, fetch };
+  if (timers !== undefined) context.setTimeout = (fn: () => void, ms: number) => void timers.push({ fn, ms });
   for (const name of ["localStorage", "sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "navigator", "window", "self", "top", "parent", "opener", "open", "postMessage", "setTimeout", "setInterval", "console", "alert", "confirm", "prompt"]) {
+    if (name === "setTimeout" && timers !== undefined) continue;
     Object.defineProperty(context, name, {
       get() {
         violations.push(name);
@@ -238,6 +244,9 @@ describe("the Account page", () => {
       "Signed in as solex",
       "Your details",
       "Change",
+      "Download all my data",
+      "One zip file with your tours, images and clips, and a list of what's in your account.",
+      "Download",
       "Where you are signed in",
       "This browser | Firefox on Linux | since 2 Nov",
       "Chrome on Windows | last used 18 Nov",
@@ -386,6 +395,96 @@ describe("the Account page", () => {
     expect(ended.left()).toBe("/signin");
   });
 
+  it("Download asks for the download with the anti-forgery header, opens the address as a plain link, and stays disabled with no words until the server says the download has ended", async () => {
+    const server = later();
+    const running = (r: boolean): Answer => ({ status: 200, json: { running: r } });
+    const base = answers({ "GET /api/v1/session": sessionAnswer(), "GET /api/v1/sessions": sessionsAnswer(), "GET /api/v1/account/data": [running(true), running(true), running(false)] });
+    const timers: Timer[] = [];
+    const tab = openPage(ACCOUNT_HTML, ACCOUNT_JS, `${APP}/account`, (req) => (req.method === "POST" ? server.respond(req) : base(req)), timers);
+    await tab.settle();
+    const opened: [string, unknown][] = [];
+    tab.doc.body.addEventListener("click", (ev) => {
+      const a = ev.target as unknown as { tagName: string; href: string; download?: unknown };
+      if (a.tagName === "a") opened.push([a.href, a.download]);
+    });
+    const button = tab.$("data-download");
+    button.click();
+    await tab.settle();
+    const post = tab.fetched.find((f) => f.method === "POST")!;
+    expect([post.path, post.headers, post.body]).toEqual(["/api/v1/account/data", { "X-Csrf-Token": CSRF }, undefined]);
+    expect([button.disabled, button.textContent, button.getAttribute("aria-busy")]).toEqual([true, "Download", "true"]);
+    // A second click while it asks does nothing.
+    button.click();
+    await tab.settle();
+    expect(tab.fetched.filter((f) => f.method === "POST")).toHaveLength(1);
+    const url = `/api/v1/account/data/${"0a".repeat(38)}`;
+    server.answer({ status: 200, json: { url } });
+    await tab.settle();
+    // A plain link, with no download attribute: a refusal in plain text is shown, never saved.
+    expect(opened).toEqual([[url, undefined]]);
+    expect(tab.doc.body.all().filter((e) => e.tagName === "a" && e.getAttribute("href") === null)).toEqual([]);
+    // The server says it is running: still disabled, and asked again after 3 seconds, twice.
+    const asks = () => tab.fetched.filter((f) => f.method === "GET" && f.path === "/api/v1/account/data").length;
+    expect([asks(), button.disabled, timers.map((t) => t.ms)]).toEqual([1, true, [3000]]);
+    timers.shift()!.fn();
+    await tab.settle();
+    expect([asks(), button.disabled, timers.map((t) => t.ms)]).toEqual([2, true, [3000]]);
+    button.click();
+    await tab.settle();
+    expect(tab.fetched.filter((f) => f.method === "POST")).toHaveLength(1);
+    timers.shift()!.fn();
+    await tab.settle();
+    // Ended: the button is back, nothing was said, no timer is left, and the page stayed.
+    expect([asks(), button.disabled, button.hasAttribute("aria-busy"), tab.$("data-message").hidden, timers, tab.left()]).toEqual([3, false, false, true, [], null]);
+  });
+
+  it("while it waits for the download to end, a failed ask gives the button back, and a 401 is signed out", async () => {
+    for (const [answer, left] of [[{ status: 500, json: {} }, null], ["network", null], [SIGNED_OUT, "/signin"]] as [Answer, string | null][]) {
+      const timers: Timer[] = [];
+      const url = `/api/v1/account/data/${"0b".repeat(38)}`;
+      const tab = openPage(ACCOUNT_HTML, ACCOUNT_JS, `${APP}/account`, answers({ "GET /api/v1/session": sessionAnswer(), "GET /api/v1/sessions": sessionsAnswer(), "POST /api/v1/account/data": { status: 200, json: { url } }, "GET /api/v1/account/data": answer }), timers);
+      await tab.settle();
+      tab.$("data-download").click();
+      await tab.settle();
+      expect([tab.$("data-download").disabled, tab.left(), timers]).toEqual([left !== null, left, []]);
+    }
+  });
+
+  it("a download that cannot be asked for says the dashboard's own sentence and gives the button back; an address of any other shape is never opened", async () => {
+    const url = (u: string): Answer => ({ status: 200, json: { url: u } });
+    const cases: [Answer, string][] = [
+      [{ status: 409, json: { error: "export_busy" } }, FAILED],
+      [{ status: 409, json: { error: "too_large_to_export" } }, FAILED],
+      [{ status: 429, json: { error: "rate_limited" } }, TOO_MANY],
+      [{ status: 500, json: {} }, FAILED],
+      ["network", FAILED],
+      [url("https://evil.example/api/v1/account/data/" + "0".repeat(76)), FAILED],
+      [url("//evil.example/api/v1/account/data/" + "0".repeat(76)), FAILED],
+      [url("/api/v1/account/data/" + "0".repeat(75)), FAILED],
+      [url("/api/v1/tours"), FAILED],
+      [{ status: 200, json: { url: 5 } }, FAILED],
+    ];
+    for (const [answer, says] of cases) {
+      const tab = account({ "POST /api/v1/account/data": answer });
+      await tab.settle();
+      const clicked: string[] = [];
+      tab.doc.body.addEventListener("click", (ev) => {
+        if ((ev.target as unknown as { tagName: string }).tagName === "a") clicked.push("a");
+      });
+      tab.$("data-download").click();
+      await tab.settle();
+      const what = JSON.stringify(answer);
+      expect([tab.$("data-message").textContent, tab.$("data-message").hidden], what).toEqual([says, false]);
+      expect([tab.$("data-download").disabled, clicked, tab.left()], what).toEqual([false, [], null]);
+      expect(tab.doc.activeElement?.id, what).toBe("data-download");
+    }
+    const out = account({ "POST /api/v1/account/data": SIGNED_OUT });
+    await out.settle();
+    out.$("data-download").click();
+    await out.settle();
+    expect(out.left()).toBe("/signin");
+  });
+
   it("a session answer without its session part is a failure, as the old account page had it", async () => {
     const full = (sessionAnswer() as { json: Record<string, unknown> }).json;
     for (const part of [undefined, null, "ses_x"]) {
@@ -474,6 +573,9 @@ describe("the Account page's download card", () => {
       DOWNLOAD_TITLE,
       DOWNLOAD_TEXT,
       // The link, checked below (this list holds the page's blocks: headings, paragraphs, buttons and rows).
+      "Download all my data",
+      "One zip file with your tours, images and clips, and a list of what's in your account.",
+      "Download",
       "Where you are signed in",
       "This browser | Firefox on Linux | since 2 Nov",
       "Chrome on Windows | last used 18 Nov",
@@ -490,7 +592,7 @@ describe("the Account page's download card", () => {
     expect(card.contains(a)).toBe(true);
     // The card sits between the details and the sessions.
     const cards = tab.$("account").children.filter((c): c is FakeElement => c instanceof FakeElement && c.className === "card");
-    expect(cards.map((c) => c.all().find((e) => e.tagName === "h2")!.id)).toEqual(["h-details", "h-download", "h-where"]);
+    expect(cards.map((c) => c.all().find((e) => e.tagName === "h2")!.id)).toEqual(["h-details", "h-download", "h-data", "h-where"]);
     // It asks nothing more than the page did.
     expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", "GET /api/v1/sessions"]);
   });

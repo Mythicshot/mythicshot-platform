@@ -157,7 +157,7 @@ function partLength(bytes: number, parts: number, n: number): number {
 }
 
 /** The key of one claim's object: a part's, or (n = -1) the preview's of type `ext`. */
-function objectKey(id: string, o: { n: number; claim: string; ext: ImageType | null }): string {
+export function objectKey(id: string, o: { n: number; claim: string; ext: ImageType | null }): string {
   return o.n === PREVIEW ? `m/${id}/preview.${o.claim}.${o.ext ?? "png"}` : `m/${id}/part-${String(o.n).padStart(3, "0")}.${o.claim}`;
 }
 

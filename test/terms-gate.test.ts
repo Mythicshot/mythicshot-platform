@@ -102,6 +102,11 @@ const GATE: Record<string, Entry> = {
   "POST /api/v1/signout/everywhere": open("POST", "/api/v1/signout/everywhere"),
   "POST /api/v1/account/email": held("POST", "/api/v1/account/email", { email: "new-address@example.com" }),
   "POST /api/v1/account/email/confirm": held("POST", "/api/v1/account/email/confirm", { code: "dpe_" + "0".repeat(40) }),
+  // Download all my data (0.1.60): a session alone, and open before agreeing, as the sign-outs
+  // are: taking one's data away needs no agreement (the owner's plan: it works in every state).
+  "GET /api/v1/account/data": open("GET", "/api/v1/account/data"),
+  "POST /api/v1/account/data": open("POST", "/api/v1/account/data"),
+  "GET /api/v1/account/data/:ticket": open("GET", `/api/v1/account/data/${"0".repeat(76)}`),
   // The site's terms: open.
   "GET /api/v1/terms": open("GET", "/api/v1/terms"),
   "GET /api/v1/terms/agreed": open("GET", "/api/v1/terms/agreed"),
@@ -225,7 +230,16 @@ const GATE: Record<string, Entry> = {
 };
 
 /** The only session routes a person reaches before agreeing. */
-const OPEN_BEFORE_AGREEING = ["GET /api/v1/terms", "GET /api/v1/terms/agreed", "POST /api/v1/terms/agree", "POST /api/v1/signout", "POST /api/v1/signout/everywhere"];
+const OPEN_BEFORE_AGREEING = [
+  "GET /api/v1/terms",
+  "GET /api/v1/terms/agreed",
+  "POST /api/v1/terms/agree",
+  "POST /api/v1/signout",
+  "POST /api/v1/signout/everywhere",
+  "GET /api/v1/account/data",
+  "POST /api/v1/account/data",
+  "GET /api/v1/account/data/:ticket",
+];
 
 /** The app's routes as keys, the host gate left out. */
 function routeKeysOf(app: { routes: { method: string; path: string }[] }): string[] {
@@ -376,7 +390,8 @@ describe("before the account agrees to the site's terms", () => {
         expect(r.calls, `${key}: database calls`).toBe(0);
         if (key !== "GET /") expect(r.text, key).toBe(bare.text);
       }
-      if (e.kind === "open") expect([200, 204, 409], `${key}: ${r.text}`).toContain(r.status);
+      // The sample download address names a ticket nobody has: its own refusal, not the terms'.
+      if (e.kind === "open") expect(key === "GET /api/v1/account/data/:ticket" ? [404] : [200, 204, 409], `${key}: ${r.text}`).toContain(r.status);
     }
   });
 
