@@ -42,7 +42,7 @@ describe("migration 0024 on an install of 0.1.58", () => {
       expect(await migrate(db, upTo)).toEqual([NAME]);
       const after = await dump();
       expect(after.workspace).toEqual(old.workspace);
-      expect(after.removal).toEqual(old.removal.map((r) => ({ ...(r as object), work_started_at: null })));
+      expect(after.removal).toEqual(old.removal.map((r) => ({ ...(r as object), work_started_at: null, stopped_at: null })));
       expect(await db.all("SELECT * FROM billing_warning")).toEqual([]);
 
       // 0.1.58's statements still run: it names none of this.
@@ -80,14 +80,14 @@ describe("migration 0024 on an install of 0.1.58", () => {
     }
   });
 
-  it("is plain and additive: one CREATE TABLE and one ADD COLUMN", async () => {
+  it("is plain and additive: one CREATE TABLE and two ADD COLUMN", async () => {
     const sql = (await readFile(join(MIGRATIONS_DIR, NAME), "utf8"))
       .split("\n")
       .filter((l) => !l.trimStart().startsWith("--"))
       .join("\n");
     expect(sql).not.toMatch(/\b(DROP|RENAME|DELETE|UPDATE|INSERT)\b/i);
     expect([...sql.matchAll(/\bCREATE TABLE\b/g)]).toHaveLength(1);
-    expect([...sql.matchAll(/\bADD COLUMN\b/g)]).toHaveLength(1);
+    expect([...sql.matchAll(/\bADD COLUMN\b/g)]).toHaveLength(2);
     expect(sql).not.toMatch(/REFERENCES/);
   });
 });

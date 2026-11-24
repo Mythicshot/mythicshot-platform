@@ -9,6 +9,7 @@
 //   node dist/node/admin.js terms list
 //   node dist/node/admin.js terms show <id>
 //   node dist/node/admin.js billing-sweep [--dry-run]
+//   node dist/node/admin.js billing-sweep --clear-claim <workspace id>
 //
 // Without a command, `--email` with `--username` is first-admin and `--email` alone is
 // signin-link, which is how `./cpanel.sh admin --email … --username …` reads.
@@ -31,7 +32,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEmail } from "../accounts.ts";
 import { claimFirstAdmin, setEmailOnServer, signInLinkFor, type ClaimProblem, type EmailSetProblem } from "../admin.ts";
-import { billingSweep, sweepLines } from "../billing-sweep.ts";
+import { billingSweep, clearClaim, sweepLines } from "../billing-sweep.ts";
 import type { Mailer } from "../mail.ts";
 import type { Config, Deps, FileStore } from "../ports.ts";
 import { removalSwitchedOn } from "../removal-rules.ts";
@@ -156,6 +157,8 @@ const usage = (name: string): string[] => [
   "      Print one version of the terms exactly as it was published.",
   "  billing-sweep [--dry-run]",
   "      On a site with billing: send the warning mails that are due and, only while the settings file holds BILLING_REMOVAL=on, remove what is due, a few workspaces at most. Prints counts. With --dry-run, says what it would do and changes nothing. Run it once a day.",
+  "  billing-sweep --clear-claim <workspace id>",
+  "      Clear a workspace's warning mail whose sending was never confirmed, so the next sweep sends it again.",
   "",
   "Without a command, --email with --username is first-admin, and --email alone is signin-link.",
 ];
@@ -271,7 +274,8 @@ type Parsed =
   | { kind: "terms-publish"; file: string }
   | { kind: "terms-list" }
   | { kind: "terms-show"; id: string }
-  | { kind: "billing-sweep"; dryRun: boolean };
+  | { kind: "billing-sweep"; dryRun: boolean }
+  | { kind: "clear-claim"; workspaceId: string };
 
 const COMMANDS = ["first-admin", "signin-link", "change-email", "mail-check", "audit"] as const;
 type Command = (typeof COMMANDS)[number];
@@ -291,6 +295,7 @@ function parseArgs(argv: readonly string[]): Parsed | null {
   if (argv[0] === "billing-sweep") {
     if (argv.length === 1) return { kind: "billing-sweep", dryRun: false };
     if (argv.length === 2 && argv[1] === "--dry-run") return { kind: "billing-sweep", dryRun: true };
+    if (argv.length === 3 && argv[1] === "--clear-claim" && /^ws_[0-9a-f]{24}$/.test(argv[2])) return { kind: "clear-claim", workspaceId: argv[2] };
     return null;
   }
   // The terms commands take words, not options: exactly these shapes and nothing more.
@@ -455,10 +460,15 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
     }
     const deps: Deps = { db, drafts: NO_FILES, pub: NO_FILES, config, now: () => Date.now() };
 
-    if (parsed.kind === "billing-sweep") {
+    if (parsed.kind === "billing-sweep" || parsed.kind === "clear-claim") {
       if ((await db.first("SELECT 1 AS x FROM _migrations WHERE name = ?", [REMOVAL_MIGRATION])) === null) {
         out(SAID.older);
         return 1;
+      }
+      if (parsed.kind === "clear-claim") {
+        const n = await clearClaim({ db, drafts: NO_FILES, pub: NO_FILES, config, now: () => Date.now() }, parsed.workspaceId);
+        out(n === 0 ? "That workspace has no unconfirmed warning mail. Nothing was changed." : `Cleared ${n === 1 ? "1 unconfirmed warning mail" : `${n} unconfirmed warning mails`}; the next sweep sends it again.`);
+        return 0;
       }
       return await sweepCommand(parsed.dryRun, db, config, env, out, opts);
     }

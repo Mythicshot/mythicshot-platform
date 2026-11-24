@@ -28,6 +28,7 @@
 // account is that same 404. Every answer is `cache-control: no-store`.
 import type { Hono } from "hono";
 import { prepareDeletion } from "./billing.ts";
+import { SWEEP_ACTOR } from "./removal-rules.ts";
 import { auditStatement } from "./audit.ts";
 import { requireAuth } from "./auth.ts";
 import { SUBREQUEST_BUDGET, metered } from "./budget.ts";
@@ -234,16 +235,20 @@ async function finalStatements(deps: Deps, t: Target, adminId: string): Promise<
  * already gone is not an error). Until the last batch the account, its membership and its
  * workspace stay, so a delete stopped anywhere leaves an account that is still disabled,
  * still listed and can be deleted again to the end. Returns "deleted" once the last batch
- * took effect, "more" otherwise.
+ * took effect, "more" otherwise, and "undone" when the removal's record is gone (an undo):
+ * then nothing was removed.
  */
-export async function work(d: Deps, calls: () => number, t: Target, adminId: string): Promise<"deleted" | "more"> {
+export async function work(d: Deps, calls: () => number, t: Target, adminId: string): Promise<"deleted" | "more" | "undone"> {
   const ws = t.workspace_id;
   const room = (cost: number) => calls() + cost + CALLS_AT_THE_END <= SUBREQUEST_BUDGET;
 
-  // Marked before anything is removed (migration 0024): from then on the removal can no
-  // longer be undone (POST /api/v1/admin/accounts/:id/undo-removal), only finished.
+  // Before anything is removed, in one guarded statement (0.1.61): the removal must still be
+  // recorded, and it is marked as begun (migration 0024), from then on beyond an undo
+  // (POST /api/v1/admin/accounts/:id/undo-removal). An undo that landed while the delete's
+  // preparation asked Stripe took the record away: then nothing is removed ("undone").
   if (!room(1)) return "more";
-  await d.db.run("UPDATE account_removal SET work_started_at = ? WHERE user_id = ? AND workspace_id = ? AND work_started_at IS NULL", [d.now(), t.id, ws]);
+  const marked = await d.db.run("UPDATE account_removal SET work_started_at = coalesce(work_started_at, ?) WHERE user_id = ? AND workspace_id = ?", [d.now(), t.id, ws]);
+  if (marked.changes !== 1) return "undone";
 
   for (;;) {
     if (!room(2)) return "more";
@@ -428,13 +433,17 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
     const t = await readTarget(deps, id);
     if (t === null) return notFound();
     if (t.removing === 0) return notDeleting();
+    // A removal the billing sweep started: its warnings are cleared with it (0.1.61), so an account
+    // enabled again is warned afresh before the sweep may remove it, and the audit row says so.
+    const bySweep = (await deps.db.first("SELECT 1 AS x FROM account_removal WHERE user_id = ? AND started_by = ?", [id, SWEEP_ACTOR])) !== null;
     try {
       await deps.db.batch([
         {
           sql: `DELETE FROM account_removal WHERE user_id = ? AND workspace_id = ? AND work_started_at IS NULL AND total = (${FILES_SQL})`,
           params: [id, t.workspace_id, ...filesParams(t.workspace_id)],
         },
-        auditStatement(deps, { event: "account_removal_undone", userId: adminId, workspaceId: t.workspace_id, subject: id }, { onlyAfterOneChange: true }),
+        auditStatement(deps, { event: "account_removal_undone", userId: adminId, workspaceId: t.workspace_id, subject: id, ...(bySweep ? { detail: { by: "billing_sweep" } } : {}) }, { onlyAfterOneChange: true }),
+        ...(bySweep ? [{ sql: "DELETE FROM billing_warning WHERE workspace_id = ?", params: [t.workspace_id] }] : []),
       ]);
     } catch (err) {
       if (!isNotNullViolation(err)) throw err;
@@ -526,7 +535,7 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
       return apiError(500, "cleanup_pending", "the account is being deleted, but some of its files could not be removed yet; delete it again to retry");
     }
 
-    let outcome: "deleted" | "more";
+    let outcome: "deleted" | "more" | "undone";
     try {
       outcome = prepared === "more" ? "more" : await work(d, meter.calls, t, adminId);
     } catch {
@@ -535,6 +544,8 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
       return apiError(500, "cleanup_pending", "the account is being deleted, but some of its files could not be removed yet; delete it again to retry");
     }
     if (outcome === "deleted") return json(200, { deleted: true });
+    // Undone while this request asked Stripe: nothing was removed, and nothing is recorded now.
+    if (outcome === "undone") return notDeleting();
     const progress = await d.db.first<{ total: number; left: number }>(`SELECT r.total, ${FILES_SQL} AS left FROM account_removal r WHERE r.user_id = ?`, [
       ...filesParams(t.workspace_id),
       id,

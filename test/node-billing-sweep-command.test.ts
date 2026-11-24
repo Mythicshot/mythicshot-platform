@@ -122,10 +122,25 @@ describe("billing-sweep", () => {
     expect(on.code).toBe(0);
     expect(on.lines).toContain("Removals started: 1. Finished: 1. Still in progress: 0.");
     expect(rowsOf(s.dir, "SELECT id FROM workspace WHERE id = ?", [s.workspaceId])).toHaveLength(0);
-    // The site's own workspace is untouched; Stripe was not asked (a trial has nothing there) and no mail went.
+    // The site's own workspace is untouched; Stripe was asked only for its time (0.1.61: a trial has nothing else there), and no mail went.
     expect(rowsOf(s.dir, "SELECT id FROM workspace")).toHaveLength(1);
-    expect(on.stripe.calls).toEqual([]);
+    expect(on.stripe.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /v1/prices/price_FAKE"]);
     for (const r of [off, dry, on]) expect(r.lines.join("\n")).not.toMatch(/@|rk_test|whsec|made-up/);
+  });
+
+  it("--clear-claim clears one workspace's unconfirmed claim, audited, and refuses anything but a workspace id", async () => {
+    const s = await site();
+    const db = new NodeDb(join(s.dir, "db.sqlite"));
+    await db.run("UPDATE billing_warning SET sent_at = NULL WHERE workspace_id = ? AND stage = 1", [s.workspaceId]);
+    db.close();
+    const env = { ...s.env, ...BILLING_ENV };
+    expect((await run(env, ["billing-sweep", "--clear-claim", "nobody"])).code).toBe(2);
+    expect((await run(env, ["billing-sweep", "--clear-claim"])).code).toBe(2);
+    const r = await run(env, ["billing-sweep", "--clear-claim", s.workspaceId]);
+    expect(r).toMatchObject({ code: 0, lines: ["Cleared 1 unconfirmed warning mail; the next sweep sends it again."] });
+    expect(rowsOf(s.dir, "SELECT stage FROM billing_warning WHERE workspace_id = ? ORDER BY stage", [s.workspaceId])).toEqual([{ stage: 7 }, { stage: 30 }]);
+    expect(rowsOf(s.dir, "SELECT event FROM audit WHERE event = 'billing_warning_claim_cleared'")).toHaveLength(1);
+    expect((await run(env, ["billing-sweep", "--clear-claim", s.workspaceId])).lines).toEqual(["That workspace has no unconfirmed warning mail. Nothing was changed."]);
   });
 
   it("on a database without the removal migration it says to update first", async () => {

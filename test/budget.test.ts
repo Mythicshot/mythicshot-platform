@@ -671,7 +671,8 @@ describe("the call budget, route by route", () => {
     for (let i = 0; i < 50 && removed.status === 202; i++) removed = await call(deps, "DELETE", `/api/v1/admin/accounts/${target}`, { headers: { ...adminSession.headers, "content-type": "application/json" }, body: JSON.stringify({ username: name.username ?? name.email }) });
     expect(removed.status, removed.text).toBe(200);
     expect(stripe.calls.some((c) => c.method === "DELETE" && c.path === "/v1/subscriptions/sub_B")).toBe(true);
-  });
+    // Five 200-step uploads and a 1,500-row sweep: over 20 s on a busy machine, as the other heavy cases here.
+  }, 120_000);
 
   it("links down (0.1.61): the public page, picture and shared item cost the same calls with billing off and with links up, and a link that is down costs what a link that never existed costs", async () => {
     const costs = async (billing: boolean) => {

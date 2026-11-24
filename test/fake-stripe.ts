@@ -86,6 +86,9 @@ export class FakeStripe implements Stripe {
    * happen in between, deterministically (another notice, Stripe changing its mind).
    */
   hook: ((call: StripeCall, answer: StripeAnswer) => Promise<void>) | null = null;
+  /** The clock Stripe's Date header is written from (withBilling gives it the deps' own), and how far Stripe's clock is off it. */
+  clock: () => number = () => Date.now();
+  skewMs = 0;
   private byKey = new Map<string, StripeAnswer>();
   private n = 0;
 
@@ -93,7 +96,7 @@ export class FakeStripe implements Stripe {
     const call: StripeCall = { method, path, form: form === undefined ? null : form.map(([k, v]) => [k, v] as [string, string]), key };
     this.calls.push(call);
     if (this.down) throw new Error("stripe: unreachable");
-    const answer = this.answer(method, path, form, key);
+    const answer = { ...this.answer(method, path, form, key), date: new Date(this.clock() + this.skewMs).toUTCString() };
     if (this.hook !== null) await this.hook(call, answer);
     return answer;
   }
@@ -188,6 +191,7 @@ export function withBilling(deps: Deps): FakeStripe {
   const own = (deps.config.hosts ?? null) !== null || typeof deps.config.siteHost === "string" ? {} : { siteHost: "tours.example.com" };
   deps.config = { ...deps.config, ...own, billing: BILLING };
   deps.stripe = stripe;
+  stripe.clock = () => deps.now();
   return stripe;
 }
 

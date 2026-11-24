@@ -189,7 +189,11 @@ ${COMMON}
       action = s.manage === true ? manageButton(line) : null;
     } else if (s.state === "ended") {
       kind = "bad";
-      text = [[W.ended, true], [W.endedRest + dateOf(s.links_until) + W.endedAnd + dateOf(s.removed_at) + W.stop, false]];
+      // An ended workspace on no removal clock (an allowance set by hand) has no dates: the
+      // sentence ends before them (0.1.61), in the same approved words.
+      text = num(s.links_until) !== null && num(s.removed_at) !== null
+        ? [[W.ended, true], [W.endedRest + dateOf(s.links_until) + W.endedAnd + dateOf(s.removed_at) + W.stop, false]]
+        : [[W.ended, true], [W.endedRest.slice(0, W.endedRest.indexOf(" Your links")), false]];
       action = subscribeLink(W.subscribeAgain);
     } else {
       return;
@@ -261,8 +265,9 @@ ${DOWNLOAD_LINE}    var bar = el("div", kind === "" ? "billing-strip" : "billing
     } else if (s.state === "ended") {
       title.textContent = W.noSubscription;
       c.appendChild(row(W.endedRow, dateOf(s.ended_at)));
-      c.appendChild(row(W.linksUntil, dateOf(s.links_until)));
-      c.appendChild(row(W.contentRemoved, dateOf(s.removed_at)));
+      // Without the removal's dates (no clock: an allowance set by hand) the two rows are left out.
+      if (num(s.links_until) !== null) c.appendChild(row(W.linksUntil, dateOf(s.links_until)));
+      if (num(s.removed_at) !== null) c.appendChild(row(W.contentRemoved, dateOf(s.removed_at)));
       c.appendChild(el("p", "hint", W.endedText));
       acts.appendChild(subscribeLink(W.subscribeAgain));
     } else {

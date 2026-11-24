@@ -11,7 +11,9 @@
 //   90 days after the stored end of the subscription.
 // Never on the clock: billing off, a live subscription, an exempt workspace (made while billing
 // was off: every existing account), the admin's, one with an allowance the admin set by hand
-// (also after it had a subscription), and the workspace the site was set up with.
+// (also after it had a subscription), the workspace the site was set up with, and one with more
+// than one account. A subscription that never went live (`incomplete`, `incomplete_expired`) is
+// the trial's clock, from the workspace's creation.
 //
 // What the clock gives, all from stored times:
 // - links down: a trial's from the moment it ends; an ended subscription's 30 days after it ended.
@@ -29,7 +31,7 @@
 //   last one named reached, and the stored end of the 90 days passed.
 // A stored time ahead of the clock by more than CLOCK_SKEW_MS (the clock went back) stops both the
 // mails and the removal until the clock has caught up.
-import { DAY, ENDED_STATUSES, LINKS_GRACE_MS, LIVE_STATUSES, REMOVAL_MS, TRIAL_MS, billingConfigured, standingOf, type BillingRow, type BillingSettings } from "./billing-rules.ts";
+import { DAY, LAPSED_STATUSES, LINKS_GRACE_MS, LIVE_STATUSES, REMOVAL_MS, TRIAL_MS, billingConfigured, standingOf, type BillingRow, type BillingSettings } from "./billing-rules.ts";
 
 /** The three warnings, by how many days before the removal day each is due, in the order they are sent. */
 export const WARNING_STAGES = [30, 7, 1] as const;
@@ -99,10 +101,11 @@ function endedAtOf(row: BillingRow): number | null {
 
 /**
  * The clock of a workspace with billing on, or null when it is not on one (see the top of this
- * file). `site` is true for the workspace the site was set up with.
+ * file). `site` is true for the workspace the site was set up with, `shared` for one with more than
+ * one account (ONE_ACCOUNT_SQL false).
  */
-export function clockOf(row: BillingRow, site: boolean, now: number): Clock | null {
-  if (site || row.own_allowance !== null) return null;
+export function clockOf(row: BillingRow, site: boolean, now: number, shared = false): Clock | null {
+  if (site || shared || row.own_allowance !== null) return null;
   const s = standingOf(row, now);
   if (s.kind === "trial" || s.kind === "trial_over") {
     const ends = row.created_at + TRIAL_MS;
@@ -191,6 +194,14 @@ export function notDueReason(clock: Clock, plan: Plan, now: number): NotDue | nu
 const quoted = (list: readonly string[]) => list.map((s) => `'${s}'`).join(", ");
 
 /**
+ * The condition that the workspace `ws` (a column) has at most one account: its memberships and
+ * the accounts whose own row names it without a membership (an older build's). A workspace with
+ * more is on no clock: its links stay up, it gets no mail and nothing of it is removed (0.1.61).
+ */
+export const ONE_ACCOUNT_SQL = (ws: string) =>
+  `(SELECT count(*) FROM membership om1 WHERE om1.workspace_id = ${ws}) + (SELECT count(*) FROM user ou1 WHERE ou1.workspace_id = ${ws} AND NOT EXISTS (SELECT 1 FROM membership om2 WHERE om2.user_id = ou1.id AND om2.workspace_id = ${ws})) <= 1`;
+
+/**
  * The SQL condition that the links of the workspace `ws` (a column of the query, such as
  * `t.workspace_id`, never a value from a request) are up at `now`, to fold into a public route's
  * one lookup, beginning with " AND ". Without billing it is "" and the statement is the one of the
@@ -207,7 +218,8 @@ export function linksUpSql(config: { billing?: BillingSettings | null }, ws: str
     ` AND (bw.subscription_status IS NULL OR bw.subscription_status NOT IN (${quoted([...LIVE_STATUSES])}))` +
     " AND NOT EXISTS (SELECT 1 FROM membership bm JOIN user bu ON bu.id = bm.user_id WHERE bm.workspace_id = bw.id AND bu.is_admin = 1)" +
     " AND NOT EXISTS (SELECT 1 FROM setup bs WHERE bs.workspace_id = bw.id)" +
-    ` AND CASE WHEN bw.subscription_status IN (${quoted([...ENDED_STATUSES])})` +
+    ` AND ${ONE_ACCOUNT_SQL("bw.id")}` +
+    ` AND CASE WHEN bw.subscription_status IN (${quoted([...LAPSED_STATUSES])})` +
     ` THEN coalesce(bw.subscription_ended_at, bw.subscription_cancel_at, bw.subscription_period_end) + ${LINKS_GRACE_MS}` +
     ` ELSE bw.created_at + ${TRIAL_MS} END <= ${at})`
   );

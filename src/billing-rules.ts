@@ -21,12 +21,13 @@
 //   site's default allowance, no trial, no notice, never read-only, exactly as before billing.
 //   So is a workspace with an allowance the admin set by hand that has never had a subscription
 //   (room given without a payment).
-// - ended: Stripe says `canceled`, `unpaid` or `incomplete_expired`. Read-only at once: view,
+// - ended: Stripe says `canceled` or `unpaid` (0.1.61: no longer `incomplete_expired`, a first
+//   payment that never completed, which is the trial below). Read-only at once: view,
 //   download and delete work; upload, publish, rename and widening who may view are refused
 //   (src/billing.ts, readOnlyRefusal). The allowance stays PLAN_BYTES (or the admin's number),
 //   so the content it holds is never "over".
-// - trial: no subscription that ever went live (none at all, or one Stripe still calls
-//   `incomplete` or `paused`): TRIAL_BYTES for TRIAL_MS from the workspace's creation.
+// - trial: no subscription that ever went live (none at all, or one Stripe calls `incomplete`,
+//   `incomplete_expired` or `paused`): TRIAL_BYTES for TRIAL_MS from the workspace's creation.
 // - trial_over: the same, past TRIAL_MS: read-only like an ended subscription. Removing anything
 //   is the next slice, and nothing here deletes, unpublishes or mails.
 // An allowance an admin set by hand (workspace.storage_allowance_bytes) is always the size, in
@@ -62,6 +63,17 @@ export const CONFIRMED_FOR_MS = DAY_MS;
 export const LIVE_STATUSES = ["active", "trialing", "past_due"] as const;
 /** Stripe's subscription statuses that end it: the workspace is read-only. */
 export const ENDED_STATUSES = ["canceled", "unpaid", "incomplete_expired"] as const;
+/**
+ * The ended statuses of a subscription that once went live (0.1.61): the workspace is read-only
+ * and on the ended clock. `incomplete_expired` is not one of them: a first payment that never
+ * completed is a subscription that never went live, so the workspace stays on its trial.
+ */
+export const LAPSED_STATUSES = ["canceled", "unpaid"] as const;
+/**
+ * The statuses Stripe never moves a subscription out of (0.1.61): nothing more can be charged.
+ * Every other subscription on record is cancelled at Stripe before a removal or a delete.
+ */
+export const FINAL_STATUSES = ["canceled", "incomplete_expired"] as const;
 /** Every status migration 0021 takes: the live and ended ones, and the two that are neither. */
 export const STRIPE_STATUSES = [...LIVE_STATUSES, ...ENDED_STATUSES, "incomplete", "paused"] as const;
 export type StripeStatus = (typeof STRIPE_STATUSES)[number];
@@ -164,7 +176,7 @@ export function allowanceSqlOf(config: { billing?: BillingSettings | null }): st
     "coalesce(workspace.storage_allowance_bytes, CASE" +
     ` WHEN workspace.subscription_status IN (${quoted([...LIVE_STATUSES])}) THEN ${PLAN_BYTES}` +
     ` WHEN workspace.billing_trial = 0 OR ${WORKSPACE_IS_ADMIN_SQL} THEN ?` +
-    ` WHEN workspace.subscription_status IN (${quoted([...ENDED_STATUSES])}) THEN ${PLAN_BYTES}` +
+    ` WHEN workspace.subscription_status IN (${quoted([...LAPSED_STATUSES])}) THEN ${PLAN_BYTES}` +
     ` ELSE ${TRIAL_BYTES} END)`
   );
 }
@@ -217,6 +229,16 @@ export function isEnded(status: string | null): boolean {
   return status !== null && (ENDED_STATUSES as readonly string[]).includes(status);
 }
 
+/** True for an ended subscription that once went live (LAPSED_STATUSES). */
+export function isLapsed(status: string | null): boolean {
+  return status !== null && (LAPSED_STATUSES as readonly string[]).includes(status);
+}
+
+/** True for a status Stripe never leaves (FINAL_STATUSES): no cancel is needed. */
+export function isFinal(status: string | null): boolean {
+  return status !== null && (FINAL_STATUSES as readonly string[]).includes(status);
+}
+
 /** Where a workspace stands at `now` (see the top of this file). */
 export function standingOf(row: BillingRow, now: number): Standing {
   if (isLive(row.status)) {
@@ -228,7 +250,7 @@ export function standingOf(row: BillingRow, now: number): Standing {
   // An allowance an admin set by hand is room given without a payment, for a workspace that
   // never had a subscription; once one existed, its end is read-only whatever the allowance.
   if (row.own_allowance !== null && row.subscription === null) return { kind: "exempt" };
-  if (isEnded(row.status)) return { kind: "ended", endedAt: row.ended_at ?? row.cancel_at ?? row.period_end ?? now };
+  if (isLapsed(row.status)) return { kind: "ended", endedAt: row.ended_at ?? row.cancel_at ?? row.period_end ?? now };
   const endsAt = row.created_at + TRIAL_MS;
   return now < endsAt ? { kind: "trial", endsAt } : { kind: "trial_over", endedAt: endsAt };
 }

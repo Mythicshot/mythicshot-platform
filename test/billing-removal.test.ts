@@ -4,116 +4,18 @@
 // only when every rule holds, and only with BILLING_REMOVAL on. Stripe is the fake of
 // test/fake-stripe.ts and mail the fake mailer: no test reaches any network or sends real mail.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { makeDeps, seedAccount } from "#harness";
-import { CHECKOUTS_ASKED, billingSweep, sweepLines, sweepWithinBudget, type SweepOptions } from "../src/billing-sweep.ts";
-import { DAY, REMOVAL_MS, TRIAL_MS, type BillingRow } from "../src/billing-rules.ts";
+import { seedAccount } from "#harness";
+import { CHECKOUTS_ASKED, sweepLines, sweepWithinBudget } from "../src/billing-sweep.ts";
+import { DAY, REMOVAL_MS, type BillingRow } from "../src/billing-rules.ts";
 import { SUBREQUEST_BUDGET } from "../src/budget.ts";
-import type { Deps } from "../src/ports.ts";
 import { warningMail } from "../src/removal-mail.ts";
 import { REMOVALS_PER_DAY, REMOVALS_PER_RUN, SWEEP_ACTOR, clockOf, fullDate, linksUpSql, planOf, removalSwitchedOn } from "../src/removal-rules.ts";
 import { emailSha256 } from "../src/removal-store.ts";
-import { clone, fixtures, png, send, uploadTour, type Json } from "./bundle.ts";
-import { withBilling, type FakeStripe } from "./fake-stripe.ts";
+import { send, uploadTour, type Json } from "./bundle.ts";
 import { OWNED, dumpOf, snapshotOf } from "./isolation-world.ts";
+import { ACCOUNT, DOWNLOAD, ON_TIME, ORIGIN, REMOVAL_DAY, SUBSCRIBE, T0, TRIAL_END, at3, audits, daily, ended, exists, keysOf, mailsTo, manifest, publishedTour, sharedImage, site, sweep, userStatus, visit, warned, warnings, type Side, type Site } from "./removal-world.ts";
 
 afterEach(() => vi.restoreAllMocks());
-
-/** A and B are made at T0: their trials end on 10 April 2027 at 14:23 UTC, and their removal day is 11 April. */
-const T0 = Date.UTC(2027, 0, 10, 14, 23);
-const TRIAL_END = T0 + TRIAL_MS;
-const REMOVAL_DAY = Date.UTC(2027, 3, 11);
-/** 03:00 UTC on a day, when the daily sweep runs in these tests. */
-const at3 = (month: number, day: number, year = 2027) => Date.UTC(year, month, day, 3, 0);
-const ORIGIN = "https://tours.example.com";
-const SUBSCRIBE = `${ORIGIN}/billing/subscribe`;
-const ACCOUNT = `${ORIGIN}/account`;
-const DOWNLOAD = `You can download everything in your account first: ${ACCOUNT}`;
-
-type Side = { workspaceId: string; userId: string; token: string; email: string };
-
-async function site(opts: { mail?: boolean; billing?: boolean } = {}) {
-  const ctx = await makeDeps({}, { mail: opts.mail ?? true });
-  let now = T0;
-  ctx.deps.now = () => now;
-  const stripe = opts.billing === false ? (null as unknown as FakeStripe) : withBilling(ctx.deps);
-  if (opts.billing === false) ctx.deps.config = { ...ctx.deps.config, siteHost: "tours.example.com" };
-  const admin = await seedAccount(ctx.deps, { username: "siteadmin", admin: true });
-  const a = await seedAccount(ctx.deps, { username: "alpha" });
-  const b = await seedAccount(ctx.deps, { username: "bravo" });
-  return { ...ctx, stripe, admin, a, b, now: () => now, at: (ms: number) => (now = ms) };
-}
-type Site = Awaited<ReturnType<typeof site>>;
-
-const sweep = (s: Site, opts: Partial<SweepOptions> = {}) => billingSweep(s.deps, { removal: true, ...opts });
-
-/** One sweep at 03:00 UTC each day from `from` to `to`, both included. */
-async function daily(s: Site, from: number, to: number, opts: Partial<SweepOptions> = {}) {
-  for (let t = from; t <= to; t += DAY) {
-    s.at(t);
-    await sweep(s, opts);
-  }
-}
-
-function manifest(title: string): Json {
-  const m = clone(fixtures.v2 as Json);
-  m.title = title;
-  m.steps = [{ ...clone(m.steps[1]), image: "step-001.png", width: 64, height: 64, bytes: 120 }];
-  return m;
-}
-
-/** A published public tour of this side: its id, slug and one live picture's name under /p/. */
-async function publishedTour(s: Site, side: Side, title = "Removal") {
-  const tour = await uploadTour(s.deps, side.token, manifest(title));
-  let pub = await send(s.deps, "POST", `/api/v1/tours/${tour.tour_id}/publish`, { token: side.token });
-  while (pub.status === 202) pub = await send(s.deps, "POST", `/api/v1/tours/${tour.tour_id}/publish`, { token: side.token, headers: { "content-type": "application/json" }, body: JSON.stringify({ publish_id: pub.json.publish_id }) });
-  expect(pub.status, pub.text).toBe(200);
-  const row = await s.deps.db.first<{ slug: string; key: string }>("SELECT t.slug AS slug, o.image_key AS key FROM tour t JOIN snapshot_object o ON o.tour_id = t.id WHERE t.id = ? LIMIT 1", [tour.tour_id]);
-  return { id: tour.tour_id, slug: row!.slug, picture: "/" + row!.key };
-}
-
-/** A public shared image of this side: its id and its page's path. */
-async function sharedImage(s: Site, side: Side) {
-  const made = await send(s.deps, "POST", "/api/v1/media", { token: side.token, headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "image", content_type: "image/png", bytes: 300, width: 8, height: 8, title: "Shot" }) });
-  expect(made.status, made.text).toBe(201);
-  const id = made.json.id as string;
-  expect((await send(s.deps, "PUT", `/api/v1/media/${id}/parts/0`, { token: side.token, body: png(8, 8, 300, 3) as NonNullable<RequestInit["body"]> })).status).toBe(204);
-  const done = await send(s.deps, "POST", `/api/v1/media/${id}/commit`, { token: side.token });
-  expect(done.status, done.text).toBe(200);
-  return { id, path: done.json.path as string };
-}
-
-/** What a visitor gets: status, every header and the body, byte for byte. */
-async function visit(deps: Deps, path: string) {
-  const r = await send(deps, "GET", path);
-  return { status: r.status, headers: [...r.headers.entries()].sort(), body: [...r.bytes] };
-}
-
-const exists = async (deps: Deps, ws: string) => (await deps.db.first("SELECT 1 AS x FROM workspace WHERE id = ?", [ws])) !== null;
-const userStatus = async (deps: Deps, id: string) => (await deps.db.first<{ status: string }>("SELECT status FROM user WHERE id = ?", [id]))?.status ?? null;
-const warnings = (deps: Deps, ws: string) => deps.db.all<Json>("SELECT stage, removal_at, sent_at, named_at, email_sha256 FROM billing_warning WHERE workspace_id = ? ORDER BY claimed_at, stage DESC", [ws]);
-const mailsTo = (s: Site, to: string) => s.mail.sent.filter((m) => m.to === to);
-const audits = (deps: Deps, ws: string, event: string) => deps.db.all<Json>("SELECT event, user_id, workspace_id, subject, detail FROM audit WHERE workspace_id = ? AND event = ? ORDER BY at, id", [ws, event]);
-
-/** Records the three warnings of a side as accepted, at these times, for this removal day (test set-up, not the sweep). */
-async function warned(s: Site, side: Side, removalAt: number, sent: [number, number, number], email = side.email) {
-  const sha = await emailSha256(email);
-  for (const [i, stage] of ([30, 7, 1] as const).entries()) {
-    await s.deps.db.run("INSERT INTO billing_warning (workspace_id, removal_at, stage, email_sha256, claimed_at, sent_at, named_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [side.workspaceId, removalAt, stage, sha, sent[i], sent[i], removalAt]);
-  }
-}
-/** The usual on-time warnings of A's and B's trial clock. */
-const ON_TIME: [number, number, number] = [at3(2, 12), at3(3, 4), at3(3, 10)];
-
-/** Puts a side on an ended subscription, ended at `endedAt`, as Stripe has it too. */
-async function ended(s: Site, side: Side, endedAt: number, n: string) {
-  await s.deps.db.run(
-    "UPDATE workspace SET stripe_customer_id = ?, stripe_subscription_id = ?, subscription_status = 'canceled', subscription_period_end = ?, subscription_ended_at = ? WHERE id = ?",
-    [`cus_${n}`, `sub_${n}`, endedAt, endedAt, side.workspaceId],
-  );
-  s.stripe.subscription(`sub_${n}`, `cus_${n}`, "canceled", { endedAt: Math.floor(endedAt / 1000), periodEnd: Math.floor(endedAt / 1000) });
-}
-
-const keysOf = (s: Site) => ({ draftKeys: s.draftKeys, publicKeys: s.publicKeys });
 
 describe("the clock", () => {
   it("a trial's removal day is the first full UTC day after its 90 days; an ended subscription's is 90 days after it ended, its links down after 30", async () => {
@@ -196,14 +98,24 @@ describe("the warning mails", () => {
       subject: "Your Mythicshot content is removed in 30 days",
       text: `Your subscription ended on 12 February 2027. On 14 May 2027 your tours, images and clips are removed and your account is closed.\n\nTo keep them, subscribe for $7 a month: ${SUBSCRIBE}\n\n${DOWNLOAD}\n`,
     });
-    const seven = `On 11 April 2027 your tours, images and clips are removed and the links to them stop working.\n\nTo keep them, subscribe for $7 a month: ${SUBSCRIBE}\n\nIf you'd rather leave, there's nothing you need to do.\n\n${DOWNLOAD}\n`;
+    const rest7 = `\n\nTo keep them, subscribe for $7 a month: ${SUBSCRIBE}\n\nIf you'd rather leave, there's nothing you need to do.\n\n${DOWNLOAD}\n`;
+    // The trial's 7-day mail keeps the links clause; an ended subscription's drops it (owner, 2026-11-24): its links came down earlier.
+    const seven = { trial: `On 11 April 2027 your tours, images and clips are removed and the links to them stop working.${rest7}`, ended: `On 11 April 2027 your tours, images and clips are removed.${rest7}` };
     const one = `This is the last reminder. Tomorrow, 11 April 2027, your tours, images and clips are removed. This can't be undone.\n\nTo keep them, subscribe today: ${SUBSCRIBE}\n\n${DOWNLOAD}\n`;
     for (const kind of ["trial", "ended"] as const) {
-      expect(warningMail("a@example.com", { kind, stage: 7, removalAt, endedAt: kind === "ended" ? Date.UTC(2027, 0, 11) : null }, ORIGIN)).toEqual({ to: "a@example.com", subject: "7 days left to keep your Mythicshot content", text: seven });
+      expect(warningMail("a@example.com", { kind, stage: 7, removalAt, endedAt: kind === "ended" ? Date.UTC(2027, 0, 11) : null }, ORIGIN)).toEqual({ to: "a@example.com", subject: "7 days left to keep your Mythicshot content", text: seven[kind] });
       expect(warningMail("a@example.com", { kind, stage: 1, removalAt, endedAt: kind === "ended" ? Date.UTC(2027, 0, 11) : null }, ORIGIN)).toEqual({ to: "a@example.com", subject: "Tomorrow your Mythicshot content is removed", text: one });
     }
-    // Four distinct mails; no tracking, no picture, no markup.
-    const all = [trial30, ended30, warningMail("x@example.com", { kind: "trial", stage: 7, removalAt, endedAt: null }, ORIGIN), warningMail("x@example.com", { kind: "trial", stage: 1, removalAt, endedAt: null }, ORIGIN)];
+    // Five distinct texts (trial 30, ended 30, trial 7, ended 7, and the shared 1-day mail); four subjects; no tracking, no picture, no markup.
+    const all = [
+      trial30,
+      ended30,
+      warningMail("x@example.com", { kind: "trial", stage: 7, removalAt, endedAt: null }, ORIGIN),
+      warningMail("x@example.com", { kind: "ended", stage: 7, removalAt, endedAt: Date.UTC(2027, 0, 11) }, ORIGIN),
+      warningMail("x@example.com", { kind: "trial", stage: 1, removalAt, endedAt: null }, ORIGIN),
+      warningMail("x@example.com", { kind: "ended", stage: 1, removalAt, endedAt: Date.UTC(2027, 0, 11) }, ORIGIN),
+    ];
+    expect(new Set(all.map((m) => m.text.replaceAll("x@example.com", ""))).size).toBe(5);
     expect(new Set(all.map((m) => m.subject)).size).toBe(4);
     for (const m of all) expect(m.text).not.toMatch(/<|utm_|\?/);
     expect(() => warningMail("a@example.com", { kind: "trial", stage: 1, removalAt, endedAt: null }, "javascript:alert(1)")).toThrow("bad origin");
@@ -517,7 +429,6 @@ describe("removal", () => {
       ["500", (s) => void s.stripe.failing.add("/v1/subscriptions/sub_B")],
       ["403", (s) => (s.deps.stripe = { call: async () => ({ status: 403, body: { error: { type: "invalid_request_error", code: "secret_key_required" } } }) })],
       ["another customer", (s) => s.stripe.subscription("sub_B", "cus_OTHER", "canceled")],
-      ["incomplete", (s) => s.stripe.subscription("sub_B", "cus_B", "incomplete")],
     ];
     for (const [why, make] of cases) {
       const s = await prepare();
@@ -532,11 +443,17 @@ describe("removal", () => {
     await sweep(live);
     expect(await exists(live.deps, live.b.workspaceId)).toBe(true);
     expect((await live.deps.db.first<Json>("SELECT subscription_status FROM workspace WHERE id = ?", [live.b.workspaceId]))!.subscription_status).toBe("active");
+    // 0.1.61 (review H1): a status that is neither live nor final is cancelled at Stripe first, then removed.
+    const incomplete = await prepare();
+    incomplete.stripe.subscription("sub_B", "cus_B", "incomplete");
+    await sweep(incomplete);
+    expect(incomplete.stripe.subscriptions.get("sub_B")!.status).toBe("canceled");
+    expect(await exists(incomplete.deps, incomplete.b.workspaceId)).toBe(false);
     const ok = await prepare();
     await sweep(ok);
     expect(await exists(ok.deps, ok.b.workspaceId)).toBe(false);
-    // The subscription was asked right before, and nothing was cancelled or written at Stripe.
-    expect(ok.stripe.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /v1/subscriptions/sub_B"]);
+    // The subscription was asked right before (and again before the pass, 0.1.61), and nothing was cancelled or written at Stripe.
+    expect(new Set(ok.stripe.calls.map((c) => `${c.method} ${c.path}`))).toEqual(new Set(["GET /v1/subscriptions/sub_B"]));
   });
 
   it("a pending checkout, a paid one, one Stripe cannot confirm expired, or too many hold the removal back; expired ones do not", async () => {

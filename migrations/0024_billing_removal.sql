@@ -42,3 +42,8 @@ CREATE TABLE billing_warning (
 -- preparation and began removing files and rows (src/account-removal.ts, `work`). NULL while
 -- nothing of the workspace has been removed: only then can the admin undo the removal record.
 ALTER TABLE account_removal ADD COLUMN work_started_at INTEGER CHECK (work_started_at IS NULL OR work_started_at > 0);
+
+-- When the billing sweep stopped its own removal for good (src/billing-sweep.ts): the workspace
+-- went live, took a checkout or left the clock after the removal started. NULL otherwise. No sweep
+-- continues a stopped removal; the account stays disabled with its record for the admin to undo.
+ALTER TABLE account_removal ADD COLUMN stopped_at INTEGER CHECK (stopped_at IS NULL OR stopped_at > 0);

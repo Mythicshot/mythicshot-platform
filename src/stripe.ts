@@ -17,8 +17,12 @@ export const STRIPE_JS_URL = "https://js.stripe.com/endive/stripe.js";
 /** Where the API lives. */
 const STRIPE_API = "https://api.stripe.com";
 
-/** Stripe's answer: its HTTP status and its parsed JSON body (null when it is not JSON). */
-export type StripeAnswer = { status: number; body: unknown };
+/**
+ * Stripe's answer: its HTTP status and its parsed JSON body (null when it is not JSON), and its
+ * Date header as sent (0.1.61, optional: absent or null when there was none), which the billing
+ * sweep compares with the server's clock before it removes anything.
+ */
+export type StripeAnswer = { status: number; body: unknown; date?: string | null };
 
 /** A form field: name and value, sent in this order. */
 export type StripeForm = readonly (readonly [string, string])[];
@@ -74,7 +78,9 @@ export function stripeOverFetch(apiKey: string, fetchFn: typeof fetch = (input, 
       } catch {
         body = null;
       }
-      return { status: res.status, body };
+      // The Date header only when Stripe sent one, so an answer without it is the answer of before.
+      const date = res.headers.get("date");
+      return date === null ? { status: res.status, body } : { status: res.status, body, date };
     },
   };
 }

@@ -51,6 +51,7 @@ import {
   testKeys,
   type BillingSettings,
   isEnded,
+  isFinal,
   isLive,
   isReadOnly,
   standingOf,
@@ -58,7 +59,7 @@ import {
   type Standing,
 } from "./billing-rules.ts";
 import { apiError, json, readCapped } from "./http.ts";
-import { clockOf, planOf } from "./removal-rules.ts";
+import { ONE_ACCOUNT_SQL, clockOf, planOf } from "./removal-rules.ts";
 import { WARNINGS_JSON_SQL, emailSha256, warningsOf } from "./removal-store.ts";
 import { linkOrigin } from "./mail.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
@@ -226,15 +227,18 @@ export function missingAllowsRemoval(): false {
 
 /**
  * What Stripe says, right before a removal, of the subscription on the workspace's record
- * (GET /v1/subscriptions/<id>, one call): "ended" only for a definite answer that it is the
- * record's own, of the record's customer, with an ended status (`canceled`, `unpaid`,
- * `incomplete_expired`). "live" when Stripe says it is live: with `repair` the stored state is
- * then brought to what Stripe says, as a read-back does (storeSubscription, under its guard).
- * "unknown" for everything else: no answer, a timeout, a permission error, any status but 200,
- * a body not of the shape expected, another customer, and a 404, which missingAllowsRemoval says
- * is never proof. Nothing is removed on "live" or "unknown".
+ * (GET /v1/subscriptions/<id>, one call), for a definite answer that it is the record's own, of
+ * the record's customer: "ended" for a status Stripe never leaves (`canceled`,
+ * `incomplete_expired`); "cancel" for any other status that is not live (`unpaid`, `paused`,
+ * `incomplete`): the removal may go on, but only after prepareDeletion has cancelled it at Stripe
+ * and Stripe said `canceled`; "live" when Stripe says it is live: with `repair` the stored state is
+ * then brought to what Stripe says, as a read-back does (storeSubscription, under its guard);
+ * with `repair` "all" so is any answer, so that prepareDeletion cancels what Stripe says is not
+ * over even when the record says otherwise. "unknown" for everything else: no answer, a timeout,
+ * a permission error, any status but 200, a body not of the shape expected, another customer, and
+ * a 404, which missingAllowsRemoval says is never proof. Nothing is removed on "live" or "unknown".
  */
-export async function subscriptionBeforeRemoval(deps: Deps, row: BillingRow, repair: boolean): Promise<"ended" | "live" | "unknown"> {
+export async function subscriptionBeforeRemoval(deps: Deps, row: BillingRow, repair: boolean | "all"): Promise<"ended" | "cancel" | "live" | "unknown"> {
   if (row.subscription === null || row.customer === null) return "unknown";
   const read = await readSubscription(deps, row.subscription);
   if (read === "missing") return missingAllowsRemoval() ? "ended" : "unknown";
@@ -243,7 +247,8 @@ export async function subscriptionBeforeRemoval(deps: Deps, row: BillingRow, rep
     if (repair) await storeSubscription(deps, null, row, read, null);
     return "live";
   }
-  return isEnded(read.status) ? "ended" : "unknown";
+  if (repair === "all") await storeSubscription(deps, null, row, read, null);
+  return isFinal(read.status) ? "ended" : "cancel";
 }
 
 /**
@@ -517,12 +522,12 @@ export type BillingStateName = "exempt" | "trial" | "trial_over" | "subscribed" 
  */
 async function removalShown(deps: Deps, row: BillingRow, standing: Standing, userId: string, now: number): Promise<{ linksUntil: number; removedAt: number } | null> {
   if (standing.kind !== "trial" && standing.kind !== "trial_over" && standing.kind !== "ended") return null;
-  const found = await deps.db.first<{ site: number; email: string | null; warnings: string }>(
-    `SELECT EXISTS (SELECT 1 FROM setup s WHERE s.workspace_id = workspace.id) AS site, (SELECT u.email FROM user u WHERE u.id = ?) AS email, ${WARNINGS_JSON_SQL} AS warnings FROM workspace WHERE workspace.id = ?`,
+  const found = await deps.db.first<{ site: number; shared: number; email: string | null; warnings: string }>(
+    `SELECT EXISTS (SELECT 1 FROM setup s WHERE s.workspace_id = workspace.id) AS site, CASE WHEN ${ONE_ACCOUNT_SQL("workspace.id")} THEN 0 ELSE 1 END AS shared, (SELECT u.email FROM user u WHERE u.id = ?) AS email, ${WARNINGS_JSON_SQL} AS warnings FROM workspace WHERE workspace.id = ?`,
     [userId, row.id],
   );
   if (found === null) return null;
-  const clock = clockOf(row, found.site === 1, now);
+  const clock = clockOf(row, found.site === 1, now, found.shared === 1);
   if (clock === null) return null;
   const plan = planOf(clock, warningsOf(found.warnings), found.email === null ? "" : await emailSha256(found.email), now);
   return { linksUntil: clock.linksDownAt, removedAt: plan.removalAt };
@@ -556,7 +561,8 @@ function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, al
     case "trial_over":
       return { state: "trial_over" as BillingStateName, ...base, trial_ends_at: s.endedAt, days_left: 0, removed_at: removal?.removedAt ?? s.endedAt };
     case "ended":
-      return { state: "ended" as BillingStateName, ...base, ended_at: s.endedAt, links_until: removal?.linksUntil ?? s.endedAt + LINKS_GRACE_MS, removed_at: removal?.removedAt ?? s.endedAt + REMOVAL_MS };
+      // Not on the clock (an allowance set by hand): neither the links nor the content go, so no date is shown.
+      return { state: "ended" as BillingStateName, ...base, ended_at: s.endedAt, links_until: removal?.linksUntil ?? null, removed_at: removal?.removedAt ?? null };
     case "subscribed":
       if (s.endsAt !== null) {
         return { state: "ending" as BillingStateName, ...base, ends_at: s.endsAt, links_until: s.endsAt + LINKS_GRACE_MS, removed_at: s.endsAt + REMOVAL_MS };
@@ -697,6 +703,20 @@ async function closeCheckout(deps: Deps, row: BillingRow, sessionId: string): Pr
   return "paid";
 }
 
+/** True when a removal of the workspace or of the account is recorded, or the account is not active (0.1.61). One call. */
+async function closing(deps: Deps, workspaceId: string, userId: string): Promise<boolean> {
+  const found = await deps.db.first<{ removing: number; status: string | null }>(
+    "SELECT EXISTS (SELECT 1 FROM account_removal r WHERE r.workspace_id = ? OR r.user_id = ?) AS removing, (SELECT u.status FROM user u WHERE u.id = ?) AS status",
+    [workspaceId, userId, userId],
+  );
+  return found === null || found.removing === 1 || found.status !== "active";
+}
+
+/** The refusal of a checkout for an account being deleted: the admin API's own `deleting`. */
+function deletingAccount(): Response {
+  return apiError(409, "deleting", "this account is being deleted; nothing can be bought for it");
+}
+
 function alreadySubscribed(): Response {
   return apiError(409, "already_subscribed", "the workspace already has a subscription; manage it on Stripe's page");
 }
@@ -774,6 +794,8 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     const row = await rowWithEmail(deps, auth.workspaceId, auth.session.userId);
     if (row === null) return apiError(404, "not_found", "no such workspace");
     if (isLive(row.status)) return alreadySubscribed();
+    // 0.1.61: no checkout for an account being removed (or one that is not active).
+    if (await closing(deps, auth.workspaceId, auth.session.userId)) return deletingAccount();
 
     const now = deps.now();
     if (row.checkout_session !== null) {
@@ -818,6 +840,17 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     }
     const secret = b.client_secret;
 
+    // A removal recorded while Stripe made it (0.1.61): its secret is never handed out, so nobody
+    // can pay it, and it is expired at Stripe.
+    if (await closing(deps, auth.workspaceId, auth.session.userId)) {
+      try {
+        await stripe.call("POST", `/v1/checkout/sessions/${sessionId}/expire`);
+      } catch {
+        // Best effort: without its secret nobody can pay it, and it expires by itself.
+      }
+      return deletingAccount();
+    }
+
     // Recorded first, whatever happens next: this record is how its completed notice finds the workspace.
     await deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING", [sessionId, auth.workspaceId, now, expiresAt * 1000]);
     try {
@@ -825,7 +858,8 @@ export function billingRoutes(app: Hono, deps: Deps): void {
         {
           sql:
             "UPDATE workspace SET checkout_session_id = ?, checkout_created_at = ? WHERE id = ? AND (checkout_session_id IS ? OR checkout_session_id = ?)" +
-            " AND (subscription_status IS NULL OR subscription_status NOT IN ('active', 'trialing', 'past_due'))",
+            " AND (subscription_status IS NULL OR subscription_status NOT IN ('active', 'trialing', 'past_due'))" +
+            " AND NOT EXISTS (SELECT 1 FROM account_removal r WHERE r.workspace_id = workspace.id)",
           params: [sessionId, now, auth.workspaceId, row.checkout_session, sessionId],
         },
         auditStatement(deps, { event: "billing_checkout_started", userId: auth.session.userId, workspaceId: auth.workspaceId }, { onlyAfterOneChange: true }),
@@ -1081,13 +1115,14 @@ async function cancelAtStripe(deps: Deps, id: string): Promise<Subscription | "m
     if (isMissing(a.status, a.body)) return "missing";
     if (a.status === 200 && isObj(a.body)) {
       const sub = subscriptionOf(a.body, id);
-      if (sub !== null && isEnded(sub.status)) return sub;
+      // Only a status Stripe never leaves is a cancel (0.1.61): an `unpaid` one could still be paid.
+      if (sub !== null && isFinal(sub.status)) return sub;
     }
   } catch {
     // No answer: asked again below.
   }
   const read = await readSubscription(deps, id);
-  return read === "missing" || (read !== null && isEnded(read.status)) ? read : null;
+  return read === "missing" || (read !== null && isFinal(read.status)) ? read : null;
 }
 
 /**
@@ -1140,16 +1175,21 @@ async function settleCheckout(deps: Deps, workspaceId: string, adminId: string, 
  * that has not expired is closed at Stripe (settleCheckout), within the calls `room` allows.
  * "ok" when all is settled (and at once, with no call, without billing); "more" when checkouts
  * are left for the next request; "failed" when Stripe gave no definite answer, and then nothing
- * may be deleted.
+ * may be deleted. `missingIsGone` false (the billing sweep): Stripe's 404 for the subscription is
+ * "failed" too, never "gone".
  */
-export async function prepareDeletion(deps: Deps, workspaceId: string, adminId: string, room: (cost: number) => boolean): Promise<"ok" | "more" | "failed"> {
+export async function prepareDeletion(deps: Deps, workspaceId: string, adminId: string, room: (cost: number) => boolean, missingIsGone = true): Promise<"ok" | "more" | "failed"> {
   if (!billingConfigured(deps.config)) return "ok";
   const row = await billingRowOf(deps, workspaceId);
   if (row === null) return "ok";
-  if (row.subscription !== null && !isEnded(row.status)) {
+  // 0.1.61: every subscription on record that is not definitely over (`canceled`,
+  // `incomplete_expired`) is cancelled first, `unpaid` included, which could still be paid.
+  if (row.subscription !== null && !isFinal(row.status)) {
     if (!room(4)) return "more";
     const cancelled = await cancelAtStripe(deps, row.subscription);
     if (cancelled === null) return "failed";
+    // The billing sweep takes no 404 as proof that a subscription is gone (missingAllowsRemoval).
+    if (cancelled === "missing" && !missingIsGone && !missingAllowsRemoval()) return "failed";
     if (cancelled === "missing") {
       await deps.db.run("UPDATE workspace SET subscription_status = 'canceled', subscription_ended_at = coalesce(subscription_ended_at, ?) WHERE id = ? AND stripe_subscription_id = ?", [deps.now(), workspaceId, row.subscription]);
     } else {
@@ -1177,7 +1217,7 @@ export async function prepareDeletion(deps: Deps, workspaceId: string, adminId: 
  * its reference or its customer (customer_taken, customer_differs, reference_differs). Each is
  * money taken without access, for the admin to look at in Stripe.
  */
-const PROBLEM = "(event IN ('billing_checkout_unmatched', 'billing_second_subscription', 'billing_answer_refused') OR (event = 'billing_checkout_mismatch' AND json_extract(detail, '$.paid') = 1))";
+const PROBLEM = "(event IN ('billing_checkout_unmatched', 'billing_second_subscription', 'billing_answer_refused', 'billing_removal_stopped') OR (event = 'billing_checkout_mismatch' AND json_extract(detail, '$.paid') = 1))";
 
 /** The billing problems the site's admin should look at: the count, and the newest rows (event, workspace, time). */
 export async function billingProblems(deps: Deps): Promise<{ count: number; recent: { event: string; workspace_id: string | null; at: number }[] }> {

@@ -7,8 +7,9 @@
 // settings (linkOrigin), never a request's: the Subscribe page, and the Account page for the
 // download. Dates are UTC, written as fullDate writes them ("21 February 2027").
 //
-// Six mails, four distinct: the 30-day mail of a trial and of an ended subscription, then the
-// 7-day and the 1-day mail, the same for both.
+// Six mails, five distinct texts: the 30-day and the 7-day mail of a trial and of an ended
+// subscription (the ended 7-day mail without "and the links to them stop working", approved by the
+// owner on 2026-11-24), and the 1-day mail, the same for both.
 import { DAY, SUBSCRIBE_PATH } from "./billing-rules.ts";
 import type { Mail } from "./mail.ts";
 import { fullDate, type WarningStage } from "./removal-rules.ts";
@@ -55,7 +56,8 @@ export function warningMail(to: string, w: WarningOf, origin: string): Mail {
   } else if (w.stage === 7) {
     subject = "7 days left to keep your Mythicshot content";
     lines = [
-      `On ${removed} your tours, images and clips are removed and the links to them stop working.`,
+      // An ended subscription's links came down 60 days earlier, so its mail drops that clause (owner, 2026-11-24).
+      w.kind === "trial" ? `On ${removed} your tours, images and clips are removed and the links to them stop working.` : `On ${removed} your tours, images and clips are removed.`,
       `To keep them, subscribe for $7 a month: ${subscribe}`,
       "If you'd rather leave, there's nothing you need to do.",
       download,

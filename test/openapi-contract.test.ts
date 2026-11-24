@@ -61,7 +61,10 @@ import { sessionOf, withBilling } from "./fake-stripe.ts";
  * - GET /api/v1/me 404 needs a token whose workspace is gone, which the database's own
  *   rules forbid: the one read of the workspace's name is made to find nothing.
  */
-const NOT_EXERCISED: Readonly<Record<string, string>> = {};
+const NOT_EXERCISED: Readonly<Record<string, string>> = {
+  "DELETE /api/v1/admin/accounts/{id} 409 not_deleting":
+    "a race: an undo that lands while the delete asks the payment service to cancel; it needs billing and a fake payment service that runs the undo mid-call, which test/billing-removal-rework.test.ts has (M1)",
+};
 
 const DOC = openapi();
 const JSON_TYPE = "application/json";

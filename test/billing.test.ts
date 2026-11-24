@@ -144,11 +144,12 @@ describe("the allowance and the read-only rule", () => {
     expect(await allowance(s.a.workspaceId)).toBe(TRIAL_BYTES);
     expect(TRIAL_BYTES).toBe(104_857_600);
     expect(PLAN_BYTES).toBe(5_368_709_120);
-    for (const status of ["active", "trialing", "past_due", "canceled", "unpaid", "incomplete_expired"]) {
+    for (const status of ["active", "trialing", "past_due", "canceled", "unpaid"]) {
       await s.deps.db.run("UPDATE workspace SET subscription_status = ? WHERE id = ?", [status, s.a.workspaceId]);
       expect(await allowance(s.a.workspaceId), status).toBe(PLAN_BYTES);
     }
-    for (const status of ["incomplete", "paused"]) {
+    // 0.1.61 (review M2), on purpose: a first payment that never completed (incomplete_expired) never went live, so it is the trial.
+    for (const status of ["incomplete", "incomplete_expired", "paused"]) {
       await s.deps.db.run("UPDATE workspace SET subscription_status = ? WHERE id = ?", [status, s.a.workspaceId]);
       expect(await allowance(s.a.workspaceId), status).toBe(TRIAL_BYTES);
     }

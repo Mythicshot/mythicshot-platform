@@ -41,6 +41,8 @@ export const AUDIT_EVENTS = [
   "billing_removal_started",
   "billing_removal_step",
   "billing_removal_finished",
+  "billing_removal_stopped",
+  "billing_warning_claim_cleared",
   "tour_access_changed",
   "media_access_changed",
   "viewer_link_sent",
