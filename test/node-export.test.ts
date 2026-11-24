@@ -5,6 +5,7 @@
 // Expand-Archive. Each unpacks into a new folder under the system's temporary folder, which
 // the test deletes. A program that is not there is skipped, and says so.
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,11 +76,14 @@ async function unpackedBy(zip: Uint8Array, run: (zipPath: string, outDir: string
   }
 }
 
+/** Windows' own bsdtar first: a shell's PATH may put GNU tar, which reads no zip, before it. */
+const TAR_PROGRAM = process.platform === "win32" && existsSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe")) ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
+
 const TAR = (zipPath: string, outDir: string) => {
-  const has = spawnSync("tar", ["--version"], { encoding: "utf8" });
+  const has = spawnSync(TAR_PROGRAM, ["--version"], { encoding: "utf8" });
   if (has.status !== 0 || !/bsdtar|libarchive/i.test(has.stdout)) return { ok: false, skipped: "no bsdtar here" };
-  spawnSync(process.platform === "win32" ? "cmd" : "mkdir", process.platform === "win32" ? ["/c", "mkdir", outDir] : ["-p", outDir]);
-  const r = spawnSync("tar", ["-xf", zipPath, "-C", outDir], { encoding: "utf8" });
+  mkdirSync(outDir, { recursive: true });
+  const r = spawnSync(TAR_PROGRAM, ["-xf", zipPath, "-C", outDir], { encoding: "utf8" });
   return { ok: r.status === 0 };
 };
 
@@ -122,5 +126,7 @@ describe("Download all my data on the Node server", () => {
     const why = await unpackedBy(zip64, TAR);
     if (why !== null) skipped.push(`tar, ZIP64: ${why}`);
     if (skipped.length > 0) console.log(`unzip programs not found, skipped: ${skipped.join("; ")}`);
+    // On Windows both are part of the system: neither may be skipped there.
+    if (process.platform === "win32") expect(skipped).toEqual([]);
   });
 });
