@@ -26,6 +26,48 @@ export const BILLING_ROUTE_KEYS = [
 ] as const;
 
 type Json = Record<string, any>;
+
+// ---- Values of the shapes Stripe really sends (from the owner's sandbox run, 0.1.59) ----
+
+const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+/** `n` letters and digits, the same for the same seed. */
+function letters(seed: string, n: number): string {
+  let h = 2166136261;
+  for (const ch of seed) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+  let out = "";
+  for (let i = 0; i < n; i++) {
+    h = Math.imul(h ^ i, 16777619) >>> 0;
+    out += BASE62[h % 62];
+  }
+  return out;
+}
+
+/** The fake's nth checkout: 66 characters, cs_test_ and letters and digits, as Stripe makes them. */
+export function CS(n: number): string {
+  return "cs_test_a1" + letters(`cs${n}`, 56);
+}
+
+/**
+ * The client secret of the fake's nth checkout: about 468 characters, the checkout's id,
+ * `_secret_`, then letters, digits, underscores and percent-encoded bytes (%2F, %2B, %3D), as
+ * Stripe's embedded checkout really answers it.
+ */
+export function SECRET(n: number): string {
+  const id = CS(n);
+  let tail = "";
+  for (let i = 0; tail.length < 468 - id.length - 8; i++) tail += letters(`sec${n}_${i}`, 9) + ["%2F", "%2B", "%3D", "_", "%7C"][i % 5];
+  return `${id}_secret_${tail}`.slice(0, 468);
+}
+
+/** Ids of the shapes Stripe really sends, for tests that want them. */
+export const REAL = {
+  subscription: "sub_1Uf7540x7W4K5JLaCkq7gjtQ",
+  customer: "cus_VgU3x5KqziV0vO",
+  invoice: "in_1Uf7510x7W4K5JLaoJ0fhNLs",
+  paymentMethod: "pm_1Uf74z0x7W4K5JLaQm3dLs8T",
+  paymentIntent: "pi_3Uf7520x7W4K5JLa1n6RkC2d",
+  charge: "ch_3Uf7520x7W4K5JLa1q4EwP0m",
+} as const;
 export type StripeCall = { method: string; path: string; form: [string, string][] | null; key: string | undefined };
 
 export class FakeStripe implements Stripe {
@@ -35,6 +77,8 @@ export class FakeStripe implements Stripe {
   charges = new Map<string, Json>();
   /** Every call throws, as when Stripe cannot be reached. */
   down = false;
+  /** How GET /v1/prices/<id> answers: the price, no such price, or a key that may not read prices. */
+  price: "ok" | "missing" | "forbidden" = "ok";
   /** Paths answered 500. */
   failing = new Set<string>();
   /**
@@ -60,10 +104,11 @@ export class FakeStripe implements Stripe {
     if (method === "POST" && path === "/v1/checkout/sessions") {
       if (key !== undefined && this.byKey.has(key)) return this.byKey.get(key)!;
       this.n += 1;
-      const id = `cs_test_${this.n}`;
-      const session: Json = { id, object: "checkout.session", status: "open", client_secret: `${id}_secret_FAKE${this.n}`, url: null, form: Object.fromEntries(form ?? []), noSecret: false };
+      const id = CS(this.n);
+      const session: Json = { id, object: "checkout.session", status: "open", client_secret: SECRET(this.n), url: null, form: Object.fromEntries(form ?? []), noSecret: false };
       this.sessions.set(id, session);
-      const answer = { status: 200, body: { id, object: "checkout.session", status: "open", client_secret: session.client_secret, url: null } };
+      // As Stripe answers an embedded checkout under Managed Payments.
+      const answer = { status: 200, body: { id, object: "checkout.session", status: "open", ui_mode: "embedded_page", managed_payments: { enabled: true }, mode: "subscription", client_secret: session.client_secret, url: null, expires_at: Number(session.form.expires_at ?? 0), return_url: session.form.return_url ?? null } };
       if (key !== undefined) this.byKey.set(key, answer);
       return answer;
     }
@@ -71,7 +116,7 @@ export class FakeStripe implements Stripe {
       const s = this.sessions.get(parts[4]);
       return s === undefined
         ? { status: 404, body: { error: { code: "resource_missing" } } }
-        : { status: 200, body: { id: s.id, status: s.status, client_secret: s.status === "open" && !s.noSecret ? s.client_secret : null, customer: s.customer ?? null, subscription: s.subscription ?? null, client_reference_id: s.form?.client_reference_id ?? null } };
+        : { status: 200, body: { id: s.id, object: "checkout.session", ui_mode: "embedded_page", managed_payments: { enabled: true }, status: s.status, client_secret: s.status === "open" && !s.noSecret ? s.client_secret : null, customer: s.customer ?? null, subscription: s.subscription ?? null, client_reference_id: s.form?.client_reference_id ?? null } };
     }
     if (method === "POST" && parts[3] === "sessions" && parts[5] === "expire") {
       const s = this.sessions.get(parts[4]);
@@ -80,7 +125,12 @@ export class FakeStripe implements Stripe {
       s.status = "expired";
       return { status: 200, body: { id: parts[4], status: "expired" } };
     }
-    if (method === "POST" && path === "/v1/billing_portal/sessions") return { status: 200, body: { id: "bps_FAKE", url: "https://billing.stripe.com/p/session/test_FAKE" } };
+    if (method === "POST" && path === "/v1/billing_portal/sessions") return { status: 200, body: { id: "bps_1Uf75j0x7W4K5JLaW1rD2Mbc", object: "billing_portal.session", url: "https://billing.stripe.com/p/session/test_YWNjdF8xVWY3NTQweDdXNEs1SkxhLF9UZmZ0QjNjS0FQZQ0100ZJ1kW5aT" } };
+    if (method === "GET" && parts[2] === "prices") {
+      if (this.price === "missing" || parts[3] !== BILLING.priceId) return { status: 404, body: { error: { code: "resource_missing", type: "invalid_request_error" } } };
+      if (this.price === "forbidden") return { status: 403, body: { error: { type: "invalid_request_error", code: "secret_key_required" } } };
+      return { status: 200, body: { id: parts[3], object: "price", active: true, recurring: { interval: "month" } } };
+    }
     if (method === "GET" && parts[2] === "subscriptions") {
       const s = this.subscriptions.get(parts[3]);
       return s === undefined ? { status: 404, body: { error: { code: "resource_missing" } } } : { status: 200, body: s };
@@ -108,8 +158,14 @@ export class FakeStripe implements Stripe {
       status,
       cancel_at: more.cancelAt ?? null,
       cancel_at_period_end: more.cancelAtPeriodEnd ?? false,
+      canceled_at: more.cancelAt != null ? 1_800_000_000 : null,
+      cancellation_details: more.cancelAt != null ? { reason: "cancellation_requested" } : { reason: null },
       ended_at: more.endedAt ?? null,
-      items: { object: "list", data: [{ id: "si_FAKE", current_period_end: more.periodEnd ?? 1_900_000_000 }] },
+      // As the sandbox's subscriptions are: Stripe collects the tax (Managed Payments), flexible billing.
+      automatic_tax: { enabled: true, liability: { type: "stripe" } },
+      billing_mode: { type: "flexible" },
+      latest_invoice: REAL.invoice,
+      items: { object: "list", data: [{ id: "si_TfftB3cKAPe0Zr", object: "subscription_item", current_period_end: more.periodEnd ?? 1_900_000_000 }] },
     });
   }
 
@@ -149,7 +205,8 @@ let eventN = 0;
 /** A Stripe event of this type around this object, with a fresh id unless one is given. */
 export function eventOf(type: string, object: Json, id?: string): Json {
   eventN += 1;
-  return { id: id ?? `evt_test_${Date.now().toString(36)}_${eventN}`, object: "event", type, data: { object } };
+  // 28 characters, evt_1 and letters and digits, as Stripe's event ids are.
+  return { id: id ?? `evt_1Uf7${letters(`evt${Date.now()}_${eventN}`, 20)}`, object: "event", api_version: "2026-04-22.dahlia", type, data: { object } };
 }
 
 /** Sends a notice to the listener, signed with the fake secret at `deps.now()` unless told otherwise. */

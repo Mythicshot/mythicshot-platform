@@ -9,7 +9,7 @@ import { BILLING_PATHS, missingAllowsRemoval } from "../src/billing.ts";
 import { billingFromSettings } from "../src/billing-rules.ts";
 import type { Deps } from "../src/ports.ts";
 import { clone, fixtures, send, uploadTour, type Json } from "./bundle.ts";
-import { FakeStripe, eventOf, notify, sessionOf, withBilling } from "./fake-stripe.ts";
+import { FakeStripe, eventOf, notify, sessionOf, CS, SECRET, withBilling } from "./fake-stripe.ts";
 
 const T0 = 1_800_000_000_000;
 const DAY = 86_400_000;
@@ -125,7 +125,7 @@ describe("N3: deleting an account expires its open checkouts first, after record
     s.stripe.down = false;
     // Paid at Stripe after all, its notice not taken yet.
     s.stripe.subscription("sub_LATE", "cus_LATE", "active");
-    s.stripe.complete("cs_test_1", "cus_LATE", "sub_LATE");
+    s.stripe.complete(CS(1), "cus_LATE", "sub_LATE");
     const done = await deleteAccount(s.deps, s.admin.userId, s.a.userId, "alpha");
     expect(done.status, done.text).toBe(200);
     expect(s.stripe.subscriptions.get("sub_LATE")!.status).toBe("canceled");

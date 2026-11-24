@@ -247,7 +247,16 @@ async function readSubscription(deps: Deps, id: string): Promise<Subscription | 
   }
   if (isMissing(answer.status, answer.body)) return "missing";
   if (answer.status !== 200 || !isObj(answer.body)) return null;
-  return subscriptionOf(answer.body, id);
+  const sub = subscriptionOf(answer.body, id);
+  if (sub === null) await refused(deps, "subscription_read", fieldRefused(answer.body, id));
+  return sub;
+}
+
+/** Which field of a subscription subscriptionOf refused. */
+function fieldRefused(b: Obj, id: string): string {
+  if (b.id !== id) return "id";
+  if (idOf(b.customer, "customer") === null) return "customer";
+  return "status";
 }
 
 function subscriptionOf(b: Obj, id: string): Subscription | null {
@@ -515,12 +524,12 @@ function appOrigin(deps: Deps): string | null {
 
 /**
  * The one exception to https: a site run on this computer against a Stripe sandbox. Its own
- * address is exactly localhost, 127.0.0.1 or [::1] (any port), served over http, and both keys
+ * address is exactly localhost or 127.0.0.1 (any port), served over http, and both keys
  * are test-mode keys. A live key never gets it.
  */
 function localDevelopment(config: { billing?: BillingSettings | null }, origin: string): boolean {
   if (config.billing === undefined || config.billing === null || !testKeys(config.billing)) return false;
-  return /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?$/.test(origin);
+  return /^http:\/\/(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?$/.test(origin);
 }
 
 /** The line that stops the start when billing is on without an https address of the site's own, or null. Fixed text. */
@@ -557,9 +566,30 @@ async function rowWithEmail(deps: Deps, workspaceId: string, userId: string): Pr
   );
 }
 
-/** True for what Stripe answers as an embedded checkout's client secret: letters, digits and underscores. */
+/**
+ * True for what Stripe answers as an embedded checkout's client secret. A real one is about 468
+ * characters, the checkout's id, `_secret_` and letters, digits, underscores and percent-encoded
+ * bytes (0.1.59, from a sandbox run), and its form is Stripe's to change. It is only ever
+ * JSON-encoded to the workspace's own session and handed to Stripe's script, never put in HTML,
+ * an address, a log or the database, so any printable ASCII is taken but what could break out of
+ * a quoted value: no control character, space, double or single quote, angle bracket or
+ * backslash. At most 2,048 characters.
+ */
 function clientSecret(v: unknown): v is string {
-  return typeof v === "string" && v.length >= 8 && v.length <= 512 && /^[A-Za-z0-9_]+$/.test(v);
+  return typeof v === "string" && v.length >= 8 && v.length <= 2048 && /^[!#-&(-;=?-\[\]-~]+$/.test(v);
+}
+
+/**
+ * Records that an answer of Stripe was refused for its shape: which call and which field, never
+ * the value. One audit row, a billing problem for the admin, so a refused real answer is never
+ * only "the payment service did not answer". A failure to record changes nothing.
+ */
+async function refused(deps: Deps, call: string, field: string, workspaceId: string | null = null): Promise<void> {
+  try {
+    await deps.db.batch([auditStatement(deps, { event: "billing_answer_refused", workspaceId, detail: { call, field } })]);
+  } catch {
+    // The answer stays refused either way.
+  }
 }
 
 type CheckoutNow = { status: "open"; secret: string | null } | { status: "complete"; body: Obj } | { status: "expired" };
@@ -572,7 +602,12 @@ async function checkoutNow(deps: Deps, sessionId: string): Promise<CheckoutNow |
     if (a.status !== 200 || !isObj(a.body) || a.body.id !== sessionId) return null;
     if (a.body.status === "complete") return { status: "complete", body: a.body };
     if (a.body.status === "expired") return { status: "expired" };
-    if (a.body.status === "open") return { status: "open", secret: clientSecret(a.body.client_secret) ? a.body.client_secret : null };
+    if (a.body.status === "open") {
+      if (clientSecret(a.body.client_secret)) return { status: "open", secret: a.body.client_secret };
+      // None given is Stripe's own choice; one of a shape refused is noted.
+      if (a.body.client_secret !== null && a.body.client_secret !== undefined) await refused(deps, "checkout_read", "client_secret");
+      return { status: "open", secret: null };
+    }
     return null;
   } catch {
     return null;
@@ -718,7 +753,11 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     }
     const b = created.body;
     const sessionId = isObj(b) ? idOf(b.id, "checkout") : null;
-    if (created.status !== 200 || !isObj(b) || sessionId === null || !clientSecret(b.client_secret)) return stripeUnavailable();
+    if (created.status !== 200 || !isObj(b)) return stripeUnavailable();
+    if (sessionId === null || !clientSecret(b.client_secret)) {
+      await refused(deps, "checkout_create", sessionId === null ? "id" : "client_secret", auth.workspaceId);
+      return stripeUnavailable();
+    }
     const secret = b.client_secret;
 
     // Recorded first, whatever happens next: this record is how its completed notice finds the workspace.
@@ -771,7 +810,11 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     } catch {
       return stripeUnavailable();
     }
-    if (answer.status !== 200 || !isObj(answer.body) || !stripePage(answer.body.url, "billing.stripe.com")) return stripeUnavailable();
+    if (answer.status !== 200 || !isObj(answer.body)) return stripeUnavailable();
+    if (!stripePage(answer.body.url, "billing.stripe.com")) {
+      await refused(deps, "portal_create", "url", auth.workspaceId);
+      return stripeUnavailable();
+    }
     return json(200, { url: answer.body.url });
   });
 
@@ -789,7 +832,11 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     } catch {
       return listenerRefused();
     }
-    if (!isObj(event) || typeof event.type !== "string" || idOf(event.id, "event") === null || !isObj(event.data) || !isObj(event.data.object)) return listenerRefused();
+    if (!isObj(event) || typeof event.type !== "string" || idOf(event.id, "event") === null || !isObj(event.data) || !isObj(event.data.object)) {
+      // Signed by Stripe, yet of a shape not taken: noted, so it can be looked at.
+      await refused(deps, "notice", !isObj(event) ? "body" : typeof event.type !== "string" ? "type" : idOf(event.id, "event") === null ? "id" : "data");
+      return listenerRefused();
+    }
     return handleNotice(deps, event.id as string, event.type, event.data.object);
   });
 }
@@ -1072,7 +1119,7 @@ export async function prepareDeletion(deps: Deps, workspaceId: string, adminId: 
  * its reference or its customer (customer_taken, customer_differs, reference_differs). Each is
  * money taken without access, for the admin to look at in Stripe.
  */
-const PROBLEM = "(event IN ('billing_checkout_unmatched', 'billing_second_subscription') OR (event = 'billing_checkout_mismatch' AND json_extract(detail, '$.paid') = 1))";
+const PROBLEM = "(event IN ('billing_checkout_unmatched', 'billing_second_subscription', 'billing_answer_refused') OR (event = 'billing_checkout_mismatch' AND json_extract(detail, '$.paid') = 1))";
 
 /** The billing problems the site's admin should look at: the count, and the newest rows (event, workspace, time). */
 export async function billingProblems(deps: Deps): Promise<{ count: number; recent: { event: string; workspace_id: string | null; at: number }[] }> {
@@ -1082,3 +1129,40 @@ export async function billingProblems(deps: Deps): Promise<{ count: number; rece
   );
   return { count: rows[0]?.n ?? 0, recent: rows.map((r) => ({ event: r.event, workspace_id: r.workspace_id, at: r.at })) };
 }
+
+// ---- The configured price ----
+
+export type PriceCheck = "ok" | "could_not_check" | "missing" | "not_checked";
+/** What the check found, per pair of key and price, for the life of the process (or the Worker's isolate). Held in memory only. */
+const priceChecks = new Map<string, PriceCheck>();
+const priceKey = (b: BillingSettings) => `${b.priceId}\u0000${b.apiKey}`;
+
+/** What checkPrice found for these settings, or "not_checked". */
+export function priceCheckOf(config: { billing?: BillingSettings | null }): PriceCheck {
+  return config.billing === undefined || config.billing === null ? "not_checked" : (priceChecks.get(priceKey(config.billing)) ?? "not_checked");
+}
+
+/**
+ * Asks Stripe once for the configured price with the configured key (GET /v1/prices/<id>): it
+ * proves the key belongs to the account that owns the price. "ok" when Stripe answers it;
+ * "missing" when Stripe says there is no such price (a start-up error, naming the two settings);
+ * "could_not_check" for anything else, a key that may not read prices or no answer, which does
+ * not stop the site. The Node server asks at its start, the Worker on its first request.
+ */
+export async function checkPrice(deps: Deps): Promise<PriceCheck> {
+  const billing = deps.config.billing;
+  if (billing === undefined || billing === null || deps.stripe === undefined) return "not_checked";
+  let found: PriceCheck = "could_not_check";
+  try {
+    const a = await deps.stripe.call("GET", `/v1/prices/${billing.priceId}`);
+    if (a.status === 200 && isObj(a.body) && a.body.id === billing.priceId) found = "ok";
+    else if (isMissing(a.status, a.body)) found = "missing";
+  } catch {
+    // No answer: could not be checked.
+  }
+  priceChecks.set(priceKey(billing), found);
+  return found;
+}
+
+/** The start-up line for a price Stripe says does not exist. Fixed text: it names the settings, never a value. */
+export const PRICE_MISSING = "billing: Stripe has no price STRIPE_PRICE_ID names that STRIPE_API_KEY can see. Use the id of a price of the same Stripe account, in the same mode as the key.";

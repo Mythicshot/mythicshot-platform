@@ -1,6 +1,7 @@
 import { createApp } from "../app.ts";
 import { billingFromSettings, type BillingSettings } from "../billing-rules.ts";
 import { billingAddressProblem } from "../billing.ts";
+import { PRICE_MISSING, checkPrice, priceCheckOf, type PriceCheck } from "../billing.ts";
 import { stripeOverFetch } from "../stripe.ts";
 import { mediaLimitsProblem } from "../limits.ts";
 import { withBudget } from "../budget.ts";
@@ -147,6 +148,13 @@ export function billingFromWorkerEnv(env: { STRIPE_API_KEY?: unknown; STRIPE_WEB
   return billingFromSettings({ STRIPE_API_KEY: env.STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET: env.STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID: env.STRIPE_PRICE_ID, STRIPE_PUBLISHABLE_KEY: env.STRIPE_PUBLISHABLE_KEY });
 }
 
+/** The price check of this isolate (src/billing.ts, checkPrice): asked on the first request with billing on, then kept. */
+function checkedPrice(deps: Deps): Promise<PriceCheck> {
+  if (!deps.config.billing) return Promise.resolve("not_checked");
+  const known = priceCheckOf(deps.config);
+  return known === "not_checked" ? checkPrice(deps) : Promise.resolve(known);
+}
+
 /** Whether this isolate has said the line for a DOWNLOAD_URL that cannot be used. */
 let downloadSaid = false;
 /** Whether this isolate has said the line for a HOME_URL that cannot be used. */
@@ -231,6 +239,16 @@ export default {
       console.error(media);
       return misconfigured();
     }
-    return withBudget(deps, request.method, async (metered) => createApp(metered).fetch(request, env, ctx));
+    // Without billing, as before: nothing more is asked.
+    if (!deps.config.billing) return withBudget(deps, request.method, async (metered) => createApp(metered).fetch(request, env, ctx));
+    // With billing, Stripe is asked once per isolate, on its first request, for the configured
+    // price: a definite "no such price" closes every path; anything else leaves the site serving.
+    return checkedPrice(deps).then((price) => {
+      if (price === "missing") {
+        console.error(PRICE_MISSING);
+        return misconfigured();
+      }
+      return withBudget(deps, request.method, async (metered) => createApp(metered).fetch(request, env, ctx));
+    });
   },
 } satisfies ExportedHandler<WorkerEnv>;

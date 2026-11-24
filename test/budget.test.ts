@@ -12,7 +12,7 @@ import { DEFER_FAILED, deferOf, mailOf, type Deps } from "../src/ports.ts";
 import { COPY_BATCH, MAX_SNAPSHOT_BYTES, STALE_PUBLISH_MS } from "../src/publish.ts";
 import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { FakeMailer } from "./fake-mail.ts";
-import { eventOf, notify, sessionOf, withBilling } from "./fake-stripe.ts";
+import { eventOf, notify, sessionOf, CS, SECRET, withBilling } from "./fake-stripe.ts";
 import { clone, commit, createUpload, fixtures, logoPng, ORIGIN, putLogo, putStep, routeOf, send, sendAll, sha256Hex, stepImage, uploadTour, type Call, type Json } from "./bundle.ts";
 
 const v3 = fixtures.v3 as Json;
@@ -633,13 +633,13 @@ describe("the call budget, route by route", () => {
     const session = await sessionOf(deps, owner!.user_id);
     // Subscribe: a stored checkout to look at (expired), a new one, the store, and a lost race's expire.
     expect((await call(deps, "POST", "/api/v1/billing/checkout", { headers: session.headers })).status).toBe(200);
-    stripe.sessions.get("cs_test_1")!.status = "expired";
+    stripe.sessions.get(CS(1))!.status = "expired";
     const second = await call(deps, "POST", "/api/v1/billing/checkout", { headers: session.headers });
     expect(second.status).toBe(200);
-    expect((await call(deps, "GET", "/api/v1/billing?session_id=cs_test_2", { headers: session.headers })).json.checkout).toBe("open");
+    expect((await call(deps, "GET", `/api/v1/billing?session_id=${CS(2)}`, { headers: session.headers })).json.checkout).toBe("open");
     // The listener: a completed checkout, a renewal that failed, and a dispute whose charge is read.
     stripe.subscription("sub_B", "cus_B", "active");
-    const done = await notify(deps, eventOf("checkout.session.completed", { id: "cs_test_2", client_reference_id: a.workspaceId, customer: "cus_B", subscription: "sub_B", payment_status: "paid" }));
+    const done = await notify(deps, eventOf("checkout.session.completed", { id: CS(2), client_reference_id: a.workspaceId, customer: "cus_B", subscription: "sub_B", payment_status: "paid" }));
     noted(done, "POST /api/v1/billing/webhook");
     stripe.subscription("sub_B", "cus_B", "past_due");
     noted(await notify(deps, eventOf("invoice.payment_failed", { id: "in_B", customer: "cus_B" })), "POST /api/v1/billing/webhook");
@@ -660,7 +660,7 @@ describe("the call budget, route by route", () => {
     const healed = await call(deps, "POST", "/api/v1/uploads", { token: a.token, body: JSON.stringify({ manifest: big, target: { kind: "new" } }), headers: { "content-type": "application/json" } });
     expect(healed.status, healed.text).toBe(201);
     // The rate-limited routes and the checkout's state.
-    noted(await call(deps, "GET", "/api/v1/billing?session_id=cs_test_2", { headers: session.headers }), "GET /api/v1/billing");
+    noted(await call(deps, "GET", `/api/v1/billing?session_id=${CS(2)}`, { headers: session.headers }), "GET /api/v1/billing");
     // Deleting the subscribed account: the cancel at Stripe comes first, then the delete's own work, within the budget.
     const adminRow = await deps.db.first<{ id: string }>("SELECT id FROM user WHERE is_admin = 1");
     const adminSession = await sessionOf(deps, adminRow!.id);
