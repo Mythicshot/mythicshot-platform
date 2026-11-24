@@ -2086,6 +2086,21 @@ function paths(): OpenApiDoc["paths"] {
         },
       },
     },
+    "/api/v1/admin/accounts/{id}/undo-removal": {
+      post: {
+        tags: ["Admin"],
+        summary: "Undo a delete that has removed nothing yet",
+        description: `For the site's admin: a delete is recorded before the payment service is asked to cancel the account's subscription, so when that service never gives a definite answer the account stays disabled with its delete recorded. This takes the record back, only while nothing of the workspace has been removed: the account is disabled, as before the delete, and can be enabled again. What the delete already did at the payment service (a subscription cancelled, a checkout expired) is not undone. A delete that has begun removing files or rows can only be finished: send the delete again. In the audit record as account_removal_undone. ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminUndoAccountRemoval",
+        security: SESSION,
+        parameters: [accountId],
+        responses: {
+          "204": empty("The delete's record is gone; the account is disabled."),
+          "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header; and an account id that is malformed or names no account. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
+          "409": refusal("own_account: this is the caller's own account. not_deleting: no delete of the account is recorded. removal_started: the delete has begun removing the account's files or rows; send the delete again to finish it.", "own_account", "not_deleting", "removal_started"),
+        },
+      },
+    },
     "/api/v1/admin/accounts/{id}/removal": {
       get: {
         tags: ["Admin"],

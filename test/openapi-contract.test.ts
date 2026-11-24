@@ -1018,6 +1018,15 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     }
     refused(await api.call("POST", account(member.userId, "/enable"), { headers }), 409, "deleting");
 
+    // Undoing a delete (0.1.61): this one has begun removing, so it is refused; one that removed nothing is undone.
+    const undo = (id: string) => api.call("POST", account(id, "/undo-removal"), { headers });
+    refused(await undo(member.userId), 409, "removal_started");
+    refused(await undo(admin.userId), 409, "own_account");
+    refused(await undo(NO_ACCOUNT), 404, "not_found");
+    await deps.db.run("INSERT INTO account_removal (user_id, workspace_id, started_by, total, created_at) VALUES (?, ?, ?, 0, ?)", [other.userId, other.workspaceId, admin.userId, deps.now()]);
+    expect((await undo(other.userId)).status).toBe(204);
+    refused(await undo(other.userId), 409, "not_deleting");
+
     // A delete with more files than one request removes: rows naming files that do not
     // exist are written first (removing a file that is already gone is not an error).
     const gone = "tour_" + "1".repeat(24);

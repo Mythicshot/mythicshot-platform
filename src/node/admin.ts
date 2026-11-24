@@ -8,6 +8,7 @@
 //   node dist/node/admin.js terms publish <file>      ("-" reads the file from standard input)
 //   node dist/node/admin.js terms list
 //   node dist/node/admin.js terms show <id>
+//   node dist/node/admin.js billing-sweep [--dry-run]
 //
 // Without a command, `--email` with `--username` is first-admin and `--email` alone is
 // signin-link, which is how `./cpanel.sh admin --email … --username …` reads.
@@ -30,12 +31,16 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEmail } from "../accounts.ts";
 import { claimFirstAdmin, setEmailOnServer, signInLinkFor, type ClaimProblem, type EmailSetProblem } from "../admin.ts";
+import { billingSweep, sweepLines } from "../billing-sweep.ts";
 import type { Mailer } from "../mail.ts";
-import type { Deps, FileStore } from "../ports.ts";
+import type { Config, Deps, FileStore } from "../ports.ts";
+import { removalSwitchedOn } from "../removal-rules.ts";
+import { stripeOverFetch, type Stripe } from "../stripe.ts";
 import { listTerms, parseTerms, publishTerms, showTerms, TERMS_LIMITS } from "../terms.ts";
 import { parseUsername } from "../usernames.ts";
 import { configFromEnv, mailFromEnv, NODE_SETTINGS } from "./config.ts";
 import { NodeDb } from "./db.ts";
+import { NodeFileStore } from "./files.ts";
 import { SmtpError, smtpMailer, type SmtpSettings } from "./smtp.ts";
 
 /**
@@ -43,17 +48,29 @@ import { SmtpError, smtpMailer, type SmtpSettings } from "./smtp.ts";
  * recovery gate: true lets the command print a link for an account that exists. Absent
  * means closed.
  */
-export type AdminOptions = { makeMailer?: (settings: SmtpSettings) => Mailer; recoveryLinks?: boolean; readStdin?: () => Promise<Uint8Array | "too_large"> };
+export type AdminOptions = {
+  makeMailer?: (settings: SmtpSettings) => Mailer;
+  recoveryLinks?: boolean;
+  readStdin?: () => Promise<Uint8Array | "too_large">;
+  /** Replaces how the Stripe client is made from the key (tests: a fake that reaches no network). */
+  makeStripe?: (apiKey: string) => Stripe;
+};
 
 /** The name of the recovery setting. Only this file and the startup file use it. */
 const RECOVERY_SETTING = "RECOVERY_LINKS";
+
+/**
+ * The setting that lets billing-sweep remove anything (removalSwitchedOn, src/removal-rules.ts):
+ * `on`, else off. Read by this command only, never by the app, so it is no setting of the app's.
+ */
+export const REMOVAL_SETTING = "BILLING_REMOVAL";
 
 /**
  * Every setting the startup file clears from the environment before it reads the
  * settings file for this command, so the file is the command's only source: each one the
  * Node target reads, and the recovery setting.
  */
-export const ADMIN_SETTINGS: readonly string[] = [...NODE_SETTINGS, RECOVERY_SETTING];
+export const ADMIN_SETTINGS: readonly string[] = [...NODE_SETTINGS, RECOVERY_SETTING, REMOVAL_SETTING];
 
 /**
  * True for the command line of this application's server as the image starts it (the
@@ -102,6 +119,8 @@ const ACCOUNTS_MIGRATION = "0008_accounts.sql";
 const EMAIL_CHANGE_MIGRATION = "0009_email_change.sql";
 /** The migration that made the tables of the terms, which the terms commands read and write. */
 const TERMS_MIGRATION = "0018_terms.sql";
+/** The migration that made the record of warning mails, which billing-sweep reads and writes. */
+const REMOVAL_MIGRATION = "0024_billing_removal.sql";
 
 /** How the usage names the command when nothing else is said: run as its own file. */
 const DIRECT_NAME = "node dist/node/admin.js";
@@ -135,6 +154,8 @@ const usage = (name: string): string[] => [
   "      List every published version of the terms, oldest first, with how many accounts agreed to each.",
   "  terms show <id>",
   "      Print one version of the terms exactly as it was published.",
+  "  billing-sweep [--dry-run]",
+  "      On a site with billing: send the warning mails that are due and, only while the settings file holds BILLING_REMOVAL=on, remove what is due, a few workspaces at most. Prints counts. With --dry-run, says what it would do and changes nothing. Run it once a day.",
   "",
   "Without a command, --email with --username is first-admin, and --email alone is signin-link.",
 ];
@@ -249,7 +270,8 @@ type Parsed =
   | { kind: "audit"; last: number }
   | { kind: "terms-publish"; file: string }
   | { kind: "terms-list" }
-  | { kind: "terms-show"; id: string };
+  | { kind: "terms-show"; id: string }
+  | { kind: "billing-sweep"; dryRun: boolean };
 
 const COMMANDS = ["first-admin", "signin-link", "change-email", "mail-check", "audit"] as const;
 type Command = (typeof COMMANDS)[number];
@@ -265,6 +287,12 @@ const FLAGS: Record<Command | "", readonly string[]> = {
 /** The arguments as a command, or null for anything it does not take exactly. */
 function parseArgs(argv: readonly string[]): Parsed | null {
   if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help")) return { kind: "help" };
+  // The sweep takes one option without a value, and nothing else.
+  if (argv[0] === "billing-sweep") {
+    if (argv.length === 1) return { kind: "billing-sweep", dryRun: false };
+    if (argv.length === 2 && argv[1] === "--dry-run") return { kind: "billing-sweep", dryRun: true };
+    return null;
+  }
   // The terms commands take words, not options: exactly these shapes and nothing more.
   if (argv[0] === "terms") {
     if (argv.length === 2 && argv[1] === "list") return { kind: "terms-list" };
@@ -427,6 +455,14 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
     }
     const deps: Deps = { db, drafts: NO_FILES, pub: NO_FILES, config, now: () => Date.now() };
 
+    if (parsed.kind === "billing-sweep") {
+      if ((await db.first("SELECT 1 AS x FROM _migrations WHERE name = ?", [REMOVAL_MIGRATION])) === null) {
+        out(SAID.older);
+        return 1;
+      }
+      return await sweepCommand(parsed.dryRun, db, config, env, out, opts);
+    }
+
     if (parsed.kind === "terms-publish" || parsed.kind === "terms-list" || parsed.kind === "terms-show") {
       if ((await db.first("SELECT 1 AS x FROM _migrations WHERE name = ?", [TERMS_MIGRATION])) === null) {
         out(SAID.older);
@@ -518,6 +554,30 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
   } finally {
     db?.close();
   }
+}
+
+/**
+ * billing-sweep (src/billing-sweep.ts): with the site's own data folder, its mail (sent directly,
+ * as mail-check sends, without the mail thread) and its Stripe client, one sweep; removal only
+ * with BILLING_REMOVAL=on in the settings. Prints the sweep's lines, counts only. Exit 0 when the
+ * sweep ran (whatever it found), 1 when it could not.
+ */
+async function sweepCommand(dryRun: boolean, db: NodeDb, config: Config, env: NodeJS.ProcessEnv, out: (line: string) => void, opts: AdminOptions): Promise<number> {
+  const root = resolve(env.DATA_DIR as string);
+  const mail = mailFromEnv(env, config, opts.makeMailer ?? smtpMailer);
+  const billing = config.billing ?? null;
+  const deps: Deps = {
+    db,
+    drafts: new NodeFileStore(join(root, "drafts")),
+    pub: new NodeFileStore(join(root, "public")),
+    config,
+    now: () => Date.now(),
+    ...(mail.mode === "smtp" ? { mail: mail.mailer } : {}),
+    ...(billing === null ? {} : { stripe: (opts.makeStripe ?? ((key: string) => stripeOverFetch(key)))(billing.apiKey) }),
+  };
+  const summary = await billingSweep(deps, { dryRun, removal: removalSwitchedOn(env[REMOVAL_SETTING]) });
+  for (const line of sweepLines(summary)) out(line);
+  return 0;
 }
 
 /**

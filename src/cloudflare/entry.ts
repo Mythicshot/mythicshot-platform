@@ -4,6 +4,7 @@ import { billingAddressProblem } from "../billing.ts";
 import { stripeOverFetch } from "../stripe.ts";
 import { mediaLimitsProblem } from "../limits.ts";
 import { withBudget } from "../budget.ts";
+import { sweepWithinBudget, type SweepSummary } from "../billing-sweep.ts";
 import { setClientAddress } from "../client.ts";
 import { downloadUrlSetting, homeUrlSetting } from "../https-address.ts";
 import { DEFAULT_LIFETIMES, LIFETIME_SETTINGS, lifetimesSetting, sameLifetimes, type LifetimeSetting } from "../lifetimes.ts";
@@ -159,12 +160,42 @@ function lifetimeVars(env: Partial<Record<LifetimeSetting, unknown>>): Partial<R
   return Object.fromEntries(LIFETIME_SETTINGS.map((name) => [name, env[name]]));
 }
 
+/**
+ * The billing sweep on Workers (src/billing-sweep.ts, 0.1.61): what the scheduled handler below
+ * runs, one sweep within the call budget of one invocation. BILLING_REMOVAL is a var only an
+ * install that wants removal adds (removalSwitchedOn: `on`, else off). Settings that cannot be
+ * used make it do nothing, with the same one line each the fetch handler writes; so does a site
+ * without billing. Each summary line is logged; none holds a value of the settings. This target
+ * sends no mail in this phase, so no warning is ever recorded here and nothing is ever removed:
+ * only takes effect once the Worker can send mail. NOT wired: wrangler.jsonc has no cron trigger,
+ * so the handler never runs until an install adds one (README, "The billing sweep").
+ */
+export async function scheduledSweep(env: WorkerEnv & { BILLING_REMOVAL?: unknown }): Promise<SweepSummary | null> {
+  const hosts = hostsFromWorkerEnv(env);
+  const allowance = allowanceFromWorkerEnv(env);
+  const billing = billingFromWorkerEnv(env);
+  if (!hosts.ok || !allowance.ok || !billing.ok) {
+    console.error("billing sweep: a setting cannot be used; nothing was swept");
+    return null;
+  }
+  const deps = depsFromEnv(env, hosts.hosts, allowance.bytes, undefined, billing.billing);
+  if (billingAddressProblem(deps.config) !== null) {
+    console.error("billing sweep: a setting cannot be used; nothing was swept");
+    return null;
+  }
+  return (await sweepWithinBudget(deps, env.BILLING_REMOVAL)).summary;
+}
+
 /** The answer to every request while a setting cannot be used. */
 function misconfigured(): Response {
   return new Response('{"error":"misconfigured"}', { status: 500, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
 export default {
+  // The billing sweep, for a cron trigger an install may add (scheduledSweep above); none is configured.
+  async scheduled(_controller: ScheduledController, env: WorkerEnv, _ctx: ExecutionContext): Promise<void> {
+    await scheduledSweep(env);
+  },
   fetch(request: Request, env: WorkerEnv, ctx: ExecutionContext): Response | Promise<Response> {
     // A Worker cannot refuse to start, so a pair of addresses that cannot be used closes
     // every path instead, health included: serving one address quietly would put what

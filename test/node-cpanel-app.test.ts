@@ -142,9 +142,9 @@ describe("the cPanel startup file", () => {
     expect(r.stderr).toMatch(/entry\.js/);
   });
 
-  it("its header comment names every setting it passes on: each one the app reads, and the recovery setting", () => {
+  it("its header comment names every setting it passes on: each one the app reads, the recovery setting and the removal setting", () => {
     const header = readFileSync(APP_CJS, "utf8").split("\n").filter((l) => l.startsWith("//")).join("\n");
-    for (const name of [...NODE_SETTINGS, "RECOVERY_LINKS"]) expect(header, name).toMatch(new RegExp(`\\b${name}\\b`));
+    for (const name of [...NODE_SETTINGS, "RECOVERY_LINKS", "BILLING_REMOVAL"]) expect(header, name).toMatch(new RegExp(`\\b${name}\\b`));
   });
 });
 
