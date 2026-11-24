@@ -74,7 +74,7 @@ export function readZip(data: Uint8Array): ReadZip {
   const entries: ReadEntry[] = [];
   let p = dirOffset;
   let expectLocal = 0;
-  const dec = new TextDecoder("utf-8", { fatal: true });
+  const dec = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
   for (let i = 0; i < count; i++) {
     if (u32(p) !== 0x02014b50) fail(`no central header ${i}`);
     const flags = u16(p + 8);
