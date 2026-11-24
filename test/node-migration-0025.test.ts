@@ -1,8 +1,8 @@
-// Migration 0025 (the account a token belongs to) on a database at 0.1.61, which has 0022 and
+// Migration 0025 (the account a token belongs to) on a database at 0.1.62, which has 0024 and
 // tokens of every kind (Node only: the shared harness always applies every migration to an
 // empty database). One nullable column on api_token, filled only for a token made by
 // connecting the app whose collection the audit record names, by an account of the token's
-// own workspace. Every other row keeps what it had, the statements of 0.1.61 still run, the
+// own workspace. Every other row keeps what it had, the statements of 0.1.62 still run, the
 // column takes only an existing account, and a second application stops at its first statement.
 import { copyFile, mkdir, mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -21,8 +21,10 @@ const WS_A = id("ws", "a");
 const WS_B = id("ws", "b");
 const USR_A = id("usr", "a");
 const USR_B = id("usr", "b");
+const USR_C = id("usr", "c");
+const USR_D = id("usr", "d");
 
-describe("migration 0025 on an install of 0.1.61", () => {
+describe("migration 0025 on an install of 0.1.62", () => {
   it("adds the column and fills it only where the record names an account of the token's workspace", async () => {
     const root = await mkdtemp(join(tmpdir(), "demo-platform-migrate-"));
     const before = join(root, "before");
@@ -31,18 +33,26 @@ describe("migration 0025 on an install of 0.1.61", () => {
     await mkdir(upTo);
     const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith(".sql")).sort();
     const at = files.indexOf(NAME);
-    expect(at).toBe(22);
+    // After media's 0024; 0023 was left unused on purpose.
+    expect(files[at - 1]).toBe("0024_billing_removal.sql");
+    expect(files.some((f) => f.startsWith("0023_"))).toBe(false);
     for (const f of files.slice(0, at)) await copyFile(join(MIGRATIONS_DIR, f), join(before, f));
     for (const f of files.slice(0, at + 1)) await copyFile(join(MIGRATIONS_DIR, f), join(upTo, f));
     const db = new NodeDb(join(root, "db.sqlite"));
     try {
       expect(await migrate(db, before)).toEqual(files.slice(0, at));
-      // As 0.1.61 wrote them: two workspaces, each with its owner.
+      // As 0.1.62 wrote them: two workspaces, each with its owner; C a second member of A who is
+      // later removed from it (membership gone, the row kept), and D a member of A whose account
+      // is deleted later on.
       for (const [ws, usr, mail] of [[WS_A, USR_A, "a@example.com"], [WS_B, USR_B, "b@example.com"]]) {
         await db.run("INSERT INTO workspace (id, name, created_at) VALUES (?, ?, 1)", [ws, `Workspace ${mail}`]);
         await db.run("INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, ?, 1)", [usr, ws, mail]);
         await db.run("INSERT INTO membership (workspace_id, user_id, role, created_at) VALUES (?, ?, 'owner', 1)", [ws, usr]);
       }
+      await db.run("INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, 'c@example.com', 1)", [USR_C, WS_A]);
+      await db.run("INSERT INTO membership (workspace_id, user_id, role, created_at) VALUES (?, ?, 'owner', 1)", [WS_A, USR_C]);
+      await db.run("INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, 'd@example.com', 1)", [USR_D, WS_A]);
+      await db.run("INSERT INTO membership (workspace_id, user_id, role, created_at) VALUES (?, ?, 'owner', 1)", [WS_A, USR_D]);
       const token = (n: string, ws: string, kind: "setup" | "sign_in") =>
         db.run("INSERT INTO api_token (id, workspace_id, name, hash, created_at, kind) VALUES (?, ?, ?, ?, 2, ?)", [id("tok", n), ws, `Token ${n}`, n.repeat(64), kind]);
       const collected = (n: string, tok: string, usr: string, ws: string) =>
@@ -66,6 +76,35 @@ describe("migration 0025 on an install of 0.1.61", () => {
       // 7: a connection of B, collected by B's owner.
       await token("7", WS_B, "sign_in");
       await collected("5", id("tok", "7"), USR_B, WS_B);
+      // Any other shape of record attaches the token only to one member of its own workspace:
+      // a: two records of the same collection naming A's owner: A's owner.
+      await token("a", WS_A, "sign_in");
+      await collected("6", id("tok", "a"), USR_A, WS_A);
+      await collected("7", id("tok", "a"), USR_A, WS_A);
+      // b: two records naming two members of A: which is unknown, so none.
+      await token("b", WS_A, "sign_in");
+      await collected("8", id("tok", "b"), USR_A, WS_A);
+      await collected("9", id("tok", "b"), USR_C, WS_A);
+      // c: a record with no account, and one with no workspace: none.
+      await token("c", WS_A, "sign_in");
+      await db.run("INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES (?, 3, 'connection_collected', NULL, ?, ?, NULL)", [id("aud", "c"), WS_A, id("tok", "c")]);
+      await db.run("INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES (?, 3, 'connection_collected', ?, NULL, ?, NULL)", [id("aud", "e"), USR_A, id("tok", "c")]);
+      // d: a record naming a member removed from A (C, membership gone, row kept): none.
+      await token("d", WS_A, "sign_in");
+      await collected("f", id("tok", "d"), USR_C, WS_A);
+      // e: a record naming an account deleted since (D): none.
+      await token("e", WS_A, "sign_in");
+      await collected("0", id("tok", "e"), USR_D, WS_A);
+      // f: a record naming B's owner and A's workspace for a token of B: the token is B's, the record says A: none.
+      await token("f", WS_B, "sign_in");
+      await collected("d", id("tok", "f"), USR_B, WS_A);
+      // g: a record with no subject names no token at all.
+      await token("g", WS_A, "sign_in");
+      await db.run("INSERT INTO audit (id, at, event, user_id, workspace_id, subject, detail) VALUES (?, 3, 'connection_collected', ?, ?, NULL, NULL)", [id("aud", "b"), USR_A, WS_A]);
+      // C leaves A; D's account is deleted, as a removal does: its rows first.
+      await db.run("DELETE FROM membership WHERE user_id = ?", [USR_C]);
+      await db.run("DELETE FROM membership WHERE user_id = ?", [USR_D]);
+      await db.run("DELETE FROM user WHERE id = ?", [USR_D]);
       const dump = async () => ({
         token: await db.all("SELECT * FROM api_token ORDER BY id"),
         audit: await db.all("SELECT * FROM audit ORDER BY id"),
@@ -93,15 +132,24 @@ describe("migration 0025 on an install of 0.1.61", () => {
         { id: id("tok", "5"), user_id: null },
         { id: id("tok", "6"), user_id: null },
         { id: id("tok", "7"), user_id: USR_B },
+        { id: id("tok", "a"), user_id: USR_A },
+        { id: id("tok", "b"), user_id: null },
+        { id: id("tok", "c"), user_id: null },
+        { id: id("tok", "d"), user_id: null },
+        { id: id("tok", "e"), user_id: null },
+        { id: id("tok", "f"), user_id: null },
+        { id: id("tok", "g"), user_id: null },
       ]);
+      // And no token is attached to an account outside its own workspace, whatever the records say.
+      expect(await db.all("SELECT k.id FROM api_token k JOIN user u ON u.id = k.user_id WHERE u.workspace_id <> k.workspace_id OR u.id NOT IN (SELECT m.user_id FROM membership m WHERE m.workspace_id = k.workspace_id)")).toEqual([]);
 
-      // 0.1.61's statements still run: they name no user_id.
+      // 0.1.62's statements still run: they name no user_id.
       await db.run("INSERT INTO api_token (id, workspace_id, name, hash, created_at) VALUES (?, ?, 'Later', ?, 4)", [id("tok", "8"), WS_A, "8".repeat(64)]);
       await db.run("DELETE FROM api_token WHERE workspace_id = ?", [WS_B]);
       await db.run("DELETE FROM membership WHERE user_id = ?", [USR_B]);
       await db.run("DELETE FROM user WHERE id = ?", [USR_B]);
       // The column takes an existing account only.
-      await expect(db.run("UPDATE api_token SET user_id = ? WHERE id = ?", [id("usr", "c"), id("tok", "1")])).rejects.toThrow(/FOREIGN KEY constraint failed/);
+      await expect(db.run("UPDATE api_token SET user_id = ? WHERE id = ?", [id("usr", "9"), id("tok", "1")])).rejects.toThrow(/FOREIGN KEY constraint failed/);
       await db.run("UPDATE api_token SET user_id = ? WHERE id = ?", [USR_A, id("tok", "1")]);
 
       expect(await migrate(db, upTo)).toEqual([]);

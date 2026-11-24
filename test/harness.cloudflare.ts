@@ -36,8 +36,8 @@ async function listAll(bucket: R2Bucket): Promise<string[]> {
   return keys.sort();
 }
 
-/** Empties the test database and buckets, then applies the migrations from scratch. */
-async function reset(): Promise<void> {
+/** Empties the test database and buckets, then applies the migrations from scratch (only those `keep` takes, when given). */
+async function reset(keep?: (name: string) => boolean): Promise<void> {
   assertLocalStorage();
   for (const bucket of [testEnv.DRAFTS, testEnv.PUB]) {
     const keys = await listAll(bucket);
@@ -52,7 +52,31 @@ async function reset(): Promise<void> {
       ...tables.results.map((t) => testEnv.DB.prepare(`DROP TABLE "${t.name.replaceAll('"', '""')}"`)),
     ]);
   }
-  await applyD1Migrations(testEnv.DB, testEnv.TEST_MIGRATIONS);
+  await applyD1Migrations(testEnv.DB, keep === undefined ? testEnv.TEST_MIGRATIONS : testEnv.TEST_MIGRATIONS.filter((m) => keep(m.name)));
+}
+
+/** The names the D1 migrations table records, in the order they were applied. */
+async function appliedNames(): Promise<string[]> {
+  return (await testEnv.DB.prepare("SELECT name FROM d1_migrations ORDER BY id").all<{ name: string }>()).results.map((r) => r.name);
+}
+
+/**
+ * Deps as makeDeps gives them, on a database that has only the migrations `keep` takes, as a
+ * site that has not applied the others yet. `migrate()` then applies the rest the way this
+ * target's own runner does (applyD1Migrations, which follows `wrangler d1 migrations apply`:
+ * every file whose name is not on record, in name order) and answers what it applied.
+ */
+export async function makeDepsBefore(keep: (name: string) => boolean, config?: Partial<Config>, opts: MakeOptions = {}) {
+  const made = await makeDeps(config, opts, keep);
+  return {
+    ...made,
+    applied: appliedNames,
+    migrate: async (): Promise<string[]> => {
+      const before = await appliedNames();
+      await applyD1Migrations(testEnv.DB, testEnv.TEST_MIGRATIONS);
+      return (await appliedNames()).filter((n) => !before.includes(n));
+    },
+  };
 }
 
 /**
@@ -62,8 +86,8 @@ async function reset(): Promise<void> {
 export type MakeOptions = { mail?: boolean };
 
 /** Deps on the test D1 database and R2 buckets, emptied and migrated. */
-export async function makeDeps(config?: Partial<Config>, opts: MakeOptions = {}) {
-  await reset();
+export async function makeDeps(config?: Partial<Config>, opts: MakeOptions = {}, keep?: (name: string) => boolean) {
+  await reset(keep);
   const c = counted(new D1Db(testEnv.DB), new R2FileStore(testEnv.DRAFTS), new R2FileStore(testEnv.PUB));
   const mail = new FakeMailer();
   const background = trackBackground();
