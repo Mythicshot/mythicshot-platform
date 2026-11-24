@@ -41,7 +41,9 @@
 // and passed on like any other line; the install writes neither.
 //
 // RECOVERY_LINKS is read only for the admin command below, and never put in the
-// environment: the command is handed it as an explicit yes or no.
+// environment: the command is handed it as an explicit yes or no. BILLING_REMOVAL (`on`
+// lets the admin command's billing-sweep remove what is due; anything else is off) is read
+// by that command only, never by the app, and is passed on like any other line.
 //
 // Tests: test/node-cpanel-app.test.ts.
 const fs = require("node:fs");

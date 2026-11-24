@@ -38,6 +38,7 @@ const TABLES = [
   "account_removal",
   "api_token",
   "audit",
+  "billing_warning",
   "chapter",
   "connect_key",
   "connect_request",

@@ -51,6 +51,7 @@ import {
   testKeys,
   type BillingSettings,
   isEnded,
+  isFinal,
   isLive,
   isReadOnly,
   standingOf,
@@ -58,6 +59,8 @@ import {
   type Standing,
 } from "./billing-rules.ts";
 import { apiError, json, readCapped } from "./http.ts";
+import { ONE_ACCOUNT_SQL, clockOf, planOf } from "./removal-rules.ts";
+import { WARNINGS_JSON_SQL, emailSha256, warningsOf } from "./removal-store.ts";
 import { linkOrigin } from "./mail.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 import { LIMITS_BILLING, hitLimit, workspaceKey } from "./rate.ts";
@@ -218,6 +221,52 @@ function isMissing(status: number, body: unknown): boolean {
 /** Whether Stripe's 404 may be taken as proof for removing data: never (see isMissing). */
 export function missingAllowsRemoval(): false {
   return false;
+}
+
+// ---- The billing sweep's last questions before a removal (src/billing-sweep.ts, 0.1.62) ----
+
+/**
+ * What Stripe says, right before a removal, of the subscription on the workspace's record
+ * (GET /v1/subscriptions/<id>, one call), for a definite answer that it is the record's own, of
+ * the record's customer: "ended" for a status Stripe never leaves (`canceled`,
+ * `incomplete_expired`); "cancel" for any other status that is not live (`unpaid`, `paused`,
+ * `incomplete`): the removal may go on, but only after prepareDeletion has cancelled it at Stripe
+ * and Stripe said `canceled`; "live" when Stripe says it is live: with `repair` the stored state is
+ * then brought to what Stripe says, as a read-back does (storeSubscription, under its guard);
+ * with `repair` "all" so is any answer, so that prepareDeletion cancels what Stripe says is not
+ * over even when the record says otherwise. "pending" for `incomplete`, a first payment in progress, which holds the sweep (never
+ * cancelled). "unknown" for everything else: no answer, a timeout,
+ * a permission error, any status but 200, a body not of the shape expected, another customer, and
+ * a 404, which missingAllowsRemoval says is never proof. Nothing is removed on "live" or "unknown".
+ */
+export async function subscriptionBeforeRemoval(deps: Deps, row: BillingRow, repair: boolean | "all"): Promise<"ended" | "cancel" | "pending" | "live" | "unknown"> {
+  if (row.subscription === null || row.customer === null) return "unknown";
+  const read = await readSubscription(deps, row.subscription);
+  if (read === "missing") return missingAllowsRemoval() ? "ended" : "unknown";
+  if (read === null || read.customer !== row.customer) return "unknown";
+  if (isLive(read.status)) {
+    if (repair) await storeSubscription(deps, null, row, read, null);
+    return "live";
+  }
+  if (repair === "all") await storeSubscription(deps, null, row, read, null);
+  // A first payment in progress (second review N2): Stripe itself resolves it to `active` or
+  // `incomplete_expired`, so the sweep neither cancels nor removes; it asks again next run.
+  if (read.status === "incomplete") return "pending";
+  return isFinal(read.status) ? "ended" : "cancel";
+}
+
+/**
+ * What Stripe says, right before a removal, of one checkout this site made for the workspace
+ * (GET /v1/checkout/sessions/<id>, one call): "expired" only for that definite answer; "open"
+ * or "complete" (paid) as Stripe says, with the subscription a complete one made; "unknown" for
+ * anything else, a 404 included. "expired" lets a removal go on, and so does "complete" for the
+ * subscription already on the workspace's record (its notice linked it; the sweep decides).
+ */
+export async function checkoutBeforeRemoval(deps: Deps, id: string): Promise<{ status: "expired" | "open" | "complete" | "unknown"; subscription: string | null }> {
+  if (idOf(id, "checkout") === null) return { status: "unknown", subscription: null };
+  const now = await checkoutNow(deps, id);
+  if (now === null) return { status: "unknown", subscription: null };
+  return { status: now.status, subscription: now.status === "complete" ? subscriptionNamedBy(now.body) : null };
 }
 
 /** A subscription as read back from Stripe. */
@@ -473,7 +522,25 @@ export async function accessNarrows(deps: Deps, kind: "tour" | "media", workspac
 /** The dashboard's name for where a workspace stands (GET /api/v1/billing). */
 export type BillingStateName = "exempt" | "trial" | "trial_over" | "subscribed" | "past_due" | "ending" | "ended";
 
-function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, allowance: number | null) {
+/**
+ * The dates of a workspace on the removal clock (src/removal-rules.ts) as the sweep acts on them:
+ * when its links come down and its removal day, the warnings already sent counted in. Null for a
+ * workspace on no clock. One call, made only for a trial or an ended subscription.
+ */
+async function removalShown(deps: Deps, row: BillingRow, standing: Standing, userId: string, now: number): Promise<{ linksUntil: number; removedAt: number } | null> {
+  if (standing.kind !== "trial" && standing.kind !== "trial_over" && standing.kind !== "ended") return null;
+  const found = await deps.db.first<{ site: number; shared: number; email: string | null; warnings: string }>(
+    `SELECT EXISTS (SELECT 1 FROM setup s WHERE s.workspace_id = workspace.id) AS site, CASE WHEN ${ONE_ACCOUNT_SQL("workspace.id")} THEN 0 ELSE 1 END AS shared, (SELECT u.email FROM user u WHERE u.id = ?) AS email, ${WARNINGS_JSON_SQL} AS warnings FROM workspace WHERE workspace.id = ?`,
+    [userId, row.id],
+  );
+  if (found === null) return null;
+  const clock = clockOf(row, found.site === 1, now, found.shared === 1);
+  if (clock === null) return null;
+  const plan = planOf(clock, warningsOf(found.warnings), found.email === null ? "" : await emailSha256(found.email), now);
+  return { linksUntil: clock.linksDownAt, removedAt: plan.removalAt };
+}
+
+function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, allowance: number | null, removal: { linksUntil: number; removedAt: number } | null = null) {
   const base = {
     plan: PLAN_NAME,
     used_bytes: used,
@@ -494,12 +561,15 @@ function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, al
   switch (s.kind) {
     case "exempt":
       return { state: "exempt" as BillingStateName, ...base };
+    // The removal's dates are the clock's (removalShown), the ones the sweep acts on; a workspace
+    // the clock leaves out (an allowance set by hand) keeps the dates of the version before.
     case "trial":
-      return { state: "trial" as BillingStateName, ...base, trial_ends_at: s.endsAt, days_left: daysTo(s.endsAt), removed_at: s.endsAt };
+      return { state: "trial" as BillingStateName, ...base, trial_ends_at: s.endsAt, days_left: daysTo(s.endsAt), removed_at: removal?.removedAt ?? s.endsAt };
     case "trial_over":
-      return { state: "trial_over" as BillingStateName, ...base, trial_ends_at: s.endedAt, days_left: 0, removed_at: s.endedAt };
+      return { state: "trial_over" as BillingStateName, ...base, trial_ends_at: s.endedAt, days_left: 0, removed_at: removal?.removedAt ?? s.endedAt };
     case "ended":
-      return { state: "ended" as BillingStateName, ...base, ended_at: s.endedAt, links_until: s.endedAt + LINKS_GRACE_MS, removed_at: s.endedAt + REMOVAL_MS };
+      // Not on the clock (an allowance set by hand): neither the links nor the content go, so no date is shown.
+      return { state: "ended" as BillingStateName, ...base, ended_at: s.endedAt, links_until: removal?.linksUntil ?? null, removed_at: removal?.removedAt ?? null };
     case "subscribed":
       if (s.endsAt !== null) {
         return { state: "ending" as BillingStateName, ...base, ends_at: s.endsAt, links_until: s.endsAt + LINKS_GRACE_MS, removed_at: s.endsAt + REMOVAL_MS };
@@ -640,6 +710,89 @@ async function closeCheckout(deps: Deps, row: BillingRow, sessionId: string): Pr
   return "paid";
 }
 
+/**
+ * The billing sweep's repair of a paid checkout found in stripe_checkout whose notice never linked
+ * it (second review N1): Stripe says the checkout is complete, so its subscription is read back and
+ * linked to the workspace exactly as the completed notice links a checkout this site made (the
+ * reference must be the workspace's, no other live subscription replaced, the customer the one on
+ * record if any), with the audit row `billing_checkout_paid_unlinked`, a billing problem for the
+ * admin, whatever the link's outcome, once per checkout (stripe_checkout.paid_noted_at). "linked" when the workspace now holds that subscription,
+ * "not_linked" otherwise (the removal stays held either way). With a dry run's database nothing is
+ * written. At most three calls to Stripe and three to the database.
+ */
+export async function repairPaidCheckout(deps: Deps, workspaceId: string, checkoutId: string): Promise<"linked" | "not_linked"> {
+  const row = await billingRowOf(deps, workspaceId);
+  if (row === null) return "not_linked";
+  // Recorded once per checkout (third review L2): the record's mark and the audit row in one batch.
+  try {
+    await deps.db.batch([
+      { sql: "UPDATE stripe_checkout SET paid_noted_at = ? WHERE id = ? AND workspace_id = ? AND paid_noted_at IS NULL", params: [deps.now(), checkoutId, workspaceId] },
+      auditStatement(deps, { event: "billing_checkout_paid_unlinked", workspaceId }, { onlyAfterOneChange: true }),
+    ]);
+  } catch (err) {
+    // Noted at an earlier sweep: not again.
+    if (!isNotNullViolation(err)) throw err;
+  }
+  const now = await checkoutNow(deps, checkoutId);
+  if (now?.status !== "complete") return "not_linked";
+  const subId = subscriptionNamedBy(now.body);
+  if (subId === null || now.body.client_reference_id !== row.id || (row.subscription !== null && row.subscription !== subId && isLive(row.status))) return "not_linked";
+  const read = await readSubscription(deps, subId);
+  if (read === null || read === "missing" || (row.customer !== null && row.customer !== read.customer)) return "not_linked";
+  const named = idOf(now.body.customer, "customer");
+  if (named !== null && named !== read.customer) return "not_linked";
+  const stored = await storeSubscription(deps, null, row, read, checkoutId);
+  return stored === "stored" || stored === "unchanged" ? "linked" : "not_linked";
+}
+
+/** How many open invoices one request voids at most; more are voided by the next. */
+const VOIDS_PER_CALL = 10;
+const INVOICE_ID = /^in_[A-Za-z0-9_]{1,250}$/;
+
+/**
+ * Voids the open invoices of a subscription being removed or deleted (second review N3), so none
+ * stays payable once the subscription is cancelled: GET /v1/invoices?subscription=…&status=open,
+ * then POST /v1/invoices/<id>/void for each, within `room`. "ok" when none is left open; "more"
+ * when invoices are left for the next request; "failed" when Stripe's list or a void gave no
+ * definite answer, and then nothing may be removed. Needs a check against a Stripe sandbox.
+ */
+async function voidOpenInvoices(deps: Deps, subscriptionId: string, room: (cost: number) => boolean): Promise<"ok" | "more" | "failed"> {
+  if (deps.stripe === undefined) return "failed";
+  let list;
+  try {
+    list = await deps.stripe.call("GET", "/v1/invoices", [["subscription", subscriptionId], ["status", "open"], ["limit", String(VOIDS_PER_CALL)]]);
+  } catch {
+    return "failed";
+  }
+  if (list.status !== 200 || !isObj(list.body) || !Array.isArray(list.body.data)) return "failed";
+  for (const inv of list.body.data) {
+    if (!isObj(inv) || typeof inv.id !== "string" || !INVOICE_ID.test(inv.id)) return "failed";
+    if (inv.status !== "open") continue;
+    if (!room(1)) return "more";
+    try {
+      const v = await deps.stripe.call("POST", `/v1/invoices/${inv.id}/void`);
+      if (v.status !== 200 || !isObj(v.body) || v.body.status !== "void") return "failed";
+    } catch {
+      return "failed";
+    }
+  }
+  return list.body.has_more === true ? "more" : "ok";
+}
+
+/** True when a removal of the workspace or of the account is recorded, or the account is not active (0.1.62). One call. */
+export async function closing(deps: Deps, workspaceId: string, userId: string): Promise<boolean> {
+  const found = await deps.db.first<{ removing: number; status: string | null }>(
+    "SELECT EXISTS (SELECT 1 FROM account_removal r WHERE r.workspace_id = ? OR r.user_id = ?) AS removing, (SELECT u.status FROM user u WHERE u.id = ?) AS status",
+    [workspaceId, userId, userId],
+  );
+  return found === null || found.removing === 1 || found.status !== "active";
+}
+
+/** The refusal of a checkout (and of a download, src/export.ts) for an account being deleted: the admin API's own `deleting`. */
+export function deletingAccount(): Response {
+  return apiError(409, "deleting", "this account is being deleted; nothing can be bought or downloaded for it");
+}
+
 function alreadySubscribed(): Response {
   return apiError(409, "already_subscribed", "the workspace already has a subscription; manage it on Stripe's page");
 }
@@ -682,7 +835,8 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     if (asked !== undefined && idOf(asked, "checkout") !== null && (await ownCheckout(deps, auth.workspaceId, asked))) {
       checkout = (await checkoutNow(deps, asked))?.status ?? "unknown";
     }
-    return json(200, { ...stateAnswer(standing, row, now, usage.used, usage.allowance), checkout });
+    const removal = await removalShown(deps, row, standing, auth.session?.userId ?? "", now);
+    return json(200, { ...stateAnswer(standing, row, now, usage.used, usage.allowance, removal), checkout });
   });
 
   /**
@@ -716,6 +870,8 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     const row = await rowWithEmail(deps, auth.workspaceId, auth.session.userId);
     if (row === null) return apiError(404, "not_found", "no such workspace");
     if (isLive(row.status)) return alreadySubscribed();
+    // 0.1.62: no checkout for an account being removed (or one that is not active).
+    if (await closing(deps, auth.workspaceId, auth.session.userId)) return deletingAccount();
 
     const now = deps.now();
     if (row.checkout_session !== null) {
@@ -760,6 +916,17 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     }
     const secret = b.client_secret;
 
+    // A removal recorded while Stripe made it (0.1.62): its secret is never handed out, so nobody
+    // can pay it, and it is expired at Stripe.
+    if (await closing(deps, auth.workspaceId, auth.session.userId)) {
+      try {
+        await stripe.call("POST", `/v1/checkout/sessions/${sessionId}/expire`);
+      } catch {
+        // Best effort: without its secret nobody can pay it, and it expires by itself.
+      }
+      return deletingAccount();
+    }
+
     // Recorded first, whatever happens next: this record is how its completed notice finds the workspace.
     await deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING", [sessionId, auth.workspaceId, now, expiresAt * 1000]);
     try {
@@ -767,7 +934,8 @@ export function billingRoutes(app: Hono, deps: Deps): void {
         {
           sql:
             "UPDATE workspace SET checkout_session_id = ?, checkout_created_at = ? WHERE id = ? AND (checkout_session_id IS ? OR checkout_session_id = ?)" +
-            " AND (subscription_status IS NULL OR subscription_status NOT IN ('active', 'trialing', 'past_due'))",
+            " AND (subscription_status IS NULL OR subscription_status NOT IN ('active', 'trialing', 'past_due'))" +
+            " AND NOT EXISTS (SELECT 1 FROM account_removal r WHERE r.workspace_id = workspace.id)",
           params: [sessionId, now, auth.workspaceId, row.checkout_session, sessionId],
         },
         auditStatement(deps, { event: "billing_checkout_started", userId: auth.session.userId, workspaceId: auth.workspaceId }, { onlyAfterOneChange: true }),
@@ -1023,13 +1191,14 @@ async function cancelAtStripe(deps: Deps, id: string): Promise<Subscription | "m
     if (isMissing(a.status, a.body)) return "missing";
     if (a.status === 200 && isObj(a.body)) {
       const sub = subscriptionOf(a.body, id);
-      if (sub !== null && isEnded(sub.status)) return sub;
+      // Only a status Stripe never leaves is a cancel (0.1.62): an `unpaid` one could still be paid.
+      if (sub !== null && isFinal(sub.status)) return sub;
     }
   } catch {
     // No answer: asked again below.
   }
   const read = await readSubscription(deps, id);
-  return read === "missing" || (read !== null && isEnded(read.status)) ? read : null;
+  return read === "missing" || (read !== null && isFinal(read.status)) ? read : null;
 }
 
 /**
@@ -1082,16 +1251,21 @@ async function settleCheckout(deps: Deps, workspaceId: string, adminId: string, 
  * that has not expired is closed at Stripe (settleCheckout), within the calls `room` allows.
  * "ok" when all is settled (and at once, with no call, without billing); "more" when checkouts
  * are left for the next request; "failed" when Stripe gave no definite answer, and then nothing
- * may be deleted.
+ * may be deleted. `missingIsGone` false (the billing sweep): Stripe's 404 for the subscription is
+ * "failed" too, never "gone".
  */
-export async function prepareDeletion(deps: Deps, workspaceId: string, adminId: string, room: (cost: number) => boolean): Promise<"ok" | "more" | "failed"> {
+export async function prepareDeletion(deps: Deps, workspaceId: string, adminId: string, room: (cost: number) => boolean, missingIsGone = true): Promise<"ok" | "more" | "failed"> {
   if (!billingConfigured(deps.config)) return "ok";
   const row = await billingRowOf(deps, workspaceId);
   if (row === null) return "ok";
-  if (row.subscription !== null && !isEnded(row.status)) {
+  // 0.1.62: every subscription on record that is not definitely over (`canceled`,
+  // `incomplete_expired`) is cancelled first, `unpaid` included, which could still be paid.
+  if (row.subscription !== null && !isFinal(row.status)) {
     if (!room(4)) return "more";
     const cancelled = await cancelAtStripe(deps, row.subscription);
     if (cancelled === null) return "failed";
+    // The billing sweep takes no 404 as proof that a subscription is gone (missingAllowsRemoval).
+    if (cancelled === "missing" && !missingIsGone && !missingAllowsRemoval()) return "failed";
     if (cancelled === "missing") {
       await deps.db.run("UPDATE workspace SET subscription_status = 'canceled', subscription_ended_at = coalesce(subscription_ended_at, ?) WHERE id = ? AND stripe_subscription_id = ?", [deps.now(), workspaceId, row.subscription]);
     } else {
@@ -1103,6 +1277,12 @@ export async function prepareDeletion(deps: Deps, workspaceId: string, adminId: 
         auditStatement(deps, { event: "billing_cancelled_for_deletion", userId: adminId, workspaceId }, { onlyAfterOneChange: true }),
       ]);
     }
+  }
+  // Its open invoices are voided (second review N3), each request until none is left open.
+  if (row.subscription !== null) {
+    if (!room(2)) return "more";
+    const voided = await voidOpenInvoices(deps, row.subscription, room);
+    if (voided !== "ok") return voided;
   }
   if (!room(1)) return "more";
   const open = await deps.db.all<{ id: string }>("SELECT id FROM stripe_checkout WHERE workspace_id = ? AND expires_at > ? ORDER BY id LIMIT 20", [workspaceId, deps.now()]);
@@ -1119,7 +1299,7 @@ export async function prepareDeletion(deps: Deps, workspaceId: string, adminId: 
  * its reference or its customer (customer_taken, customer_differs, reference_differs). Each is
  * money taken without access, for the admin to look at in Stripe.
  */
-const PROBLEM = "(event IN ('billing_checkout_unmatched', 'billing_second_subscription', 'billing_answer_refused') OR (event = 'billing_checkout_mismatch' AND json_extract(detail, '$.paid') = 1))";
+const PROBLEM = "(event IN ('billing_checkout_unmatched', 'billing_second_subscription', 'billing_answer_refused', 'billing_removal_stopped', 'billing_checkout_paid_unlinked') OR (event = 'billing_checkout_mismatch' AND json_extract(detail, '$.paid') = 1))";
 
 /** The billing problems the site's admin should look at: the count, and the newest rows (event, workspace, time). */
 export async function billingProblems(deps: Deps): Promise<{ count: number; recent: { event: string; workspace_id: string | null; at: number }[] }> {

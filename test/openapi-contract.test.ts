@@ -61,7 +61,10 @@ import { sessionOf, withBilling } from "./fake-stripe.ts";
  * - GET /api/v1/me 404 needs a token whose workspace is gone, which the database's own
  *   rules forbid: the one read of the workspace's name is made to find nothing.
  */
-const NOT_EXERCISED: Readonly<Record<string, string>> = {};
+const NOT_EXERCISED: Readonly<Record<string, string>> = {
+  "DELETE /api/v1/admin/accounts/{id} 409 not_deleting":
+    "a race: an undo that lands while the delete asks the payment service to cancel; it needs billing and a fake payment service that runs the undo mid-call, which test/billing-removal-rework.test.ts has (M1)",
+};
 
 const DOC = openapi();
 const JSON_TYPE = "application/json";
@@ -1017,6 +1020,18 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
       deps.drafts.delete = realDelete;
     }
     refused(await api.call("POST", account(member.userId, "/enable"), { headers }), 409, "deleting");
+
+    // Undoing a delete (0.1.62): this one has begun removing, so it is refused; one that removed nothing is undone.
+    const undo = (id: string) => api.call("POST", account(id, "/undo-removal"), { headers });
+    refused(await undo(member.userId), 409, "removal_started");
+    refused(await undo(admin.userId), 409, "own_account");
+    refused(await undo(NO_ACCOUNT), 404, "not_found");
+    await deps.db.run("INSERT INTO account_removal (user_id, workspace_id, started_by, total, created_at) VALUES (?, ?, ?, 0, ?)", [other.userId, other.workspaceId, admin.userId, deps.now()]);
+    expect((await undo(other.userId)).status).toBe(204);
+    refused(await undo(other.userId), 409, "not_deleting");
+    // A removal the billing sweep stopped (second review N3): undone even once begun, with the files it had removed.
+    await deps.db.run("INSERT INTO account_removal (user_id, workspace_id, started_by, total, created_at, work_started_at, stopped_at) VALUES (?, ?, ?, 2, ?, ?, ?)", [other.userId, other.workspaceId, "usr_" + "0".repeat(24), deps.now(), deps.now(), deps.now()]);
+    expect((await undo(other.userId)).json).toEqual({ restored: false, files_removed: 2 });
 
     // A delete with more files than one request removes: rows naming files that do not
     // exist are written first (removing a file that is already gone is not an error).

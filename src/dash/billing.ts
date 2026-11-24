@@ -23,6 +23,7 @@
 //   record says it is subscribed, which only Stripe's signed notice makes so.
 // A failure shows the dashboard's one failure sentence (Dash.failure) and nothing new.
 import { RETURN_PATH, SUBSCRIBE_PATH } from "../billing-rules.ts";
+import { DOWNLOAD_ALL_BUILT } from "../removal-rules.ts";
 import { STRIPE_JS_URL } from "../stripe.ts";
 import { dashHtml } from "./shell.ts";
 
@@ -42,6 +43,30 @@ export const TRIAL_OVER_WORDS = {
   strip: "Your trial has ended. You can view, download and delete, but not publish. Subscribe to keep your tours, images and clips.",
   row: "Trial ended",
 } as const;
+
+/** Section 7's sentence, added to the trial-ending and ended notices once the download exists. */
+export const DOWNLOAD_SENTENCE = "You can download everything from your Account page.";
+
+/**
+ * The line of the notice script that adds DOWNLOAD_SENTENCE to the notice of a trial ending within
+ * 7 days, a trial that has ended and an ended subscription: only in a build with the download
+ * (DOWNLOAD_ALL_BUILT, src/removal-rules.ts); without it the script is the one before, byte for byte.
+ */
+const DOWNLOAD_LINE = DOWNLOAD_ALL_BUILT
+  ? `    if (s.state === "ended" || s.state === "trial_over" || (s.state === "trial" && kind === "warn")) text = text.concat(downloadParts());
+`
+  : "";
+
+/** Where "Account page" in DOWNLOAD_SENTENCE leads: the "Download all my data" card (src/dash/account.ts). */
+export const DOWNLOAD_PLACE = "/account#h-data";
+
+/**
+ * The trial notice's sentence about the removal (approved by the owner), around the removal day:
+ * "On <date> your content is permanently removed unless you subscribe." Always shown with the
+ * policy's removal day, as the other notices and the mails state it; BILLING_REMOVAL only delays
+ * the removal itself (the warnings are its precondition).
+ */
+export const TRIAL_REMOVAL_WORDS = { on: " On ", rest: " your content is permanently removed unless you subscribe." } as const;
 
 /** The approved words of the notices and the Billing card (mockup sections 2 and 3). */
 const WORDS = {
@@ -85,13 +110,17 @@ const WORDS = {
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
-/** The shared part of the billing scripts: dates as "21 February 2027", and making elements. */
+/**
+ * The shared part of the billing scripts: dates as "21 February 2027", and making elements. A
+ * date is the UTC day (0.1.62), as the warning mails write it and the removal sweep counts it, so
+ * the day shown is the day acted on wherever the person is.
+ */
 const COMMON = `  var MONTHS = ${JSON.stringify(MONTHS)};
   var $ = function (id) { return document.getElementById(id); };
   function dateOf(ms) {
     if (typeof ms !== "number" || !isFinite(ms)) return "";
     var d = new Date(ms);
-    return d.getDate() + " " + MONTHS[d.getMonth()] + " " + d.getFullYear();
+    return d.getUTCDate() + " " + MONTHS[d.getUTCMonth()] + " " + d.getUTCFullYear();
   }
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -105,6 +134,12 @@ export const BILLING_JS = `(function () {
   "use strict";
   var W = ${JSON.stringify(WORDS)};
   var OVER = ${JSON.stringify(TRIAL_OVER_WORDS)};
+  var REMOVAL = ${JSON.stringify(TRIAL_REMOVAL_WORDS)};
+  var CUT = ${JSON.stringify(DOWNLOAD_SENTENCE.split("Account page"))};
+  // "You can download everything from your Account page.", its "Account page" a link to the download card.
+  function downloadParts() {
+    return [[" " + CUT[0], false], ["Account page", false, ${JSON.stringify(DOWNLOAD_PLACE)}], [CUT[1], false]];
+  }
 ${COMMON}
 
   // A link to the Subscribe page, as a button.
@@ -155,6 +190,8 @@ ${COMMON}
     var days = num(s.days_left);
     if (s.state === "trial" && days !== null && days > 7) {
       text = [[W.trialLead, true], [" " + days + (days === 1 ? W.dayLeft : W.daysLeft) + Dash.formatBytes(s.used_bytes) + W.of + Dash.formatBytes(s.allowance_bytes) + W.stop, false]];
+      // The policy's removal day and where to download everything (owner's wording), as every notice states it.
+      if (num(s.removed_at) !== null) text = text.concat([[REMOVAL.on + dateOf(s.removed_at) + REMOVAL.rest, false]], downloadParts());
       action = subscribeLink(W.subscribe);
     } else if (s.state === "trial" && days !== null) {
       kind = "warn";
@@ -171,15 +208,27 @@ ${COMMON}
       action = s.manage === true ? manageButton(line) : null;
     } else if (s.state === "ended") {
       kind = "bad";
-      text = [[W.ended, true], [W.endedRest + dateOf(s.links_until) + W.endedAnd + dateOf(s.removed_at) + W.stop, false]];
+      // An ended workspace on no removal clock (an allowance set by hand) has no dates: the
+      // sentence ends before them (0.1.62), in the same approved words.
+      text = num(s.links_until) !== null && num(s.removed_at) !== null
+        ? [[W.ended, true], [W.endedRest + dateOf(s.links_until) + W.endedAnd + dateOf(s.removed_at) + W.stop, false]]
+        : [[W.ended, true], [W.endedRest.slice(0, W.endedRest.indexOf(" Your links")), false]];
       action = subscribeLink(W.subscribeAgain);
     } else {
       return;
     }
-    var bar = el("div", kind === "" ? "billing-strip" : "billing-strip " + kind);
+${DOWNLOAD_LINE}    var bar = el("div", kind === "" ? "billing-strip" : "billing-strip " + kind);
     bar.id = "billing-strip";
     var span = el("span", "billing-strip-text");
-    text.forEach(function (part) { span.appendChild(part[1] ? el("b", "", part[0]) : document.createTextNode(part[0])); });
+    text.forEach(function (part) {
+      if (part[2]) {
+        var a = el("a", "", part[0]);
+        a.setAttribute("href", part[2]);
+        span.appendChild(a);
+      } else {
+        span.appendChild(part[1] ? el("b", "", part[0]) : document.createTextNode(part[0]));
+      }
+    });
     bar.appendChild(span);
     if (action !== null) bar.appendChild(action);
     bar.appendChild(line);
@@ -243,8 +292,9 @@ ${COMMON}
     } else if (s.state === "ended") {
       title.textContent = W.noSubscription;
       c.appendChild(row(W.endedRow, dateOf(s.ended_at)));
-      c.appendChild(row(W.linksUntil, dateOf(s.links_until)));
-      c.appendChild(row(W.contentRemoved, dateOf(s.removed_at)));
+      // Without the removal's dates (no clock: an allowance set by hand) the two rows are left out.
+      if (num(s.links_until) !== null) c.appendChild(row(W.linksUntil, dateOf(s.links_until)));
+      if (num(s.removed_at) !== null) c.appendChild(row(W.contentRemoved, dateOf(s.removed_at)));
       c.appendChild(el("p", "hint", W.endedText));
       acts.appendChild(subscribeLink(W.subscribeAgain));
     } else {

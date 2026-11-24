@@ -56,6 +56,7 @@
 // last, so they can say which file could not be read, if any.
 import type { Hono } from "hono";
 import { auditStatement } from "./audit.ts";
+import { closing, deletingAccount } from "./billing.ts";
 import { constantTimeEqual, requireAuth, type Auth } from "./auth.ts";
 import { SUBREQUEST_BUDGET } from "./budget.ts";
 import { apiError, json } from "./http.ts";
@@ -757,6 +758,17 @@ export async function exportInProgress(deps: Deps, workspaceId: string, now: num
   return row !== null;
 }
 
+/**
+ * True when a download of the workspace is being sent at this moment: a ticket opened and not
+ * ended, within RUNNING_MS (a crashed one stops counting then). One database call. For the removal
+ * sweep (0.1.62), which after a day of holds waits only for one of these.
+ */
+export async function exportStreaming(deps: Deps, workspaceId: string, now: number): Promise<boolean> {
+  const key = await workspaceKey(workspaceId);
+  const row = await deps.db.first<{ one: number }>(`SELECT 1 AS one FROM rate_counter WHERE bucket = ? AND key = ? AND count = ${RUNNING} AND window_start > ? LIMIT 1`, [EXPORT_RUNNING_BUCKET, key, now - RUNNING_MS]);
+  return row !== null;
+}
+
 const ZIP_HEADERS: Record<string, string> = {
   "content-type": "application/zip",
   "content-disposition": `attachment; filename="${EXPORT_FILE_NAME}"`,
@@ -774,6 +786,8 @@ export function exportRoutes(app: Hono, deps: Deps): void {
   app.get(EXPORT_PATH, async (c) => {
     const auth = await requireAuth(c.req.raw, deps, SESSION_OPEN);
     if (auth instanceof Response) return auth;
+    // 0.1.62: refused while a removal of the workspace is recorded (the checkout route's own check).
+    if (await closing(deps, auth.workspaceId, auth.session?.userId ?? "")) return deletingAccount();
     return json(200, { running: await exportInProgress(deps, auth.workspaceId, deps.now()) });
   });
 
@@ -797,8 +811,9 @@ export function exportRoutes(app: Hono, deps: Deps): void {
       taken = (
         await deps.db.run(
           `INSERT INTO rate_counter (bucket, key, window_start, count) SELECT ?, ?, ?, ${READY}
-            WHERE NOT EXISTS (SELECT 1 FROM rate_counter WHERE bucket = ? AND key = ? AND ${LIVE})`,
-          [EXPORT_RUNNING_BUCKET, key, now, EXPORT_RUNNING_BUCKET, key, now - TICKET_MS, now - RUNNING_MS],
+            WHERE NOT EXISTS (SELECT 1 FROM rate_counter WHERE bucket = ? AND key = ? AND ${LIVE})
+              AND NOT EXISTS (SELECT 1 FROM account_removal r WHERE r.workspace_id = ?)`,
+          [EXPORT_RUNNING_BUCKET, key, now, EXPORT_RUNNING_BUCKET, key, now - TICKET_MS, now - RUNNING_MS, auth.workspaceId],
         )
       ).changes;
     } catch (err) {
@@ -806,7 +821,9 @@ export function exportRoutes(app: Hono, deps: Deps): void {
       if (!isUniqueViolation(err)) throw err;
       taken = 0;
     }
-    if (taken !== 1) return busy();
+    // Not taken: another download is under way, or (0.1.62) a removal of the workspace is recorded,
+    // which only then costs the read that tells them apart.
+    if (taken !== 1) return (await closing(deps, auth.workspaceId, auth.session.userId)) ? deletingAccount() : busy();
     return json(200, { url: `${EXPORT_PATH}/${await ticketOf(secret, auth, now)}` });
   });
 
@@ -837,8 +854,10 @@ export function exportRoutes(app: Hono, deps: Deps): void {
     try {
       await deps.db.batch([
         {
-          sql: `UPDATE rate_counter SET count = ${RUNNING} WHERE bucket = ? AND key = ? AND window_start = ? AND count = ${READY} AND window_start > ?`,
-          params: [EXPORT_RUNNING_BUCKET, key, start, now - TICKET_MS],
+          // 0.1.62: never claimed while a removal of the workspace is recorded (no call more).
+          sql: `UPDATE rate_counter SET count = ${RUNNING} WHERE bucket = ? AND key = ? AND window_start = ? AND count = ${READY} AND window_start > ?
+                  AND NOT EXISTS (SELECT 1 FROM account_removal r WHERE r.workspace_id = ?)`,
+          params: [EXPORT_RUNNING_BUCKET, key, start, now - TICKET_MS, auth.workspaceId],
         },
         auditStatement(deps, { event: "data_exported", userId: auth.session.userId, workspaceId: auth.workspaceId }, { onlyAfterOneChange: true }),
       ]);

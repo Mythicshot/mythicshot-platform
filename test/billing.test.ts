@@ -8,6 +8,7 @@ import { createApp } from "../src/app.ts";
 import { BILLING_PATHS, LISTENER_MAX_BYTES, SUBSCRIPTION_ENDED, verifyStripeSignature } from "../src/billing.ts";
 import { PLAN_BYTES, TRIAL_BYTES, TRIAL_MS, billingFromSettings } from "../src/billing-rules.ts";
 import type { Deps } from "../src/ports.ts";
+import { removalDayOf } from "../src/removal-rules.ts";
 import { STRIPE_API_VERSION, stripeOverFetch } from "../src/stripe.ts";
 import { usageOf } from "../src/usage.ts";
 import { BILLING, BILLING_CONFIG, FakeStripe, eventOf, notify, sessionOf, v1Of, CS, SECRET, withBilling } from "./fake-stripe.ts";
@@ -143,11 +144,12 @@ describe("the allowance and the read-only rule", () => {
     expect(await allowance(s.a.workspaceId)).toBe(TRIAL_BYTES);
     expect(TRIAL_BYTES).toBe(104_857_600);
     expect(PLAN_BYTES).toBe(5_368_709_120);
-    for (const status of ["active", "trialing", "past_due", "canceled", "unpaid", "incomplete_expired"]) {
+    for (const status of ["active", "trialing", "past_due", "canceled", "unpaid"]) {
       await s.deps.db.run("UPDATE workspace SET subscription_status = ? WHERE id = ?", [status, s.a.workspaceId]);
       expect(await allowance(s.a.workspaceId), status).toBe(PLAN_BYTES);
     }
-    for (const status of ["incomplete", "paused"]) {
+    // 0.1.62 (review M2), on purpose: a first payment that never completed (incomplete_expired) never went live, so it is the trial.
+    for (const status of ["incomplete", "incomplete_expired", "paused"]) {
       await s.deps.db.run("UPDATE workspace SET subscription_status = ? WHERE id = ?", [status, s.a.workspaceId]);
       expect(await allowance(s.a.workspaceId), status).toBe(TRIAL_BYTES);
     }
@@ -595,7 +597,8 @@ describe("the state the dashboard reads", () => {
       ends_at: null,
       ended_at: null,
       links_until: null,
-      removed_at: T0 + TRIAL_MS,
+      // The first full UTC day after the trial (0.1.62): the day the sweep acts on.
+      removed_at: removalDayOf(T0 + TRIAL_MS),
       manage: false,
       confirming: false,
       checkout: null,
@@ -623,7 +626,7 @@ describe("the state the dashboard reads", () => {
     const s = await site();
     const ended = 1_800_000_000_000 + 5 * DAY;
     await s.deps.db.run("UPDATE workspace SET stripe_customer_id = 'cus_A', stripe_subscription_id = 'sub_A', subscription_status = 'canceled', subscription_ended_at = ? WHERE id = ?", [ended, s.a.workspaceId]);
-    expect((await asSession(s.deps, "GET", BILLING_PATHS.state, s.sa.headers)).json).toMatchObject({ state: "ended", ended_at: ended, links_until: ended + 30 * DAY, removed_at: ended + 90 * DAY, manage: true });
+    expect((await asSession(s.deps, "GET", BILLING_PATHS.state, s.sa.headers)).json).toMatchObject({ state: "ended", ended_at: ended, links_until: ended + 30 * DAY, removed_at: removalDayOf(ended + 90 * DAY), manage: true });
     await s.deps.db.run("UPDATE workspace SET billing_trial = 0 WHERE id = ?", [s.b.workspaceId]);
     expect((await asSession(s.deps, "GET", BILLING_PATHS.state, s.sb.headers)).json.state).toBe("exempt");
     // The session says billing is on.

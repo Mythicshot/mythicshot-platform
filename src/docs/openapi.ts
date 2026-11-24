@@ -419,6 +419,14 @@ function schemas(): Record<string, Schema> {
     RenameBody: input(["title"], { title: text(LIMITS.title, "The new title: trimmed, no control or format characters.", 1) }),
     Renamed: object(["id", "title"], { id: { type: "string" }, title: { type: "string", description: "The title as saved (trimmed)." } }),
     Deleted: object(["deleted"], { deleted: { type: "boolean", const: true } }, "Nothing of the tour is left."),
+    RemovalUndone: object(
+      ["restored", "files_removed"],
+      {
+        restored: { type: "boolean", const: false, description: "Always false: nothing that was removed is put back." },
+        files_removed: { type: "integer", minimum: 0, description: "How many of the workspace's files the removal had already removed." },
+      },
+      "A stopped removal was undone; what it had removed stays removed.",
+    ),
     Chapter: object(["id", "title", "position", "steps", "pictures", "uploaded_at"], {
       id: { type: "string", pattern: "^ch_[0-9a-f]{24}$", description: "The chapter's id." },
       title: { type: "string", description: "The chapter's title, as its upload named it." },
@@ -2101,6 +2109,22 @@ function paths(): OpenApiDoc["paths"] {
         },
       },
     },
+    "/api/v1/admin/accounts/{id}/undo-removal": {
+      post: {
+        tags: ["Admin"],
+        summary: "Undo a delete that has removed nothing yet",
+        description: `For the site's admin: a delete is recorded before the payment service is asked to cancel the account's subscription, so when that service never gives a definite answer the account stays disabled with its delete recorded. This takes the record back, only while nothing of the workspace has been removed: the account is disabled, as before the delete, and can be enabled again. What the delete already did at the payment service (a subscription cancelled, a checkout expired) is not undone. A delete that has begun removing files or rows can only be finished: send the delete again. In the audit record as account_removal_undone. ${NOT_FROM_THE_PAGE}`,
+        operationId: "adminUndoAccountRemoval",
+        security: SESSION,
+        parameters: [accountId],
+        responses: {
+          "200": answer("A removal the billing sweep had stopped is undone, also after it had begun: its record and the workspace's warning mails are gone, the account is disabled, and nothing removed is restored.", ref("RemovalUndone")),
+          "204": empty("The delete's record is gone; the account is disabled."),
+          "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header; and an account id that is malformed or names no account. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
+          "409": refusal("own_account: this is the caller's own account. not_deleting: no delete of the account is recorded. removal_started: the delete has begun removing the account's files or rows and was not stopped by the billing sweep; send the delete again to finish it.", "own_account", "not_deleting", "removal_started"),
+        },
+      },
+    },
     "/api/v1/admin/accounts/{id}/removal": {
       get: {
         tags: ["Admin"],
@@ -2129,7 +2153,7 @@ function paths(): OpenApiDoc["paths"] {
           "202": answer("The delete has more to do; done and total count the workspace's files. Send the same request again.", ref("InProgress")),
           "400": refusal("bad_request: the body is not a JSON object holding username and nothing else. username_mismatch: username is not the account's username (or, when it has none, its email address) exactly.", "bad_request", "username_mismatch"),
           "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header; and an account id that is malformed or names no account. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
-          "409": refusal("own_account: this is the caller's own account. not_disabled: the account is not disabled; disable it first. last_admin: this is the site's last admin. shared_workspace: another account belongs to the account's workspace, whose work a delete would remove too. site_owner: the account owns the workspace the site was set up with, which cannot be deleted.", "own_account", "not_disabled", "last_admin", "shared_workspace", "site_owner"),
+          "409": refusal("own_account: this is the caller's own account. not_disabled: the account is not disabled; disable it first. last_admin: this is the site's last admin. shared_workspace: another account belongs to the account's workspace, whose work a delete would remove too. site_owner: the account owns the workspace the site was set up with, which cannot be deleted. not_deleting: the delete was undone while this request was asking the payment service, and nothing was removed.", "own_account", "not_disabled", "last_admin", "shared_workspace", "site_owner", "not_deleting"),
           "500": refusal("Part of the account is removed, but some of its files could not be removed yet. Nothing is lost: send the same request again.", "cleanup_pending"),
         },
       },

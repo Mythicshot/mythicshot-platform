@@ -157,6 +157,7 @@ const ROWS: Record<string, Row> = {
   "POST /api/v1/admin/accounts/:id/disable": admin("POST", `/api/v1/admin/accounts/${ACCOUNT}/disable`),
   "POST /api/v1/admin/accounts/:id/enable": admin("POST", `/api/v1/admin/accounts/${ACCOUNT}/enable`),
   "GET /api/v1/admin/accounts/:id/removal": admin("GET", `/api/v1/admin/accounts/${ACCOUNT}/removal`),
+  "POST /api/v1/admin/accounts/:id/undo-removal": admin("POST", `/api/v1/admin/accounts/${ACCOUNT}/undo-removal`),
   "DELETE /api/v1/admin/accounts/:id": admin("DELETE", `/api/v1/admin/accounts/${ACCOUNT}`, { username: "rook" }),
   "POST /api/v1/admin/invites": admin("POST", "/api/v1/admin/invites", { email: "new@example.com" }),
   "GET /api/v1/admin/invites": admin("GET", "/api/v1/admin/invites"),
@@ -400,7 +401,7 @@ describe("the host-routing matrix", () => {
     for (const key of ["GET /dash/dash.css", "GET /dash/dash.js", "GET /dash/mark.svg"]) expect(DASH_KEYS, key).toContain(key);
     // 9, the two requests of an invite, the three requests that take a short code, the three of the token list, the change of who may view a tour or an item, and the three of the site's terms, and the three of Download all my data.
     expect(SESSION_KEYS.length).toBe(25);
-    expect(ADMIN_KEYS.length).toBe(11);
+    expect(ADMIN_KEYS.length).toBe(12);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
     // 15, the eight routes of shared items, the read of who may view one, and a tour's chapters read and changed.

@@ -163,6 +163,7 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "POST /api/v1/admin/accounts/:id/disable": "app",
   "POST /api/v1/admin/accounts/:id/enable": "app",
   "GET /api/v1/admin/accounts/:id/removal": "app",
+  "POST /api/v1/admin/accounts/:id/undo-removal": "app",
   "DELETE /api/v1/admin/accounts/:id": "app",
 
   // The sign-in pages and their two files. They lead to the session, whose cookie belongs

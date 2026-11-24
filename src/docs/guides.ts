@@ -216,6 +216,8 @@ export const CODE_MEANINGS: Readonly<Record<string, string>> = {
   last_admin: "The account is the site's last active admin; the site would be left without one.",
   deleting: "A delete of the account has started, so it cannot be enabled; send the delete again to finish it.",
   not_disabled: "Only a disabled account can be deleted; disable it first.",
+  not_deleting: "No delete of the account is recorded, so there is nothing to undo.",
+  removal_started: "The delete has begun removing the account's files or rows, so it cannot be undone; send the delete again to finish it.",
   username_mismatch: "The username typed to confirm a delete is not the account's username (or, for an account without one, its email address) exactly.",
   shared_workspace: "Another account belongs to the account's workspace, so deleting it would delete their work too.",
   site_owner: "The account owns the workspace the site was set up with, which cannot be deleted.",

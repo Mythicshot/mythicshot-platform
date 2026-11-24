@@ -439,6 +439,11 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
   await deps.db.run("INSERT INTO email_change (id, user_id, new_email, code_hash, created_at) VALUES (?, ?, ?, ?, ?)", [
     newId("emc"), account.userId, `${name.toLowerCase()}-next@example.com`, await hashToken(emailCode), deps.now(),
   ]);
+  // A warning mail before removal, as the billing sweep records it (migration 0024): every route
+  // must leave the other side's untouched, and deleting the account must take it too.
+  await deps.db.run("INSERT INTO billing_warning (workspace_id, removal_at, stage, email_sha256, claimed_at, sent_at, named_at) VALUES (?, ?, 30, ?, ?, ?, ?)", [
+    workspaceId, T0 + 91 * 86_400_000, "ab".repeat(32), deps.now(), deps.now(), T0 + 91 * 86_400_000,
+  ]);
   return { name, workspaceId, workspaceName, userId: account.userId, email: account.email, token, tokenId, connectedToken, revokedToken, revokedTokenId, session, emailCode, ids };
 }
 
@@ -509,6 +514,8 @@ export const OWNED: Readonly<Record<string, string>> = {
   membership: "workspace_id = ?",
   // The checkouts this site made for a workspace (migration 0021).
   stripe_checkout: "workspace_id = ?",
+  // The warning mails before a workspace's removal (migration 0024).
+  billing_warning: "workspace_id = ?",
   signin_method: BY_USER,
   signin_code: BY_USER,
   session: BY_USER,

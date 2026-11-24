@@ -261,7 +261,7 @@ describe("the server command", () => {
       for (const m of readFileSync(fileURLToPath(new URL(f, import.meta.url)), "utf8").matchAll(/\benv\.([A-Z][A-Z0-9_]*)/g)) names.add(m[1]);
     }
     expect([...NODE_SETTINGS].sort()).toEqual([...names].sort());
-    expect([...ADMIN_SETTINGS].sort()).toEqual([...NODE_SETTINGS, "RECOVERY_LINKS"].sort());
+    expect([...ADMIN_SETTINGS].sort()).toEqual([...NODE_SETTINGS, "RECOVERY_LINKS", "BILLING_REMOVAL"].sort());
   });
 
   it("started under the command's name but not recognised as itself, it prints the usage instead of doing nothing", () => {
