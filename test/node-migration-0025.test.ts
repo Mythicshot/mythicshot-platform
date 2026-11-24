@@ -1,4 +1,4 @@
-// Migration 0023 (the account a token belongs to) on a database at 0.1.61, which has 0022 and
+// Migration 0025 (the account a token belongs to) on a database at 0.1.61, which has 0022 and
 // tokens of every kind (Node only: the shared harness always applies every migration to an
 // empty database). One nullable column on api_token, filled only for a token made by
 // connecting the app whose collection the audit record names, by an account of the token's
@@ -14,7 +14,7 @@ import { NodeDb } from "../src/node/db.ts";
 import { migrate } from "../src/node/migrate.ts";
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url));
-const NAME = "0023_token_account.sql";
+const NAME = "0025_token_account.sql";
 
 const id = (prefix: string, n: string) => `${prefix}_${n.repeat(24)}`;
 const WS_A = id("ws", "a");
@@ -22,7 +22,7 @@ const WS_B = id("ws", "b");
 const USR_A = id("usr", "a");
 const USR_B = id("usr", "b");
 
-describe("migration 0023 on an install of 0.1.61", () => {
+describe("migration 0025 on an install of 0.1.61", () => {
   it("adds the column and fills it only where the record names an account of the token's workspace", async () => {
     const root = await mkdtemp(join(tmpdir(), "demo-platform-migrate-"));
     const before = join(root, "before");

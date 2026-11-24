@@ -45,7 +45,7 @@ describe("migration 0018", () => {
 
     const account = async (email: string, username: string, admin: boolean) => {
       const w = await workspaceStatements(deps, username, email);
-      // As a site before migration 0023 writes them: the token names no account.
+      // As a site before migration 0025 writes them: the token names no account.
       await db.batch([...withoutTokenAccount(w.stmts), { sql: "UPDATE user SET username = ?, is_admin = ? WHERE id = ?", params: [username, admin ? 1 : 0, w.userId] }]);
       const made = await redeemSignInCode(deps, await createSignInCode(deps, w.userId), null, null);
       if (made === null) throw new Error("the sign-in was refused");

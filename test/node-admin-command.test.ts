@@ -21,7 +21,7 @@ import { FakeMailer } from "./fake-mail.ts";
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url));
 const ACCOUNTS_MIGRATION = "0008_accounts.sql";
-const NEEDS_ACCOUNTS = ["0023_token_account.sql"];
+const NEEDS_ACCOUNTS = ["0025_token_account.sql"];
 const SETUP_CODE = "made-up-setup-code-0123456789abcdef";
 const SMTP_PASSWORD = "pw-S3cret/with+chars=";
 const TWO = { TOURS_HOST: "tours.example.com", APP_HOST: "app.example.com" };
@@ -69,7 +69,7 @@ async function site(opts: { setUp?: boolean; accounts?: boolean; email?: string 
   let migrations = MIGRATIONS_DIR;
   if (opts.accounts === false) {
     migrations = join(dir, "migrations-before-accounts");
-    // And the migrations that read the accounts' tables (0023 fills a column from the audit
+    // And the migrations that read the accounts' tables (0025 fills a column from the audit
     // record and the memberships), which a database before accounts cannot have either.
     cpSync(MIGRATIONS_DIR, migrations, { recursive: true, filter: (from) => !from.endsWith(ACCOUNTS_MIGRATION) && !NEEDS_ACCOUNTS.some((m) => from.endsWith(m)) });
   }

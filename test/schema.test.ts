@@ -532,7 +532,7 @@ describe("schema", () => {
       ["signin_code", "DELETE FROM signin_code WHERE user_id = ?"],
       ["signin_method", "DELETE FROM signin_method WHERE user_id = ?"],
       ["membership", "DELETE FROM membership WHERE user_id = ?"],
-      // A token names the account it was made for (migration 0023).
+      // A token names the account it was made for (migration 0025).
       ["api_token", "DELETE FROM api_token WHERE user_id = ?"],
     ];
     for (const [table, remove] of holders) {

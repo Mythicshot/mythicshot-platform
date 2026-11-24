@@ -189,7 +189,7 @@ export function tourRoutes(app: Hono, deps: Deps): void {
     // The answer describes the caller's own credential and nothing else: its workspace (the one
     // requireAuth resolved it to) and the account it belongs to. For a session that is the
     // signed-in account, which requireAuth has already found a member of the workspace. For a
-    // token it is the account its row names (migration 0023), read in this same statement and
+    // token it is the account its row names (migration 0025), read in this same statement and
     // only while that account belongs to the token's own workspace, by its membership or, for a
     // row an older build wrote without one, its own row (the rule of the token's lookup); a
     // token nothing names an account of (one an older build made) gets null, never a guess.
@@ -207,7 +207,7 @@ export function tourRoutes(app: Hono, deps: Deps): void {
         [auth.tokenId, auth.workspaceId],
       );
     } catch (err) {
-      // A database migration 0023 (or 0008, before accounts) has not reached: no token names
+      // A database migration 0025 (or 0008, before accounts) has not reached: no token names
       // an account there yet, and the name alone is read as before.
       if (!isBeforeTokenAccount(err) && !isBeforeAccounts(err)) throw err;
       row = await deps.db.first<Row>("SELECT name, NULL AS account_id FROM workspace WHERE id = ?", [auth.workspaceId]);

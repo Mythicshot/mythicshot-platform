@@ -45,8 +45,8 @@ async function site(opts: { before?: string } = {}) {
   open.push(db);
   await migrate(db, migrations);
   const w = await workspaceStatements(depsOn(db), "Acme", "owner@example.com");
-  // Before migration 0023 the token names no account, as such a site writes it.
-  const stmts = opts.before !== undefined && opts.before < "0024" ? withoutTokenAccount(w.stmts) : w.stmts;
+  // Before migration 0025 the token names no account, as such a site writes it.
+  const stmts = opts.before !== undefined && opts.before < "0026" ? withoutTokenAccount(w.stmts) : w.stmts;
   await db.batch([...stmts, { sql: "UPDATE user SET username = 'owner', is_admin = 1 WHERE id = ?", params: [w.userId] }]);
   return { dir, db, env: { DATA_DIR: dir } as NodeJS.ProcessEnv, userId: w.userId };
 }

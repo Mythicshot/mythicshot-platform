@@ -40,7 +40,7 @@ export async function workspaceStatements(
       sql: "INSERT INTO signin_method (user_id, kind, created_at) VALUES (?, 'email_link', ?)",
       params: [userId, now],
     },
-    // The token is the owner's: it names the account (migration 0023), so GET /api/v1/me can.
+    // The token is the owner's: it names the account (migration 0025), so GET /api/v1/me can.
     {
       sql: "INSERT INTO api_token (id, workspace_id, name, hash, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?)",
       params: [newId("tok"), workspaceId, FIRST_TOKEN_NAME, hash, now, userId],
@@ -50,7 +50,7 @@ export async function workspaceStatements(
 }
 
 /**
- * The same statements for a database migration 0023 has not reached (isBeforeTokenAccount):
+ * The same statements for a database migration 0025 has not reached (isBeforeTokenAccount):
  * the token's row without the account, as every version before it wrote it.
  */
 export function withoutTokenAccount(stmts: Stmt[]): Stmt[] {

@@ -364,7 +364,7 @@ export function connectRoutes(app: Hono, deps: Deps): void {
     // 3. the request is marked collected.
     // Of two collections at once the second finds the request collected (and the token's id
     // taken) and makes nothing.
-    // The token names the account that confirmed (migration 0023), so GET /api/v1/me can; on a
+    // The token names the account that confirmed (migration 0025), so GET /api/v1/me can; on a
     // database the migration has not reached, the same row without it, as before.
     const token = newToken();
     const tokenHash = await hashToken(token);

@@ -254,7 +254,7 @@ function isBeforeKinds(err: unknown): boolean {
 
 /**
  * True for the error of a statement naming api_token.user_id (the account a token belongs to)
- * on a database migration 0023 has not reached: `no such column` for a read, `has no column
+ * on a database migration 0025 has not reached: `no such column` for a read, `has no column
  * named` for a write, on Node and on Workers alike. The token's lookup above never names it.
  */
 export function isBeforeTokenAccount(err: unknown): boolean {

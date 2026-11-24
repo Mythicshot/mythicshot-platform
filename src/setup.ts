@@ -249,7 +249,7 @@ export function setupRoutes(app: Hono, deps: Deps): void {
       try {
         await deps.db.batch([...w.stmts, claim]);
       } catch (err) {
-        // A database migration 0023 has not reached: the token without its account, as before.
+        // A database migration 0025 has not reached: the token without its account, as before.
         if (!isBeforeTokenAccount(err)) throw err;
         await deps.db.batch([...withoutTokenAccount(w.stmts), claim]);
       }
