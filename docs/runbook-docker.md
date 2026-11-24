@@ -1298,6 +1298,7 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `billing_payment_failed` | On a site with billing: a payment failed, at the checkout (`{"stage":"checkout"}`) or at a renewal (`{"stage":"renewal"}`) |
 | `billing_cancelled_for_deletion` | On a site with billing: the admin's delete of an account cancelled its workspace's subscription at Stripe first, at once and without a refund; the account is the admin |
 | `billing_stale_confirmed` | On a site with billing: Stripe confirmed a subscription live although its paid period ended more than 3 days ago; it is trusted for a day without asking again |
+| `billing_answer_refused` | On a site with billing: an answer of Stripe was refused for its shape; the detail names the call and the field, such as `{"call":"checkout_create","field":"client_secret"}`, never the value. It is counted in the admin's billing problems: report it, the site may need an update |
 | `billing_risk` | On a site with billing: a refund, a dispute or an early fraud warning on this workspace's customer (`{"kind":"refund"}`, `dispute` or `fraud_warning`); the subscription was read back from Stripe after it |
 
 ## Troubleshooting by symptom
