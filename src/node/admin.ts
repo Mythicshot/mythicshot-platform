@@ -62,7 +62,7 @@ const RECOVERY_SETTING = "RECOVERY_LINKS";
 
 /**
  * The setting that lets billing-sweep remove anything (removalSwitchedOn, src/removal-rules.ts):
- * `on`, else off. The app reads it too (0.1.61), only to word the trial notice.
+ * `on`, else off. Read by this command only, never by the app, so it is no setting of the app's.
  */
 export const REMOVAL_SETTING = "BILLING_REMOVAL";
 
@@ -71,7 +71,7 @@ export const REMOVAL_SETTING = "BILLING_REMOVAL";
  * settings file for this command, so the file is the command's only source: each one the
  * Node target reads, and the recovery setting.
  */
-export const ADMIN_SETTINGS: readonly string[] = [...new Set([...NODE_SETTINGS, RECOVERY_SETTING, REMOVAL_SETTING])];
+export const ADMIN_SETTINGS: readonly string[] = [...NODE_SETTINGS, RECOVERY_SETTING, REMOVAL_SETTING];
 
 /**
  * True for the command line of this application's server as the image starts it (the

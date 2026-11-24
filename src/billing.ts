@@ -537,7 +537,7 @@ async function removalShown(deps: Deps, row: BillingRow, standing: Standing, use
   return { linksUntil: clock.linksDownAt, removedAt: plan.removalAt };
 }
 
-function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, allowance: number | null, removal: { linksUntil: number; removedAt: number } | null = null, removalOn = false) {
+function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, allowance: number | null, removal: { linksUntil: number; removedAt: number } | null = null) {
   const base = {
     plan: PLAN_NAME,
     used_bytes: used,
@@ -553,8 +553,6 @@ function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, al
     manage: row.customer !== null,
     // A checkout's payment Stripe is still confirming: the return page keeps waiting.
     confirming: row.status === "incomplete",
-    // BILLING_REMOVAL is on: only then does the trial notice promise a removal (0.1.61).
-    removal_on: removalOn,
   };
   const daysTo = (at: number) => Math.max(0, Math.ceil((at - now) / 86_400_000));
   switch (s.kind) {
@@ -826,7 +824,7 @@ export function billingRoutes(app: Hono, deps: Deps): void {
       checkout = (await checkoutNow(deps, asked))?.status ?? "unknown";
     }
     const removal = await removalShown(deps, row, standing, auth.session?.userId ?? "", now);
-    return json(200, { ...stateAnswer(standing, row, now, usage.used, usage.allowance, removal, deps.config.billingRemoval === true), checkout });
+    return json(200, { ...stateAnswer(standing, row, now, usage.used, usage.allowance, removal), checkout });
   });
 
   /**

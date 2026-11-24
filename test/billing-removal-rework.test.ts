@@ -612,20 +612,17 @@ describe("round 4: the download wired in", () => {
     expect([...s.stripe.invoices.values()].map((i) => i.status)).toEqual(["void", "void", "void"]);
   });
 
-  it("the trial notice names the real removal day and the download only while removal is on", async () => {
+  it("the trial notice always names the real removal day and where to download everything, whatever BILLING_REMOVAL says", async () => {
     const { BILLING_JS } = await import("../src/dash/billing.ts");
     const state = { state: "trial", days_left: 62, used_bytes: 38 * 1024 * 1024, allowance_bytes: 104_857_600, removed_at: REMOVAL_DAY, trial_ends_at: TRIAL_END, manage: false };
-    expect(await stripText(BILLING_JS, { ...state, removal_on: true })).toBe(
+    expect(await stripText(BILLING_JS, state)).toBe(
       "Trial: 62 days left. You're using 38 MB of 100 MB. On 11 April 2027 your content is permanently removed unless you subscribe. You can download everything from your Account page.Subscribe",
     );
-    expect(await stripText(BILLING_JS, { ...state, removal_on: false })).toBe("Trial: 62 days left. You're using 38 MB of 100 MB.Subscribe");
     // The Account page is a link to the download card.
-    expect(await stripLinks(BILLING_JS, { ...state, removal_on: true })).toContain("/account#h-data");
-    // The billing state says whether removal is on.
+    expect(await stripLinks(BILLING_JS, state)).toContain("/account#h-data");
+    // The billing state says nothing of the switch: the policy's date is the same either way.
     const s = await site();
-    expect((await send(s.deps, "GET", "/api/v1/billing", { headers: (await sessionOf(s.deps, s.a.userId)).headers })).json.removal_on).toBe(false);
-    s.deps.config = { ...s.deps.config, billingRemoval: true };
-    expect((await send(s.deps, "GET", "/api/v1/billing", { headers: (await sessionOf(s.deps, s.a.userId)).headers })).json.removal_on).toBe(true);
+    expect((await send(s.deps, "GET", "/api/v1/billing", { headers: (await sessionOf(s.deps, s.a.userId)).headers })).json).not.toHaveProperty("removal_on");
   });
 });
 

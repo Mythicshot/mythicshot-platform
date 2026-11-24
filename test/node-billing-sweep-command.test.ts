@@ -86,10 +86,10 @@ describe("billing-sweep", () => {
     }
   });
 
-  it("BILLING_REMOVAL is cleared from the shell like every other setting; the app reads it too, only for the trial notice's wording", () => {
+  it("BILLING_REMOVAL is read by this command only, and cleared from the shell like every other setting", () => {
     expect(REMOVAL_SETTING).toBe("BILLING_REMOVAL");
-    expect(ADMIN_SETTINGS.filter((n) => n === "BILLING_REMOVAL")).toHaveLength(1);
-    expect(NODE_SETTINGS).toContain("BILLING_REMOVAL");
+    expect(ADMIN_SETTINGS).toContain("BILLING_REMOVAL");
+    expect(NODE_SETTINGS).not.toContain("BILLING_REMOVAL");
   });
 
   it("without billing it says so and changes nothing", async () => {

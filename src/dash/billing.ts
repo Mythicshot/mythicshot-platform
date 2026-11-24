@@ -62,9 +62,9 @@ export const DOWNLOAD_PLACE = "/account#h-data";
 
 /**
  * The trial notice's sentence about the removal (approved by the owner), around the removal day:
- * "On <date> your content is permanently removed unless you subscribe." Shown only while
- * BILLING_REMOVAL is on (the state's `removal_on`): without it nothing is removed, and the notice
- * keeps its sentence of before.
+ * "On <date> your content is permanently removed unless you subscribe." Always shown with the
+ * policy's removal day, as the other notices and the mails state it; BILLING_REMOVAL only delays
+ * the removal itself (the warnings are its precondition).
  */
 export const TRIAL_REMOVAL_WORDS = { on: " On ", rest: " your content is permanently removed unless you subscribe." } as const;
 
@@ -190,8 +190,8 @@ ${COMMON}
     var days = num(s.days_left);
     if (s.state === "trial" && days !== null && days > 7) {
       text = [[W.trialLead, true], [" " + days + (days === 1 ? W.dayLeft : W.daysLeft) + Dash.formatBytes(s.used_bytes) + W.of + Dash.formatBytes(s.allowance_bytes) + W.stop, false]];
-      // With removal on, the day the content goes and where to download it (owner's wording).
-      if (s.removal_on === true && num(s.removed_at) !== null) text = text.concat([[REMOVAL.on + dateOf(s.removed_at) + REMOVAL.rest, false]], downloadParts());
+      // The policy's removal day and where to download everything (owner's wording), as every notice states it.
+      if (num(s.removed_at) !== null) text = text.concat([[REMOVAL.on + dateOf(s.removed_at) + REMOVAL.rest, false]], downloadParts());
       action = subscribeLink(W.subscribe);
     } else if (s.state === "trial" && days !== null) {
       kind = "warn";
