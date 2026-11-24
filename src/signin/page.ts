@@ -12,9 +12,15 @@
 // out of the address bar, before the script does anything else, so back, reload and the
 // history never show it. The code then lives in one variable of the link page's own
 // function and leaves it once: in the JSON body of POST /api/v1/signin/complete, when the
-// button is pressed. Nothing here writes to storage, to a cookie or to an address.
+// button is pressed. Nothing here writes to a cookie or to an address, and nothing to storage
+// but removing the Connections page's record of the way back (src/dash/connect-return.ts):
+// after a sign-in that worked, a valid, unexpired record sends the browser to /connections
+// instead of /tours; the record can only switch between those two fixed paths, and a record
+// that is not valid is removed. The "already signed in" check of the sign-in page does not
+// honour it: it goes to /tours as before and removes the record.
 import { PAGE_BASE_CSS, WORDMARK_CSS } from "../brand-css.ts";
 import { BRAND_PLAIN, FAVICON_LINKS } from "../brand.ts";
+import { RETURN_SHARED_JS } from "../dash/connect-return.ts";
 import { escapeHtml, type InviteContact } from "./invite.ts";
 
 export const SIGNIN_HTML = `<!doctype html>
@@ -240,6 +246,18 @@ export const SIGNIN_JS = `(function () {
     }
   }
 
+${RETURN_SHARED_JS}
+  // True when Use a different account on the Connections page asked to come back there: a
+  // valid, unexpired record, left in place for that page to take. A record that is not valid
+  // is removed.
+  function backToConnections() {
+    var text = returnRead();
+    if (text === null) return false;
+    if (returnCheck(text) !== null) return true;
+    returnClear();
+    return false;
+  }
+
   function looksLikeEmail(v) {
     if (v.length === 0 || v.length > 254 || /\\s/.test(v)) return false;
     var parts = v.split("@");
@@ -267,8 +285,12 @@ export const SIGNIN_JS = `(function () {
 
     input.focus();
     // Someone who is signed in already belongs on the dashboard, which starts at the Tours page.
+    // Signed in here means another tab signed in, not this one: the way back to Connections is
+    // not honoured, and dropped, so it cannot surface later in a place nobody expects.
     call("GET", "/api/v1/session").then(function (res) {
-      if (res.status === 200) location.replace("/tours");
+      if (res.status !== 200) return;
+      returnClear();
+      location.replace("/tours");
     }, function () { /* the form stays */ });
 
     $("ask-form").addEventListener("submit", function (ev) {
@@ -337,7 +359,8 @@ export const SIGNIN_JS = `(function () {
       call("POST", "/api/v1/signin/complete", { code: code }).then(function (res) {
         if (res.status === 200) {
           code = "";
-          location.replace("/tours");
+          if (backToConnections()) location.replace("/connections");
+          else location.replace("/tours");
           return;
         }
         busy(btn, false);

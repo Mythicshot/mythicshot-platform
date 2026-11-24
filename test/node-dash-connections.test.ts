@@ -14,10 +14,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
 import { createApp } from "../src/app.ts";
 import { CONNECTIONS_HTML, CONNECTIONS_JS } from "../src/dash/connections.ts";
+import { CONNECT_MS } from "../src/connect.ts";
+import { RETURN_KEY, RETURN_MAX_CHARS } from "../src/dash/connect-return.ts";
 import { DASH_JS } from "../src/dash/script.ts";
 import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
-import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
+import { FakeDocument, FakeElement, FakeStorage, visibleText } from "./pages-dom.ts";
 
 const CSRF = "c".repeat(64);
 /** "Now" for the page: 20 November 2026, noon UTC. */
@@ -54,6 +56,8 @@ type Tab = {
   tick: () => number[];
   pendingDelays: () => number[];
   violations: string[];
+  /** The page's clock: Date.now() in the page. */
+  clock: { now: number };
 };
 
 const opened: Tab[] = [];
@@ -65,7 +69,12 @@ afterEach(() => {
   }
 });
 
-function openPage(respond: Responder): Tab {
+/**
+ * Opens the page and runs its two scripts. The browser's localStorage is `storage` (a fresh,
+ * empty one unless given; tabs of one browser share one), or "blocked": every use of it throws,
+ * as in a browser that keeps no site data.
+ */
+function openPage(respond: Responder, storage: FakeStorage | "blocked" = new FakeStorage()): Tab {
   const doc = new FakeDocument(CONNECTIONS_HTML);
   let left: string | null = null;
   const fetched: Fetched[] = [];
@@ -96,8 +105,15 @@ function openPage(respond: Responder): Tab {
     timers.push({ fn, ms: Number(ms) });
     return timers.length;
   };
-  const context: Record<string, unknown> = { document: doc, location, fetch, setTimeout };
-  for (const name of ["localStorage", "sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "window", "self", "top", "parent", "opener", "open", "postMessage", "setInterval", "console", "alert", "confirm", "prompt", "history", "URL", "Image", "navigator"]) {
+  const clock = { now: NOW };
+  const context: Record<string, unknown> = { document: doc, location, fetch, setTimeout, __clock: clock };
+  Object.defineProperty(context, "localStorage", {
+    get() {
+      if (storage === "blocked") throw new Error("SecurityError: the browser keeps no data for this site");
+      return storage;
+    },
+  });
+  for (const name of ["sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "window", "self", "top", "parent", "opener", "open", "postMessage", "setInterval", "console", "alert", "confirm", "prompt", "history", "URL", "Image", "navigator"]) {
     Object.defineProperty(context, name, {
       get() {
         violations.push(name);
@@ -106,7 +122,8 @@ function openPage(respond: Responder): Tab {
     });
   }
   const ctx = vm.createContext(context);
-  vm.runInContext(`(function () { var Real = Date; Date = function (v) { return arguments.length === 0 ? new Real(${NOW}) : new Real(v); }; Date.now = function () { return ${NOW}; }; Date.prototype = Real.prototype; })();`, ctx);
+  // The page's clock: NOW, moved on only by a test that says so (clock.now).
+  vm.runInContext(`(function () { var Real = Date; var clock = __clock; Date = function (v) { return arguments.length === 0 ? new Real(clock.now) : new Real(v); }; Date.now = function () { return clock.now; }; Date.prototype = Real.prototype; })();`, ctx);
   vm.runInContext(DASH_JS, ctx, { filename: "dash.js" });
   vm.runInContext(CONNECTIONS_JS, ctx, { filename: "connections.js" });
   const tab: Tab = {
@@ -133,6 +150,7 @@ function openPage(respond: Responder): Tab {
     },
     pendingDelays: () => timers.map((t) => t.ms),
     violations,
+    clock,
   };
   opened.push(tab);
   return tab;
@@ -206,8 +224,8 @@ const type = (tab: Tab, text: string) => {
 };
 
 /** Opens the page, types `code` and presses Continue. */
-async function lookedUp(respond: Responder, code = "k7qm2hxd"): Promise<Tab> {
-  const tab = openPage(respond);
+async function lookedUp(respond: Responder, code = "k7qm2hxd", storage?: FakeStorage | "blocked"): Promise<Tab> {
+  const tab = openPage(respond, storage);
   await tab.settle();
   type(tab, code);
   tab.$("connect-go").click();
@@ -965,6 +983,162 @@ describe("the Connections page: Use a different account", () => {
     expect(CONNECTIONS_JS).toContain('Dash.api("POST", SIGNOUT)');
     expect(CONNECTIONS_JS).toContain('var SIGNOUT = "/api/v1/signout";');
     expect(CONNECTIONS_JS).not.toMatch(/signout\/everywhere|next=|return_to|redirect/i);
+  });
+});
+
+// ---- Back to Connections after "Use a different account" ----
+
+/** The record "Use a different account" keeps (src/dash/connect-return.ts). */
+const record = (over: Record<string, unknown> = {}) => JSON.stringify({ to: "connections", user_code: "K7QM2HXD", until: NOW + CONNECT_MS, ...over });
+const storageWith = (text: string) => {
+  const s = new FakeStorage();
+  s.items.set(RETURN_KEY, text);
+  return s;
+};
+const GET = `get ${RETURN_KEY}`;
+const REMOVE = `remove ${RETURN_KEY}`;
+/** Every record kept, as [key, the record read back]. */
+const keptIn = (storage: FakeStorage) =>
+  storage.log
+    .filter((l) => l.startsWith("set "))
+    .map((l) => {
+      const rest = l.slice(4);
+      const at = rest.indexOf(" ");
+      return [rest.slice(0, at), JSON.parse(rest.slice(at + 1))];
+    });
+
+describe("the Connections page: back here after Use a different account", () => {
+  it("keeps the way back once the sign-out is done: the fixed marker, the code that was looked up, and an expiry the code's own lifetime after the lookup", async () => {
+    for (const answer of [DONE, SIGNED_OUT]) {
+      const storage = new FakeStorage();
+      const tab = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/signout": answer }), "k7qm-2hxd", storage);
+      // Loading the page only looked for a record (there was none).
+      expect(storage.log).toEqual([GET]);
+      // The field changed since the lookup, and minutes passed: the record has the code that was looked up, and the lookup's time.
+      type(tab, "ABCD");
+      tab.clock.now = NOW + 4 * 60_000;
+      tab.$("confirm-other").click();
+      await tab.settle();
+      expect(tab.left()).toBe("/signin");
+      expect(keptIn(storage)).toEqual([[RETURN_KEY, { to: "connections", user_code: "K7QM2HXD", until: NOW + CONNECT_MS }]]);
+      expect(storage.log).toHaveLength(2);
+      // Nothing about it was sent anywhere.
+      expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", "GET /api/v1/tokens", LOOKUP, "POST /api/v1/signout"]);
+      expect(of(tab, "POST", "/api/v1/signout")[0].body).toBeUndefined();
+    }
+  });
+
+  it("keeps nothing when the sign-out fails or the tab is stale, nor once the code has outlived its lifetime", async () => {
+    for (const answer of [{ status: 500, json: { error: "internal" } }, "network", { status: 403, json: { error: "bad_csrf" } }, { status: 403, json: { error: "forbidden" } }] as Answer[]) {
+      const storage = new FakeStorage();
+      const tab = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/signout": answer }), "k7qm2hxd", storage);
+      tab.$("confirm-other").click();
+      await tab.settle();
+      expect(storage.log, JSON.stringify(answer)).toEqual([GET]);
+    }
+    const storage = new FakeStorage();
+    const old = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/signout": DONE }), "k7qm2hxd", storage);
+    old.clock.now = NOW + CONNECT_MS;
+    old.$("confirm-other").click();
+    await old.settle();
+    expect([old.left(), storage.log]).toEqual(["/signin", [GET]]);
+  });
+
+  it("on load, takes a valid record once (removed before it is used), fills in the code and looks it up as if typed; the person still presses Connect", async () => {
+    const storage = storageWith(record());
+    const tab = openPage(standard({ [LOOKUP]: found(), "POST /api/v1/connect/confirm": DONE }), storage);
+    await tab.settle();
+    expect(storage.log).toEqual([GET, REMOVE]);
+    expect(storage.items.has(RETURN_KEY)).toBe(false);
+    expect(tab.$("connect-code").value).toBe("K7QM-2HXD");
+    expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", "GET /api/v1/tokens", LOOKUP]);
+    expect(of(tab, "POST", "/api/v1/connect/lookup")[0].body).toEqual({ user_code: "K7QM2HXD" });
+    expect(tab.$("confirm-dialog").shown).toBe(true);
+    expect(questionOf(tab)).toBe("Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com.");
+    expect(tab.doc.activeElement?.id).toBe("confirm-refuse");
+    // Connect is the person's own press.
+    tab.$("confirm-go").click();
+    await tab.settle();
+    expect(of(tab, "POST", "/api/v1/connect/confirm").map((f) => f.body)).toEqual([{ user_code: "K7QM2HXD" }]);
+    // A reload finds nothing more.
+    const again = openPage(standard(), storage);
+    await again.settle();
+    expect([again.fetched.map((f) => f.path), again.$("connect-code").value, again.$("confirm-dialog").shown]).toEqual([["/api/v1/session", "/api/v1/tokens"], "", false]);
+  });
+
+  it("a lookup of the filled-in code that fails shows what a typed code would show", async () => {
+    const cases: [Answer, string][] = [
+      [NO_REQUEST, BAD_CODE],
+      [limited("120"), "Too many codes that did not work. Try again in 2 minutes."],
+      [{ status: 500, json: { error: "internal" } }, FAILED],
+      ["network", FAILED],
+    ];
+    for (const [answer, text] of cases) {
+      const tab = openPage(standard({ [LOOKUP]: answer }), storageWith(record()));
+      await tab.settle();
+      const typed = await lookedUp(standard({ [LOOKUP]: answer }));
+      expect([tab.$("connect-message").textContent, tab.$("confirm-dialog").shown, tab.$("connect-code").value], JSON.stringify(answer)).toEqual([text, false, "K7QM-2HXD"]);
+      expect(tab.$("connect-message").textContent).toBe(typed.$("connect-message").textContent);
+    }
+    // A lookup refused for a session that ended goes to sign in, as a typed one does.
+    const out = openPage(standard({ [LOOKUP]: SIGNED_OUT }), storageWith(record()));
+    await out.settle();
+    expect(out.left()).toBe("/signin");
+  });
+
+  it("a malformed, oversized or expired record, or one with no code, is removed and ignored: nothing is filled in or looked up", async () => {
+    const bad: [string, string][] = [
+      ["expired", record({ until: NOW })],
+      ["longer than a code lives", record({ until: NOW + CONNECT_MS + 1 })],
+      ["an expiry that is no number", record({ until: String(NOW + 1000) })],
+      ["another destination", record({ to: "tours" })],
+      ["an address to go to", record({ to: "https://evil.example.net/" })],
+      ["a key more", record({ next: "/admin" })],
+      ["a code of the wrong shape", record({ user_code: "K7QM-2HXD" })],
+      ["a code of the wrong alphabet", record({ user_code: "K7QM2HX0" })],
+      ["a code that is no text", record({ user_code: 12345678 })],
+      ["not JSON", "K7QM2HXD"],
+      ["null", "null"],
+      // A valid record but for its length: blanks JSON allows, so only the size refuses it.
+      ["oversized", record().replace("{", "{" + " ".repeat(RETURN_MAX_CHARS))],
+      ["no code", JSON.stringify({ to: "connections", until: NOW + CONNECT_MS })],
+    ];
+    for (const [what, text] of bad) {
+      const storage = storageWith(text);
+      const tab = openPage(standard(), storage);
+      await tab.settle();
+      expect([storage.log, tab.fetched.map((f) => f.path), tab.$("connect-code").value, tab.$("connect-message").hidden], what).toEqual([[GET, REMOVE], ["/api/v1/session", "/api/v1/tokens"], "", true]);
+    }
+  });
+
+  it("a page that is not signed in takes nothing: the record waits for the sign-in", async () => {
+    const storage = storageWith(record());
+    const tab = openPage(answers({ "GET /api/v1/session": SIGNED_OUT }), storage);
+    await tab.settle();
+    expect([tab.left(), storage.log, storage.items.get(RETURN_KEY)]).toEqual(["/signin", [], record()]);
+  });
+
+  it("a connection confirmed or refused also removes a record another tab kept meanwhile", async () => {
+    for (const [how, path] of [["confirm-go", "POST /api/v1/connect/confirm"], ["confirm-refuse", "POST /api/v1/connect/refuse"]]) {
+      const storage = new FakeStorage();
+      const tab = await lookedUp(standard({ [LOOKUP]: found(), [path]: DONE }), "k7qm2hxd", storage);
+      storage.items.set(RETURN_KEY, record());
+      tab.$(how).click();
+      await tab.settle();
+      expect([storage.items.has(RETURN_KEY), storage.log.at(-1)], how).toEqual([false, REMOVE]);
+    }
+  });
+
+  it("with storage the browser does not keep, everything works as before", async () => {
+    const tab = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/signout": DONE }), "k7qm2hxd", "blocked");
+    expect(tab.$("confirm-dialog").shown).toBe(true);
+    tab.$("confirm-other").click();
+    await tab.settle();
+    expect(tab.left()).toBe("/signin");
+    const confirmed = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/connect/confirm": DONE }), "k7qm2hxd", "blocked");
+    confirmed.$("confirm-go").click();
+    await confirmed.settle();
+    expect([confirmed.$("confirm-dialog").shown, confirmed.$("connect-code").value]).toEqual([false, ""]);
   });
 });
 

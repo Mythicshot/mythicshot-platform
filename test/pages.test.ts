@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { MANROPE_FACE } from "../src/brand-css.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { UNDOCUMENTED_ROUTES } from "../src/docs/openapi.ts";
+import { RETURN_SHARED_JS } from "../src/dash/connect-return.ts";
 import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { ACCOUNT_PAGE_HEADERS } from "../src/pages.ts";
@@ -239,8 +240,13 @@ describe("the sign-in pages", () => {
   });
 
   it("the script never writes the code or the anti-forgery value to a store, a cookie or an address", () => {
+    // Its one use of storage: the Connections page's record of the way back, read and removed
+    // (src/dash/connect-return.ts), never written here.
+    expect([...SIGNIN_JS.matchAll(/localStorage\.([a-zA-Z]+)\(([^)]*)\)/g)].map((m) => `${m[1]}(${m[2]})`)).toEqual(["getItem(RETURN_KEY)", "removeItem(RETURN_KEY)"]);
+    expect(SIGNIN_JS.match(/localStorage/g)).toHaveLength(2);
+    expect(SIGNIN_JS).toContain(RETURN_SHARED_JS);
     const forbidden = [
-      "localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState",
+      "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState",
       "location.href", "location.hash =", "location.search =", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(",
       "eval(", "Function(", "console.", "open(", "setTimeout(", "setInterval(", "document.referrer", "?c=", "?code",
     ];
@@ -248,8 +254,10 @@ describe("the sign-in pages", () => {
     // Leaving a page goes only to a fixed address of this site.
     const navigations = [...SIGNIN_JS.matchAll(/location\.(replace|assign)\(([^)]*)\)/g)].map((m) => m[2]);
     expect(navigations.length).toBeGreaterThan(0);
-    // After signing in a person lands on the Tours page; the account page is a dashboard page now.
-    expect(navigations.sort()).toEqual(['"/signin"', '"/tours"', '"/tours"']);
+    // After signing in a person lands on the Tours page, or on Connections when its record of
+    // the way back is there; the account page is a dashboard page now.
+    expect(navigations.sort()).toEqual(['"/connections"', '"/signin"', '"/tours"', '"/tours"']);
+    expect(SIGNIN_JS).toContain('if (backToConnections()) location.replace("/connections");\n          else location.replace("/tours");');
     // The address is never assigned to, by any name: every use of location is one of these.
     expect(SIGNIN_JS).not.toMatch(/\blocation\s*=(?!=)/);
     expect(SIGNIN_JS).not.toMatch(/\b(?:window|document|self|top|parent|globalThis)\s*\.\s*location\b/);

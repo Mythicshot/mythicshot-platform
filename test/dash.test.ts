@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { MANROPE_FACE } from "../src/brand-css.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { DASH_LINK_PAGES, DASH_PAGES } from "../src/dash/routes.ts";
+import { CONNECTIONS_JS } from "../src/dash/connections.ts";
 import { DASH_JS } from "../src/dash/script.ts";
 import { DASH_TABS, dashHtml } from "../src/dash/shell.ts";
 import { DASH_CSS } from "../src/dash/style.ts";
@@ -529,7 +530,8 @@ describe("the dashboard's pages and files", () => {
     expect(TOURS_JS.match(/chaptersPath\(/g)).toHaveLength(3);
     // Nothing is stored, no cookie is touched, and leaving a page goes only to /signin.
     const forbidden = ["localStorage", "sessionStorage", "indexedDB", "cookie", "cookieStore", "caches", "postMessage", "window.name", "pushState", "replaceState", "location.href", "location.hash", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer"];
-    for (const js of SCRIPTS) for (const api of forbidden) expect(js, api).not.toContain(api);
+    // The Connections page alone keeps its record of the way back in localStorage (src/dash/connect-return.ts, test/dash-connections.test.ts).
+    for (const js of SCRIPTS) for (const api of forbidden) if (!(api === "localStorage" && js === CONNECTIONS_JS)) expect(js, api).not.toContain(api);
     const navigations = [...(DASH_JS + TOURS_JS).matchAll(/location\.(replace|assign)\(([^)]*)\)/g)].map((m) => m[2]);
     // And to the terms screen, while the site's terms wait for the account (0.1.53), told the page it came from.
     expect(navigations).toEqual(['"/terms?next=" + encodeURIComponent(location.pathname', '"/signin"']);

@@ -21,7 +21,7 @@ import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../
 import { INVITE_HTML, INVITE_JS } from "../src/signin/accept.ts";
 import { parseUsername } from "../src/usernames.ts";
 import { send } from "./bundle.ts";
-import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
+import { FakeDocument, FakeElement, FakeStorage, visibleText } from "./pages-dom.ts";
 
 const APP = "https://app.example.com";
 const CODE = "dpi_" + "0123456789abcdef0123456789abcdef01234567";
@@ -124,6 +124,11 @@ function openPage(html: string, url: string, scripts: [string, string][], respon
   if (timers) context.setTimeout = (fn: () => void) => waiting.push(fn);
   const banned = ["localStorage", "sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "navigator", "window", "self", "top", "parent", "opener", "open", "postMessage", "setInterval", "console", "alert", "confirm", "prompt"];
   if (!timers) banned.push("setTimeout");
+  // The Connections page reads its record of the way back (src/dash/connect-return.ts): here a browser that holds none.
+  if (scripts.some(([name]) => name === "connections.js")) {
+    banned.splice(banned.indexOf("localStorage"), 1);
+    context.localStorage = new FakeStorage();
+  }
   for (const name of banned) {
     Object.defineProperty(context, name, {
       get() {

@@ -27,15 +27,20 @@
 // "Use a different account", under the two buttons, is the Account page's Sign out (POST
 // /api/v1/signout: this browser's session only, no other) and then the sign-in page
 // (Dash.signedOut); it sends nothing about the code, so the request stays open until it
-// expires and another account can confirm it. The sign-in pages take no return address, so
-// after signing in the person lands where everyone does (Tours) and opens Connections. A
+// expires and another account can confirm it. Once the sign-out is done, and only then, the
+// page keeps the way back in this browser's localStorage (src/dash/connect-return.ts): a fixed
+// marker, the code that was looked up, and an expiry the code's own lifetime after the lookup.
+// The sign-in pages take no return address and send nothing of it; after a sign-in that worked
+// they go to Connections instead of Tours while a valid record is there. This page, loading
+// signed in, takes the record once (removes it before using it), fills in the code and looks it
+// up exactly as if it had been typed, so the question names the account now signed in; the
+// person still presses Connect. A confirm or a refusal that is done removes a record too. A
 // 404 from any of the three is the "does not work" sentence; a 429 says how many minutes to
 // wait (its retry-after, rounded up) and Continue stays disabled, and does nothing, until
 // then. When no answer comes to Connect or Not me, the code is looked up once: a 404 (no
 // longer open) closes the question with a neutral note and the list is watched as after a
 // confirm; anything else keeps the question open with the failure. The code is never read
-// from or written to the page's address, storage or a log: after "Use a different account"
-// it is typed again.
+// from or written to the page's address or a log, and storage only as the record above.
 //
 // After a confirm the token does not exist yet: Mythicshot makes it when it next asks, every
 // few seconds (src/connect.ts). So the list is read at once and then again after each pause
@@ -64,6 +69,7 @@ import { MAX_EMAIL_CHARS } from "../accounts.ts";
 import { DEVICE_NAME_MAX, USER_CODE_ALPHABET } from "../connect.ts";
 import { MAX_WORKSPACE_CHARS } from "../setup.ts";
 import { MAX_TOKENS_LISTED } from "../tokens.ts";
+import { RETURN_SHARED_JS } from "./connect-return.ts";
 import { dashHtml } from "./shell.ts";
 
 const CONNECTIONS_MAIN = `  <div id="connections-page">
@@ -243,7 +249,8 @@ export const CONNECTIONS_JS = String.raw`(function () {
   // The token a rename or a disconnect question is about.
   var renaming = null;
   var disconnecting = null;
-  // The request the confirm question is about: { code, device, asked }, as the lookup answered.
+  // The request the confirm question is about: { code, device, asked, elsewhere }, as the
+  // lookup answered, and at: when this page had that answer (its own clock).
   var pending = null;
   // A lookup is running; Continue rests until blockedUntil after a 429.
   var looking = false;
@@ -251,6 +258,37 @@ export const CONNECTIONS_JS = String.raw`(function () {
   var blockNo = 0;
   // The reads after a confirm, numbered: a newer confirm ends the older one's.
   var watchNo = 0;
+
+${RETURN_SHARED_JS}
+  // Kept once Use a different account has signed this browser out: the way back here, with
+  // the code that was looked up, until the code's own lifetime after the lookup (from now when
+  // that time is not known). Nothing is kept once that time has passed.
+  function returnSave(userCode, lookedUpAt) {
+    var now = Date.now();
+    var from = isTime(lookedUpAt) && lookedUpAt <= now ? lookedUpAt : now;
+    var r = { to: "connections" };
+    if (typeof userCode === "string" && RETURN_USER_CODE.test(userCode)) r.user_code = userCode;
+    r.until = from + RETURN_MS;
+    if (r.until <= now) return;
+    try { localStorage.setItem(RETURN_KEY, JSON.stringify(r)); } catch (e) { /* no storage in this browser: as before */ }
+  }
+
+  // The record, taken once: removed before it is used, then checked.
+  function returnTake() {
+    var text = returnRead();
+    if (text === null) return null;
+    returnClear();
+    return returnCheck(text);
+  }
+
+  // Back here after Use a different account and a sign-in: the code in the field, looked up
+  // exactly as if the person had typed it and pressed Continue.
+  function resume() {
+    var back = returnTake();
+    if (back === null || back.user_code === null) return;
+    $("connect-code").value = back.user_code.slice(0, 4) + "-" + back.user_code.slice(4);
+    lookUp();
+  }
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -388,7 +426,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
       if (res !== null && res.status === 200 && d !== null && typeof d === "object" && typeof d.device_name === "string" && isTime(d.asked_at)) {
         // Another question opened meanwhile: this one is not asked on top of it.
         if (anyOpen()) return;
-        ask({ code: code, device: d.device_name, asked: d.asked_at, elsewhere: d.same_network === false });
+        ask({ code: code, device: d.device_name, asked: d.asked_at, elsewhere: d.same_network === false, at: Date.now() });
         return;
       }
       if (res !== null && res.status === 404) codeSays(TEXT.badCode);
@@ -493,6 +531,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
       if (res !== null && (res.status === 204 || res.status === 404 || res.status === 429)) {
         confirmQ.close(false);
         if (res.status === 204) {
+          returnClear();
           input.value = "";
           codeSays("");
           if (how === "confirm") {
@@ -511,14 +550,16 @@ export const CONNECTIONS_JS = String.raw`(function () {
   }
 
   // "Use a different account": this browser's session ends, as with the Account page's Sign
-  // out, and the browser goes to the sign-in page. Nothing about the code is sent (no confirm,
-  // no refuse): the request stays open until it expires. A refusal for a stale session (Dash.staleSession) means
+  // out, and the browser goes to the sign-in page, with the way back here kept in this browser
+  // (returnSave). Nothing about the code is sent (no confirm, no refuse): the request stays
+  // open until it expires. A refusal for a stale session (Dash.staleSession) means
   // this tab's session is not the browser's any more (another account signed in elsewhere in
   // it), so the page loads again and starts from the current session. When the sign-out
   // fails otherwise, the person is still signed in here, so the question stays open with the
   // failure.
   function otherAccount() {
     if (pending === null || confirmQ.isWorking()) return;
+    var p = pending;
     confirmQ.say("");
     confirmQ.busy(true, "confirm-other");
     function failed(res) {
@@ -527,7 +568,11 @@ export const CONNECTIONS_JS = String.raw`(function () {
       $("confirm-other").focus();
     }
     Dash.api("POST", SIGNOUT).then(function (res) {
-      if (res.status === 204 || res.status === 401) { Dash.signedOut(); return; }
+      if (res.status === 204 || res.status === 401) {
+        returnSave(p.code, p.at);
+        Dash.signedOut();
+        return;
+      }
       if (Dash.staleSession(res)) { Dash.reload(); return; }
       failed(res);
     }, function () { failed(null); });
@@ -892,6 +937,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
       if (!got(r)) $("dash-load").textContent = Dash.failure(r);
       $("connections").hidden = false;
       if (who.named) welcome(who.username, r);
+      resume();
     });
   });
 })();
