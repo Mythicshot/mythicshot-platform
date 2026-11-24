@@ -148,7 +148,7 @@ describe("the allowance and the read-only rule", () => {
       await s.deps.db.run("UPDATE workspace SET subscription_status = ? WHERE id = ?", [status, s.a.workspaceId]);
       expect(await allowance(s.a.workspaceId), status).toBe(PLAN_BYTES);
     }
-    // 0.1.61 (review M2), on purpose: a first payment that never completed (incomplete_expired) never went live, so it is the trial.
+    // 0.1.62 (review M2), on purpose: a first payment that never completed (incomplete_expired) never went live, so it is the trial.
     for (const status of ["incomplete", "incomplete_expired", "paused"]) {
       await s.deps.db.run("UPDATE workspace SET subscription_status = ? WHERE id = ?", [status, s.a.workspaceId]);
       expect(await allowance(s.a.workspaceId), status).toBe(TRIAL_BYTES);
@@ -597,7 +597,7 @@ describe("the state the dashboard reads", () => {
       ends_at: null,
       ended_at: null,
       links_until: null,
-      // The first full UTC day after the trial (0.1.61): the day the sweep acts on.
+      // The first full UTC day after the trial (0.1.62): the day the sweep acts on.
       removed_at: removalDayOf(T0 + TRIAL_MS),
       manage: false,
       confirming: false,

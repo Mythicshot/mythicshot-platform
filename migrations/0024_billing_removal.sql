@@ -1,4 +1,4 @@
--- Removal after the trial or an ended subscription (0.1.61, Plan 2l items 7 and 8): the record
+-- Removal after the trial or an ended subscription (0.1.62, Plan 2l items 7 and 8): the record
 -- of each warning mail, and a mark on an account's removal once anything of it is removed.
 -- Everything is additive: one new table and one nullable column, so rows written before this
 -- migration stay valid and the statements of the versions before it, which name none of this,

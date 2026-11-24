@@ -475,7 +475,7 @@ export async function housekeeping(deps: Deps, workspaceId: string, tourId: stri
     await deps.db.batch([
       { sql: RETIRE_ABANDONED_SQL, params: [now, workspaceId, stale, stale] },
       { sql: DROP_ABANDONED_JOBS_SQL, params: [workspaceId, stale] },
-      // 0.1.61 (second review N1): checkout records are no longer cleared here by age. A record
+      // 0.1.62 (second review N1): checkout records are no longer cleared here by age. A record
       // past its expiry may be of a checkout that was paid and never linked; only the billing
       // sweep clears one, once Stripe has confirmed that checkout expired (src/billing-sweep.ts).
     ]);

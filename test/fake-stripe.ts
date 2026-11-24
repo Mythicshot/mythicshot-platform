@@ -75,7 +75,7 @@ export class FakeStripe implements Stripe {
   subscriptions = new Map<string, Json>();
   sessions = new Map<string, Json>();
   charges = new Map<string, Json>();
-  /** Invoices, for the list of a subscription's open ones and their void (0.1.61). */
+  /** Invoices, for the list of a subscription's open ones and their void (0.1.62). */
   invoices = new Map<string, Json>();
   /** Every call throws, as when Stripe cannot be reached. */
   down = false;

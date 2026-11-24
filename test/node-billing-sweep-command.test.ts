@@ -1,4 +1,4 @@
-// The server command's billing-sweep (0.1.61, src/node/admin.ts), run in this process on a database
+// The server command's billing-sweep (0.1.62, src/node/admin.ts), run in this process on a database
 // file in a scratch folder, as `cpanel.sh admin billing-sweep` runs it. Node only. No mail is
 // sent and Stripe is never reached: the fake mailer and the fake Stripe are handed in.
 import { mkdtempSync, rmSync } from "node:fs";
@@ -122,7 +122,7 @@ describe("billing-sweep", () => {
     expect(on.code).toBe(0);
     expect(on.lines).toContain("Removals started: 1. Finished: 1. Still in progress: 0.");
     expect(rowsOf(s.dir, "SELECT id FROM workspace WHERE id = ?", [s.workspaceId])).toHaveLength(0);
-    // The site's own workspace is untouched; Stripe was asked only for its time (0.1.61: a trial has nothing else there), and no mail went.
+    // The site's own workspace is untouched; Stripe was asked only for its time (0.1.62: a trial has nothing else there), and no mail went.
     expect(rowsOf(s.dir, "SELECT id FROM workspace")).toHaveLength(1);
     expect(on.stripe.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["GET /v1/prices/price_FAKE"]);
     for (const r of [off, dry, on]) expect(r.lines.join("\n")).not.toMatch(/@|rk_test|whsec|made-up/);

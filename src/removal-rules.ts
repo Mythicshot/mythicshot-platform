@@ -1,4 +1,4 @@
-// The clock of removal (0.1.61, Plan 2l items 7 and 8): when a workspace's links come down, when
+// The clock of removal (0.1.62, Plan 2l items 7 and 8): when a workspace's links come down, when
 // each of the three warning mails is due, and when its content may be removed. Pure: it reads the
 // stored billing row and the stored warnings, never a request and never the network, so the
 // dashboard (src/billing.ts), the public routes (linksUpSql) and the sweep (src/billing-sweep.ts)
@@ -194,7 +194,7 @@ const quoted = (list: readonly string[]) => list.map((s) => `'${s}'`).join(", ")
 /**
  * The condition that the workspace `ws` (a column) has at most one account: its memberships and
  * the accounts whose own row names it without a membership (an older build's). A workspace with
- * more is on no clock: its links stay up, it gets no mail and nothing of it is removed (0.1.61).
+ * more is on no clock: its links stay up, it gets no mail and nothing of it is removed (0.1.62).
  */
 export const ONE_ACCOUNT_SQL = (ws: string) =>
   `(SELECT count(*) FROM membership om1 WHERE om1.workspace_id = ${ws}) + (SELECT count(*) FROM user ou1 WHERE ou1.workspace_id = ${ws} AND NOT EXISTS (SELECT 1 FROM membership om2 WHERE om2.user_id = ou1.id AND om2.workspace_id = ${ws})) <= 1`;

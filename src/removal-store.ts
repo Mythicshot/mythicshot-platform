@@ -1,4 +1,4 @@
-// The stored side of the removal clock (0.1.61): reading a workspace's warning mails (migration
+// The stored side of the removal clock (0.1.62): reading a workspace's warning mails (migration
 // 0024) in the same statement as its billing row, and the digest a warning is recorded under in
 // place of the address. Imports nothing but types, so the dashboard's state route (src/billing.ts)
 // and the sweep (src/billing-sweep.ts) share it without importing each other.

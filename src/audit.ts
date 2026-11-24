@@ -35,7 +35,7 @@ export const AUDIT_EVENTS = [
   "account_disabled",
   "account_enabled",
   "account_deleted",
-  // 0.1.61: undoing a delete that removed nothing yet, and the billing sweep's warnings and removals.
+  // 0.1.62: undoing a delete that removed nothing yet, and the billing sweep's warnings and removals.
   "account_removal_undone",
   "billing_warning_sent",
   "billing_removal_started",

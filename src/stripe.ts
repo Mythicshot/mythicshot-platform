@@ -19,7 +19,7 @@ const STRIPE_API = "https://api.stripe.com";
 
 /**
  * Stripe's answer: its HTTP status and its parsed JSON body (null when it is not JSON), and its
- * Date header as sent (0.1.61, optional: absent or null when there was none), which the billing
+ * Date header as sent (0.1.62, optional: absent or null when there was none), which the billing
  * sweep compares with the server's clock before it removes anything.
  */
 export type StripeAnswer = { status: number; body: unknown; date?: string | null };
@@ -31,7 +31,7 @@ export interface Stripe {
   /**
    * One request to Stripe. `path` is an API path such as /v1/subscriptions/sub_123: it must
    * match STRIPE_PATH, else the call throws before anything is sent. `form` is sent as the
-   * form-encoded body of a POST, and (0.1.61) as the query of a GET, such as a list's filters.
+   * form-encoded body of a POST, and (0.1.62) as the query of a GET, such as a list's filters.
    * Throws Error("stripe: unreachable") when no answer came.
    */
   call(method: "GET" | "POST" | "DELETE", path: string, form?: StripeForm, idempotencyKey?: string): Promise<StripeAnswer>;

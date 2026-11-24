@@ -1,4 +1,4 @@
-// Removal after the trial or an ended subscription (0.1.61, Plan 2l items 7 and 8), on both
+// Removal after the trial or an ended subscription (0.1.62, Plan 2l items 7 and 8), on both
 // targets: links come down 30 days after a subscription ends (a trial's when it ends), three
 // warning mails go out 30, 7 and 1 days before the removal day, and the sweep removes a workspace
 // only when every rule holds, and only with BILLING_REMOVAL on. Stripe is the fake of
@@ -443,7 +443,7 @@ describe("removal", () => {
     await sweep(live);
     expect(await exists(live.deps, live.b.workspaceId)).toBe(true);
     expect((await live.deps.db.first<Json>("SELECT subscription_status FROM workspace WHERE id = ?", [live.b.workspaceId]))!.subscription_status).toBe("active");
-    // 0.1.61 (second review N2): an incomplete subscription, a first payment in progress, holds: never cancelled.
+    // 0.1.62 (second review N2): an incomplete subscription, a first payment in progress, holds: never cancelled.
     const incomplete = await prepare();
     incomplete.stripe.subscription("sub_B", "cus_B", "incomplete");
     await sweep(incomplete);
@@ -452,7 +452,7 @@ describe("removal", () => {
     const ok = await prepare();
     await sweep(ok);
     expect(await exists(ok.deps, ok.b.workspaceId)).toBe(false);
-    // The subscription was asked right before (and again before the pass, 0.1.61), and nothing was cancelled or written at Stripe.
+    // The subscription was asked right before (and again before the pass, 0.1.62), and nothing was cancelled or written at Stripe.
     expect(new Set(ok.stripe.calls.map((c) => `${c.method} ${c.path}`))).toEqual(new Set(["GET /v1/subscriptions/sub_B", "GET /v1/invoices"]));
   });
 
@@ -705,7 +705,7 @@ describe("the dashboard's notices", () => {
   it("say where to download everything, now that the build has the download, and write dates as the UTC day", async () => {
     const { BILLING_JS, DOWNLOAD_SENTENCE } = await import("../src/dash/billing.ts");
     const { DOWNLOAD_ALL_BUILT } = await import("../src/removal-rules.ts");
-    // 0.1.61 with 0.1.60 merged: the download exists, so the notices say where; "Account page" links to its card.
+    // 0.1.62 with 0.1.60 merged: the download exists, so the notices say where; "Account page" links to its card.
     expect(DOWNLOAD_ALL_BUILT).toBe(true);
     expect(DOWNLOAD_SENTENCE).toBe("You can download everything from your Account page.");
     expect(BILLING_JS).toContain('"You can download everything from your ","."');

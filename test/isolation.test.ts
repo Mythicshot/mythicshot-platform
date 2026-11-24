@@ -568,7 +568,7 @@ const ADMIN: Record<string, { reason: string; request: (w: World) => Sample; fie
     fields: [],
     status: 204,
   },
-  // 0.1.61: no delete of B is recorded yet, so it is refused; the delete after it is not stopped.
+  // 0.1.62: no delete of B is recorded yet, so it is refused; the delete after it is not stopped.
   "POST /api/v1/admin/accounts/:id/undo-removal": {
     reason: "the admin undoes a delete of one account that has removed nothing yet, by the account's id; it answers nothing, or a refusal",
     request: (w) => ({ method: "POST", path: `/api/v1/admin/accounts/${w.b.userId}/undo-removal` }),

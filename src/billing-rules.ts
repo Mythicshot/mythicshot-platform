@@ -21,7 +21,7 @@
 //   site's default allowance, no trial, no notice, never read-only, exactly as before billing.
 //   So is a workspace with an allowance the admin set by hand that has never had a subscription
 //   (room given without a payment).
-// - ended: Stripe says `canceled` or `unpaid` (0.1.61: no longer `incomplete_expired`, a first
+// - ended: Stripe says `canceled` or `unpaid` (0.1.62: no longer `incomplete_expired`, a first
 //   payment that never completed, which is the trial below). Read-only at once: view,
 //   download and delete work; upload, publish, rename and widening who may view are refused
 //   (src/billing.ts, readOnlyRefusal). The allowance stays PLAN_BYTES (or the admin's number),
@@ -64,13 +64,13 @@ export const LIVE_STATUSES = ["active", "trialing", "past_due"] as const;
 /** Stripe's subscription statuses that end it: the workspace is read-only. */
 export const ENDED_STATUSES = ["canceled", "unpaid", "incomplete_expired"] as const;
 /**
- * The ended statuses of a subscription that once went live (0.1.61): the workspace is read-only
+ * The ended statuses of a subscription that once went live (0.1.62): the workspace is read-only
  * and on the ended clock. `incomplete_expired` is not one of them: a first payment that never
  * completed is a subscription that never went live, so the workspace stays on its trial.
  */
 export const LAPSED_STATUSES = ["canceled", "unpaid"] as const;
 /**
- * The statuses Stripe never moves a subscription out of (0.1.61): nothing more can be charged.
+ * The statuses Stripe never moves a subscription out of (0.1.62): nothing more can be charged.
  * Every other subscription on record is cancelled at Stripe before a removal or a delete.
  */
 export const FINAL_STATUSES = ["canceled", "incomplete_expired"] as const;

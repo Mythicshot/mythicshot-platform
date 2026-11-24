@@ -1,4 +1,4 @@
-// The billing sweep (0.1.61, Plan 2l items 7 and 8): the housekeeping that mails the three
+// The billing sweep (0.1.62, Plan 2l items 7 and 8): the housekeeping that mails the three
 // warnings before a workspace's content is removed, and, only with BILLING_REMOVAL=on, removes
 // the content of a workspace whose warnings all went out and whose removal day has come. The
 // rules of the clock are src/removal-rules.ts; the mails are src/removal-mail.ts; the removal
@@ -557,7 +557,7 @@ async function startRemoval(deps: Deps, c: Candidate, clock: Clock): Promise<boo
 type Recheck = BillingRow & { site: number; shared: number; user_admin: number | null; late_checkouts: number };
 
 /**
- * The re-check before a pass (0.1.61): "go", "hold" (Stripe gave no definite answer: try at the
+ * The re-check before a pass (0.1.62): "go", "hold" (Stripe gave no definite answer: try at the
  * next sweep), or the fixed word of why the removal stops for good: "live" (a live subscription,
  * stored or at Stripe, which is then stored), "checkout" (a checkout of the workspace made after
  * the removal started, or not expired, or pending on the record), "left_clock" (the workspace is on

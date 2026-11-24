@@ -223,7 +223,7 @@ export function missingAllowsRemoval(): false {
   return false;
 }
 
-// ---- The billing sweep's last questions before a removal (src/billing-sweep.ts, 0.1.61) ----
+// ---- The billing sweep's last questions before a removal (src/billing-sweep.ts, 0.1.62) ----
 
 /**
  * What Stripe says, right before a removal, of the subscription on the workspace's record
@@ -767,7 +767,7 @@ async function voidOpenInvoices(deps: Deps, subscriptionId: string, room: (cost:
   return list.body.has_more === true ? "more" : "ok";
 }
 
-/** True when a removal of the workspace or of the account is recorded, or the account is not active (0.1.61). One call. */
+/** True when a removal of the workspace or of the account is recorded, or the account is not active (0.1.62). One call. */
 export async function closing(deps: Deps, workspaceId: string, userId: string): Promise<boolean> {
   const found = await deps.db.first<{ removing: number; status: string | null }>(
     "SELECT EXISTS (SELECT 1 FROM account_removal r WHERE r.workspace_id = ? OR r.user_id = ?) AS removing, (SELECT u.status FROM user u WHERE u.id = ?) AS status",
@@ -858,7 +858,7 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     const row = await rowWithEmail(deps, auth.workspaceId, auth.session.userId);
     if (row === null) return apiError(404, "not_found", "no such workspace");
     if (isLive(row.status)) return alreadySubscribed();
-    // 0.1.61: no checkout for an account being removed (or one that is not active).
+    // 0.1.62: no checkout for an account being removed (or one that is not active).
     if (await closing(deps, auth.workspaceId, auth.session.userId)) return deletingAccount();
 
     const now = deps.now();
@@ -904,7 +904,7 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     }
     const secret = b.client_secret;
 
-    // A removal recorded while Stripe made it (0.1.61): its secret is never handed out, so nobody
+    // A removal recorded while Stripe made it (0.1.62): its secret is never handed out, so nobody
     // can pay it, and it is expired at Stripe.
     if (await closing(deps, auth.workspaceId, auth.session.userId)) {
       try {
@@ -1179,7 +1179,7 @@ async function cancelAtStripe(deps: Deps, id: string): Promise<Subscription | "m
     if (isMissing(a.status, a.body)) return "missing";
     if (a.status === 200 && isObj(a.body)) {
       const sub = subscriptionOf(a.body, id);
-      // Only a status Stripe never leaves is a cancel (0.1.61): an `unpaid` one could still be paid.
+      // Only a status Stripe never leaves is a cancel (0.1.62): an `unpaid` one could still be paid.
       if (sub !== null && isFinal(sub.status)) return sub;
     }
   } catch {
@@ -1246,7 +1246,7 @@ export async function prepareDeletion(deps: Deps, workspaceId: string, adminId: 
   if (!billingConfigured(deps.config)) return "ok";
   const row = await billingRowOf(deps, workspaceId);
   if (row === null) return "ok";
-  // 0.1.61: every subscription on record that is not definitely over (`canceled`,
+  // 0.1.62: every subscription on record that is not definitely over (`canceled`,
   // `incomplete_expired`) is cancelled first, `unpaid` included, which could still be paid.
   if (row.subscription !== null && !isFinal(row.status)) {
     if (!room(4)) return "more";

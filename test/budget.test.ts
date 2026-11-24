@@ -676,7 +676,7 @@ describe("the call budget, route by route", () => {
     // Five 200-step uploads and a 1,500-row sweep: over 20 s on a busy machine, as the other heavy cases here.
   }, 120_000);
 
-  it("links down (0.1.61): the public page, picture and shared item cost the same calls with billing off and with links up, and a link that is down costs what a link that never existed costs", async () => {
+  it("links down (0.1.62): the public page, picture and shared item cost the same calls with billing off and with links up, and a link that is down costs what a link that never existed costs", async () => {
     const costs = async (billing: boolean) => {
       const { deps, advance } = await clocked();
       if (billing) withBilling(deps);
@@ -716,7 +716,7 @@ describe("the call budget, route by route", () => {
     expect(on.unknown).toEqual(off.unknown);
   }, 120_000);
 
-  it("the billing state (0.1.61) reads the removal's dates in one call more, only for a workspace on the clock", async () => {
+  it("the billing state (0.1.62) reads the removal's dates in one call more, only for a workspace on the clock", async () => {
     const { deps } = await clocked();
     withBilling(deps);
     await seedAccount(deps, { username: "siteadmin", admin: true });

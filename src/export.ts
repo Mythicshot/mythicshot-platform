@@ -775,7 +775,7 @@ export function exportRoutes(app: Hono, deps: Deps): void {
   app.get(EXPORT_PATH, async (c) => {
     const auth = await requireAuth(c.req.raw, deps, SESSION_OPEN);
     if (auth instanceof Response) return auth;
-    // 0.1.61: refused while a removal of the workspace is recorded (the checkout route's own check).
+    // 0.1.62: refused while a removal of the workspace is recorded (the checkout route's own check).
     if (await closing(deps, auth.workspaceId, auth.session?.userId ?? "")) return deletingAccount();
     return json(200, { running: await exportInProgress(deps, auth.workspaceId, deps.now()) });
   });
@@ -810,7 +810,7 @@ export function exportRoutes(app: Hono, deps: Deps): void {
       if (!isUniqueViolation(err)) throw err;
       taken = 0;
     }
-    // Not taken: another download is under way, or (0.1.61) a removal of the workspace is recorded,
+    // Not taken: another download is under way, or (0.1.62) a removal of the workspace is recorded,
     // which only then costs the read that tells them apart.
     if (taken !== 1) return (await closing(deps, auth.workspaceId, auth.session.userId)) ? deletingAccount() : busy();
     return json(200, { url: `${EXPORT_PATH}/${await ticketOf(secret, auth, now)}` });
@@ -843,7 +843,7 @@ export function exportRoutes(app: Hono, deps: Deps): void {
     try {
       await deps.db.batch([
         {
-          // 0.1.61: never claimed while a removal of the workspace is recorded (no call more).
+          // 0.1.62: never claimed while a removal of the workspace is recorded (no call more).
           sql: `UPDATE rate_counter SET count = ${RUNNING} WHERE bucket = ? AND key = ? AND window_start = ? AND count = ${READY} AND window_start > ?
                   AND NOT EXISTS (SELECT 1 FROM account_removal r WHERE r.workspace_id = ?)`,
           params: [EXPORT_RUNNING_BUCKET, key, start, now - TICKET_MS, auth.workspaceId],

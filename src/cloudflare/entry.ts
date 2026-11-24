@@ -169,7 +169,7 @@ function lifetimeVars(env: Partial<Record<LifetimeSetting, unknown>>): Partial<R
 }
 
 /**
- * The billing sweep on Workers (src/billing-sweep.ts, 0.1.61): what the scheduled handler below
+ * The billing sweep on Workers (src/billing-sweep.ts, 0.1.62): what the scheduled handler below
  * runs, one sweep within the call budget of one invocation. BILLING_REMOVAL is a var only an
  * install that wants removal adds (removalSwitchedOn: `on`, else off). Settings that cannot be
  * used make it do nothing, with the same one line each the fetch handler writes; so does a site

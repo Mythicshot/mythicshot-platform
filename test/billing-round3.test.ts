@@ -229,7 +229,7 @@ describe("N6: read-backs of a stale row", () => {
 });
 
 describe("N7: the checkout record is swept, and money taken without access is shown to the admin", () => {
-  it("housekeeping no longer removes checkout records by age (0.1.61, second review N1): the billing sweep clears them once Stripe confirmed each expired", async () => {
+  it("housekeeping no longer removes checkout records by age (0.1.62, second review N1): the billing sweep clears them once Stripe confirmed each expired", async () => {
     const s = await site();
     const put = (id: string, ws: string, expires: number) => s.deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES (?, ?, ?, ?)", [id, ws, expires - 33 * MIN, expires]);
     await put("cs_old_a", s.a.workspaceId, T0 - 8 * DAY);

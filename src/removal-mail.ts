@@ -1,4 +1,4 @@
-// The three warning mails before a workspace's content is removed (0.1.61), in the approved words
+// The three warning mails before a workspace's content is removed (0.1.62), in the approved words
 // of the mockup (Files/Mythicshot billing/billing-mockups.html, section 6), with section 7's
 // sentence about the download added to each, in the 30-day mail in place of the line about
 // recordings on the computer. The ended subscription's 30-day mail is the wording the owner gave

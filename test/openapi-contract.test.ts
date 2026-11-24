@@ -1021,7 +1021,7 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     }
     refused(await api.call("POST", account(member.userId, "/enable"), { headers }), 409, "deleting");
 
-    // Undoing a delete (0.1.61): this one has begun removing, so it is refused; one that removed nothing is undone.
+    // Undoing a delete (0.1.62): this one has begun removing, so it is refused; one that removed nothing is undone.
     const undo = (id: string) => api.call("POST", account(id, "/undo-removal"), { headers });
     refused(await undo(member.userId), 409, "removal_started");
     refused(await undo(admin.userId), 409, "own_account");

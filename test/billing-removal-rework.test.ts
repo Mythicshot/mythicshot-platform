@@ -1,4 +1,4 @@
-// The removal's rework after the security review (0.1.61), on both targets: subscriptions that
+// The removal's rework after the security review (0.1.62), on both targets: subscriptions that
 // are not definitely cancelled are cancelled at Stripe before anything goes (H1), a sweep's removal
 // re-checks the workspace before every pass and stops for good when it went live, took a checkout
 // or left the clock (H2), an undo that lands mid-way is honoured (M1), a subscription that never

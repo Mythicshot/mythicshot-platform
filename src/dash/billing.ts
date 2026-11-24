@@ -112,7 +112,7 @@ const MONTHS = ["January", "February", "March", "April", "May", "June", "July", 
 
 /**
  * The shared part of the billing scripts: dates as "21 February 2027", and making elements. A
- * date is the UTC day (0.1.61), as the warning mails write it and the removal sweep counts it, so
+ * date is the UTC day (0.1.62), as the warning mails write it and the removal sweep counts it, so
  * the day shown is the day acted on wherever the person is.
  */
 const COMMON = `  var MONTHS = ${JSON.stringify(MONTHS)};
@@ -209,7 +209,7 @@ ${COMMON}
     } else if (s.state === "ended") {
       kind = "bad";
       // An ended workspace on no removal clock (an allowance set by hand) has no dates: the
-      // sentence ends before them (0.1.61), in the same approved words.
+      // sentence ends before them (0.1.62), in the same approved words.
       text = num(s.links_until) !== null && num(s.removed_at) !== null
         ? [[W.ended, true], [W.endedRest + dateOf(s.links_until) + W.endedAnd + dateOf(s.removed_at) + W.stop, false]]
         : [[W.ended, true], [W.endedRest.slice(0, W.endedRest.indexOf(" Your links")), false]];
@@ -337,7 +337,14 @@ export const SUBSCRIBE_HTML = dashHtml({ title: "Account", active: "account", ma
 export const SUBSCRIBE_JS = `(function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
+  // The box is framed as a light card (class "mounted", src/dash/style.ts) only while Stripe's
+  // form is in it: never while the page waits, and never around the failure sentence.
+  function framed(on) {
+    var box = $("checkout");
+    if (box !== null) box.classList[on ? "add" : "remove"]("mounted");
+  }
   function failed(res) {
+    framed(false);
     var line = $("subscribe-message");
     line.textContent = Dash.failure(res);
     line.hidden = false;
@@ -359,6 +366,7 @@ export const SUBSCRIBE_JS = `(function () {
         var stripe = window.Stripe(d.publishable_key);
         Promise.resolve(stripe.createEmbeddedCheckoutPage({ clientSecret: secret })).then(function (checkout) {
           checkout.mount("#checkout");
+          framed(true);
         }, function () { failed(null); });
       } catch (e) {
         failed(null);

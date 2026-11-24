@@ -93,6 +93,17 @@ describe("the billing pages", () => {
     expect(SUBSCRIBE_JS).not.toMatch(/location|localStorage|sessionStorage|history/);
   });
 
+  it("framing the box for Stripe's form changed no word: the page is byte for byte as before, and its script writes no new text", async () => {
+    // SUBSCRIBE_HTML as of 0.1.60, before the box was framed (the frame is a class the script adds).
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(SUBSCRIBE_HTML))), (b) => b.toString(16).padStart(2, "0")).join("");
+    expect(digest).toBe("5c1b3f6e282d55f0e0261fb4000e8a4e46bcd315726f6ed3432e8c4c7fa1cfb9");
+    // Every string the script holds: ids, types, the request, and the frame's class, none of them shown.
+    expect([...new Set(SUBSCRIBE_JS.match(/"[^"]*"/g))].sort()).toEqual(
+      ['"#checkout"', '"/api/v1/billing/checkout"', '"POST"', '"add"', '"checkout"', '"function"', '"mounted"', '"object"', '"remove"', '"string"', '"subscribe-message"', '"use strict"'].sort(),
+    );
+    expect(SUBSCRIBE_JS).not.toMatch(/textContent\s*=\s*"|createTextNode|innerText/);
+  });
+
   it("the return page's three states, the notices and the Billing card hold the approved words", () => {
     for (const w of [
       "Confirming your payment",

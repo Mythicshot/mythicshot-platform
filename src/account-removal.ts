@@ -16,7 +16,7 @@
 // - GET /api/v1/admin/accounts/:id/removal: what a delete would remove, as counts.
 // - DELETE /api/v1/admin/accounts/:id with {"username": ...}: deletes a disabled account
 //   and everything in its workspace, in bounded steps (see `work` below).
-// - POST /api/v1/admin/accounts/:id/undo-removal (0.1.61): takes back a delete that has removed
+// - POST /api/v1/admin/accounts/:id/undo-removal (0.1.62): takes back a delete that has removed
 //   nothing yet; the account stays disabled.
 // The billing sweep (src/billing-sweep.ts) removes a workspace with the same steps, `work`
 // and its last batch, never with a path of its own; it is reached from no route.
@@ -242,7 +242,7 @@ export async function work(d: Deps, calls: () => number, t: Target, adminId: str
   const ws = t.workspace_id;
   const room = (cost: number) => calls() + cost + CALLS_AT_THE_END <= SUBREQUEST_BUDGET;
 
-  // Before anything is removed, in one guarded statement (0.1.61): the removal must still be
+  // Before anything is removed, in one guarded statement (0.1.62): the removal must still be
   // recorded, and it is marked as begun (migration 0024), from then on beyond an undo
   // (POST /api/v1/admin/accounts/:id/undo-removal). An undo that landed while the delete's
   // preparation asked Stripe took the record away: then nothing is removed ("undone").
@@ -409,7 +409,7 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
   });
 
   /**
-   * Undoes a delete that has removed nothing yet (0.1.61): an admin's delete records the removal
+   * Undoes a delete that has removed nothing yet (0.1.62): an admin's delete records the removal
    * first and then asks Stripe to cancel, so a Stripe that never gives a definite answer left the
    * account disabled with a removal recorded, neither finished nor undone. 204 once the removal
    * record is gone: the account is disabled, as before the delete, and can be enabled again. Only
@@ -433,7 +433,7 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
     const t = await readTarget(deps, id);
     if (t === null) return notFound();
     if (t.removing === 0) return notDeleting();
-    // A removal the billing sweep started: its warnings are cleared with it (0.1.61), so an account
+    // A removal the billing sweep started: its warnings are cleared with it (0.1.62), so an account
     // enabled again is warned afresh before the sweep may remove it, and the audit row says so. A
     // removal the sweep STOPPED (second review N3) may be undone even after files went: nothing is
     // restored, and the answer and the audit row give how many files had been removed.
