@@ -372,4 +372,6 @@ h1 { font-size: 20px; line-height: 28px; font-weight: 700; margin: 0 0 4px; }
 .billing-strip .btn { flex: 0 0 auto; }
 .billing-strip .message { flex: 1 1 100%; margin: 0; }
 .checkout { min-height: 320px; margin: 0 0 16px; }
+/* Once Stripe's form is mounted (the script adds "mounted"): a centred light card at the width Stripe's form takes one column, white inside like the form (on-primary is white in both schemes) so no dark edge shows, its corners clipped to the radius. No height of its own: the form grows it. Narrower than 480px it takes the page's width inside its gutter. */
+.checkout.mounted { width: 100%; max-width: 480px; margin-block: 16px; margin-inline: auto; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--on-primary); overflow: hidden; }
 `;

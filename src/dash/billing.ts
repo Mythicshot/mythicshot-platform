@@ -287,7 +287,14 @@ export const SUBSCRIBE_HTML = dashHtml({ title: "Account", active: "account", ma
 export const SUBSCRIBE_JS = `(function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
+  // The box is framed as a light card (class "mounted", src/dash/style.ts) only while Stripe's
+  // form is in it: never while the page waits, and never around the failure sentence.
+  function framed(on) {
+    var box = $("checkout");
+    if (box !== null) box.classList[on ? "add" : "remove"]("mounted");
+  }
   function failed(res) {
+    framed(false);
     var line = $("subscribe-message");
     line.textContent = Dash.failure(res);
     line.hidden = false;
@@ -309,6 +316,7 @@ export const SUBSCRIBE_JS = `(function () {
         var stripe = window.Stripe(d.publishable_key);
         Promise.resolve(stripe.createEmbeddedCheckoutPage({ clientSecret: secret })).then(function (checkout) {
           checkout.mount("#checkout");
+          framed(true);
         }, function () { failed(null); });
       } catch (e) {
         failed(null);
