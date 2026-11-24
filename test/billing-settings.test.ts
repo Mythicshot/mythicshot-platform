@@ -54,8 +54,33 @@ describe("billing on the Worker", () => {
     const res = await entry.default.fetch(new Request("https://tours.example.com/healthz"), { ...bindings(), ...FOUR }, {});
     expect([res.status, await res.text()]).toEqual([500, '{"error":"misconfigured"}']);
     expect(logged.mock.calls.map((c) => c.join(" ")).join(" ")).toMatch(/SITE_HOST/);
+    // With an address it serves; its first request asks Stripe for the price, here a stand-in
+    // fetch (no test reaches the network).
+    const asked: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      asked.push(String(input instanceof Request ? input.url : input));
+      return new Response('{"id":"price_FAKE","object":"price"}', { status: 200 });
+    });
     const ok = await entry.default.fetch(new Request("https://tours.example.com/no/such"), { ...bindings(), ...FOUR, SITE_HOST: "tours.example.com" }, {});
     expect(ok.status).toBe(404);
+    expect(asked).toEqual(["https://api.stripe.com/v1/prices/price_FAKE"]);
+    // Once per isolate: the next request asks nothing.
+    await entry.default.fetch(new Request("https://tours.example.com/no/such"), { ...bindings(), ...FOUR, SITE_HOST: "tours.example.com" }, {});
+    expect(asked).toHaveLength(1);
+  });
+
+  it("answers 500 misconfigured to every request when Stripe says the price does not exist, naming the two settings", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('{"error":{"code":"resource_missing","type":"invalid_request_error"}}', { status: 404 }));
+    const env = { ...bindings(), ...FOUR, STRIPE_PRICE_ID: "price_GONE", SITE_HOST: "tours.example.com" };
+    for (let i = 0; i < 2; i++) {
+      const res = await entry.default.fetch(new Request("https://tours.example.com/healthz"), env, {});
+      expect([res.status, await res.text()]).toEqual([500, '{"error":"misconfigured"}']);
+    }
+    const lines = logged.mock.calls.map((c) => c.join(" ")).join(" ");
+    expect(lines).toContain("STRIPE_PRICE_ID");
+    expect(lines).toContain("STRIPE_API_KEY");
+    expect(lines).not.toContain("price_GONE");
   });
 
   it("answers 500 misconfigured to every request for a setting of the wrong shape, with a line that names it and never a value", async () => {
