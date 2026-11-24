@@ -434,15 +434,26 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
     if (t === null) return notFound();
     if (t.removing === 0) return notDeleting();
     // A removal the billing sweep started: its warnings are cleared with it (0.1.61), so an account
-    // enabled again is warned afresh before the sweep may remove it, and the audit row says so.
-    const bySweep = (await deps.db.first("SELECT 1 AS x FROM account_removal WHERE user_id = ? AND started_by = ?", [id, SWEEP_ACTOR])) !== null;
+    // enabled again is warned afresh before the sweep may remove it, and the audit row says so. A
+    // removal the sweep STOPPED (second review N3) may be undone even after files went: nothing is
+    // restored, and the answer and the audit row give how many files had been removed.
+    const record = await deps.db.first<{ by_sweep: number; stopped: number; removed: number }>(
+      `SELECT started_by = ? AS by_sweep, stopped_at IS NOT NULL AS stopped, max(0, total - (${FILES_SQL})) AS removed FROM account_removal WHERE user_id = ? AND workspace_id = ?`,
+      [SWEEP_ACTOR, ...filesParams(t.workspace_id), id, t.workspace_id],
+    );
+    if (record === null) return notDeleting();
+    const bySweep = record.by_sweep === 1;
+    const stopped = record.stopped === 1;
+    const detail = { ...(bySweep ? { by: "billing_sweep" } : {}), ...(stopped ? { files_removed: record.removed } : {}) };
     try {
       await deps.db.batch([
-        {
-          sql: `DELETE FROM account_removal WHERE user_id = ? AND workspace_id = ? AND work_started_at IS NULL AND total = (${FILES_SQL})`,
-          params: [id, t.workspace_id, ...filesParams(t.workspace_id)],
-        },
-        auditStatement(deps, { event: "account_removal_undone", userId: adminId, workspaceId: t.workspace_id, subject: id, ...(bySweep ? { detail: { by: "billing_sweep" } } : {}) }, { onlyAfterOneChange: true }),
+        stopped
+          ? { sql: "DELETE FROM account_removal WHERE user_id = ? AND workspace_id = ? AND stopped_at IS NOT NULL", params: [id, t.workspace_id] }
+          : {
+              sql: `DELETE FROM account_removal WHERE user_id = ? AND workspace_id = ? AND work_started_at IS NULL AND total = (${FILES_SQL})`,
+              params: [id, t.workspace_id, ...filesParams(t.workspace_id)],
+            },
+        auditStatement(deps, { event: "account_removal_undone", userId: adminId, workspaceId: t.workspace_id, subject: id, ...(Object.keys(detail).length > 0 ? { detail } : {}) }, { onlyAfterOneChange: true }),
         ...(bySweep ? [{ sql: "DELETE FROM billing_warning WHERE workspace_id = ?", params: [t.workspace_id] }] : []),
       ]);
     } catch (err) {
@@ -453,6 +464,8 @@ export function accountRemovalRoutes(app: Hono, deps: Deps): void {
       if (again.removing === 0) return noContent();
       return removalStarted();
     }
+    // A stopped removal undone: what was removed stays removed, which the answer says in fields.
+    if (stopped) return json(200, { restored: false, files_removed: record.removed });
     return noContent();
   });
 

@@ -229,7 +229,7 @@ describe("N6: read-backs of a stale row", () => {
 });
 
 describe("N7: the checkout record is swept, and money taken without access is shown to the admin", () => {
-  it("housekeeping removes checkouts more than 7 days past their expiry, of the workspace it runs for, and keeps the others", async () => {
+  it("housekeeping no longer removes checkout records by age (0.1.61, second review N1): the billing sweep clears them once Stripe confirmed each expired", async () => {
     const s = await site();
     const put = (id: string, ws: string, expires: number) => s.deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES (?, ?, ?, ?)", [id, ws, expires - 33 * MIN, expires]);
     await put("cs_old_a", s.a.workspaceId, T0 - 8 * DAY);
@@ -239,7 +239,7 @@ describe("N7: the checkout record is swept, and money taken without access is sh
     const m = clone(fixtures.v2 as Json);
     m.steps = [{ ...clone(m.steps[1]), image: "step-001.png", width: 64, height: 64, bytes: 120 }];
     await uploadTour(s.deps, s.a.token, m);
-    expect((await s.deps.db.all<{ id: string }>("SELECT id FROM stripe_checkout ORDER BY id")).map((r) => r.id)).toEqual(["cs_old_b", "cs_open_a", "cs_recent_a"]);
+    expect((await s.deps.db.all<{ id: string }>("SELECT id FROM stripe_checkout ORDER BY id")).map((r) => r.id)).toEqual(["cs_old_a", "cs_old_b", "cs_open_a", "cs_recent_a"]);
   });
 
   it("a paid checkout that matched on its id but not on its reference or customer is a billing problem", async () => {

@@ -1029,6 +1029,9 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     await deps.db.run("INSERT INTO account_removal (user_id, workspace_id, started_by, total, created_at) VALUES (?, ?, ?, 0, ?)", [other.userId, other.workspaceId, admin.userId, deps.now()]);
     expect((await undo(other.userId)).status).toBe(204);
     refused(await undo(other.userId), 409, "not_deleting");
+    // A removal the billing sweep stopped (second review N3): undone even once begun, with the files it had removed.
+    await deps.db.run("INSERT INTO account_removal (user_id, workspace_id, started_by, total, created_at, work_started_at, stopped_at) VALUES (?, ?, ?, 2, ?, ?, ?)", [other.userId, other.workspaceId, "usr_" + "0".repeat(24), deps.now(), deps.now(), deps.now()]);
+    expect((await undo(other.userId)).json).toEqual({ restored: false, files_removed: 2 });
 
     // A delete with more files than one request removes: rows naming files that do not
     // exist are written first (removing a file that is already gone is not an error).

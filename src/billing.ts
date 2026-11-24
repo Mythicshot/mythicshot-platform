@@ -234,11 +234,12 @@ export function missingAllowsRemoval(): false {
  * and Stripe said `canceled`; "live" when Stripe says it is live: with `repair` the stored state is
  * then brought to what Stripe says, as a read-back does (storeSubscription, under its guard);
  * with `repair` "all" so is any answer, so that prepareDeletion cancels what Stripe says is not
- * over even when the record says otherwise. "unknown" for everything else: no answer, a timeout,
+ * over even when the record says otherwise. "pending" for `incomplete`, a first payment in progress, which holds the sweep (never
+ * cancelled). "unknown" for everything else: no answer, a timeout,
  * a permission error, any status but 200, a body not of the shape expected, another customer, and
  * a 404, which missingAllowsRemoval says is never proof. Nothing is removed on "live" or "unknown".
  */
-export async function subscriptionBeforeRemoval(deps: Deps, row: BillingRow, repair: boolean | "all"): Promise<"ended" | "cancel" | "live" | "unknown"> {
+export async function subscriptionBeforeRemoval(deps: Deps, row: BillingRow, repair: boolean | "all"): Promise<"ended" | "cancel" | "pending" | "live" | "unknown"> {
   if (row.subscription === null || row.customer === null) return "unknown";
   const read = await readSubscription(deps, row.subscription);
   if (read === "missing") return missingAllowsRemoval() ? "ended" : "unknown";
@@ -248,6 +249,9 @@ export async function subscriptionBeforeRemoval(deps: Deps, row: BillingRow, rep
     return "live";
   }
   if (repair === "all") await storeSubscription(deps, null, row, read, null);
+  // A first payment in progress (second review N2): Stripe itself resolves it to `active` or
+  // `incomplete_expired`, so the sweep neither cancels nor removes; it asks again next run.
+  if (read.status === "incomplete") return "pending";
   return isFinal(read.status) ? "ended" : "cancel";
 }
 
@@ -701,6 +705,66 @@ async function closeCheckout(deps: Deps, row: BillingRow, sessionId: string): Pr
     if (read !== null && read !== "missing" && (row.customer === null || row.customer === read.customer)) await storeSubscription(deps, null, row, read, sessionId);
   }
   return "paid";
+}
+
+/**
+ * The billing sweep's repair of a paid checkout found in stripe_checkout whose notice never linked
+ * it (second review N1): Stripe says the checkout is complete, so its subscription is read back and
+ * linked to the workspace exactly as the completed notice links a checkout this site made (the
+ * reference must be the workspace's, no other live subscription replaced, the customer the one on
+ * record if any), with the audit row `billing_checkout_paid_unlinked`, a billing problem for the
+ * admin, whatever the link's outcome. "linked" when the workspace now holds that subscription,
+ * "not_linked" otherwise (the removal stays held either way). With a dry run's database nothing is
+ * written. At most three calls to Stripe and three to the database.
+ */
+export async function repairPaidCheckout(deps: Deps, workspaceId: string, checkoutId: string): Promise<"linked" | "not_linked"> {
+  const row = await billingRowOf(deps, workspaceId);
+  if (row === null) return "not_linked";
+  await deps.db.batch([auditStatement(deps, { event: "billing_checkout_paid_unlinked", workspaceId })]);
+  const now = await checkoutNow(deps, checkoutId);
+  if (now?.status !== "complete") return "not_linked";
+  const subId = subscriptionNamedBy(now.body);
+  if (subId === null || now.body.client_reference_id !== row.id || (row.subscription !== null && row.subscription !== subId && isLive(row.status))) return "not_linked";
+  const read = await readSubscription(deps, subId);
+  if (read === null || read === "missing" || (row.customer !== null && row.customer !== read.customer)) return "not_linked";
+  const named = idOf(now.body.customer, "customer");
+  if (named !== null && named !== read.customer) return "not_linked";
+  const stored = await storeSubscription(deps, null, row, read, checkoutId);
+  return stored === "stored" || stored === "unchanged" ? "linked" : "not_linked";
+}
+
+/** How many open invoices one request voids at most; more are voided by the next. */
+const VOIDS_PER_CALL = 10;
+const INVOICE_ID = /^in_[A-Za-z0-9_]{1,250}$/;
+
+/**
+ * Voids the open invoices of a subscription being removed or deleted (second review N3), so none
+ * stays payable once the subscription is cancelled: GET /v1/invoices?subscription=…&status=open,
+ * then POST /v1/invoices/<id>/void for each, within `room`. "ok" when none is left open; "more"
+ * when invoices are left for the next request; "failed" when Stripe's list or a void gave no
+ * definite answer, and then nothing may be removed. Needs a check against a Stripe sandbox.
+ */
+async function voidOpenInvoices(deps: Deps, subscriptionId: string, room: (cost: number) => boolean): Promise<"ok" | "more" | "failed"> {
+  if (deps.stripe === undefined) return "failed";
+  let list;
+  try {
+    list = await deps.stripe.call("GET", "/v1/invoices", [["subscription", subscriptionId], ["status", "open"], ["limit", String(VOIDS_PER_CALL)]]);
+  } catch {
+    return "failed";
+  }
+  if (list.status !== 200 || !isObj(list.body) || !Array.isArray(list.body.data)) return "failed";
+  for (const inv of list.body.data) {
+    if (!isObj(inv) || typeof inv.id !== "string" || !INVOICE_ID.test(inv.id)) return "failed";
+    if (inv.status !== "open") continue;
+    if (!room(1)) return "more";
+    try {
+      const v = await deps.stripe.call("POST", `/v1/invoices/${inv.id}/void`);
+      if (v.status !== 200 || !isObj(v.body) || v.body.status !== "void") return "failed";
+    } catch {
+      return "failed";
+    }
+  }
+  return list.body.has_more === true ? "more" : "ok";
 }
 
 /** True when a removal of the workspace or of the account is recorded, or the account is not active (0.1.61). One call. */
@@ -1202,6 +1266,12 @@ export async function prepareDeletion(deps: Deps, workspaceId: string, adminId: 
       ]);
     }
   }
+  // Its open invoices are voided (second review N3), each request until none is left open.
+  if (row.subscription !== null) {
+    if (!room(2)) return "more";
+    const voided = await voidOpenInvoices(deps, row.subscription, room);
+    if (voided !== "ok") return voided;
+  }
   if (!room(1)) return "more";
   const open = await deps.db.all<{ id: string }>("SELECT id FROM stripe_checkout WHERE workspace_id = ? AND expires_at > ? ORDER BY id LIMIT 20", [workspaceId, deps.now()]);
   for (const c of open) {
@@ -1217,7 +1287,7 @@ export async function prepareDeletion(deps: Deps, workspaceId: string, adminId: 
  * its reference or its customer (customer_taken, customer_differs, reference_differs). Each is
  * money taken without access, for the admin to look at in Stripe.
  */
-const PROBLEM = "(event IN ('billing_checkout_unmatched', 'billing_second_subscription', 'billing_answer_refused', 'billing_removal_stopped') OR (event = 'billing_checkout_mismatch' AND json_extract(detail, '$.paid') = 1))";
+const PROBLEM = "(event IN ('billing_checkout_unmatched', 'billing_second_subscription', 'billing_answer_refused', 'billing_removal_stopped', 'billing_checkout_paid_unlinked') OR (event = 'billing_checkout_mismatch' AND json_extract(detail, '$.paid') = 1))";
 
 /** The billing problems the site's admin should look at: the count, and the newest rows (event, workspace, time). */
 export async function billingProblems(deps: Deps): Promise<{ count: number; recent: { event: string; workspace_id: string | null; at: number }[] }> {

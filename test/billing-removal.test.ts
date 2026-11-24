@@ -443,17 +443,17 @@ describe("removal", () => {
     await sweep(live);
     expect(await exists(live.deps, live.b.workspaceId)).toBe(true);
     expect((await live.deps.db.first<Json>("SELECT subscription_status FROM workspace WHERE id = ?", [live.b.workspaceId]))!.subscription_status).toBe("active");
-    // 0.1.61 (review H1): a status that is neither live nor final is cancelled at Stripe first, then removed.
+    // 0.1.61 (second review N2): an incomplete subscription, a first payment in progress, holds: never cancelled.
     const incomplete = await prepare();
     incomplete.stripe.subscription("sub_B", "cus_B", "incomplete");
     await sweep(incomplete);
-    expect(incomplete.stripe.subscriptions.get("sub_B")!.status).toBe("canceled");
-    expect(await exists(incomplete.deps, incomplete.b.workspaceId)).toBe(false);
+    expect(incomplete.stripe.subscriptions.get("sub_B")!.status).toBe("incomplete");
+    expect(await exists(incomplete.deps, incomplete.b.workspaceId)).toBe(true);
     const ok = await prepare();
     await sweep(ok);
     expect(await exists(ok.deps, ok.b.workspaceId)).toBe(false);
     // The subscription was asked right before (and again before the pass, 0.1.61), and nothing was cancelled or written at Stripe.
-    expect(new Set(ok.stripe.calls.map((c) => `${c.method} ${c.path}`))).toEqual(new Set(["GET /v1/subscriptions/sub_B"]));
+    expect(new Set(ok.stripe.calls.map((c) => `${c.method} ${c.path}`))).toEqual(new Set(["GET /v1/subscriptions/sub_B", "GET /v1/invoices"]));
   });
 
   it("a pending checkout, a paid one, one Stripe cannot confirm expired, or too many hold the removal back; expired ones do not", async () => {

@@ -416,6 +416,14 @@ function schemas(): Record<string, Schema> {
     RenameBody: input(["title"], { title: text(LIMITS.title, "The new title: trimmed, no control or format characters.", 1) }),
     Renamed: object(["id", "title"], { id: { type: "string" }, title: { type: "string", description: "The title as saved (trimmed)." } }),
     Deleted: object(["deleted"], { deleted: { type: "boolean", const: true } }, "Nothing of the tour is left."),
+    RemovalUndone: object(
+      ["restored", "files_removed"],
+      {
+        restored: { type: "boolean", const: false, description: "Always false: nothing that was removed is put back." },
+        files_removed: { type: "integer", minimum: 0, description: "How many of the workspace's files the removal had already removed." },
+      },
+      "A stopped removal was undone; what it had removed stays removed.",
+    ),
     Chapter: object(["id", "title", "position", "steps", "pictures", "uploaded_at"], {
       id: { type: "string", pattern: "^ch_[0-9a-f]{24}$", description: "The chapter's id." },
       title: { type: "string", description: "The chapter's title, as its upload named it." },
@@ -2100,9 +2108,10 @@ function paths(): OpenApiDoc["paths"] {
         security: SESSION,
         parameters: [accountId],
         responses: {
+          "200": answer("A removal the billing sweep had stopped is undone, also after it had begun: its record and the workspace's warning mails are gone, the account is disabled, and nothing removed is restored.", ref("RemovalUndone")),
           "204": empty("The delete's record is gone; the account is disabled."),
           "404": answer("Anything other than the site's admin, signed in on this address, with a correct request: no credential, a token, another account's session, a token with a session, a session on the tours address, a change from another origin or without the anti-forgery header; and an account id that is malformed or names no account. The 400 and 403 answers any request can get are this 404 here.", bare("not_found")),
-          "409": refusal("own_account: this is the caller's own account. not_deleting: no delete of the account is recorded. removal_started: the delete has begun removing the account's files or rows; send the delete again to finish it.", "own_account", "not_deleting", "removal_started"),
+          "409": refusal("own_account: this is the caller's own account. not_deleting: no delete of the account is recorded. removal_started: the delete has begun removing the account's files or rows and was not stopped by the billing sweep; send the delete again to finish it.", "own_account", "not_deleting", "removal_started"),
         },
       },
     },

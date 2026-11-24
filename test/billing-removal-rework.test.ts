@@ -132,7 +132,9 @@ describe("H2: a sweep's removal is re-checked before every pass, and stops for g
     await sweep(s);
     expect(await tours(s, s.b)).toBe(1);
     expect(await audits(s.deps, s.b.workspaceId, "billing_removal_stopped")).toHaveLength(1);
-    expect((await send(s.deps, "POST", `/api/v1/admin/accounts/${s.b.userId}/undo-removal`, { headers: await adminHeaders(s) })).status).toBe(204);
+    // A stopped removal is undone with what was removed counted (second review N3): nothing had gone.
+    const undone = await send(s.deps, "POST", `/api/v1/admin/accounts/${s.b.userId}/undo-removal`, { headers: await adminHeaders(s) });
+    expect([undone.status, undone.json]).toEqual([200, { restored: false, files_removed: 0 }]);
   });
 
   it("a checkout made after the start, or one not expired, and a workspace that left the clock, stop the removal", async () => {
@@ -341,11 +343,17 @@ describe("the low items", () => {
     expect(await userStatus(s.deps, s.b.userId)).toBe("active");
   });
 
-  it("the sweep clears checkout records more than 7 days past their expiry, so they cannot hold a removal for good", async () => {
+  it("old checkout records are cleared only once Stripe confirmed each expired, at most CHECKOUTS_ASKED a run; too many hold until the next run", async () => {
     const s = await site();
     await warned(s, s.a, REMOVAL_DAY, ON_TIME);
     s.at(at3(3, 11));
-    for (let i = 0; i < 12; i++) await s.deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES (?, ?, 1, ?)", [`cs_test_old${i}`, s.a.workspaceId, s.now() - 8 * DAY]);
+    for (let i = 0; i < 12; i++) {
+      await s.deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES (?, ?, ?, ?)", [`cs_test_old${i}`, s.a.workspaceId, i + 1, s.now() - 8 * DAY]);
+      s.stripe.sessions.set(`cs_test_old${i}`, { id: `cs_test_old${i}`, status: "expired" });
+    }
+    expect((await sweep(s)).held).toBe(1);
+    expect(await exists(s.deps, s.a.workspaceId)).toBe(true);
+    expect((await s.deps.db.all("SELECT id FROM stripe_checkout WHERE workspace_id = ?", [s.a.workspaceId])).length).toBe(2);
     await sweep(s);
     expect(await exists(s.deps, s.a.workspaceId)).toBe(false);
   });
@@ -383,6 +391,136 @@ describe("the low items", () => {
     const r = await sweep(s, { dryRun: true });
     expect(r.held).toBe(1);
     expect(await dumpOf(s.deps, keysOf(s), { files: true })).toEqual(before);
+  });
+});
+
+describe("round 3", () => {
+  it("N1: a trial paid at Stripe whose notice never linked it is found by its old checkout record, held, recorded and linked: never removed", async () => {
+    const s = await site();
+    await warned(s, s.a, REMOVAL_DAY, ON_TIME);
+    // Paid in January; the listener never linked it, and the record is long past its expiry.
+    await s.deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES ('cs_test_paid', ?, ?, ?)", [s.a.workspaceId, T0 + DAY, T0 + DAY + 33 * 60_000]);
+    s.stripe.sessions.set("cs_test_paid", { id: "cs_test_paid", status: "complete", customer: "cus_P", subscription: "sub_P", form: { client_reference_id: s.a.workspaceId } });
+    s.stripe.subscription("sub_P", "cus_P", "active", { periodEnd: Math.floor(Date.UTC(2027, 4, 1) / 1000) });
+    s.at(at3(3, 11));
+    const r = await sweep(s);
+    expect(r.held).toBe(1);
+    expect(await exists(s.deps, s.a.workspaceId)).toBe(true);
+    expect(await s.deps.db.first<Json>("SELECT stripe_customer_id AS c, stripe_subscription_id AS s, subscription_status AS st FROM workspace WHERE id = ?", [s.a.workspaceId])).toEqual({ c: "cus_P", s: "sub_P", st: "active" });
+    expect(await s.deps.db.first("SELECT id FROM stripe_checkout WHERE id = 'cs_test_paid'")).not.toBeNull();
+    expect((await audits(s.deps, s.a.workspaceId, "billing_checkout_paid_unlinked"))).toHaveLength(1);
+    expect((await billingProblems(s.deps)).recent.map((x) => x.event)).toContain("billing_checkout_paid_unlinked");
+    // And the next run, now live: nothing more happens to it.
+    s.at(at3(3, 12));
+    await sweep(s);
+    expect(await exists(s.deps, s.a.workspaceId)).toBe(true);
+    expect(s.stripe.subscriptions.get("sub_P")!.status).toBe("active");
+  });
+
+  it("N1: publishing no longer clears checkout records by age", async () => {
+    const s = await site();
+    await s.deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES ('cs_test_aged', ?, 1, 2)", [s.a.workspaceId]);
+    s.at(T0 + 20 * DAY);
+    await publishedTour(s, s.a);
+    expect(await s.deps.db.first("SELECT id FROM stripe_checkout WHERE id = 'cs_test_aged'")).not.toBeNull();
+  });
+
+  it("N2: an incomplete subscription holds the sweep's removal: never cancelled, re-evaluated next run", async () => {
+    const s = await site();
+    await s.deps.db.run("UPDATE workspace SET billing_trial = 0 WHERE id = ?", [s.a.workspaceId]);
+    await ended(s, s.b, ENDED_AT, "B");
+    await warned(s, s.b, ENDED_DAY, ENDED_WARNINGS);
+    s.stripe.subscription("sub_B", "cus_B", "incomplete");
+    s.at(at3(4, 14));
+    expect((await sweep(s)).held).toBe(1);
+    expect(s.stripe.calls.filter((c) => c.method === "DELETE")).toEqual([]);
+    expect(await userStatus(s.deps, s.b.userId)).toBe("active");
+    // Stripe resolved it: expired. The next run removes.
+    s.stripe.subscription("sub_B", "cus_B", "incomplete_expired");
+    await sweep(s);
+    expect(await exists(s.deps, s.b.workspaceId)).toBe(false);
+  });
+
+  it("N3: a stopped removal can be undone after files went: nothing restored, the count of files removed answered and audited, warnings cleared", async () => {
+    const s = await site();
+    s.at(T0 + DAY);
+    await publishedTour(s, s.b);
+    await unpaid(s);
+    const restore = cancelFails(s, "unreachable");
+    await sweep(s);
+    restore();
+    // As if the first pass had removed files before the stop.
+    await s.deps.db.run("UPDATE account_removal SET work_started_at = ?, total = total + 3, stopped_at = ? WHERE workspace_id = ?", [s.now(), s.now(), s.b.workspaceId]);
+    const h = await adminHeaders(s);
+    const r = await send(s.deps, "POST", `/api/v1/admin/accounts/${s.b.userId}/undo-removal`, { headers: h });
+    expect([r.status, r.json]).toEqual([200, { restored: false, files_removed: 3 }]);
+    expect(await removal(s, s.b)).toBeNull();
+    expect(await s.deps.db.all("SELECT * FROM billing_warning WHERE workspace_id = ?", [s.b.workspaceId])).toEqual([]);
+    expect((await audits(s.deps, s.b.workspaceId, "account_removal_undone")).map((x) => JSON.parse(x.detail))).toEqual([{ by: "billing_sweep", files_removed: 3 }]);
+    expect((await send(s.deps, "POST", `/api/v1/admin/accounts/${s.b.userId}/enable`, { headers: h })).status).toBe(204);
+  });
+
+  it("N3: a removal that was not stopped is still refused once it began", async () => {
+    const s = await site();
+    s.at(T0 + DAY);
+    await publishedTour(s, s.b);
+    await unpaid(s);
+    const restore = cancelFails(s, "unreachable");
+    await sweep(s);
+    restore();
+    await s.deps.db.run("UPDATE account_removal SET work_started_at = ? WHERE workspace_id = ?", [s.now(), s.b.workspaceId]);
+    const r = await send(s.deps, "POST", `/api/v1/admin/accounts/${s.b.userId}/undo-removal`, { headers: await adminHeaders(s) });
+    expect([r.status, r.json.error]).toEqual([409, "removal_started"]);
+  });
+
+  it("N3: after a confirmed cancel the subscription's open invoices are voided; a void that fails holds the sweep and is cleanup_pending for an admin", async () => {
+    const s = await site();
+    s.at(T0 + DAY);
+    await publishedTour(s, s.b);
+    await unpaid(s);
+    s.stripe.invoice("in_open1", "sub_B", "open");
+    s.stripe.invoice("in_paid1", "sub_B", "paid");
+    s.stripe.failing.add("/v1/invoices/in_open1/void");
+    await sweep(s);
+    expect(await tours(s, s.b)).toBe(1);
+    expect(s.stripe.subscriptions.get("sub_B")!.status).toBe("canceled");
+    s.stripe.failing.delete("/v1/invoices/in_open1/void");
+    const h = await adminHeaders(s);
+    // The admin's delete of the same account voids it and finishes.
+    await s.deps.db.run("DELETE FROM account_removal WHERE workspace_id = ?", [s.b.workspaceId]);
+    s.stripe.failing.add("/v1/invoices/in_open1/void");
+    const held = await send(s.deps, "DELETE", `/api/v1/admin/accounts/${s.b.userId}`, { headers: h, body: JSON.stringify({ username: "bravo" }) });
+    expect([held.status, held.json.error]).toEqual([500, "cleanup_pending"]);
+    s.stripe.failing.delete("/v1/invoices/in_open1/void");
+    let done = await send(s.deps, "DELETE", `/api/v1/admin/accounts/${s.b.userId}`, { headers: h, body: JSON.stringify({ username: "bravo" }) });
+    while (done.status === 202) done = await send(s.deps, "DELETE", `/api/v1/admin/accounts/${s.b.userId}`, { headers: h, body: JSON.stringify({ username: "bravo" }) });
+    expect(done.status).toBe(200);
+    expect(s.stripe.invoices.get("in_open1")!.status).toBe("void");
+    expect(s.stripe.invoices.get("in_paid1")!.status).toBe("paid");
+  });
+
+  it("N4: a sweep that outlives its lock's first two hours keeps it", async () => {
+    const s = await site();
+    await s.deps.db.run("UPDATE workspace SET billing_trial = 0 WHERE id = ?", [s.a.workspaceId]);
+    await ended(s, s.b, ENDED_AT, "B");
+    await warned(s, s.b, ENDED_DAY, ENDED_WARNINGS);
+    const c = await seedAccount(s.deps, { username: "charlie" });
+    await ended(s, c, ENDED_AT, "C");
+    await warned(s, c, ENDED_DAY, ENDED_WARNINGS);
+    s.at(at3(4, 14));
+    let inner: Awaited<ReturnType<typeof sweep>> | null = null;
+    let advanced = false;
+    s.stripe.hook = async (call) => {
+      // The first removal takes three hours (past the lock's two); then the other's first question to Stripe starts another sweep.
+      if (call.method === "GET" && call.path === "/v1/invoices" && !advanced) {
+        advanced = true;
+        s.at(s.now() + 3 * 3_600_000);
+      } else if (advanced && inner === null && call.method === "GET" && call.path.startsWith("/v1/subscriptions/")) {
+        inner = await sweep(s);
+      }
+    };
+    await sweep(s);
+    expect(inner!.alreadyRunning).toBe(true);
   });
 });
 

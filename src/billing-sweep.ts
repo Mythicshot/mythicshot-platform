@@ -47,7 +47,7 @@
 import { CALLS_AT_THE_END, FILES_SQL, aloneIn, filesParams, readTarget, work } from "./account-removal.ts";
 import { auditStatement } from "./audit.ts";
 import { BILLING_COLUMNS_SQL, DAY, LAPSED_STATUSES, LIVE_STATUSES, REMOVAL_MS, TRIAL_MS, WORKSPACE_IS_ADMIN_SQL, billingConfigured, isFinal, isLive, type BillingRow } from "./billing-rules.ts";
-import { checkoutBeforeRemoval, prepareDeletion, subscriptionBeforeRemoval } from "./billing.ts";
+import { checkoutBeforeRemoval, prepareDeletion, repairPaidCheckout, subscriptionBeforeRemoval } from "./billing.ts";
 import { SUBREQUEST_BUDGET, metered } from "./budget.ts";
 import { linkOrigin } from "./mail.ts";
 import { canMailLinks, isNotNullViolation, mailOf, type Db, type Deps } from "./ports.ts";
@@ -69,8 +69,6 @@ export async function exportInProgress(_deps: Deps, _workspaceId: string): Promi
 export const CHECKOUTS_ASKED = 10;
 /** The most warning mails one sweep sends (or tries); the rest wait for the next, those due longest first. */
 export const MAILS_PER_RUN = 50;
-/** Checkout records more than this past their expiry are cleared by the sweep, for workspaces on the clock. */
-export const CHECKOUT_KEEP_MS = 7 * DAY;
 /** How far the server's clock and Stripe's may be apart before nothing is removed. */
 export const CLOCK_TOLERANCE_MS = 3_600_000;
 /** How long the run lock holds when a sweep stops without letting it go. */
@@ -233,10 +231,20 @@ export async function billingSweep(input: Deps, opts: SweepOptions): Promise<Swe
     s.alreadyRunning = true;
     return s;
   }
+  // The lock as it stands now; renewed before each workspace once half its time has gone (second review N4).
+  let held = lock;
+  const keepLock = async (): Promise<boolean> => {
+    if (held === 0 || held - deps.now() > LOCK_MS / 2) return true;
+    const until = deps.now() + LOCK_MS;
+    const renewed = await deps.db.run("UPDATE rate_counter SET window_start = ? WHERE bucket = ? AND key = ? AND window_start = ?", [until, LOCK_BUCKET, LOCK_KEY, held]);
+    if (renewed.changes !== 1) return false;
+    held = until;
+    return true;
+  };
   try {
-    await sweepUnderLock(deps, opts, s, room, calls, () => lastDate);
+    await sweepUnderLock(deps, opts, s, room, calls, () => lastDate, keepLock);
   } finally {
-    if (lock !== 0) await deps.db.run("DELETE FROM rate_counter WHERE bucket = ? AND key = ? AND window_start = ?", [LOCK_BUCKET, LOCK_KEY, lock]);
+    if (held !== 0) await deps.db.run("DELETE FROM rate_counter WHERE bucket = ? AND key = ? AND window_start = ?", [LOCK_BUCKET, LOCK_KEY, held]);
   }
   return s;
 }
@@ -253,7 +261,15 @@ async function takeLock(deps: Deps): Promise<number | null> {
   return took.changes === 1 ? until : null;
 }
 
-async function sweepUnderLock(deps: Deps, opts: SweepOptions, s: SweepSummary, room: (cost: number) => boolean, calls: (() => number) | undefined, lastDate: () => string | null): Promise<void> {
+async function sweepUnderLock(
+  deps: Deps,
+  opts: SweepOptions,
+  s: SweepSummary,
+  room: (cost: number) => boolean,
+  calls: (() => number) | undefined,
+  lastDate: () => string | null,
+  keepLock: () => Promise<boolean>,
+): Promise<void> {
   const perRun = opts.perRun ?? REMOVALS_PER_RUN;
   const perDay = opts.perDay ?? REMOVALS_PER_DAY;
   const mailCap = opts.mailsPerRun ?? MAILS_PER_RUN;
@@ -294,7 +310,9 @@ async function sweepUnderLock(deps: Deps, opts: SweepOptions, s: SweepSummary, r
       s.capped += 1;
       continue;
     }
-    if (!room(3)) return void stop(s);
+    if (!room(4)) return void stop(s);
+    // The lock lost (another sweep took it after it ran out): this one stops at once.
+    if (!(await keepLock())) return void stop(s);
     if (!(await clockOk())) {
       s.held += 1;
       continue;
@@ -313,7 +331,8 @@ async function sweepUnderLock(deps: Deps, opts: SweepOptions, s: SweepSummary, r
     for (const { id, ends } of page) {
       afterEnd = ends;
       afterId = id;
-      if (!room(4)) return void stop(s);
+      if (!room(5)) return void stop(s);
+      if (!(await keepLock())) return void stop(s);
       const c = await deps.db.first<Candidate>(CANDIDATE_SQL, [id]);
       if (c === null) continue;
       s.checked += 1;
@@ -443,27 +462,38 @@ async function sendWarning(deps: Deps, s: SweepSummary, c: Candidate, clock: Clo
 
 /**
  * Conditions 5 and 6: true when the removal must wait. An export in progress; a checkout pending
- * on the record; the site's checkout records for the workspace more than CHECKOUT_KEEP_MS past
- * their expiry cleared (a read-only trial runs no housekeeping of its own), then any left not yet
- * expired by its own clock, more than CHECKOUTS_ASKED, or any Stripe does not say is expired; a
- * customer on record with no subscription; and a subscription Stripe says is live (stored as Stripe
- * says it with `repair`, never in a dry run) or gives no definite answer about. `unpaid`, `paused`
- * and `incomplete` let it go on: prepareDeletion cancels them at Stripe first.
+ * on the record, or one of the site's checkout records for the workspace not yet expired by its
+ * own clock. Then each record, oldest first and at most CHECKOUTS_ASKED a run (more holds until
+ * the next run), is asked at Stripe (second review N1: never cleared on age alone): one Stripe
+ * confirms `expired` is cleared; one Stripe says is `complete` (paid, its notice never linked it)
+ * holds the removal for good and is repaired (repairPaidCheckout: linked as its notice would,
+ * recorded as a billing problem); any other answer holds. A customer on record with no
+ * subscription holds; so does a subscription Stripe says is live (stored as Stripe says it with
+ * `repair`, never in a dry run), `incomplete` (a first payment in progress, second review N2) or
+ * gives no definite answer about. `unpaid` and `paused` let it go on: prepareDeletion cancels
+ * them at Stripe first.
  */
 async function heldBack(deps: Deps, c: Candidate, busy: (deps: Deps, ws: string) => Promise<boolean>, room: (cost: number) => boolean, repair: boolean): Promise<boolean> {
   if (await busy(deps, c.id)) return true;
   if (c.checkout_session !== null) return true;
   const now = deps.now();
-  await deps.db.run("DELETE FROM stripe_checkout WHERE workspace_id = ? AND expires_at < ?", [c.id, now - CHECKOUT_KEEP_MS]);
   const checkouts = await deps.db.all<{ id: string; expires_at: number }>(
-    "SELECT id, expires_at FROM stripe_checkout WHERE workspace_id = ? AND expires_at >= ? ORDER BY created_at DESC, id LIMIT ?",
-    [c.id, now - CHECKOUT_KEEP_MS, CHECKOUTS_ASKED + 1],
+    "SELECT id, expires_at FROM stripe_checkout WHERE workspace_id = ? ORDER BY created_at, id LIMIT ?",
+    [c.id, CHECKOUTS_ASKED + 1],
   );
-  if (checkouts.length > CHECKOUTS_ASKED || checkouts.some((k) => k.expires_at > now - CLOCK_SKEW_MS)) return true;
-  for (const k of checkouts) {
-    if (!room(2)) return true;
-    if ((await checkoutBeforeRemoval(deps, k.id)) !== "expired") return true;
+  if (checkouts.some((k) => k.expires_at > now - CLOCK_SKEW_MS)) return true;
+  for (const k of checkouts.slice(0, CHECKOUTS_ASKED)) {
+    if (!room(8)) return true;
+    const state = await checkoutBeforeRemoval(deps, k.id);
+    if (state === "complete") {
+      await repairPaidCheckout(deps, c.id, k.id);
+      return true;
+    }
+    if (state !== "expired") return true;
+    // Stripe has just confirmed it expired: its record has nothing left to find.
+    await deps.db.run("DELETE FROM stripe_checkout WHERE id = ? AND workspace_id = ? AND expires_at <= ?", [k.id, c.id, now]);
   }
+  if (checkouts.length > CHECKOUTS_ASKED) return true;
   if (c.subscription === null) return c.customer !== null;
   if (!room(3)) return true;
   const answer = await subscriptionBeforeRemoval(deps, c, repair);
@@ -550,7 +580,7 @@ async function recheck(deps: Deps, ws: string, userId: string, startedAt: number
   if (row.subscription !== null) {
     const answer = await subscriptionBeforeRemoval(deps, row, "all");
     if (answer === "live") return "live";
-    if (answer === "unknown") return "hold";
+    if (answer === "unknown" || answer === "pending") return "hold";
   }
   return "go";
 }

@@ -75,6 +75,8 @@ export class FakeStripe implements Stripe {
   subscriptions = new Map<string, Json>();
   sessions = new Map<string, Json>();
   charges = new Map<string, Json>();
+  /** Invoices, for the list of a subscription's open ones and their void (0.1.61). */
+  invoices = new Map<string, Json>();
   /** Every call throws, as when Stripe cannot be reached. */
   down = false;
   /** How GET /v1/prices/<id> answers: the price, no such price, or a key that may not read prices. */
@@ -145,6 +147,18 @@ export class FakeStripe implements Stripe {
       s.ended_at = s.ended_at ?? 1_800_000_000;
       return { status: 200, body: s };
     }
+    if (method === "GET" && path === "/v1/invoices") {
+      const q = Object.fromEntries(form ?? []);
+      const data = [...this.invoices.values()].filter((i) => (q.subscription === undefined || i.subscription === q.subscription) && (q.status === undefined || i.status === q.status));
+      return { status: 200, body: { object: "list", data, has_more: false, url: "/v1/invoices" } };
+    }
+    if (method === "POST" && parts[2] === "invoices" && parts[4] === "void") {
+      const i = this.invoices.get(parts[3]);
+      if (i === undefined) return { status: 404, body: { error: { code: "resource_missing" } } };
+      if (i.status !== "open") return { status: 400, body: { error: { type: "invalid_request_error" } } };
+      i.status = "void";
+      return { status: 200, body: i };
+    }
     if (method === "GET" && parts[2] === "charges") {
       const c = this.charges.get(parts[3]);
       return c === undefined ? { status: 404, body: { error: { code: "resource_missing" } } } : { status: 200, body: c };
@@ -170,6 +184,11 @@ export class FakeStripe implements Stripe {
       latest_invoice: REAL.invoice,
       items: { object: "list", data: [{ id: "si_TfftB3cKAPe0Zr", object: "subscription_item", current_period_end: more.periodEnd ?? 1_900_000_000 }] },
     });
+  }
+
+  /** Puts an invoice of a subscription as Stripe would list it. */
+  invoice(id: string, subscription: string, status: "open" | "paid" | "void" | "draft"): void {
+    this.invoices.set(id, { id, object: "invoice", subscription, status });
   }
 
   /** Marks a checkout paid at Stripe, as a completed one is. */
