@@ -45,7 +45,7 @@
 // rows: billing_removal_started (counts), billing_removal_step (files left after each pass), the
 // deletion's own account_deleted, and billing_removal_finished, with ids and counts only.
 import { CALLS_AT_THE_END, FILES_SQL, aloneIn, filesParams, readTarget, work } from "./account-removal.ts";
-import { exportInProgress } from "./export.ts";
+import { exportInProgress, exportStreaming } from "./export.ts";
 import { auditStatement } from "./audit.ts";
 import { BILLING_COLUMNS_SQL, DAY, LAPSED_STATUSES, LIVE_STATUSES, REMOVAL_MS, TRIAL_MS, WORKSPACE_IS_ADMIN_SQL, billingConfigured, isFinal, isLive, type BillingRow } from "./billing-rules.ts";
 import { checkoutBeforeRemoval, prepareDeletion, repairPaidCheckout, subscriptionBeforeRemoval } from "./billing.ts";
@@ -63,6 +63,32 @@ import { WARNINGS_JSON_SQL, emailSha256, warningsOf } from "./removal-store.ts";
  * before every pass: an export in progress holds the removal (never stops it).
  */
 export const exportCheck = (deps: Deps, workspaceId: string): Promise<boolean> => exportInProgress(deps, workspaceId, deps.now());
+
+/** How long downloads may hold one removal day's removal, from the first hold (third review L1). */
+export const EXPORT_HOLD_MS = 24 * 3_600_000;
+
+/**
+ * Whether a download holds the removal now: one in progress (`busy`, the export's own rule) holds
+ * it for at most EXPORT_HOLD_MS from the first time it held this removal day's removal (noted on
+ * the last warning's row); after that only a download being sent at that very moment holds it, so
+ * asking again and again cannot keep the content forever. A crashed download stops counting after
+ * the export's own RUNNING_MS. Up to three calls; a dry run writes nothing.
+ */
+async function exportHolds(deps: Deps, ws: string, busy: (deps: Deps, ws: string) => Promise<boolean>): Promise<boolean> {
+  if (!(await busy(deps, ws))) return false;
+  const now = deps.now();
+  const last = await deps.db.first<{ removal_at: number; since: number | null }>(
+    "SELECT removal_at, export_hold_since AS since FROM billing_warning WHERE workspace_id = ? AND stage = 1 AND sent_at IS NOT NULL ORDER BY removal_at DESC LIMIT 1",
+    [ws],
+  );
+  if (last === null) return true;
+  if (last.since === null) {
+    await deps.db.run("UPDATE billing_warning SET export_hold_since = ? WHERE workspace_id = ? AND stage = 1 AND removal_at = ? AND export_hold_since IS NULL", [now, ws, last.removal_at]);
+    return true;
+  }
+  if (now - last.since < EXPORT_HOLD_MS) return true;
+  return exportStreaming(deps, ws, now);
+}
 
 /** The most checkouts of one workspace the last check asks Stripe about; more holds the removal back. */
 export const CHECKOUTS_ASKED = 10;
@@ -318,7 +344,7 @@ async function sweepUnderLock(
       continue;
     }
     touched += 1;
-    const outcome = await continueRemoval(deps, r.user_id, r.workspace_id, room, calls, busy);
+    const outcome = await continueRemoval(deps, r.user_id, r.workspace_id, room, calls, busy, keepLock);
     count(s, outcome);
     if (outcome === "out_of_budget") return void stop(s);
   }
@@ -366,7 +392,7 @@ async function sweepUnderLock(
         continue;
       }
       // The count, the checkouts and the questions to Stripe, the clock, the start, and a pass's start.
-      if (!room(16)) return void stop(s);
+      if (!room(20)) return void stop(s);
       if (startedToday === null) {
         const n = await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM audit WHERE event = 'billing_removal_started' AND at > ?", [now - DAY]);
         startedToday = n?.n ?? 0;
@@ -395,7 +421,7 @@ async function sweepUnderLock(
         continue;
       }
       s.removalsStarted += 1;
-      const outcome = await continueRemoval(deps, c.user_id, c.id, room, calls, busy);
+      const outcome = await continueRemoval(deps, c.user_id, c.id, room, calls, busy, keepLock);
       count(s, outcome);
       if (outcome === "out_of_budget") return void stop(s);
     }
@@ -474,7 +500,7 @@ async function sendWarning(deps: Deps, s: SweepSummary, c: Candidate, clock: Clo
  * them at Stripe first.
  */
 async function heldBack(deps: Deps, c: Candidate, busy: (deps: Deps, ws: string) => Promise<boolean>, room: (cost: number) => boolean, repair: boolean): Promise<boolean> {
-  if (await busy(deps, c.id)) return true;
+  if (await exportHolds(deps, c.id, busy)) return true;
   if (c.checkout_session !== null) return true;
   const now = deps.now();
   const checkouts = await deps.db.all<{ id: string; expires_at: number }>(
@@ -484,13 +510,16 @@ async function heldBack(deps: Deps, c: Candidate, busy: (deps: Deps, ws: string)
   if (checkouts.some((k) => k.expires_at > now - CLOCK_SKEW_MS)) return true;
   for (const k of checkouts.slice(0, CHECKOUTS_ASKED)) {
     if (!room(8)) return true;
-    const state = await checkoutBeforeRemoval(deps, k.id);
-    if (state === "complete") {
+    const answer = await checkoutBeforeRemoval(deps, k.id);
+    // Paid, and its subscription is the one on the workspace's record: its notice linked it, so
+    // the record is settled (third review M1): cleared like an expired one, no problem recorded.
+    const settled = answer.status === "complete" && answer.subscription !== null && answer.subscription === c.subscription;
+    if (answer.status === "complete" && !settled) {
       await repairPaidCheckout(deps, c.id, k.id);
       return true;
     }
-    if (state !== "expired") return true;
-    // Stripe has just confirmed it expired: its record has nothing left to find.
+    if (answer.status !== "expired" && !settled) return true;
+    // Stripe has just confirmed it expired, or paid and linked: its record has nothing left to find.
     await deps.db.run("DELETE FROM stripe_checkout WHERE id = ? AND workspace_id = ? AND expires_at <= ?", [k.id, c.id, now]);
   }
   if (checkouts.length > CHECKOUTS_ASKED) return true;
@@ -604,9 +633,10 @@ async function continueRemoval(
   room: (cost: number) => boolean,
   calls: (() => number) | undefined,
   busy: (deps: Deps, ws: string) => Promise<boolean>,
+  keepLock: () => Promise<boolean>,
 ): Promise<Outcome> {
-  // Its reads, the re-check (the export, a read and Stripe), prepareDeletion's own read and a pass's audit row fit.
-  if (!room(9)) return "out_of_budget";
+  // Its reads, the re-check (the export's three, the lock, a read and Stripe), prepareDeletion's own read and a pass's audit row fit.
+  if (!room(12)) return "out_of_budget";
   const t = await readTarget(deps, userId);
   if (t === null || t.workspace_id !== ws || t.removing !== 1 || t.status !== "disabled") return "held";
   const record = await deps.db.first<{ total: number; created_at: number; stopped_at: number | null }>(
@@ -615,9 +645,11 @@ async function continueRemoval(
   );
   if (record === null || record.stopped_at !== null) return "held";
   for (let pass = 0; pass < PASSES_AT_MOST; pass++) {
-    if (calls !== undefined && !room(7)) return "out_of_budget";
-    // A download of the workspace in progress holds the pass: its files are being read.
-    if (await busy(deps, ws)) return "held";
+    if (calls !== undefined && !room(10)) return "out_of_budget";
+    // A download of the workspace in progress holds the pass, within its bound: its files are being read.
+    if (await exportHolds(deps, ws, busy)) return "held";
+    // The lock renewed between passes too (third review L3): lost, this sweep stops at once.
+    if (!(await keepLock())) return "out_of_budget";
     const check = await recheck(deps, ws, userId, record.created_at);
     if (check === "hold") return "held";
     if (check !== "go") {

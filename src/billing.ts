@@ -258,12 +258,15 @@ export async function subscriptionBeforeRemoval(deps: Deps, row: BillingRow, rep
 /**
  * What Stripe says, right before a removal, of one checkout this site made for the workspace
  * (GET /v1/checkout/sessions/<id>, one call): "expired" only for that definite answer; "open"
- * or "complete" (paid) as Stripe says; "unknown" for anything else, a 404 included. Only
- * "expired" lets a removal go on.
+ * or "complete" (paid) as Stripe says, with the subscription a complete one made; "unknown" for
+ * anything else, a 404 included. "expired" lets a removal go on, and so does "complete" for the
+ * subscription already on the workspace's record (its notice linked it; the sweep decides).
  */
-export async function checkoutBeforeRemoval(deps: Deps, id: string): Promise<"expired" | "open" | "complete" | "unknown"> {
-  if (idOf(id, "checkout") === null) return "unknown";
-  return (await checkoutNow(deps, id))?.status ?? "unknown";
+export async function checkoutBeforeRemoval(deps: Deps, id: string): Promise<{ status: "expired" | "open" | "complete" | "unknown"; subscription: string | null }> {
+  if (idOf(id, "checkout") === null) return { status: "unknown", subscription: null };
+  const now = await checkoutNow(deps, id);
+  if (now === null) return { status: "unknown", subscription: null };
+  return { status: now.status, subscription: now.status === "complete" ? subscriptionNamedBy(now.body) : null };
 }
 
 /** A subscription as read back from Stripe. */
@@ -713,14 +716,23 @@ async function closeCheckout(deps: Deps, row: BillingRow, sessionId: string): Pr
  * linked to the workspace exactly as the completed notice links a checkout this site made (the
  * reference must be the workspace's, no other live subscription replaced, the customer the one on
  * record if any), with the audit row `billing_checkout_paid_unlinked`, a billing problem for the
- * admin, whatever the link's outcome. "linked" when the workspace now holds that subscription,
+ * admin, whatever the link's outcome, once per checkout (stripe_checkout.paid_noted_at). "linked" when the workspace now holds that subscription,
  * "not_linked" otherwise (the removal stays held either way). With a dry run's database nothing is
  * written. At most three calls to Stripe and three to the database.
  */
 export async function repairPaidCheckout(deps: Deps, workspaceId: string, checkoutId: string): Promise<"linked" | "not_linked"> {
   const row = await billingRowOf(deps, workspaceId);
   if (row === null) return "not_linked";
-  await deps.db.batch([auditStatement(deps, { event: "billing_checkout_paid_unlinked", workspaceId })]);
+  // Recorded once per checkout (third review L2): the record's mark and the audit row in one batch.
+  try {
+    await deps.db.batch([
+      { sql: "UPDATE stripe_checkout SET paid_noted_at = ? WHERE id = ? AND workspace_id = ? AND paid_noted_at IS NULL", params: [deps.now(), checkoutId, workspaceId] },
+      auditStatement(deps, { event: "billing_checkout_paid_unlinked", workspaceId }, { onlyAfterOneChange: true }),
+    ]);
+  } catch (err) {
+    // Noted at an earlier sweep: not again.
+    if (!isNotNullViolation(err)) throw err;
+  }
   const now = await checkoutNow(deps, checkoutId);
   if (now?.status !== "complete") return "not_linked";
   const subId = subscriptionNamedBy(now.body);

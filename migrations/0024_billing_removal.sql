@@ -35,6 +35,10 @@ CREATE TABLE billing_warning (
   claimed_at INTEGER NOT NULL CHECK (claimed_at > 0),
   sent_at INTEGER CHECK (sent_at IS NULL OR sent_at > 0),
   named_at INTEGER NOT NULL CHECK (named_at > 0),
+  -- On the last warning's row (stage 1): when a download of the workspace first held its removal
+  -- back, for this removal day (src/billing-sweep.ts). A download holds a removal at most a day
+  -- from then, after which only one being sent at that moment does.
+  export_hold_since INTEGER CHECK (export_hold_since IS NULL OR export_hold_since > 0),
   PRIMARY KEY (workspace_id, removal_at, stage, email_sha256)
 ) STRICT;
 
@@ -47,3 +51,8 @@ ALTER TABLE account_removal ADD COLUMN work_started_at INTEGER CHECK (work_start
 -- went live, took a checkout or left the clock after the removal started. NULL otherwise. No sweep
 -- continues a stopped removal; the account stays disabled with its record for the admin to undo.
 ALTER TABLE account_removal ADD COLUMN stopped_at INTEGER CHECK (stopped_at IS NULL OR stopped_at > 0);
+
+-- When the billing sweep found this checkout paid at Stripe although no notice linked it, and
+-- recorded it as a billing problem (billing_checkout_paid_unlinked): once per checkout. NULL
+-- otherwise. Nothing but the sweep writes it.
+ALTER TABLE stripe_checkout ADD COLUMN paid_noted_at INTEGER CHECK (paid_noted_at IS NULL OR paid_noted_at > 0);

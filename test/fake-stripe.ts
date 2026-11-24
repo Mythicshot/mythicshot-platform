@@ -77,6 +77,8 @@ export class FakeStripe implements Stripe {
   charges = new Map<string, Json>();
   /** Invoices, for the list of a subscription's open ones and their void (0.1.62). */
   invoices = new Map<string, Json>();
+  /** Invoices whose void Stripe refuses with a 400 (as it would one it may not void). */
+  voidRefused = new Set<string>();
   /** Every call throws, as when Stripe cannot be reached. */
   down = false;
   /** How GET /v1/prices/<id> answers: the price, no such price, or a key that may not read prices. */
@@ -155,7 +157,7 @@ export class FakeStripe implements Stripe {
     if (method === "POST" && parts[2] === "invoices" && parts[4] === "void") {
       const i = this.invoices.get(parts[3]);
       if (i === undefined) return { status: 404, body: { error: { code: "resource_missing" } } };
-      if (i.status !== "open") return { status: 400, body: { error: { type: "invalid_request_error" } } };
+      if (i.status !== "open" || this.voidRefused.has(i.id)) return { status: 400, body: { error: { type: "invalid_request_error" } } };
       i.status = "void";
       return { status: 200, body: i };
     }
@@ -188,7 +190,9 @@ export class FakeStripe implements Stripe {
 
   /** Puts an invoice of a subscription as Stripe would list it. */
   invoice(id: string, subscription: string, status: "open" | "paid" | "void" | "draft"): void {
-    this.invoices.set(id, { id, object: "invoice", subscription, status });
+    // As the sandbox showed (2026-11-24): after a cancel for non-payment the failed renewal stays
+    // open, with an amount still due and no automatic collection.
+    this.invoices.set(id, { id, object: "invoice", subscription, status, amount_remaining: status === "open" ? 700 : 0, auto_advance: status === "open" ? false : null });
   }
 
   /** Marks a checkout paid at Stripe, as a completed one is. */

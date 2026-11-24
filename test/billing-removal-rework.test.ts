@@ -13,14 +13,16 @@ import type { Stripe } from "../src/stripe.ts";
 import { removalDayOf } from "../src/removal-rules.ts";
 import { emailSha256 } from "../src/removal-store.ts";
 import { send, type Json } from "./bundle.ts";
-import { sessionOf } from "./fake-stripe.ts";
+import { eventOf, notify, sessionOf } from "./fake-stripe.ts";
+const BILLING_POST = "POST";
 import { dumpOf } from "./isolation-world.ts";
 import { FakeDocument, type FakeElement } from "./pages-dom.ts";
 import { EXPORT_PATH } from "../src/export.ts";
 import { EXPORT_RUNNING_BUCKET, workspaceKey } from "../src/rate.ts";
 import { SUBREQUEST_BUDGET } from "../src/budget.ts";
 import { sweepWithinBudget } from "../src/billing-sweep.ts";
-import { ON_TIME, REMOVAL_DAY, T0, TRIAL_END, at3, audits, ended, exists, keysOf, mailsTo, publishedTour, site, sweep, userStatus, visit, warned, type Side, type Site } from "./removal-world.ts";
+import { ON_TIME, REMOVAL_DAY, T0, TRIAL_END, at3, audits, ended, exists, keysOf, mailsTo, manifest, publishedTour, site, sweep, userStatus, visit, warned, type Side, type Site } from "./removal-world.ts";
+import { uploadTour } from "./bundle.ts";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -656,5 +658,109 @@ async function publishedTourAt(s: Site, side: Side) {
   await publishedTour(s, side);
   s.at(was);
 }
+
+describe("round 5", () => {
+  it("M1: the real path, end to end: Subscribe, the completed notice links it, the subscription ends, three warnings, removal day: removed, with no billing problem", async () => {
+    const s = await site();
+    await s.deps.db.run("UPDATE workspace SET billing_trial = 0 WHERE id = ?", [s.a.workspaceId]);
+    s.at(T0 + DAY);
+    const h = (await sessionOf(s.deps, s.b.userId)).headers;
+    expect((await send(s.deps, BILLING_POST, BILLING_PATHS.checkout, { headers: h })).status).toBe(200);
+    const checkoutId = (await s.deps.db.first<{ id: string }>("SELECT checkout_session_id AS id FROM workspace WHERE id = ?", [s.b.workspaceId]))!.id;
+    s.stripe.subscription("sub_B", "cus_B", "active", { periodEnd: Math.floor((T0 + 31 * DAY) / 1000) });
+    s.stripe.complete(checkoutId, "cus_B", "sub_B");
+    expect((await notify(s.deps, eventOf("checkout.session.completed", { id: checkoutId, client_reference_id: s.b.workspaceId, customer: "cus_B", subscription: "sub_B", payment_status: "paid" }))).status).toBe(200);
+    expect((await s.deps.db.first<Json>("SELECT subscription_status FROM workspace WHERE id = ?", [s.b.workspaceId]))!.subscription_status).toBe("active");
+    // It ends 12 February 2027; Stripe's notice of the end.
+    s.at(ENDED_AT);
+    s.stripe.subscription("sub_B", "cus_B", "canceled", { endedAt: Math.floor(ENDED_AT / 1000), periodEnd: Math.floor(ENDED_AT / 1000) });
+    expect((await notify(s.deps, eventOf("customer.subscription.deleted", { id: "sub_B", customer: "cus_B" }))).status).toBe(200);
+    for (let t = at3(3, 13); t <= at3(4, 13); t += DAY) {
+      s.at(t);
+      await sweep(s);
+    }
+    expect(mailsTo(s, s.b.email)).toHaveLength(3);
+    s.at(at3(4, 14));
+    const r = await sweep(s);
+    expect(r.removalsFinished).toBe(1);
+    expect(await exists(s.deps, s.b.workspaceId)).toBe(false);
+    expect((await billingProblems(s.deps)).count).toBe(0);
+  });
+
+  it("L2: a paid checkout never linked is recorded as a billing problem once, not at every sweep", async () => {
+    const s = await site();
+    await warned(s, s.a, REMOVAL_DAY, ON_TIME);
+    await s.deps.db.run("INSERT INTO stripe_checkout (id, workspace_id, created_at, expires_at) VALUES ('cs_test_paid', ?, ?, ?)", [s.a.workspaceId, T0 + DAY, T0 + DAY + 33 * 60_000]);
+    // Paid, but its subscription cannot be linked (Stripe gives no definite answer about it).
+    s.stripe.sessions.set("cs_test_paid", { id: "cs_test_paid", status: "complete", customer: "cus_P", subscription: "sub_P", form: { client_reference_id: s.a.workspaceId } });
+    for (const t of [at3(3, 11), at3(3, 12), at3(3, 13)]) {
+      s.at(t);
+      expect((await sweep(s)).held).toBe(1);
+    }
+    expect(await audits(s.deps, s.a.workspaceId, "billing_checkout_paid_unlinked")).toHaveLength(1);
+    expect(await exists(s.deps, s.a.workspaceId)).toBe(true);
+  });
+
+  it("L1: a download holds a removal at most 24 hours from its first hold; after that only one streaming at that moment holds", async () => {
+    const s = await site();
+    await s.deps.db.run("UPDATE workspace SET billing_trial = 0 WHERE id = ?", [s.b.workspaceId]);
+    await warned(s, s.a, REMOVAL_DAY, ON_TIME);
+    const key = await workspaceKey(s.a.workspaceId);
+    const ticket = (at: number) => s.deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, 1) ON CONFLICT DO NOTHING", [EXPORT_RUNNING_BUCKET, key, at]);
+    s.at(at3(3, 11));
+    // A fresh ticket at each sweep (a person asking again and again).
+    for (const t of [at3(3, 11), at3(3, 11) + 12 * 3_600_000, at3(3, 12) - 60_000]) {
+      s.at(t);
+      await ticket(t - 30_000);
+      expect((await sweep(s)).held, new Date(t).toISOString()).toBe(1);
+    }
+    // 24 hours after the first hold: a ticket asked and not opened no longer holds.
+    s.at(at3(3, 12) + 60_000);
+    await ticket(s.now() - 30_000);
+    // But a download streaming at that moment does.
+    await s.deps.db.run("INSERT INTO rate_counter (bucket, key, window_start, count) VALUES (?, ?, ?, 2)", [EXPORT_RUNNING_BUCKET, key, s.now() - 1_000]);
+    expect((await sweep(s)).held).toBe(1);
+    await s.deps.db.run("DELETE FROM rate_counter WHERE bucket = ? AND count = 2", [EXPORT_RUNNING_BUCKET]);
+    expect((await sweep(s)).removalsFinished).toBe(1);
+    expect(await exists(s.deps, s.a.workspaceId)).toBe(false);
+  });
+
+  it("L3: the lock is renewed between passes of one long removal", async () => {
+    const s = await site();
+    await s.deps.db.run("UPDATE workspace SET billing_trial = 0 WHERE id = ?", [s.b.workspaceId]);
+    for (let i = 0; i < 8; i++) await uploadTour(s.deps, s.a.token, manifest(`T${i}`));
+    await warned(s, s.a, REMOVAL_DAY, ON_TIME);
+    s.at(at3(3, 11));
+    const real = s.deps.drafts.delete.bind(s.deps.drafts);
+    let advanced = false;
+    let inner: Awaited<ReturnType<typeof sweep>> | null = null;
+    s.deps.drafts.delete = async (keys) => {
+      if (!advanced) {
+        advanced = true;
+        s.at(s.now() + 3 * 3_600_000);
+      } else if (inner === null && (await s.deps.db.first("SELECT 1 AS x FROM audit WHERE event = 'billing_removal_step'")) !== null) {
+        inner = await sweep(s);
+      }
+      return real(keys);
+    };
+    await sweep(s);
+    expect(inner).not.toBeNull();
+    expect(inner!.alreadyRunning).toBe(true);
+    expect(await exists(s.deps, s.a.workspaceId)).toBe(false);
+  });
+
+  it("5: a void Stripe refuses (4xx) holds the removal", async () => {
+    const s = await site();
+    s.at(T0 + DAY);
+    await publishedTour(s, s.b);
+    await unpaid(s);
+    s.stripe.invoice("in_refused", "sub_B", "open");
+    s.stripe.voidRefused.add("in_refused");
+    await sweep(s);
+    expect(await tours(s, s.b)).toBe(1);
+    expect(s.stripe.invoices.get("in_refused")!.status).toBe("open");
+    expect(s.stripe.calls.some((c) => c.path === "/v1/invoices/in_refused/void")).toBe(true);
+  });
+});
 
 void removalDayOf;

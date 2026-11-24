@@ -80,14 +80,14 @@ describe("migration 0024 on an install of 0.1.58", () => {
     }
   });
 
-  it("is plain and additive: one CREATE TABLE and two ADD COLUMN", async () => {
+  it("is plain and additive: one CREATE TABLE and three ADD COLUMN", async () => {
     const sql = (await readFile(join(MIGRATIONS_DIR, NAME), "utf8"))
       .split("\n")
       .filter((l) => !l.trimStart().startsWith("--"))
       .join("\n");
     expect(sql).not.toMatch(/\b(DROP|RENAME|DELETE|UPDATE|INSERT)\b/i);
     expect([...sql.matchAll(/\bCREATE TABLE\b/g)]).toHaveLength(1);
-    expect([...sql.matchAll(/\bADD COLUMN\b/g)]).toHaveLength(2);
+    expect([...sql.matchAll(/\bADD COLUMN\b/g)]).toHaveLength(3);
     expect(sql).not.toMatch(/REFERENCES/);
   });
 });

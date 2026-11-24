@@ -758,6 +758,17 @@ export async function exportInProgress(deps: Deps, workspaceId: string, now: num
   return row !== null;
 }
 
+/**
+ * True when a download of the workspace is being sent at this moment: a ticket opened and not
+ * ended, within RUNNING_MS (a crashed one stops counting then). One database call. For the removal
+ * sweep (0.1.62), which after a day of holds waits only for one of these.
+ */
+export async function exportStreaming(deps: Deps, workspaceId: string, now: number): Promise<boolean> {
+  const key = await workspaceKey(workspaceId);
+  const row = await deps.db.first<{ one: number }>(`SELECT 1 AS one FROM rate_counter WHERE bucket = ? AND key = ? AND count = ${RUNNING} AND window_start > ? LIMIT 1`, [EXPORT_RUNNING_BUCKET, key, now - RUNNING_MS]);
+  return row !== null;
+}
+
 const ZIP_HEADERS: Record<string, string> = {
   "content-type": "application/zip",
   "content-disposition": `attachment; filename="${EXPORT_FILE_NAME}"`,
