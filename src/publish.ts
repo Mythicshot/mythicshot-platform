@@ -68,6 +68,7 @@ import type { Hono } from "hono";
 import { readOnlyRefusal } from "./billing.ts";
 import { CARRY_CALLS, RESTRICTED_STUB, alreadySet, carryOnSwitch, planFirstPublish, type FirstPublishPlan } from "./access.ts";
 import { beforeAccountsToo, noDisabledAccount } from "./accounts.ts";
+import { linksUpSql } from "./removal-rules.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
 import { apiError, json, noContent, readCapped } from "./http.ts";
@@ -1020,7 +1021,10 @@ export function publishRoutes(app: Hono, deps: Deps): void {
     // a tour that is restricted, which came later still). A restricted tour, or one becoming
     // restricted, answers as an unknown name, its retired names inside their grace too: its
     // pictures are served only by the app's own check (src/access.ts).
-    const live = await beforeAccountsToo(() => lookup(` AND t.access = 'public' AND ${noDisabledAccount("t.workspace_id")}`), () => lookup(""));
+    // With billing on, a workspace whose links are down (src/removal-rules.ts) answers as an
+    // unknown name too, in the same statement; without billing the statement is as before.
+    const linksUp = linksUpSql(deps.config, "t.workspace_id", deps.now());
+    const live = await beforeAccountsToo(() => lookup(` AND t.access = 'public' AND ${noDisabledAccount("t.workspace_id")}${linksUp}`), () => lookup(""));
     if (live === null) return missing();
     const file = await deps.pub.get(key);
     if (file === null) return missing();

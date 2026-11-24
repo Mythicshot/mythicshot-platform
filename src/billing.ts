@@ -58,6 +58,8 @@ import {
   type Standing,
 } from "./billing-rules.ts";
 import { apiError, json, readCapped } from "./http.ts";
+import { clockOf, planOf } from "./removal-rules.ts";
+import { WARNINGS_JSON_SQL, emailSha256, warningsOf } from "./removal-store.ts";
 import { linkOrigin } from "./mail.ts";
 import { isNotNullViolation, isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 import { LIMITS_BILLING, hitLimit, workspaceKey } from "./rate.ts";
@@ -218,6 +220,41 @@ function isMissing(status: number, body: unknown): boolean {
 /** Whether Stripe's 404 may be taken as proof for removing data: never (see isMissing). */
 export function missingAllowsRemoval(): false {
   return false;
+}
+
+// ---- The billing sweep's last questions before a removal (src/billing-sweep.ts, 0.1.61) ----
+
+/**
+ * What Stripe says, right before a removal, of the subscription on the workspace's record
+ * (GET /v1/subscriptions/<id>, one call): "ended" only for a definite answer that it is the
+ * record's own, of the record's customer, with an ended status (`canceled`, `unpaid`,
+ * `incomplete_expired`). "live" when Stripe says it is live: with `repair` the stored state is
+ * then brought to what Stripe says, as a read-back does (storeSubscription, under its guard).
+ * "unknown" for everything else: no answer, a timeout, a permission error, any status but 200,
+ * a body not of the shape expected, another customer, and a 404, which missingAllowsRemoval says
+ * is never proof. Nothing is removed on "live" or "unknown".
+ */
+export async function subscriptionBeforeRemoval(deps: Deps, row: BillingRow, repair: boolean): Promise<"ended" | "live" | "unknown"> {
+  if (row.subscription === null || row.customer === null) return "unknown";
+  const read = await readSubscription(deps, row.subscription);
+  if (read === "missing") return missingAllowsRemoval() ? "ended" : "unknown";
+  if (read === null || read.customer !== row.customer) return "unknown";
+  if (isLive(read.status)) {
+    if (repair) await storeSubscription(deps, null, row, read, null);
+    return "live";
+  }
+  return isEnded(read.status) ? "ended" : "unknown";
+}
+
+/**
+ * What Stripe says, right before a removal, of one checkout this site made for the workspace
+ * (GET /v1/checkout/sessions/<id>, one call): "expired" only for that definite answer; "open"
+ * or "complete" (paid) as Stripe says; "unknown" for anything else, a 404 included. Only
+ * "expired" lets a removal go on.
+ */
+export async function checkoutBeforeRemoval(deps: Deps, id: string): Promise<"expired" | "open" | "complete" | "unknown"> {
+  if (idOf(id, "checkout") === null) return "unknown";
+  return (await checkoutNow(deps, id))?.status ?? "unknown";
 }
 
 /** A subscription as read back from Stripe. */
@@ -464,7 +501,25 @@ export async function accessNarrows(deps: Deps, kind: "tour" | "media", workspac
 /** The dashboard's name for where a workspace stands (GET /api/v1/billing). */
 export type BillingStateName = "exempt" | "trial" | "trial_over" | "subscribed" | "past_due" | "ending" | "ended";
 
-function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, allowance: number | null) {
+/**
+ * The dates of a workspace on the removal clock (src/removal-rules.ts) as the sweep acts on them:
+ * when its links come down and its removal day, the warnings already sent counted in. Null for a
+ * workspace on no clock. One call, made only for a trial or an ended subscription.
+ */
+async function removalShown(deps: Deps, row: BillingRow, standing: Standing, userId: string, now: number): Promise<{ linksUntil: number; removedAt: number } | null> {
+  if (standing.kind !== "trial" && standing.kind !== "trial_over" && standing.kind !== "ended") return null;
+  const found = await deps.db.first<{ site: number; email: string | null; warnings: string }>(
+    `SELECT EXISTS (SELECT 1 FROM setup s WHERE s.workspace_id = workspace.id) AS site, (SELECT u.email FROM user u WHERE u.id = ?) AS email, ${WARNINGS_JSON_SQL} AS warnings FROM workspace WHERE workspace.id = ?`,
+    [userId, row.id],
+  );
+  if (found === null) return null;
+  const clock = clockOf(row, found.site === 1, now);
+  if (clock === null) return null;
+  const plan = planOf(clock, warningsOf(found.warnings), found.email === null ? "" : await emailSha256(found.email), now);
+  return { linksUntil: clock.linksDownAt, removedAt: plan.removalAt };
+}
+
+function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, allowance: number | null, removal: { linksUntil: number; removedAt: number } | null = null) {
   const base = {
     plan: PLAN_NAME,
     used_bytes: used,
@@ -485,12 +540,14 @@ function stateAnswer(s: Standing, row: BillingRow, now: number, used: number, al
   switch (s.kind) {
     case "exempt":
       return { state: "exempt" as BillingStateName, ...base };
+    // The removal's dates are the clock's (removalShown), the ones the sweep acts on; a workspace
+    // the clock leaves out (an allowance set by hand) keeps the dates of the version before.
     case "trial":
-      return { state: "trial" as BillingStateName, ...base, trial_ends_at: s.endsAt, days_left: daysTo(s.endsAt), removed_at: s.endsAt };
+      return { state: "trial" as BillingStateName, ...base, trial_ends_at: s.endsAt, days_left: daysTo(s.endsAt), removed_at: removal?.removedAt ?? s.endsAt };
     case "trial_over":
-      return { state: "trial_over" as BillingStateName, ...base, trial_ends_at: s.endedAt, days_left: 0, removed_at: s.endedAt };
+      return { state: "trial_over" as BillingStateName, ...base, trial_ends_at: s.endedAt, days_left: 0, removed_at: removal?.removedAt ?? s.endedAt };
     case "ended":
-      return { state: "ended" as BillingStateName, ...base, ended_at: s.endedAt, links_until: s.endedAt + LINKS_GRACE_MS, removed_at: s.endedAt + REMOVAL_MS };
+      return { state: "ended" as BillingStateName, ...base, ended_at: s.endedAt, links_until: removal?.linksUntil ?? s.endedAt + LINKS_GRACE_MS, removed_at: removal?.removedAt ?? s.endedAt + REMOVAL_MS };
     case "subscribed":
       if (s.endsAt !== null) {
         return { state: "ending" as BillingStateName, ...base, ends_at: s.endsAt, links_until: s.endsAt + LINKS_GRACE_MS, removed_at: s.endsAt + REMOVAL_MS };
@@ -647,7 +704,8 @@ export function billingRoutes(app: Hono, deps: Deps): void {
     if (asked !== undefined && idOf(asked, "checkout") !== null && (await ownCheckout(deps, auth.workspaceId, asked))) {
       checkout = (await checkoutNow(deps, asked))?.status ?? "unknown";
     }
-    return json(200, { ...stateAnswer(standing, row, now, usage.used, usage.allowance), checkout });
+    const removal = await removalShown(deps, row, standing, auth.session?.userId ?? "", now);
+    return json(200, { ...stateAnswer(standing, row, now, usage.used, usage.allowance, removal), checkout });
   });
 
   /**

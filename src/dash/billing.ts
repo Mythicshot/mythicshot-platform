@@ -23,6 +23,7 @@
 //   record says it is subscribed, which only Stripe's signed notice makes so.
 // A failure shows the dashboard's one failure sentence (Dash.failure) and nothing new.
 import { RETURN_PATH, SUBSCRIBE_PATH } from "../billing-rules.ts";
+import { DOWNLOAD_ALL_BUILT } from "../removal-rules.ts";
 import { STRIPE_JS_URL } from "../stripe.ts";
 import { dashHtml } from "./shell.ts";
 
@@ -42,6 +43,19 @@ export const TRIAL_OVER_WORDS = {
   strip: "Your trial has ended. You can view, download and delete, but not publish. Subscribe to keep your tours, images and clips.",
   row: "Trial ended",
 } as const;
+
+/** Section 7's sentence, added to the trial-ending and ended notices once the download exists. */
+export const DOWNLOAD_SENTENCE = "You can download everything from your Account page.";
+
+/**
+ * The line of the notice script that adds DOWNLOAD_SENTENCE to the notice of a trial ending within
+ * 7 days, a trial that has ended and an ended subscription: only in a build with the download
+ * (DOWNLOAD_ALL_BUILT, src/removal-rules.ts); without it the script is the one before, byte for byte.
+ */
+const DOWNLOAD_LINE = DOWNLOAD_ALL_BUILT
+  ? `    if (s.state === "ended" || s.state === "trial_over" || (s.state === "trial" && kind === "warn")) text.push([${JSON.stringify(" " + DOWNLOAD_SENTENCE)}, false]);
+`
+  : "";
 
 /** The approved words of the notices and the Billing card (mockup sections 2 and 3). */
 const WORDS = {
@@ -85,13 +99,17 @@ const WORDS = {
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
-/** The shared part of the billing scripts: dates as "21 February 2027", and making elements. */
+/**
+ * The shared part of the billing scripts: dates as "21 February 2027", and making elements. A
+ * date is the UTC day (0.1.61), as the warning mails write it and the removal sweep counts it, so
+ * the day shown is the day acted on wherever the person is.
+ */
 const COMMON = `  var MONTHS = ${JSON.stringify(MONTHS)};
   var $ = function (id) { return document.getElementById(id); };
   function dateOf(ms) {
     if (typeof ms !== "number" || !isFinite(ms)) return "";
     var d = new Date(ms);
-    return d.getDate() + " " + MONTHS[d.getMonth()] + " " + d.getFullYear();
+    return d.getUTCDate() + " " + MONTHS[d.getUTCMonth()] + " " + d.getUTCFullYear();
   }
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -176,7 +194,7 @@ ${COMMON}
     } else {
       return;
     }
-    var bar = el("div", kind === "" ? "billing-strip" : "billing-strip " + kind);
+${DOWNLOAD_LINE}    var bar = el("div", kind === "" ? "billing-strip" : "billing-strip " + kind);
     bar.id = "billing-strip";
     var span = el("span", "billing-strip-text");
     text.forEach(function (part) { span.appendChild(part[1] ? el("b", "", part[0]) : document.createTextNode(part[0])); });

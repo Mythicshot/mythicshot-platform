@@ -21,6 +21,7 @@
 // whole snapshot malformed, which answers the same 404 as an unknown slug.
 import type { Hono } from "hono";
 import { beforeAccountsToo, noDisabledAccount } from "./accounts.ts";
+import { linksUpSql } from "./removal-rules.ts";
 import type { Autoplay, Box, Card, EndCard, Link, Note, Point, Theme, Zoom } from "./manifest.ts";
 import { PLAYER_CSS, PLAYER_CSS_ETAG, PLAYER_CSS_PATH, PLAYER_JS, PLAYER_JS_ETAG, PLAYER_JS_PATH } from "./player/assets.ts";
 import type { Deps } from "./ports.ts";
@@ -374,7 +375,9 @@ export function pageRoutes(app: Hono, deps: Deps, restricted?: RestrictedAnswer)
     const raw = c.req.param("slug");
     const slug = SLUG.test(raw) ? raw : "";
     const row = await beforeAccountsToo(
-      () => deps.db.first<{ data: string }>(PAGE_SQL, [slug]),
+      // With billing on, a workspace whose links are down (src/removal-rules.ts) is not found
+      // either, in this same statement; without billing the statement is as before.
+      () => deps.db.first<{ data: string }>(PAGE_SQL + linksUpSql(deps.config, "t.workspace_id", deps.now()), [slug]),
       () => deps.db.first<{ data: string }>(PAGE_SQL_BEFORE_ACCOUNTS, [slug]),
     );
     // Not a public tour: perhaps a restricted one, which only src/restricted.ts may serve.

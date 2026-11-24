@@ -73,6 +73,7 @@ import { LIMITS_MEDIA, hitLimit, workspaceKey, type Limit } from "./rate.ts";
 import { checkImage, mediaInfo, type ImageType, type MediaType } from "./sniff.ts";
 import { allowanceOfSqlFor, USED_SQL, allowanceParams, storageFull, usageOf } from "./usage.ts";
 import { readOnlyRefusal } from "./billing.ts";
+import { linksUpSql } from "./removal-rules.ts";
 import { itemCreationAccess } from "./media-access.ts";
 import { ACCESS_BODY_BYTES, creationAccess, hasAccessFields, type Access } from "./viewing.ts";
 
@@ -630,7 +631,7 @@ export async function onlineItemFiles(deps: Deps, linkId: string): Promise<Onlin
     `SELECT ${ITEM_COLUMNS}, m.online_at, m.workspace_id FROM media m
       WHERE ((m.link_id = ? AND m.access = 'public') OR (m.private_link_id = ? AND m.access <> 'public')) AND m.state = 'online'
         AND NOT EXISTS (SELECT 1 FROM user u WHERE u.status = 'disabled'
-                          AND (u.workspace_id = m.workspace_id OR u.id IN (SELECT ms.user_id FROM membership ms WHERE ms.workspace_id = m.workspace_id)))`,
+                          AND (u.workspace_id = m.workspace_id OR u.id IN (SELECT ms.user_id FROM membership ms WHERE ms.workspace_id = m.workspace_id)))${linksUpSql(deps.config, "m.workspace_id", deps.now())}`,
     [asked, asked],
   );
   // The second call is made for every input, with "" when there is no item, which finds nothing.

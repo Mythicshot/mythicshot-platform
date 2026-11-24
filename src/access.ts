@@ -96,6 +96,7 @@
 import type { Hono } from "hono";
 import { accessNarrows, readOnlyRefusal } from "./billing.ts";
 import { noDisabledAccount } from "./accounts.ts";
+import { linksUpSql } from "./removal-rules.ts";
 import { requireAuth, type Auth } from "./auth.ts";
 import { metered, SUBREQUEST_BUDGET } from "./budget.ts";
 import { apiError, json } from "./http.ts";
@@ -182,10 +183,12 @@ export type ServedTour = {
   pictures: ReadonlyMap<string, ServedPicture> | null;
 };
 
-const servedSql = (by: "slug" | "id") => `
+// `linksUp` is linksUpSql's condition (src/removal-rules.ts): "" without billing, so the
+// statement is the one before; with billing a workspace whose links are down is not enabled.
+const servedSql = (by: "slug" | "id", linksUp: string) => `
   SELECT t.id, t.slug, t.workspace_id, t.access, t.status, coalesce(s.private_data, s.data) AS data,
          EXISTS (SELECT 1 FROM access_switch w WHERE w.tour_id = t.id) AS switching,
-         CASE WHEN ${noDisabledAccount("t.workspace_id")} THEN 1 ELSE 0 END AS enabled,
+         CASE WHEN ${noDisabledAccount("t.workspace_id")}${linksUp} THEN 1 ELSE 0 END AS enabled,
          (SELECT json_group_array(o.image_key) FROM snapshot_object o WHERE o.tour_id = t.id) AS live_keys
     FROM tour t LEFT JOIN snapshot s ON s.tour_id = t.id
    WHERE t.${by} = ?`;
@@ -201,7 +204,7 @@ export async function tourForServing(deps: Deps, ref: { slug: string } | { id: s
   const value = bySlug ? ref.slug : ref.id;
   if (typeof value !== "string" || !(bySlug ? SLUG : TOUR_ID).test(value)) return null;
   type Row = { id: string; slug: string; workspace_id: string; access: Access; status: string; data: string | null; switching: number; enabled: number; live_keys: string };
-  const row = await deps.db.first<Row>(servedSql(bySlug ? "slug" : "id"), [value]);
+  const row = await deps.db.first<Row>(servedSql(bySlug ? "slug" : "id", linksUpSql(deps.config, "t.workspace_id", deps.now())), [value]);
   if (row === null) return null;
   const published = row.status === "published" && row.data !== null;
   let pictures: Map<string, ServedPicture> | null = null;
