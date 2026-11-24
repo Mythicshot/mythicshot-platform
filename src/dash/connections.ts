@@ -12,18 +12,30 @@
 // checks it in the page: 8 characters of the code's own alphabet, else the "does not work"
 // sentence and no request. Then it looks the code up, POST /api/v1/connect/lookup with
 // { user_code } (8 capitals, no dash) in the body, in the one function lookupRequest: the
-// code is never put in any address. On 200 the question "Connect this computer?" names the
-// computer (at most NAME_MAX characters, wrapping, so no name pushes the warning or the
-// buttons away) and when it asked, exactly as that answer gave them, adds a warning line
-// when the answer's same_network is false, and keeps that code: Connect and Not me send that code in the body of POST
+// code is never put in any address. On 200 the question names the account the computer would
+// be connected to, as the owner approved it: "Connect <computer> to the workspace
+// <workspace>? You are signed in as <email>.", the computer as that answer gave it and the
+// workspace and the address as this page's own session gave them (Dash.start), never from
+// the lookup's answer or anything about another account. Each is text in its own isolated,
+// wrapping element, cut as the server stores it (the computer at NAME_MAX characters, the
+// workspace at WORKSPACE_MAX, the address at EMAIL_MAX), so no name pushes the warning or
+// the buttons away. Under it are when the computer asked and the same facts, a warning line
+// when the answer's same_network is false, and it keeps that code: Connect and Not me send
+// that code in the body of POST
 // /api/v1/connect/confirm or /refuse, whatever the field holds by then. Escape and a click
-// outside close the question and send nothing: the request stays open until it expires. A
+// outside close the question and send nothing: the request stays open until it expires.
+// "Use a different account", under the two buttons, is the Account page's Sign out (POST
+// /api/v1/signout: this browser's session only, no other) and then the sign-in page
+// (Dash.signedOut); it sends nothing about the code, so the request stays open until it
+// expires and another account can confirm it. The sign-in pages take no return address, so
+// after signing in the person lands where everyone does (Tours) and opens Connections. A
 // 404 from any of the three is the "does not work" sentence; a 429 says how many minutes to
 // wait (its retry-after, rounded up) and Continue stays disabled, and does nothing, until
 // then. When no answer comes to Connect or Not me, the code is looked up once: a 404 (no
 // longer open) closes the question with a neutral note and the list is watched as after a
 // confirm; anything else keeps the question open with the failure. The code is never read
-// from or written to the page's address, storage or a log.
+// from or written to the page's address, storage or a log: after "Use a different account"
+// it is typed again.
 //
 // After a confirm the token does not exist yet: Mythicshot makes it when it next asks, every
 // few seconds (src/connect.ts). So the list is read at once and then again after each pause
@@ -48,7 +60,9 @@
 // list shows a computer, and the empty state under it stays as it is. When the session names
 // a usable address of the app's download page, the welcome ends with one sentence more whose
 // words "the download page" link to it (Dash.downloadLink); without it, it reads as before.
+import { MAX_EMAIL_CHARS } from "../accounts.ts";
 import { DEVICE_NAME_MAX, USER_CODE_ALPHABET } from "../connect.ts";
+import { MAX_WORKSPACE_CHARS } from "../setup.ts";
 import { MAX_TOKENS_LISTED } from "../tokens.ts";
 import { dashHtml } from "./shell.ts";
 
@@ -85,8 +99,9 @@ const CONNECTIONS_MAIN = `  <div id="connections-page">
   </section>
   </div>
   <div class="backdrop" id="confirm-dialog" hidden>
-    <div class="dialog" id="confirm-box" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-facts confirm-warn">
-      <h2 id="confirm-title" tabindex="-1">Connect this computer?</h2>
+    <div class="dialog" id="confirm-box" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-who confirm-facts confirm-warn">
+      <h2 id="confirm-title" tabindex="-1"></h2>
+      <p class="sub confirm-who" id="confirm-who"></p>
       <dl class="kv" id="confirm-facts"><dt>Computer</dt><dd><b class="name" id="confirm-device"></b></dd><dt>Asked</dt><dd id="confirm-asked"></dd><dt>Workspace</dt><dd id="confirm-workspace"></dd></dl>
       <p class="warn-box" id="confirm-elsewhere" hidden>This request may have come from a different network than the one you are on now. If you are not sure it is yours, press Not me.</p>
       <p class="warn-box" id="confirm-warn">Confirm only if you pressed Sign in in Mythicshot on this computer just now. It will be able to publish, change and delete everything in this workspace.</p>
@@ -95,6 +110,7 @@ const CONNECTIONS_MAIN = `  <div id="connections-page">
         <button type="button" class="btn quiet" id="confirm-refuse">Not me</button>
         <button type="button" class="btn" id="confirm-go">Connect</button>
       </div>
+      <div class="other-account"><button type="button" class="link-button" id="confirm-other">Use a different account</button></div>
     </div>
   </div>
   <div class="backdrop" id="rename-dialog" hidden>
@@ -168,6 +184,11 @@ export const CONNECTIONS_JS = String.raw`(function () {
     unlessUsed: " unless it is used",
     expired: "Expired ",
     signInAgain: ". Sign in again from Mythicshot.",
+    askConnect: "Connect ",
+    toWorkspace: " to the workspace ",
+    askEnd: "?",
+    signedInAs: "You are signed in as ",
+    signedInAsEnd: ".",
   };
   var DAY_MS = 86400000;
   // The site's sign-in lifetimes, from the session (Dash.start).
@@ -177,11 +198,16 @@ export const CONNECTIONS_JS = String.raw`(function () {
   var LOOKUP = "/api/v1/connect/lookup";
   var CONFIRM = "/api/v1/connect/confirm";
   var REFUSE = "/api/v1/connect/refuse";
+  // This browser's session only, as the Account page's Sign out (no other session ends).
+  var SIGNOUT = "/api/v1/signout";
   var TOKEN_ID = /^tok_[0-9a-f]{24}$/;
   // A short code as the API stores it: 8 characters of its alphabet (src/connect.ts).
   var CODE = /^[${USER_CODE_ALPHABET}]{8}$/;
   // The name rule of src/connect.ts (parseDeviceName): trimmed, 1 to NAME_MAX characters, none of these.
   var NAME_MAX = ${DEVICE_NAME_MAX};
+  // The longest workspace name and address the server takes: the question cuts a longer one there.
+  var WORKSPACE_MAX = ${MAX_WORKSPACE_CHARS};
+  var EMAIL_MAX = ${MAX_EMAIL_CHARS};
   var HIDDEN = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
   // The most tokens the list answers (src/tokens.ts): with fewer, the list is the whole of them.
   var MAX_LISTED = ${MAX_TOKENS_LISTED};
@@ -193,12 +219,14 @@ export const CONNECTIONS_JS = String.raw`(function () {
   // What the page behind a question is, made inert while one is open.
   var BEHIND = ["dash-top", "connections-page"];
   // The three questions (Dash.question, src/dash/script.ts).
-  var confirmQ = Dash.question({ backdrop: "confirm-dialog", box: "confirm-box", role: "alertdialog", title: "confirm-title", message: "confirm-message", behind: BEHIND, buttons: ["confirm-refuse", "confirm-go"] });
+  var confirmQ = Dash.question({ backdrop: "confirm-dialog", box: "confirm-box", role: "alertdialog", title: "confirm-title", message: "confirm-message", behind: BEHIND, buttons: ["confirm-refuse", "confirm-go", "confirm-other"] });
   var renameQ = Dash.question({ backdrop: "rename-dialog", box: "rename-box", role: "dialog", title: "rename-title", message: "rename-message", behind: BEHIND, fields: ["rename-input"], buttons: ["rename-cancel", "rename-save"], lock: "readonly" });
   var disconnectQ = Dash.question({ backdrop: "disconnect-dialog", box: "disconnect-box", role: "alertdialog", title: "disconnect-title", message: "disconnect-message", behind: BEHIND, buttons: ["disconnect-keep", "disconnect-go"] });
 
   var $ = function (id) { return document.getElementById(id); };
   var workspace = "";
+  // The signed-in account's own address, from this page's session.
+  var email = "";
   // The tokens shown, and what they showed as (to leave the rows alone when nothing changed).
   var items = [];
   var shownKey = null;
@@ -378,14 +406,39 @@ export const CONNECTIONS_JS = String.raw`(function () {
 
   // ---- The confirm question ----
 
+  // At most max characters (code points), as the server stores the text.
+  function cut(text, max) {
+    return Array.from(text).slice(0, max).join("");
+  }
+
+  // The question, as the owner approved it: "Connect <computer> to the workspace <workspace>?"
+  // in the heading and "You are signed in as <email>." under it, each value in its own
+  // bidi-isolated, wrapping element, all through textContent. The workspace and the address
+  // are this page's own session's, never the lookup's.
+  function question(device) {
+    var title = $("confirm-title");
+    title.textContent = "";
+    title.appendChild(el("span", "", TEXT.askConnect));
+    title.appendChild(el("span", "name", device));
+    title.appendChild(el("span", "", TEXT.toWorkspace));
+    title.appendChild(el("span", "name", cut(workspace, WORKSPACE_MAX)));
+    title.appendChild(el("span", "", TEXT.askEnd));
+    var who = $("confirm-who");
+    who.textContent = "";
+    who.appendChild(el("span", "", TEXT.signedInAs));
+    who.appendChild(el("span", "name", cut(email, EMAIL_MAX)));
+    who.appendChild(el("span", "", TEXT.signedInAsEnd));
+  }
+
   function ask(p) {
     // At most NAME_MAX characters, as the server stores names, so no name pushes the warning away.
     $("confirm-device").textContent = Array.from(p.device).slice(0, NAME_MAX).join("");
+    question($("confirm-device").textContent);
     $("confirm-asked").textContent = agoOf(p.asked);
     $("confirm-workspace").textContent = workspace;
     // The extra warning when the request came from another network than this page's.
     $("confirm-elsewhere").hidden = !p.elsewhere;
-    $("confirm-box").setAttribute("aria-describedby", p.elsewhere ? "confirm-facts confirm-elsewhere confirm-warn" : "confirm-facts confirm-warn");
+    $("confirm-box").setAttribute("aria-describedby", p.elsewhere ? "confirm-who confirm-facts confirm-elsewhere confirm-warn" : "confirm-who confirm-facts confirm-warn");
     var opened = confirmQ.open({
       focus: "confirm-refuse",
       back: function () { return $("connect-code"); },
@@ -450,6 +503,25 @@ export const CONNECTIONS_JS = String.raw`(function () {
       $(button).focus();
     }
     Dash.api("POST", how === "confirm" ? CONFIRM : REFUSE, { user_code: p.code }).then(settle, function () { settle(null); });
+  }
+
+  // "Use a different account": this browser's session ends, as with the Account page's Sign
+  // out, and the browser goes to the sign-in page. Nothing about the code is sent (no confirm,
+  // no refuse): the request stays open until it expires. When the sign-out fails, the person
+  // is still signed in here, so the question stays open with the failure.
+  function otherAccount() {
+    if (pending === null || confirmQ.isWorking()) return;
+    confirmQ.say("");
+    confirmQ.busy(true, "confirm-other");
+    function failed(res) {
+      confirmQ.busy(false, "confirm-other");
+      confirmQ.say(res === null ? Dash.TEXT.failed : Dash.failure(res));
+      $("confirm-other").focus();
+    }
+    Dash.api("POST", SIGNOUT).then(function (res) {
+      if (res.status === 204 || res.status === 401) { Dash.signedOut(); return; }
+      failed(res);
+    }, function () { failed(null); });
   }
 
   // After a confirm: the list now, and again after each pause until a new computer shows up.
@@ -753,8 +825,9 @@ export const CONNECTIONS_JS = String.raw`(function () {
       lookUp();
     });
     $("confirm-go").addEventListener("click", function () { settleCode("confirm"); });
-    // A held key's repeats never press Connect or Not me (the first Enter may have been the field's).
-    ["confirm-go", "confirm-refuse"].forEach(function (id) {
+    $("confirm-other").addEventListener("click", otherAccount);
+    // A held key's repeats never press Connect, Not me or Use a different account (the first Enter may have been the field's).
+    ["confirm-go", "confirm-refuse", "confirm-other"].forEach(function (id) {
       $(id).addEventListener("keydown", function (ev) {
         if (ev.repeat === true && (ev.key === "Enter" || ev.key === " ")) ev.preventDefault();
       });
@@ -802,6 +875,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
   startPage();
   Dash.start(function (who) {
     workspace = who.workspace;
+    email = who.email;
     if (who.limits !== null && typeof who.limits === "object") limits = who.limits;
     $("connections-sub").textContent = TEXT.subBefore + workspace + TEXT.subAfter;
     return read().then(function (r) {

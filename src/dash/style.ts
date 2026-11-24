@@ -325,6 +325,12 @@ h1 { font-size: 20px; line-height: 28px; font-weight: 700; margin: 0 0 4px; }
 .kv dt { color: var(--text-muted); }
 .kv dd { margin: 0; min-width: 0; }
 #confirm-box, #rename-box, #disconnect-box { max-height: 100%; overflow-y: auto; }
+.confirm-who { margin: 0; }
+.other-account { margin: 12px 0 0; text-align: center; }
+.link-button { background: none; border: 0; padding: 4px 2px; min-height: var(--control-dense); font: inherit; font-size: 14px; color: var(--accent-text); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; border-radius: var(--radius-sm); }
+.link-button:hover:not(:disabled) { text-decoration-thickness: 2px; }
+.link-button:disabled { opacity: 0.45; cursor: not-allowed; }
+.link-button[aria-busy="true"] { cursor: progress; }
 @media (max-width: 720px) {
   .connections, .connections tbody, .connections tr, .connections td { display: block; }
   .connections thead, .connections td.when { display: none; }

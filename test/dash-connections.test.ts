@@ -9,6 +9,8 @@ import { makeDeps, seedAccount } from "#harness";
 import { USER_CODE_ALPHABET } from "../src/connect.ts";
 import { CONNECTIONS_HTML, CONNECTIONS_JS } from "../src/dash/connections.ts";
 import { DASH_PAGES } from "../src/dash/routes.ts";
+import { DASH_JS } from "../src/dash/script.ts";
+import { SIGNIN_JS } from "../src/signin/page.ts";
 import { DASH_TABS } from "../src/dash/shell.ts";
 import { DASH_CSS } from "../src/dash/style.ts";
 import { UNDOCUMENTED_ROUTES } from "../src/docs/openapi.ts";
@@ -62,7 +64,6 @@ const WORDING = [
   "No computers connected yet",
   "Install Mythicshot, open Workspace and press Sign in. Then type the code it shows into the box above.",
   "A connection lets Mythicshot on that computer publish, change and delete everything in this workspace. Disconnect one you no longer use or do not recognise.",
-  "Connect this computer?",
   "Computer",
   "Asked",
   "Workspace",
@@ -71,6 +72,8 @@ const WORDING = [
   "Confirm only if you pressed Sign in in Mythicshot on this computer just now. It will be able to publish, change and delete everything in this workspace.",
   "Not me",
   "Connect",
+  // Approved by the owner: under the question's buttons, ends this browser's session and goes to sign in.
+  "Use a different account",
   "Rename this connection",
   "Name",
   "Only you see this name. Up to 60 characters.",
@@ -129,9 +132,15 @@ const TEXT: Record<string, string> = {
   unlessUsed: " unless it is used",
   expired: "Expired ",
   signInAgain: ". Sign in again from Mythicshot.",
+  // Approved by the owner: the question names the account, "Connect <computer> to the workspace <workspace>? You are signed in as <email>."
+  askConnect: "Connect ",
+  toWorkspace: " to the workspace ",
+  askEnd: "?",
+  signedInAs: "You are signed in as ",
+  signedInAsEnd: ".",
 };
 
-const CLASS_NAMES = ["note plain", "btn sm quiet", "btn sm danger", "t name", "confirm-facts confirm-elsewhere confirm-warn", "confirm-facts confirm-warn"];
+const CLASS_NAMES = ["note plain", "btn sm quiet", "btn sm danger", "t name", "confirm-who confirm-facts confirm-elsewhere confirm-warn", "confirm-who confirm-facts confirm-warn"];
 
 const seen = (c: Call) => ({ status: c.status, headers: [...c.headers.entries()].sort(), body: c.text });
 
@@ -244,6 +253,9 @@ describe("the Connections page", () => {
     expect(TEXT.expires + "20 Feb 2027").toBe("Expires 20 Feb 2027");
     expect(TEXT.expired + "20 Feb 2027" + TEXT.signInAgain).toBe("Expired 20 Feb 2027. Sign in again from Mythicshot.");
     expect(TEXT.downloadBefore + TEXT.downloadLink + TEXT.downloadAfter).toBe(" Not installed yet? Get Mythicshot from the download page.");
+    expect(TEXT.askConnect + "ALEX-DESKTOP" + TEXT.toWorkspace + "Cowfee Raid Tools" + TEXT.askEnd + " " + TEXT.signedInAs + "solex@example.com" + TEXT.signedInAsEnd).toBe("Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com.");
+    // The question's heading and the line under it are filled by the script: empty in the page.
+    for (const id of ["confirm-title", "confirm-who"]) expect([doc.getElementById(id)!.textContent, doc.getElementById(id)!.children.length], id).toEqual(["", 0]);
     expect(CONNECTIONS_JS).toContain('var link = Dash.downloadLink(TEXT.downloadLink, "");');
     // The welcome's place: the green note above the heading, empty and hidden until the script fills it.
     const welcome = doc.getElementById("connections-welcome")!;
@@ -265,13 +277,36 @@ describe("the Connections page", () => {
     expect(CONNECTIONS_JS).toContain(`var CODE = /^[${USER_CODE_ALPHABET}]{8}$/;`);
     // Every request, by method and path.
     const calls = [...CONNECTIONS_JS.matchAll(/Dash\.api\("([A-Z]+)", ([^,)]+)/g)].map((m) => `${m[1]} ${m[2]}`);
-    expect(calls).toEqual(["POST LOOKUP", 'POST how === "confirm" ? CONFIRM : REFUSE', "GET TOKENS", 'PATCH TOKENS + "/" + encodeURIComponent(id', 'DELETE TOKENS + "/" + encodeURIComponent(id', "GET USAGE"]);
+    expect(calls).toEqual(["POST LOOKUP", 'POST how === "confirm" ? CONFIRM : REFUSE', "POST SIGNOUT", "GET TOKENS", 'PATCH TOKENS + "/" + encodeURIComponent(id', 'DELETE TOKENS + "/" + encodeURIComponent(id', "GET USAGE"]);
     expect(CONNECTIONS_JS).toContain('var USAGE = "/api/v1/usage";');
     expect(CONNECTIONS_JS).toContain("var TOKEN_ID = /^tok_[0-9a-f]{24}$/;");
     // Nothing is stored, logged or read from the address, and no request leaves through anything but Dash.api.
     const forbidden = ["location", "history", "localStorage", "sessionStorage", "indexedDB", "cookie", "caches", "postMessage", "window.name", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "fetch(", "csrf", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer", "innerHTML", "navigator."];
     for (const api of forbidden) expect(CONNECTIONS_JS, api).not.toContain(api);
     expect(CONNECTIONS_JS).not.toMatch(/\.style\b|setAttribute\("(?:style|on[a-z]+|src|href)"|\.on[a-z]+\s*=/);
+  });
+
+  it("Use a different account: the page's own Sign out, to the fixed sign-in page; no request can name where the browser goes, then or after signing in", async () => {
+    // The one request: this session's sign-out (never everywhere), with no body.
+    expect(CONNECTIONS_JS).toContain('var SIGNOUT = "/api/v1/signout";');
+    expect(CONNECTIONS_JS.match(/SIGNOUT/g)).toHaveLength(2);
+    expect(CONNECTIONS_JS).not.toContain("/signout/everywhere");
+    // Leaving is the shared Dash.signedOut, which goes to "/signin" and nowhere else.
+    expect(DASH_JS).toContain('function signedOut() {\n    location.replace("/signin");\n  }');
+    // The sign-in pages take no return address: they read no query and land on the fixed Tours page.
+    expect(SIGNIN_JS).not.toMatch(/[?&]next|return_?to|URLSearchParams|searchParams/i);
+    // Its one use of the query: keeping it in the address bar while the link's code is taken out.
+    expect(SIGNIN_JS.match(/location\.search/g)).toHaveLength(1);
+    expect(SIGNIN_JS).toContain('history.replaceState(null, "", location.pathname + location.search);');
+    expect([...SIGNIN_JS.matchAll(/location\.(?:replace|assign)\(([^)]*)\)/g)].map((m) => m[1])).toEqual(['"/tours"', '"/signin"', '"/tours"']);
+    // A sign-in page asked with a return address answers byte for byte as without one.
+    const { deps } = await makeDeps({ hosts: HOSTS });
+    const plain = await send(deps, "GET", "/signin", { origin: APP });
+    for (const q of ["?next=https://evil.example.net/", "?next=/connections", "?return_to=//evil.example.net", "?redirect=%2F%2Fevil.example.net"]) {
+      const asked = await send(deps, "GET", "/signin" + q, { origin: APP });
+      expect(seen(asked), q).toEqual(seen(plain));
+      expect(asked.text, q).not.toContain("evil");
+    }
   });
 
   it("is usable with the keyboard and a screen reader, keeps long names inside, and lays out at phone width", () => {

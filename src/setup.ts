@@ -14,7 +14,8 @@ export const MIN_SETUP_CODE_LENGTH = 16;
 /** The largest JSON body a setup POST reads, in bytes. Reading stops there. */
 const MAX_BODY_BYTES = 4096;
 const MAX_CODE_CHARS = 1024;
-const MAX_WORKSPACE_CHARS = 80;
+/** The longest workspace name setup takes; the Connections page cuts a longer one at this in its question. */
+export const MAX_WORKSPACE_CHARS = 80;
 const MAX_EMAIL_CHARS = 254;
 
 // C0 controls, DEL and C1 controls.

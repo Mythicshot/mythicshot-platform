@@ -624,6 +624,45 @@ describe("the dashboard's lookup, confirm and refusal", () => {
     expect(elsewhere.json.error).toBe("bad_origin");
     expect(await deps.db.first("SELECT confirmed_at FROM connect_request")).toEqual({ confirmed_at: null });
   });
+
+  it("Use a different account: the first account looks up, signs out of this browser only, and the request stays open; the second account confirms and gets the computer, the first gets nothing", async () => {
+    const { deps, a, b, tick } = await site();
+    const first = await signIn(deps, a.userId);
+    // Another browser of the same account, which a sign-out of this browser leaves alone.
+    const firstElsewhere = await signIn(deps, a.userId);
+    const r = await start(deps, "Shared laptop");
+    const code = r.json.user_code as string;
+    expect((await lookup(deps, first, code)).status).toBe(200);
+    const before = await everythingStored(deps, ["rate_counter", "audit", "session"]);
+
+    // The page's Sign out: this session only. Nothing about the code is sent.
+    expect((await send(deps, "POST", "/api/v1/signout", { headers: page(first) })).status).toBe(204);
+    expect((await send(deps, "GET", "/api/v1/session", { headers: { cookie: first.cookie } })).status).toBe(401);
+    expect((await send(deps, "GET", "/api/v1/session", { headers: { cookie: firstElsewhere.cookie } })).status).toBe(200);
+    // The request is as it was: open, neither confirmed nor refused, no token picked.
+    expect(await everythingStored(deps, ["rate_counter", "audit", "session"])).toBe(before);
+    expect(await deps.db.first("SELECT confirmed_at, confirmed_by, workspace_id, token_id, refused_at, collected_at FROM connect_request")).toEqual({ confirmed_at: null, confirmed_by: null, workspace_id: null, token_id: null, refused_at: null, collected_at: null });
+    // The signed-out browser can no longer settle it.
+    expect((await confirm(deps, first, code)).status).toBe(401);
+    tick(POLL_GAP_MS);
+    expect((await poll(deps, r.json.device_code)).json).toEqual({ status: "pending" });
+
+    // The second account signs in in that browser and confirms the same code.
+    const second = await signIn(deps, b.userId);
+    expect((await lookup(deps, second, code)).json).toEqual({ device_name: "Shared laptop", asked_at: NOW, same_network: false });
+    expect((await confirm(deps, second, code)).status).toBe(204);
+    tick(POLL_GAP_MS);
+    const got = await poll(deps, r.json.device_code);
+    expect(got.json).toEqual({ status: "connected", token: expect.stringMatching(/^dp_[0-9a-f]{40}$/), workspace: { id: b.workspaceId, name: "Bob workspace" }, account: { username: "bob" }, version: expect.any(String) });
+    expect((await send(deps, "GET", "/api/v1/me", { token: got.json.token })).json.workspace).toBe("Bob workspace");
+
+    // The first account: nothing new in its list, no record of a connection.
+    const firstList = await listTokens(deps, firstElsewhere);
+    expect(firstList.json.tokens.map((t: { name: string }) => t.name)).not.toContain("Shared laptop");
+    expect((await listTokens(deps, second)).json.tokens.map((t: { name: string }) => t.name)).toContain("Shared laptop");
+    expect(await deps.db.all("SELECT event FROM audit WHERE event LIKE 'connection%' AND (user_id = ? OR workspace_id = ?)", [a.userId, a.workspaceId])).toEqual([]);
+    expect(await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM api_token WHERE workspace_id = ? AND name = 'Shared laptop'", [a.workspaceId])).toEqual({ n: 0 });
+  });
 });
 
 describe("guessing a short code", () => {
