@@ -156,6 +156,21 @@ export const DASH_JS = `var Dash = (function () {
     return a;
   }
 
+  // Dash.saveFile(path, name): has the browser save the answer of one path of this site as a
+  // file named \`name\`, as a plain download, so it is written to disk as it arrives and the
+  // page stays where it is (the Account page's Download all my data). A path of the shape
+  // Dash.api takes only; anything else is refused before anything is asked.
+  function saveFile(path, name) {
+    if (typeof path !== "string" || !/^\\/(?![\\/\\\\])/.test(path)) throw new TypeError("path");
+    var a = document.createElement("a");
+    a.href = path;
+    a.download = name;
+    a.hidden = true;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
   // ---- A question asked in the page ----
   //
   // Dash.question(o) is the one way a page asks a question in itself (the Tours and Storage
@@ -379,6 +394,6 @@ export const DASH_JS = `var Dash = (function () {
     });
   }
 
-  return { api: api, errorOf: errorOf, failure: failure, formatBytes: formatBytes, dateOf: dateOf, signedOut: signedOut, start: start, question: question, downloadLink: downloadLink, TEXT: TEXT };
+  return { api: api, errorOf: errorOf, failure: failure, formatBytes: formatBytes, dateOf: dateOf, signedOut: signedOut, start: start, question: question, downloadLink: downloadLink, saveFile: saveFile, TEXT: TEXT };
 })();
 `;
