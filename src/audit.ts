@@ -28,6 +28,8 @@ export const AUDIT_EVENTS = [
   "connection_mail_not_sent",
   "token_renamed",
   "token_revoked",
+  // A token revoked by itself (DELETE /api/v1/token), as the desktop app drops its connection.
+  "token_ended_itself",
   "invite_sent",
   "invite_resent",
   "invite_cancelled",

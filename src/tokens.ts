@@ -7,6 +7,14 @@
 // was made and last used, when it expires (src/lifetimes.ts), and how it was made (`setup`: by the setup wizard or with a new
 // account; `sign_in`: by connecting the app, src/connect.ts).
 //
+// One more route takes a token and nothing else: DELETE /api/v1/token, "the token that sent
+// this request" ends itself. The desktop app holds only its token, so this is how it tells the
+// site that a connection it drops should end. It revokes exactly the token requireAuth resolved
+// (its id and workspace, never an id from the URL or a body, which is never read), with its
+// record in one batch, guarded like the revoke. It only takes access away, so neither billing's
+// read-only state nor the site's terms hold it back (a token is never held to the terms, and it
+// does not ask readOnlyRefusal). It lives where the other token routes do (src/host-gate.ts).
+//
 // Revoking sets revoked_at. requireAuth reads that column on every request a token makes, in
 // the one lookup that resolves the token, so the first request whose lookup runs after the
 // revoke has committed is refused (401). A request whose lookup ran before, and which is still
@@ -14,7 +22,8 @@
 // "at once" means here.
 import type { Hono } from "hono";
 import { auditStatement } from "./audit.ts";
-import { requireAuth } from "./auth.ts";
+import { isBeforeTokenAccount, requireAuth, type Auth } from "./auth.ts";
+import { isBeforeAccounts } from "./accounts.ts";
 import { parseDeviceName } from "./connect.ts";
 import { apiError, json, noContent } from "./http.ts";
 import { tokenExpiry } from "./lifetimes.ts";
@@ -47,12 +56,63 @@ function unauthorized(): Response {
   return new Response('{"error":"unauthorized"}', { status: 401, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
+/** The 401 of requireAuth for a token, byte for byte: a token revoked between its lookup and its end. */
+function endedMeanwhile(): Response {
+  return new Response('{"error":"unauthorized"}', { status: 401, headers: { "content-type": "application/json" } });
+}
+
 /** Another workspace's token, a revoked one, one that never was and an id that is not one: the one 404. */
 function noToken(): Response {
   return apiError(404, "not_found", "no such token");
 }
 
+/**
+ * The account a token belongs to, for its record: the account its row names (migration 0025),
+ * only while that account belongs to the token's own workspace, by its membership or, for a row
+ * an older build wrote without one, its own row: the rule GET /api/v1/me reads it by
+ * (src/tours.ts). Null for a token that names none, and on a database migration 0025 (or 0008,
+ * before accounts) has not reached.
+ */
+async function accountOfToken(deps: Deps, auth: Auth): Promise<string | null> {
+  try {
+    const row = await deps.db.first<{ user_id: string }>(
+      `SELECT k.user_id FROM api_token k
+        WHERE k.id = ? AND k.workspace_id = ?
+          AND k.user_id IN (SELECT u.id FROM user u WHERE u.workspace_id = k.workspace_id
+                            UNION SELECT m.user_id FROM membership m WHERE m.workspace_id = k.workspace_id)`,
+      [auth.tokenId, auth.workspaceId],
+    );
+    return row?.user_id ?? null;
+  } catch (err) {
+    if (isBeforeTokenAccount(err) || isBeforeAccounts(err)) return null;
+    throw err;
+  }
+}
+
 export function tokenRoutes(app: Hono, deps: Deps): void {
+  /**
+   * The token that sent the request ends itself: 204, and every request it makes from now on is
+   * refused (401). A token alone (`only: "token"`): a session, or no credential, is the one 401
+   * of requireAuth. Its use is not recorded (`touch: false`): it is ended, not used. A token
+   * revoked between its lookup and the batch changes nothing and gets the 401 it would get a
+   * moment later.
+   */
+  app.delete("/api/v1/token", async (c) => {
+    const auth = await requireAuth(c.req.raw, deps, { only: "token", touch: false });
+    if (auth instanceof Response) return auth;
+    const userId = await accountOfToken(deps, auth);
+    try {
+      await deps.db.batch([
+        { sql: "UPDATE api_token SET revoked_at = ? WHERE id = ? AND workspace_id = ? AND revoked_at IS NULL", params: [deps.now(), auth.tokenId, auth.workspaceId] },
+        auditStatement(deps, { event: "token_ended_itself", userId, workspaceId: auth.workspaceId, subject: auth.tokenId }, { onlyAfterOneChange: true }),
+      ]);
+    } catch (err) {
+      if (isNotNullViolation(err)) return endedMeanwhile();
+      throw err;
+    }
+    return noContent();
+  });
+
   /** The workspace's tokens that are not revoked, newest first, lapsed connections included and marked. */
   app.get("/api/v1/tokens", async (c) => {
     const auth = await requireAuth(c.req.raw, deps, { only: "session" });

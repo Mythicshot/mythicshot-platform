@@ -503,10 +503,12 @@ const OPEN: Record<string, { reason: string; samples: (w: World) => Sample[]; by
 };
 
 /**
- * Routes with no id that change only the caller's own session or account: what they end.
- * Each is sent by one workspace with its session; nothing of the other may change.
+ * Routes with no id that change only the caller's own session, account or token: what they
+ * end. Each is sent by one workspace with its session (POST unless `method` says otherwise);
+ * nothing of the other may change. DELETE /api/v1/token takes a token alone, and a test of its
+ * own sends it with every token of both sides.
  */
-const SELF: Record<string, { path: string; ends?: string; changes?: string }> = {
+const SELF: Record<string, { path: string; method?: string; ends?: string; changes?: string }> = {
   "POST /api/v1/signout": { path: "/api/v1/signout", ends: "the session the request is sent with" },
   "POST /api/v1/signout/everywhere": { path: "/api/v1/signout/everywhere", ends: "every session of the caller's own account" },
   "POST /api/v1/account/email": { path: "/api/v1/account/email", changes: "asks for a change of the caller's own email address; another account's address answers the same and changes nothing" },
@@ -515,6 +517,7 @@ const SELF: Record<string, { path: string; ends?: string; changes?: string }> = 
   "POST /api/v1/billing/checkout": { path: "/api/v1/billing/checkout", changes: "starts a checkout for the caller's own workspace and stores its id there; nothing in the request names a workspace" },
   "POST /api/v1/billing/portal": { path: "/api/v1/billing/portal", changes: "opens Stripe's page for the customer on the caller's own workspace's record; nothing in the request names one" },
   "POST /api/v1/account/data": { path: "/api/v1/account/data", changes: "asks for a download of all of the caller's own workspace's data: the request names no workspace and no id, and takes only that workspace's one download row and its count" },
+  "DELETE /api/v1/token": { path: "/api/v1/token", method: "DELETE", changes: "revokes the token the request is sent with and nothing else: no id or other selector is read from the URL or the body, and a session is refused" },
 };
 /** The SELF routes that end sessions, and those that change the caller's email address. */
 const SELF_ENDS = Object.entries(SELF).filter(([, entry]) => entry.ends !== undefined);
@@ -1650,6 +1653,44 @@ describe("one workspace against another", () => {
     }
   });
 
+  it("a token ends itself and nothing else: no token of the other workspace and no other token of its own, whatever the request names", SLOW, async () => {
+    const w = await build();
+    const { deps } = w;
+    const status = async (token: string) => (await send(deps, "GET", "/api/v1/me", { token })).status;
+    const revoked = async () => (await deps.db.all<{ id: string }>("SELECT id FROM api_token WHERE revoked_at IS NOT NULL ORDER BY id")).map((r) => r.id);
+    const unknown = newToken();
+    const ended = new Set<string>();
+    for (const [mine, theirs] of directions(w)) {
+      w.tick();
+      // Nobody may: the caller's session, its revoked token, a token nobody was given and no
+      // credential at all get the one 401, and nothing of either side changes.
+      const mineBefore = await snapshotOf(deps, mine, w.keys);
+      const theirsBefore = await snapshotOf(deps, theirs, w.keys);
+      const naming = { id: theirs.ids.tokens.live, token_id: mine.ids.tokens.connected, workspace_id: theirs.workspaceId };
+      for (const [what, credential] of [["the session", BY_SESSION.of(mine)], ["the revoked token", { token: mine.revokedToken }], ["a token nobody was given", { token: unknown }], ["nothing", { token: null }]] as [string, Credential][]) {
+        const r = await fire(deps, { method: "DELETE", path: `/api/v1/token?id=${theirs.ids.tokens.connected}`, json: naming }, credential);
+        expect({ status: r.status, body: r.json }, `${what} as ${mine.name}`).toEqual(NOBODY);
+      }
+      expect(await snapshotOf(deps, mine, w.keys)).toEqual(mineBefore);
+      expect(await snapshotOf(deps, theirs, w.keys)).toEqual(theirsBefore);
+      // The caller's connected token ends itself, with the other side's tokens and its own first
+      // token named in the URL and the body: it alone is revoked.
+      const before = await revoked();
+      const r = await fire(deps, { method: "DELETE", path: `/api/v1/token?id=${theirs.ids.tokens.live}&token_id=${mine.ids.tokens.live}`, json: { id: theirs.ids.tokens.connected, token_id: mine.ids.tokens.live, workspace_id: theirs.workspaceId } }, { token: mine.connectedToken });
+      expect([r.status, r.text], mine.name).toEqual([204, ""]);
+      expect(await revoked(), mine.name).toEqual([...before, mine.ids.tokens.connected].sort());
+      expect(await snapshotOf(deps, theirs, w.keys), `${mine.name} ending its token changed something of ${theirs.name}`).toEqual(theirsBefore);
+      const record = await deps.db.all("SELECT user_id, workspace_id, subject FROM audit WHERE event = 'token_ended_itself' AND subject = ?", [mine.ids.tokens.connected]);
+      expect(record).toEqual([{ user_id: mine.userId, workspace_id: mine.workspaceId, subject: mine.ids.tokens.connected }]);
+      // The ended token is refused, and ending it again is the one 401; every other token still works.
+      expect(await status(mine.connectedToken)).toBe(401);
+      expect({ status: (await fire(deps, { method: "DELETE", path: "/api/v1/token" }, { token: mine.connectedToken })).status }).toEqual({ status: 401 });
+      ended.add(mine.connectedToken);
+      for (const token of [mine.token, theirs.token, theirs.connectedToken]) expect(await status(token)).toBe(ended.has(token) ? 401 : 200);
+    }
+    expect(w.writes()).toEqual([]);
+  });
+
   it("an accepted invite's workspace is new and separate from every other, and its account reaches nothing of either workspace", SLOW, async () => {
     const w = await build();
     const { deps, a, b } = w;
@@ -2237,7 +2278,7 @@ describe("a viewer cookie", () => {
       }
       // What makes or changes something: asked by nobody (and so refused), which changes nothing either way.
       for (const [key, entry] of Object.entries(CREATES)) await compare(key, "by nobody", entry.sample(a), page);
-      for (const [key, entry] of Object.entries(SELF)) await compare(key, "by nobody", { method: "POST", path: entry.path, json: {} }, page);
+      for (const [key, entry] of Object.entries(SELF)) await compare(key, "by nobody", { method: entry.method ?? "POST", path: entry.path, json: {} }, page);
       // The admin's routes: those that only read, by the admin's session; every one by nobody.
       for (const [key, entry] of Object.entries(ADMIN)) {
         const r = entry.request(w);

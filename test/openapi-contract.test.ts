@@ -1536,6 +1536,12 @@ describe("the description against the real answers", { timeout: 120_000 }, () =>
     refused(await api.call("DELETE", `/api/v1/tokens/${id}`, { origin: APP, token: a.token }), 401, "unauthorized");
     expect((await api.call("DELETE", `/api/v1/tokens/${id}`, { origin: APP, headers: page })).status).toBe(204);
     refused(await api.call("DELETE", `/api/v1/tokens/${id}`, { origin: APP, headers: page }), 404, "not_found");
+    // A token ending itself: the token alone. A session is refused; the token ends, and is refused from then on.
+    refused(await api.call("DELETE", "/api/v1/token", { origin: APP, headers: page }), 401, "unauthorized");
+    const ended = await api.call("DELETE", "/api/v1/token", { origin: APP, token: a.token });
+    expect([ended.status, ended.text, ended.headers.get("cache-control")]).toEqual([204, "", "no-store"]);
+    refused(await api.call("DELETE", "/api/v1/token", { origin: APP, token: a.token }), 401, "unauthorized");
+    refused(await api.call("GET", "/api/v1/me", { origin: APP, token: a.token }), 401, "unauthorized");
 
     // One address: the connected answer has no addresses.
     const one = await makeDeps();
