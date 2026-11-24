@@ -28,7 +28,7 @@ import { TRIAL_MS } from "../src/billing-rules.ts";
 import { newId } from "../src/auth.ts";
 import { MAX_CHAPTERS } from "../src/chapters.ts";
 import { setClientAddress } from "../src/client.ts";
-import { openapi } from "../src/docs/openapi.ts";
+import { UNDOCUMENTED_ROUTES, openapi } from "../src/docs/openapi.ts";
 import type { Deps } from "../src/ports.ts";
 import { COPY_BATCH } from "../src/publish.ts";
 import { LIMITS_MEDIA, workspaceKey } from "../src/rate.ts";
@@ -1938,9 +1938,12 @@ describe("the error codes in the code", () => {
     // description (UNDOCUMENTED_ROUTES); the one refusal it gives a described route is subscription_ended.
     expect(source("billing.ts")).toContain("apiError(SUBSCRIPTION_ENDED.status, SUBSCRIPTION_ENDED.error, SUBSCRIPTION_ENDED.detail)");
     inCode.add(`${SUBSCRIPTION_ENDED.status} ${SUBSCRIPTION_ENDED.error}`);
+    // Download all my data (src/export.ts, 0.1.60): its two routes are the Account page's own,
+    // left out of the description (UNDOCUMENTED_ROUTES), and it answers no described route.
+    expect(Object.keys(UNDOCUMENTED_ROUTES)).toEqual(expect.arrayContaining(["POST /api/v1/account/data", "GET /api/v1/account/data/:ticket"]));
     // These are the only modules that answer with apiError (src/http.ts defines it).
     const callers = Object.keys(SOURCES).filter((path) => /\bapiError\(/.test(SOURCES[path])).sort();
-    expect(callers).toEqual(["../src/access.ts", "../src/account-removal.ts", "../src/admin-api.ts", "../src/billing.ts", "../src/chapters.ts", "../src/connect.ts", "../src/email-change.ts", "../src/http.ts", "../src/invites.ts", "../src/media-access.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/terms.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts", "../src/viewing.ts"]);
+    expect(callers).toEqual(["../src/access.ts", "../src/account-removal.ts", "../src/admin-api.ts", "../src/billing.ts", "../src/chapters.ts", "../src/connect.ts", "../src/email-change.ts", "../src/export.ts", "../src/http.ts", "../src/invites.ts", "../src/media-access.ts", "../src/media.ts", "../src/publish.ts", "../src/signin.ts", "../src/terms.ts", "../src/tokens.ts", "../src/tours.ts", "../src/uploads.ts", "../src/viewers.ts", "../src/viewing.ts"]);
 
     // The one refusal that carries numbers is built in src/usage.ts, as plain JSON with its
     // status and code in place; nothing else there answers an error.

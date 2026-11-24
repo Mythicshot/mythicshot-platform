@@ -55,6 +55,7 @@ import { describe, expect, it } from "vitest";
 import { makeDeps } from "#harness";
 import { createApp } from "../src/app.ts";
 import { hashToken, newId, newToken } from "../src/auth.ts";
+import { EXPORT_PATH, FAILURE_SENTENCE, TICKET_MS } from "../src/export.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { openapi, type OpenApiDoc } from "../src/docs/openapi.ts";
 import { BILLING_CONFIG, eventOf, notify, withBilling, type FakeStripe } from "./fake-stripe.ts";
@@ -69,6 +70,7 @@ import { UPLOAD_MAX_AGE_MS } from "../src/uploads.ts";
 import { VIEW_GATE_HTML } from "../src/view-page.ts";
 import { MEDIA_VIEWER_COOKIE, VIEWER_CODE_MS, VIEWER_COOKIE } from "../src/viewers.ts";
 import { ORIGIN, commit, logoPng, putStep, send, stepImage, type Call, type Json } from "./bundle.ts";
+import { filesOf } from "./zip-reader.ts";
 import { OWNED, SHARED, TRY_BUCKETS, createReplace, dumpOf, inventedIds, manifestOf, mediaPart, namesIn, needlesOf, snapshotOf, tablesOf, world, type Ids, type Side, type World } from "./isolation-world.ts";
 
 // The world holds a restricted tour and a switch in progress as well, so every case runs over more tours.
@@ -80,7 +82,8 @@ const SETUP_CODE = "correct-horse-battery-staple";
 
 // ---- The answers ----
 
-type Expect = { status: number; body: Json | null };
+/** `body`: the JSON answered; a string: the plain text answered; null: no body. */
+type Expect = { status: number; body: Json | string | null };
 const notFound = (what: string): Expect => ({ status: 404, body: { error: "not_found", detail: `no such ${what}` } });
 const NO_TOUR = notFound("tour");
 const NO_CHAPTER = notFound("chapter");
@@ -90,6 +93,8 @@ const NO_SESSION = notFound("session");
 const NO_ITEM = notFound("item");
 const NO_TOKEN = notFound("token");
 const NO_REQUEST = notFound("request");
+/** A download ticket that cannot be followed: the failure sentence as plain text, never a file (src/export.ts). */
+const NO_DOWNLOAD: Expect = { status: 404, body: FAILURE_SENTENCE };
 /** What a credential that may not be used here gets: a token on a route that takes only a session, a session on the tours address. */
 const NOBODY: Expect = { status: 401, body: { error: "unauthorized" } };
 /** Aborting an upload answers 204 whatever the id: there is nothing to tell apart. */
@@ -224,6 +229,10 @@ const CASES: Record<string, Entry> = {
       { what: `${what}, made restricted to the caller's address`, method: "PUT", path: mediaPath(id, "/access"), json: { access: "people", viewers: ["intruder@example.com"] }, only: "session" as const, expect: NO_ITEM },
       { what: `${what}, made the owner's alone`, method: "PUT", path: mediaPath(id, "/access"), json: { access: "me" }, only: "session" as const, expect: NO_ITEM },
     ]),
+  // Download all my data (0.1.60): their live ticket, sent with the caller's own session.
+  "GET /api/v1/account/data/:ticket": (t) => [
+    { what: "the download of all their data they asked for and have not opened", method: "GET", path: `/api/v1/account/data/${t.download}`, only: "session", expect: NO_DOWNLOAD },
+  ],
   "DELETE /api/v1/sessions/:id": (t) => [
     { what: "the session they are signed in with", method: "DELETE", path: `/api/v1/sessions/${t.session}`, only: "session", expect: NO_SESSION },
     { what: "another live session of theirs", method: "DELETE", path: `/api/v1/sessions/${t.otherSession}`, only: "session", expect: NO_SESSION },
@@ -307,6 +316,7 @@ const LISTS: Record<string, { path: string; holds: string; only?: "token" | "ses
   "GET /api/v1/tokens": { path: "/api/v1/tokens", holds: "the caller's workspace's tokens that are not revoked: ids, names, times and kinds", only: "session" },
   "GET /api/v1/terms": { path: "/api/v1/terms", holds: "the site's current terms, the caller's own account's newest agreement and its session's anti-forgery value", only: "session" },
   "GET /api/v1/terms/agreed": { path: "/api/v1/terms/agreed", holds: "the version of the site's terms the caller's own account agreed to last, and when", only: "session" },
+  "GET /api/v1/account/data": { path: "/api/v1/account/data", holds: "whether a download of all of the caller's own workspace's data is being prepared or sent", only: "session" },
   "GET /api/v1/billing": { path: "/api/v1/billing", holds: "where the caller's own workspace stands with billing: its state, dates, usage and allowance", only: "session" },
 };
 
@@ -504,6 +514,7 @@ const SELF: Record<string, { path: string; ends?: string; changes?: string }> = 
   "POST /api/v1/terms/agree": { path: "/api/v1/terms/agree", changes: "records that the caller's own account agrees to the site's current terms; the body names the version and nothing of any account" },
   "POST /api/v1/billing/checkout": { path: "/api/v1/billing/checkout", changes: "starts a checkout for the caller's own workspace and stores its id there; nothing in the request names a workspace" },
   "POST /api/v1/billing/portal": { path: "/api/v1/billing/portal", changes: "opens Stripe's page for the customer on the caller's own workspace's record; nothing in the request names one" },
+  "POST /api/v1/account/data": { path: "/api/v1/account/data", changes: "asks for a download of all of the caller's own workspace's data: the request names no workspace and no id, and takes only that workspace's one download row and its count" },
 };
 /** The SELF routes that end sessions, and those that change the caller's email address. */
 const SELF_ENDS = Object.entries(SELF).filter(([, entry]) => entry.ends !== undefined);
@@ -760,7 +771,7 @@ function wanted(r: Req, credential: string, onTours = false): Expect {
 
 function expectAnswer(c: Call, r: Req, label: string, credential: string, onTours = false): void {
   const want = wanted(r, credential, onTours);
-  expect({ status: c.status, body: want.body === null ? c.text : c.json }, label).toEqual({ status: want.status, body: want.body ?? "" });
+  expect({ status: c.status, body: want.body === null || typeof want.body === "string" ? c.text : c.json }, label).toEqual({ status: want.status, body: want.body ?? "" });
 }
 
 /** Every request of CASES and BODY_IDS with its route key. */
@@ -1068,8 +1079,8 @@ describe("one workspace against another", () => {
     expect(mine.a.length).toBeGreaterThan(80);
 
     const first = { a: await answers(w.a), b: await answers(w.b) };
-    // Six lists take one credential, the others both.
-    expect(Object.keys(first.a)).toHaveLength(Object.keys(LISTS).length * 2 - 7);
+    // Eight lists take one credential, the others both.
+    expect(Object.keys(first.a)).toHaveLength(Object.keys(LISTS).length * 2 - 8);
     for (const key of Object.keys(first.a)) {
       expect(first.a[key].status, key).toBe(200);
       expect(first.b[key].status, key).toBe(200);
@@ -1177,6 +1188,81 @@ describe("one workspace against another", () => {
     expect(full.status).toBe(413);
     const other = await send(deps, "POST", "/api/v1/uploads", { token: w.b.token, body: JSON.stringify({ manifest: manifestOf([10], "Bravo one more"), target: { kind: "new" } }), headers: JSON_HEADERS });
     expect(other.status).toBe(201);
+  });
+
+  it("a download of all its data (0.1.60) holds its own workspace's things and nothing of the other's, whatever its titles say, and changes nothing of the other", SLOW, async () => {
+    // No limit on files, as on the Node server, so the whole world fits; read past the meter.
+    const w = await build({ exportFileReads: null });
+    const { deps } = w;
+    // The world's own tickets are past their minute, so each side may ask again.
+    w.tick(TICKET_MS);
+    // Titles that name the other side's files, ids and paths: names are made from titles, never files.
+    const keysOf = async (side: Side) =>
+      (
+        await deps.db.all<{ key: string }>(
+          `SELECT s.image_key AS key FROM step s JOIN tour t ON t.id = s.tour_id WHERE t.workspace_id = ?
+           UNION SELECT logo_key FROM tour WHERE workspace_id = ? AND logo_key IS NOT NULL
+           UNION SELECT 'm/' || o.media_id || '/part-' || substr('00' || o.n, -3) || '.' || o.claim FROM media_object o JOIN media m ON m.id = o.media_id WHERE m.workspace_id = ? AND o.n >= 0`,
+          [side.workspaceId, side.workspaceId, side.workspaceId],
+        )
+      ).map((r) => r.key);
+    const craftedBy = new Map<string, string[]>();
+    for (const [mine, theirs] of directions(w)) {
+      const crafted = [(await keysOf(theirs))[0], `../${theirs.workspaceId}/${theirs.ids.draft.tour}`, theirs.ids.media.imageLink];
+      const own = await deps.db.all<{ id: string }>("SELECT id FROM tour WHERE workspace_id = ? ORDER BY id LIMIT 3", [mine.workspaceId]);
+      for (const [i, t] of own.entries()) await deps.db.run("UPDATE tour SET title = ? WHERE id = ?", [crafted[i], t.id]);
+      await deps.db.run("UPDATE media SET title = ? WHERE id = ?", [theirs.ids.media.clip, mine.ids.media.image]);
+      craftedBy.set(mine.name, [...crafted, theirs.ids.media.clip]);
+    }
+    const sha = async (b: Uint8Array) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", b as Uint8Array<ArrayBuffer>))].map((x) => x.toString(16).padStart(2, "0")).join("");
+    for (const [mine, theirs] of directions(w)) {
+      const before = await snapshotOf(deps, theirs, w.keys);
+      const asked = await fire(deps, { method: "POST", path: EXPORT_PATH }, BY_SESSION.of(mine));
+      expect(asked.status, mine.name).toBe(200);
+      const res = await createApp(deps).fetch(new Request(ORIGIN + asked.json.url, { headers: { cookie: mine.session.cookie } }));
+      expect(res.status, mine.name).toBe(200);
+      const zip = new Uint8Array(await res.arrayBuffer());
+      const files = filesOf(zip);
+      // Its own: every tour and every online item of its workspace, by title.
+      const list = JSON.parse(new TextDecoder().decode(files.get("account.json")));
+      const tours = await deps.db.all<{ title: string }>("SELECT title FROM tour WHERE workspace_id = ? ORDER BY title", [mine.workspaceId]);
+      expect(list.tours.map((t: Json) => t.title).sort(), mine.name).toEqual(tours.map((t) => t.title).sort());
+      const items = await deps.db.all<{ n: number }>("SELECT count(*) AS n FROM media WHERE workspace_id = ? AND state = 'online'", [mine.workspaceId]);
+      expect(list.images.length + list.clips.length, mine.name).toBe(items[0].n);
+      expect(list.account.email, mine.name).toBe(mine.email);
+      expect(list.not_included, mine.name).toEqual([]);
+      // Nothing of the other's: no id, title, slug, email, address, file name or secret anywhere in the bytes.
+      const theirNeedles = needlesOf(before, [theirs.token, theirs.revokedToken, theirs.workspaceName, theirs.email, theirs.session.secret, theirs.session.csrf, theirs.ids.download]);
+      const ownNeedles = needlesOf(await snapshotOf(deps, mine, w.keys), [mine.workspaceName, mine.email]);
+      const raw = new TextDecoder("latin1").decode(zip);
+      // A crafted title is the caller's own text naming the other's things: it is in the lists as written, and only there.
+      const crafted = craftedBy.get(mine.name)!;
+      for (const c of crafted) expect(raw, c).toContain(c);
+      const checked = theirNeedles.filter((x) => !ownNeedles.includes(x) && !crafted.some((c) => c.includes(x)) && x !== "First token");
+      expect(checked.length, theirs.name).toBeGreaterThan(50);
+      for (const n of checked) expect(raw, `${mine.name}'s zip: ${n}`).not.toContain(n);
+      // No stored file of the other's is in it: no file's bytes are those of a file of the other's
+      // alone (both sides have the same logo, which is the caller's own too), and every picture is
+      // one of the caller's own files.
+      const digests = async (side: Side) => {
+        const out = new Set<string>();
+        for (const key of await keysOf(side)) {
+          const f = await deps.drafts.get(key);
+          if (f !== null) out.add(await sha(new Uint8Array(await new Response(f.body).arrayBuffer())));
+        }
+        return out;
+      };
+      const ownFiles = await digests(mine);
+      const theirFiles = [...(await digests(theirs))].filter((d) => !ownFiles.has(d));
+      expect(theirFiles.length, theirs.name).toBeGreaterThan(5);
+      for (const [name, bytes] of files) {
+        const d = await sha(bytes);
+        expect(theirFiles.includes(d), `${mine.name}'s zip: ${name}`).toBe(false);
+        if (name.includes("/pictures/")) expect(ownFiles.has(d), `${mine.name}'s zip: ${name}`).toBe(true);
+      }
+      // And nothing of the other changed.
+      expect(await snapshotOf(deps, theirs, w.keys), mine.name).toEqual(before);
+    }
   });
 
   it("signing out, here or everywhere, ends nothing of the other workspace", SLOW, async () => {

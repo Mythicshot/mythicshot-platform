@@ -165,6 +165,14 @@ export type Config = {
    * the site is as it was before billing in every answer. Never logged, answered or put in an error.
    */
   billing?: BillingSettings | null;
+  /**
+   * The most stored files one "Download all my data" may read (src/export.ts). Set by the
+   * target, never by a setting: absent is the Workers limit within the call budget
+   * (EXPORT_WORKER_FILES), and the Node server's entry sets null, no limit, since it has no
+   * per-request limit on reading its own disk. A workspace with more files is refused before
+   * any byte is sent.
+   */
+  exportFileReads?: number | null;
 };
 
 export type Deps = {

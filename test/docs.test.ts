@@ -100,7 +100,7 @@ const ALLOWED_HOSTS = new Set([
 ]);
 
 /** Last labels that are file extensions, not top-level domains. */
-const FILE_EXTENSIONS = new Set(["sh", "md", "yml", "yaml", "json", "jsonc", "ts", "js", "mjs", "sqlite", "tar", "gz", "sql", "txt", "asc", "sources", "lock", "old", "new", "bak", "toml", "vars", "png", "svg", "ico", "ttf", "py"]);
+const FILE_EXTENSIONS = new Set(["sh", "md", "yml", "yaml", "json", "jsonc", "ts", "js", "mjs", "sqlite", "tar", "gz", "sql", "txt", "asc", "sources", "lock", "old", "new", "bak", "toml", "vars", "png", "svg", "ico", "ttf", "py", "zip", "html"]);
 
 function isPlaceholderHost(host: string): boolean {
   return /(^|\.)example\.(com|net|org)$/.test(host) || host === "localhost";

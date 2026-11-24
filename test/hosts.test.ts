@@ -125,6 +125,10 @@ const ROWS: Record<string, Row> = {
   // Changing the email address takes a session alone: 401 without one, and on the app address only.
   "POST /api/v1/account/email": session("POST", "/api/v1/account/email", 401, { email: "new@example.com" }),
   "POST /api/v1/account/email/confirm": session("POST", "/api/v1/account/email/confirm", 401, { code: "dpe_" + "0".repeat(40) }),
+  // Download all my data takes a session alone: 401 without one, and on the app address only.
+  "GET /api/v1/account/data": session("GET", "/api/v1/account/data", 401),
+  "POST /api/v1/account/data": session("POST", "/api/v1/account/data", 401),
+  "GET /api/v1/account/data/:ticket": session("GET", `/api/v1/account/data/${"0".repeat(76)}`, 401),
   // The site's terms take a session alone: 401 without one, and on the app address only.
   "GET /api/v1/terms": session("GET", "/api/v1/terms", 401),
   "GET /api/v1/terms/agreed": session("GET", "/api/v1/terms/agreed", 401),
@@ -388,8 +392,8 @@ describe("the host-routing matrix", () => {
     // Every dashboard page and its script is in one of the two lists, and nothing is in both.
     for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES, TERMS_PAGE]) for (const key of [`GET ${p.path}`, `GET ${p.script.path}`]) expect([PAGE_KEYS.includes(key), DASH_KEYS.includes(key)].filter(Boolean), key).toEqual([true]);
     for (const key of ["GET /dash/dash.css", "GET /dash/dash.js", "GET /dash/mark.svg"]) expect(DASH_KEYS, key).toContain(key);
-    // 9, the two requests of an invite, the three requests that take a short code, the three of the token list, the change of who may view a tour or an item, and the three of the site's terms.
-    expect(SESSION_KEYS.length).toBe(22);
+    // 9, the two requests of an invite, the three requests that take a short code, the three of the token list, the change of who may view a tour or an item, and the three of the site's terms, and the three of Download all my data.
+    expect(SESSION_KEYS.length).toBe(25);
     expect(ADMIN_KEYS.length).toBe(11);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);

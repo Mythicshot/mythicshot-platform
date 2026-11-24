@@ -18,6 +18,15 @@
 // the shared script), with a link that opens it in a new tab; hidden otherwise, so without
 // the setting the page reads as before.
 //
+// "Download all my data" (billing mockups, section 7), after the download card, in every billing
+// state and whether or not billing is on or the site's terms are agreed to: its heading, its one
+// sentence and a Download button. Download asks POST /api/v1/account/data, then opens the address
+// it answers as a plain link (Dash.saveFile, src/dash/script.ts), so the browser saves the zip as
+// it arrives and the page stays; a refused address answers the failure sentence as plain text,
+// which the browser shows and never saves. The button stays disabled, with no words more, until
+// the download has ended: the page asks GET /api/v1/account/data every 3 seconds while it says
+// one is going. An ask that fails says the dashboard's own failure sentence (Dash.failure).
+//
 // Changing the email address, mockup 8's first two boxes: Change is shown only when the
 // session says the site can mail the link (email_change); otherwise one line under the
 // address says why. Change opens a question with the field for the new address; Send the
@@ -51,6 +60,14 @@ const ACCOUNT_MAIN = `  <div id="account-page">
       <h2 class="card-title" id="h-download" tabindex="-1">Mythicshot for Windows</h2>
       <p class="sub" id="download-text">Get the installer from the download page. It shows the latest version and its checksum.</p>
       <div class="two" id="download-actions"></div>
+    </div>
+    <div class="card" id="data-card">
+      <h2 class="card-title" id="h-data" tabindex="-1">Download all my data</h2>
+      <p class="sub" id="data-text">One zip file with your tours, images and clips, and a list of what's in your account.</p>
+      <p class="message" id="data-message" role="status" aria-live="polite" hidden></p>
+      <div class="two">
+        <button type="button" class="btn quiet" id="data-download">Download</button>
+      </div>
     </div>
     <div class="card">
       <h2 class="card-title" id="h-where" tabindex="-1">Where you are signed in</h2>
@@ -284,7 +301,56 @@ export const ACCOUNT_JS = `(function () {
     Dash.api("POST", "/api/v1/account/email", { email: value }).then(settle, function () { settle(null); });
   }
 
+  // ---- Download all my data ----
+
+  // The address the server answers for the file: one path of this site, of exactly this shape.
+  var DATA_URL = /^\\/api\\/v1\\/account\\/data\\/[0-9a-f]{76}$/;
+
+  function downloadData() {
+    var btn = $("data-download");
+    if (btn.disabled) return;
+    var message = $("data-message");
+    sayIn(message, "");
+    btn.disabled = true;
+    btn.setAttribute("aria-busy", "true");
+    function ready() {
+      btn.removeAttribute("aria-busy");
+      btn.disabled = false;
+    }
+    function back(res) {
+      ready();
+      sayIn(message, Dash.failure(res));
+      btn.focus();
+    }
+    Dash.api("POST", "/api/v1/account/data").then(function (res) {
+      if (res.status === 401) { Dash.signedOut(); return; }
+      var url = res.status === 200 && res.data !== null && typeof res.data === "object" ? res.data.url : null;
+      if (typeof url !== "string" || !DATA_URL.test(url)) { back(res); return; }
+      // A plain download of this site's own address: the browser writes the file as it comes.
+      Dash.saveFile(url);
+      watch(ready);
+    }, function () { back(null); });
+  }
+
+  // Until the download has ended: the button stays disabled while the server says one of this
+  // workspace is being prepared or sent, asking again every POLL_MS; any other answer gives it back.
+  var POLL_MS = 3000;
+  function wait(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+  function watch(ready) {
+    Dash.api("GET", "/api/v1/account/data").then(function (res) {
+      if (res.status === 401) { Dash.signedOut(); return; }
+      if (res.status === 200 && res.data !== null && typeof res.data === "object" && res.data.running === true) {
+        wait(POLL_MS).then(function () { watch(ready); });
+        return;
+      }
+      ready();
+    }, function () { ready(); });
+  }
+
   function startPage() {
+    $("data-download").addEventListener("click", downloadData);
     $("signout").addEventListener("click", function () {
       leave($("signout"), $("signout-everywhere"), function () { return Dash.api("POST", "/api/v1/signout"); });
     });
