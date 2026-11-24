@@ -3,10 +3,10 @@
 // only from configuration; it is compared through SHA-256 digests in constant time and
 // is never logged, echoed, stored or put in a URL.
 import type { Context, Hono } from "hono";
-import { constantTimeEqual, requireAuth } from "./auth.ts";
-import { isUniqueViolation, type Deps } from "./ports.ts";
+import { constantTimeEqual, isBeforeTokenAccount, requireAuth } from "./auth.ts";
+import { isUniqueViolation, type Deps, type Stmt } from "./ports.ts";
 import { SETUP_CSS, SETUP_HTML, SETUP_JS } from "./setup/page.ts";
-import { workspaceStatements } from "./workspaces.ts";
+import { withoutTokenAccount, workspaceStatements } from "./workspaces.ts";
 
 /** The shortest setup code that opens setup. A shorter one leaves setup unavailable. */
 export const MIN_SETUP_CODE_LENGTH = 16;
@@ -244,11 +244,15 @@ export function setupRoutes(app: Hono, deps: Deps): void {
     // One batch: the workspace, its owner, its token and the one-row claim. The setup
     // table's primary key lets only one claim commit; any other loses the whole batch.
     const w = await workspaceStatements(deps, name, email);
+    const claim: Stmt = { sql: "INSERT INTO setup (id, workspace_id, completed_at) VALUES (1, ?, ?)", params: [w.workspaceId, deps.now()] };
     try {
-      await deps.db.batch([
-        ...w.stmts,
-        { sql: "INSERT INTO setup (id, workspace_id, completed_at) VALUES (1, ?, ?)", params: [w.workspaceId, deps.now()] },
-      ]);
+      try {
+        await deps.db.batch([...w.stmts, claim]);
+      } catch (err) {
+        // A database migration 0023 has not reached: the token without its account, as before.
+        if (!isBeforeTokenAccount(err)) throw err;
+        await deps.db.batch([...withoutTokenAccount(w.stmts), claim]);
+      }
     } catch (err) {
       if (isUniqueViolation(err)) return notFound();
       throw err;

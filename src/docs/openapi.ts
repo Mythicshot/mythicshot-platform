@@ -528,9 +528,16 @@ function schemas(): Record<string, Schema> {
       "The live pictures are moving between the stores. Send the same request again.",
     ),
     Me: object(
-      ["workspace", "version"],
+      ["workspace", "workspace_id", "account_id", "version"],
       {
         workspace: { type: "string", description: "The workspace's name." },
+        workspace_id: { type: "string", pattern: "^ws_[0-9a-f]{24}$", description: "The id of the workspace the credential belongs to, the same for every token and session of it. An older server leaves it out." },
+        account_id: {
+          type: ["string", "null"],
+          pattern: "^usr_[0-9a-f]{24}$",
+          description:
+            "The id of the account the credential belongs to: for a session the signed-in account; for a token the account it was made for (the owner a new workspace was made with, or the account that confirmed connecting the app), the same for every token of that account. A random id, never an email address or a username. null for a token no account is recorded for, such as a workspace's first token made by an older server. An older server leaves it out.",
+        },
         version: { type: "string", description: "The server's version." },
         addresses: object(
           ["tours", "app"],
@@ -1682,7 +1689,7 @@ function paths(): OpenApiDoc["paths"] {
       get: {
         tags: ["Workspace"],
         summary: "The workspace and the server version",
-        description: "The name of the token's workspace and the version of the server: the request to test a connection with. On a server with two addresses the answer also has addresses, the two host names.",
+        description: "The name and id of the token's workspace, the id of the account the token belongs to (null when none is recorded), and the version of the server: the request to test a connection with, and to tell which account and workspace a token is for. It describes the caller's own credential and nothing else. On a server with two addresses the answer also has addresses, the two host names.",
         operationId: "getMe",
         security: TOKEN,
         responses: { "200": answer("The workspace and the version.", ref("Me")), "401": UNAUTHORIZED, "404": refusal("The token's workspace no longer exists.", "not_found") },

@@ -101,6 +101,8 @@ export type Side = {
   email: string;
   token: string;
   tokenId: string;
+  /** The token connecting the app made (ids.tokens.connected is its id): the account's second live token. */
+  connectedToken: string;
   revokedToken: string;
   revokedTokenId: string;
   /** The account's session: its secret, the Cookie header that carries it, and its anti-forgery value. */
@@ -428,7 +430,7 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
   await settleConnect("confirm", confirmed.user_code);
   const collected = await startConnect(`${name} connected device`);
   await settleConnect("confirm", collected.user_code);
-  must(await send(deps, "POST", "/api/v1/connect/token", { origin: toursOrigin, body: JSON.stringify({ device_code: collected.device_code }), headers: JSON_HEADERS }), 200, "the collection of the connected device's token");
+  const connectedToken = must(await send(deps, "POST", "/api/v1/connect/token", { origin: toursOrigin, body: JSON.stringify({ device_code: collected.device_code }), headers: JSON_HEADERS }), 200, "the collection of the connected device's token").json.token as string;
   const refused = await startConnect(`${name} refused device`);
   await settleConnect("refuse", refused.user_code);
   ids.connect = { confirmed: confirmed.user_code, collected: collected.user_code, refused: refused.user_code };
@@ -437,7 +439,7 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
   await deps.db.run("INSERT INTO email_change (id, user_id, new_email, code_hash, created_at) VALUES (?, ?, ?, ?, ?)", [
     newId("emc"), account.userId, `${name.toLowerCase()}-next@example.com`, await hashToken(emailCode), deps.now(),
   ]);
-  return { name, workspaceId, workspaceName, userId: account.userId, email: account.email, token, tokenId, revokedToken, revokedTokenId, session, emailCode, ids };
+  return { name, workspaceId, workspaceName, userId: account.userId, email: account.email, token, tokenId, connectedToken, revokedToken, revokedTokenId, session, emailCode, ids };
 }
 
 /**

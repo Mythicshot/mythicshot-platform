@@ -32,7 +32,8 @@
 // the batch a no-op (409) or, landing after it, finds no tour and writes nothing.
 import type { Hono } from "hono";
 import { readOnlyRefusal } from "./billing.ts";
-import { requireAuth, type Auth } from "./auth.ts";
+import { isBeforeAccounts } from "./accounts.ts";
+import { isBeforeTokenAccount, requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, readCapped } from "./http.ts";
 import { parseTitle } from "./manifest.ts";
 import { CARRY_CALLS } from "./access.ts";
@@ -185,12 +186,38 @@ export function tourRoutes(app: Hono, deps: Deps): void {
   app.get("/api/v1/me", async (c) => {
     const auth = await requireAuth(c.req.raw, deps);
     if (auth instanceof Response) return auth;
-    const row = await deps.db.first<{ name: string }>("SELECT name FROM workspace WHERE id = ?", [auth.workspaceId]);
+    // The answer describes the caller's own credential and nothing else: its workspace (the one
+    // requireAuth resolved it to) and the account it belongs to. For a session that is the
+    // signed-in account, which requireAuth has already found a member of the workspace. For a
+    // token it is the account its row names (migration 0023), read in this same statement and
+    // only while that account belongs to the token's own workspace, by its membership or, for a
+    // row an older build wrote without one, its own row (the rule of the token's lookup); a
+    // token nothing names an account of (one an older build made) gets null, never a guess.
+    // Both ids are random row ids ("ws_"/"usr_" and 96 random bits), never an email or a name.
+    type Row = { name: string; account_id: string | null };
+    let row: Row | null;
+    try {
+      row = await deps.db.first<Row>(
+        `SELECT w.name,
+                (SELECT k.user_id FROM api_token k
+                  WHERE k.id = ? AND k.workspace_id = w.id
+                    AND k.user_id IN (SELECT u.id FROM user u WHERE u.workspace_id = w.id
+                                      UNION SELECT m.user_id FROM membership m WHERE m.workspace_id = w.id)) AS account_id
+           FROM workspace w WHERE w.id = ?`,
+        [auth.tokenId, auth.workspaceId],
+      );
+    } catch (err) {
+      // A database migration 0023 (or 0008, before accounts) has not reached: no token names
+      // an account there yet, and the name alone is read as before.
+      if (!isBeforeTokenAccount(err) && !isBeforeAccounts(err)) throw err;
+      row = await deps.db.first<Row>("SELECT name, NULL AS account_id FROM workspace WHERE id = ?", [auth.workspaceId]);
+    }
     if (row === null) return apiError(404, "not_found", "no such workspace");
+    const accountId = auth.session !== undefined ? auth.session.userId : row.account_id;
     // In two-address mode the answer also names both addresses, as host names without a
     // scheme; in one-address mode the key is absent, meaning "use the address you were given".
     const hosts = deps.config.hosts ?? null;
-    return json(200, { workspace: row.name, version: VERSION, ...(hosts === null ? {} : { addresses: { tours: hosts.tours, app: hosts.app } }) });
+    return json(200, { workspace: row.name, workspace_id: auth.workspaceId, account_id: accountId, version: VERSION, ...(hosts === null ? {} : { addresses: { tours: hosts.tours, app: hosts.app } }) });
   });
 
   app.get("/api/v1/tours", async (c) => {

@@ -1054,6 +1054,38 @@ describe("one workspace against another", () => {
     expect(before.rows.media.map((m) => m.id)).toContain(w.a.ids.media.uploading);
   });
 
+  it("GET /api/v1/me names each caller's own workspace and account, and one account for all its credentials", SLOW, async () => {
+    const w = await build();
+    const { deps } = w;
+    const me = async (credential: Credential) => {
+      const r = await fire(deps, { method: "GET", path: "/api/v1/me" }, credential);
+      expect(r.status, r.text).toBe(200);
+      return r;
+    };
+    const credentialsOf = (side: Side): [string, Credential][] => [
+      ["the first token", BY_TOKEN.of(side)],
+      ["the token connecting the app made", { token: side.connectedToken }],
+      ["a session", BY_SESSION.of(side)],
+    ];
+    for (const [mine, theirs] of [[w.a, w.b], [w.b, w.a]] as const) {
+      for (const [what, credential] of credentialsOf(mine)) {
+        const r = await me(credential);
+        expect([r.json.workspace_id, r.json.account_id], `${mine.name} by ${what}`).toEqual([mine.workspaceId, mine.userId]);
+        for (const n of [theirs.workspaceId, theirs.userId, theirs.workspaceName, theirs.email]) expect(r.text.includes(n), `${mine.name} by ${what} told ${n} of ${theirs.name}`).toBe(false);
+      }
+    }
+    // Two workspaces, two accounts: none of the four ids is another's.
+    expect(new Set([w.a.workspaceId, w.a.userId, w.b.workspaceId, w.b.userId]).size).toBe(4);
+    // A revoked token gets the one 401 and no id at all.
+    const revoked = await fire(deps, { method: "GET", path: "/api/v1/me" }, { token: w.a.revokedToken });
+    expect([revoked.status, revoked.text]).toEqual([401, '{"error":"unauthorized"}']);
+    // A token row that names the other workspace's account never names it: null, as for a token of no account.
+    await deps.db.run("UPDATE api_token SET user_id = ? WHERE id = ?", [w.b.userId, w.a.ids.tokens.connected]);
+    const odd = await me({ token: w.a.connectedToken });
+    expect([odd.json.workspace_id, odd.json.account_id]).toEqual([w.a.workspaceId, null]);
+    expect(odd.text.includes(w.b.userId)).toBe(false);
+  });
+
   it("no list or summary of one workspace holds anything of the other", SLOW, async () => {
     const w = await build();
     const { deps } = w;

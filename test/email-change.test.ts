@@ -640,7 +640,7 @@ describe("confirming an email change", () => {
     const s = await signIn(deps, a.userId);
     const code = await askedCode(deps, mail, s, NEW);
     const db = betweenReadAndBatch(deps, async (raw) => {
-      for (const table of ["email_change", "signin_code", "session", "signin_method", "membership"]) await raw.run(`DELETE FROM ${table} WHERE user_id = ?`, [a.userId]);
+      for (const table of ["email_change", "signin_code", "session", "signin_method", "membership", "api_token"]) await raw.run(`DELETE FROM ${table} WHERE user_id = ?`, [a.userId]);
       await raw.run("DELETE FROM user WHERE id = ?", [a.userId]);
     });
     expect(await confirmEmailChange(deps, a.userId, code)).toBeNull();

@@ -15,7 +15,7 @@ import { migrate } from "../src/node/migrate.ts";
 import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
 import { TERMS_FILE_SAYS, lineSays } from "../src/terms.ts";
-import { workspaceStatements } from "../src/workspaces.ts";
+import { withoutTokenAccount, workspaceStatements } from "../src/workspaces.ts";
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url));
 const EXAMPLE = readFileSync(fileURLToPath(new URL("../docs/terms-example.txt", import.meta.url)));
@@ -45,7 +45,9 @@ async function site(opts: { before?: string } = {}) {
   open.push(db);
   await migrate(db, migrations);
   const w = await workspaceStatements(depsOn(db), "Acme", "owner@example.com");
-  await db.batch([...w.stmts, { sql: "UPDATE user SET username = 'owner', is_admin = 1 WHERE id = ?", params: [w.userId] }]);
+  // Before migration 0023 the token names no account, as such a site writes it.
+  const stmts = opts.before !== undefined && opts.before < "0024" ? withoutTokenAccount(w.stmts) : w.stmts;
+  await db.batch([...stmts, { sql: "UPDATE user SET username = 'owner', is_admin = 1 WHERE id = ?", params: [w.userId] }]);
   return { dir, db, env: { DATA_DIR: dir } as NodeJS.ProcessEnv, userId: w.userId };
 }
 

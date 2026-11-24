@@ -252,6 +252,18 @@ function isBeforeKinds(err: unknown): boolean {
   return false;
 }
 
+/**
+ * True for the error of a statement naming api_token.user_id (the account a token belongs to)
+ * on a database migration 0023 has not reached: `no such column` for a read, `has no column
+ * named` for a write, on Node and on Workers alike. The token's lookup above never names it.
+ */
+export function isBeforeTokenAccount(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 3; e = e.cause, depth++) {
+    if (/(?:no such column: (?:k\.|api_token\.)?user_id|table api_token has no column named user_id)(?:$|:| at offset |\s)/.test(e.message)) return true;
+  }
+  return false;
+}
+
 async function tokenAuth(header: string, deps: Deps, touch: boolean): Promise<Auth | Response> {
   const sp = header.indexOf(" ");
   const scheme = sp < 0 ? "" : header.slice(0, sp);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedWorkspace } from "#harness";
+import { hashToken, newId, newToken } from "../src/auth.ts";
 import type { Deps } from "../src/ports.ts";
 import { VERSION } from "../src/version.ts";
 import pkg from "../package.json" with { type: "json" };
@@ -231,7 +232,31 @@ describe("me", () => {
     await seedWorkspace(deps, "Other");
     const r = await send(deps, "GET", "/api/v1/me", { token: a.token });
     expect(r.status).toBe(200);
-    expect(r.json).toEqual({ workspace: "Acme </script> Tours", version: VERSION });
+    expect(r.json).toEqual({ workspace: "Acme </script> Tours", workspace_id: a.workspaceId, account_id: expect.stringMatching(/^usr_[0-9a-f]{24}$/), version: VERSION });
     expect((await send(deps, "GET", "/api/v1/me")).status).toBe(401);
+  });
+
+  it("me names the account a token belongs to, and null for a token that belongs to none", async () => {
+    const { deps } = await makeDeps();
+    const a = await seedWorkspace(deps, "Acme");
+    const b = await seedWorkspace(deps, "Other");
+    const owner = async (workspaceId: string) => (await deps.db.first<{ id: string }>("SELECT id FROM user WHERE workspace_id = ?", [workspaceId]))!.id;
+    const ownerA = await owner(a.workspaceId);
+    const ownerB = await owner(b.workspaceId);
+    // The first token is its owner's: the account made with it.
+    expect((await send(deps, "GET", "/api/v1/me", { token: a.token })).json.account_id).toBe(ownerA);
+    expect((await send(deps, "GET", "/api/v1/me", { token: b.token })).json.account_id).toBe(ownerB);
+    // A token an older build made belongs to no account: null, never a guess.
+    const legacy = newToken();
+    await deps.db.run("INSERT INTO api_token (id, workspace_id, name, hash, created_at) VALUES (?, ?, ?, ?, ?)", [newId("tok"), a.workspaceId, "Old", await hashToken(legacy), deps.now()]);
+    const old = await send(deps, "GET", "/api/v1/me", { token: legacy });
+    expect(old.json).toEqual({ workspace: "Acme", workspace_id: a.workspaceId, account_id: null, version: VERSION });
+    // A token whose row names an account of another workspace never names it.
+    const odd = newToken();
+    await deps.db.run("INSERT INTO api_token (id, workspace_id, name, hash, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?)", [newId("tok"), a.workspaceId, "Odd", await hashToken(odd), deps.now(), ownerB]);
+    const r = await send(deps, "GET", "/api/v1/me", { token: odd });
+    expect(r.json).toEqual({ workspace: "Acme", workspace_id: a.workspaceId, account_id: null, version: VERSION });
+    expect(r.text).not.toContain(ownerB);
+    expect(r.text).not.toContain(b.workspaceId);
   });
 });

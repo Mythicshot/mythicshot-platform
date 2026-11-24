@@ -277,7 +277,7 @@ describe("the guides of the documentation page", () => {
     const withToken = await run({ deps, files: {}, vars: { YOUR_TOKEN: a.token } }, first);
     expect(withToken.status).toBe(200);
     // "It answers with your workspace's name and the server's version."
-    expect(withToken.json).toEqual({ workspace: "Acme", version: VERSION });
+    expect(withToken.json).toEqual({ workspace: "Acme", workspace_id: a.workspaceId, account_id: expect.stringMatching(/^usr_[0-9a-f]{24}$/), version: VERSION });
     // Without the header, and with the placeholder left in.
     const bare = await run({ deps, files: {}, vars: {} }, first.replace(' -H "Authorization: Bearer YOUR_TOKEN"', ""));
     expect(bare.status).toBe(401);

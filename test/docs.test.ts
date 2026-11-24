@@ -1386,7 +1386,7 @@ describe("two addresses in the docs", () => {
     const one = await makeDeps({});
     const seeded = await seedWorkspace(one.deps, "Acme Tours");
     const plain = await createApp(one.deps).fetch(new Request("https://tours.example.com/api/v1/me", { headers: { authorization: `Bearer ${seeded.token}` } }));
-    expect(Object.keys((await plain.json()) as object).sort()).toEqual(["version", "workspace"]);
+    expect(Object.keys((await plain.json()) as object).sort()).toEqual(["account_id", "version", "workspace", "workspace_id"]);
   });
 
   it("the lines the README quotes for a pair that cannot be used are the app's own", async () => {
