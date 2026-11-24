@@ -140,7 +140,7 @@ const TEXT: Record<string, string> = {
   signedInAsEnd: ".",
 };
 
-const CLASS_NAMES = ["note plain", "btn sm quiet", "btn sm danger", "t name", "confirm-who confirm-facts confirm-elsewhere confirm-warn", "confirm-who confirm-facts confirm-warn"];
+const CLASS_NAMES = ["note plain", "btn sm quiet", "btn sm danger", "t name", "confirm-who ", "confirm-facts confirm-elsewhere confirm-warn", "confirm-facts confirm-warn"];
 
 const seen = (c: Call) => ({ status: c.status, headers: [...c.headers.entries()].sort(), body: c.text });
 
@@ -293,6 +293,10 @@ describe("the Connections page", () => {
     expect(CONNECTIONS_JS).not.toContain("/signout/everywhere");
     // Leaving is the shared Dash.signedOut, which goes to "/signin" and nowhere else.
     expect(DASH_JS).toContain('function signedOut() {\n    location.replace("/signin");\n  }');
+    // A stale tab's sign-out (403 bad_csrf or bad_origin) loads this same page again, nowhere else.
+    expect(CONNECTIONS_JS).toContain("if (Dash.staleSession(res)) { Dash.reload(); return; }");
+    expect(DASH_JS).toContain('return res !== null && typeof res === "object" && res.status === 403 && (errorOf(res) === "bad_csrf" || errorOf(res) === "bad_origin");');
+    expect(CONNECTIONS_JS.match(/Dash\.reload\(/g)).toHaveLength(1);
     // The sign-in pages take no return address: they read no query and land on the fixed Tours page.
     expect(SIGNIN_JS).not.toMatch(/[?&]next|return_?to|URLSearchParams|searchParams/i);
     // Its one use of the query: keeping it in the address bar while the link's code is taken out.

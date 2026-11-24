@@ -21,6 +21,7 @@
 // While the site's current terms wait for the account's agreement every session request is
 // refused with 403 terms_required (src/auth.ts); Dash.api then sends the browser to the terms
 // screen, /terms, with the page it came from in ?next=, and Dash.start does nothing more.
+// Dash.reload() loads the page where it is again, for a tab whose session changed under it.
 // Nothing here writes to storage, to a cookie or to an address.
 import { DOWNLOAD_URL_MAX } from "../https-address.ts";
 import { MAX_LIMIT_DAYS } from "../lifetimes.ts";
@@ -127,6 +128,18 @@ export const DASH_JS = `var Dash = (function () {
 
   function signedOut() {
     location.replace("/signin");
+  }
+
+  // The page where it is, loaded again: for a tab whose session changed under it (another
+  // account signed in elsewhere in this browser), so it starts from the current session.
+  function reload() {
+    location.reload();
+  }
+
+  // True for the refusal of a change sent with a session this tab no longer holds: 403
+  // bad_csrf (the anti-forgery value is another session's) or bad_origin.
+  function staleSession(res) {
+    return res !== null && typeof res === "object" && res.status === 403 && (errorOf(res) === "bad_csrf" || errorOf(res) === "bad_origin");
   }
 
   // The session's terms_agreed (the account's newest agreement to the site's terms) as
@@ -394,6 +407,6 @@ export const DASH_JS = `var Dash = (function () {
     });
   }
 
-  return { api: api, errorOf: errorOf, failure: failure, formatBytes: formatBytes, dateOf: dateOf, signedOut: signedOut, start: start, question: question, downloadLink: downloadLink, saveFile: saveFile, TEXT: TEXT };
+  return { api: api, errorOf: errorOf, failure: failure, formatBytes: formatBytes, dateOf: dateOf, signedOut: signedOut, reload: reload, staleSession: staleSession, start: start, question: question, downloadLink: downloadLink, saveFile: saveFile, TEXT: TEXT };
 })();
 `;

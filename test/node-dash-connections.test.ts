@@ -76,6 +76,10 @@ function openPage(respond: Responder): Tab {
     replace(path: string) {
       left = path;
     },
+    // The page loaded again where it is, recorded as "reload".
+    reload() {
+      left = "reload";
+    },
   };
   const fetch = (path: string, init: Record<string, unknown> = {}) => {
     const req: Fetched = { method: String(init.method ?? "GET"), path, headers: { ...(init.headers as Record<string, string>) }, body: init.body === undefined ? undefined : JSON.parse(String(init.body)) };
@@ -838,9 +842,29 @@ describe("the Connections page: the question names the account", () => {
     const tab = await lookedUp(standard({ [LOOKUP]: found({ workspace: { name: "Someone else's" }, workspace_name: "Someone else's", email: "other@example.com", account: { email: "other@example.com" } }) }));
     expect(questionOf(tab)).toBe("Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com.");
     expect(tab.shows().join("\n")).not.toContain("other@example.com");
-    // A session without a usable name or address: the question is still asked, with nothing in their place.
-    const bare = await lookedUp(answers({ "GET /api/v1/session": signedInAs(7, null), "GET /api/v1/tokens": list(MOCKUP), [LOOKUP]: found() }));
-    expect(questionOf(bare)).toBe("Connect ALEX-DESKTOP to the workspace ? You are signed in as .");
+  });
+
+  it("a part whose value the session lacks is left out: no workspace, no address, or neither", async () => {
+    const cases: [unknown, unknown, string, string][] = [
+      ["", "solex@example.com", "Connect ALEX-DESKTOP?", "You are signed in as solex@example.com."],
+      [7, "solex@example.com", "Connect ALEX-DESKTOP?", "You are signed in as solex@example.com."],
+      ["Cowfee Raid Tools", "", "Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools?", ""],
+      ["Cowfee Raid Tools", null, "Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools?", ""],
+      ["", null, "Connect ALEX-DESKTOP?", ""],
+    ];
+    for (const [workspace, email, title, who] of cases) {
+      const what = JSON.stringify([workspace, email]);
+      const tab = await lookedUp(answers({ "GET /api/v1/session": signedInAs(workspace, email), "GET /api/v1/tokens": list(MOCKUP), [LOOKUP]: found() }));
+      expect([tab.$("confirm-title").textContent, tab.$("confirm-who").textContent, tab.$("confirm-who").shown], what).toEqual([title, who, who !== ""]);
+      expect(tab.$("confirm-box").getAttribute("aria-describedby"), what).toBe(who === "" ? "confirm-facts confirm-warn" : "confirm-who confirm-facts confirm-warn");
+      expect(tab.shows().join("\n"), what).not.toMatch(/workspace \?|signed in as \./);
+    }
+    // No address and another network: the warning is still described, without the missing line.
+    const other = await lookedUp(answers({ "GET /api/v1/session": signedInAs("Cowfee Raid Tools", ""), "GET /api/v1/tokens": list(MOCKUP), [LOOKUP]: found({ same_network: false }) }));
+    expect(other.$("confirm-box").getAttribute("aria-describedby")).toBe("confirm-facts confirm-elsewhere confirm-warn");
+    // Asked again with both present, after a question without them, the full wording is back (the same page keeps its session, so open a fresh one).
+    const full = await lookedUp(standard({ [LOOKUP]: found() }));
+    expect([questionOf(full), full.$("confirm-who").shown]).toEqual(["Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com.", true]);
   });
 
   it("the lookup, confirm and refuse requests send what they sent before: the code alone", async () => {
@@ -880,7 +904,7 @@ describe("the Connections page: Use a different account", () => {
   });
 
   it("a sign-out that fails keeps the person signed in here, the question open with the sentence, and nothing else sent; Connect still works after it", async () => {
-    for (const [answer, text] of [[{ status: 500, json: { error: "internal" } }, FAILED], [{ status: 429 }, TOO_MANY_REQUESTS], ["network", FAILED], [{ status: 403, json: { error: "bad_csrf" } }, FAILED]] as [Answer, string][]) {
+    for (const [answer, text] of [[{ status: 500, json: { error: "internal" } }, FAILED], [{ status: 429 }, TOO_MANY_REQUESTS], ["network", FAILED], [{ status: 403, json: { error: "forbidden" } }, FAILED]] as [Answer, string][]) {
       const tab = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/signout": answer, "POST /api/v1/connect/confirm": DONE }));
       tab.$("confirm-other").click();
       await tab.settle();
@@ -889,6 +913,22 @@ describe("the Connections page: Use a different account", () => {
       tab.$("confirm-go").click();
       await tab.settle();
       expect(of(tab, "POST", "/api/v1/connect/confirm").map((f) => f.body), String(answer)).toEqual([{ user_code: "K7QM2HXD" }]);
+    }
+  });
+
+  it("a stale tab (403 bad_csrf or bad_origin, as when another account signed in elsewhere in this browser) reloads the page to start from the current session; other 403s keep the sentence", async () => {
+    for (const error of ["bad_csrf", "bad_origin"]) {
+      const tab = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/signout": { status: 403, json: { error } } }));
+      tab.$("confirm-other").click();
+      await tab.settle();
+      expect(tab.left(), error).toBe("reload");
+      expect(tab.fetched.filter((f) => /confirm|refuse/.test(f.path)), error).toEqual([]);
+    }
+    for (const json of [{ error: "forbidden" }, {}, null]) {
+      const tab = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/signout": json === null ? { status: 403 } : { status: 403, json } }));
+      tab.$("confirm-other").click();
+      await tab.settle();
+      expect([tab.left(), tab.$("confirm-dialog").shown, tab.$("confirm-message").textContent], JSON.stringify(json)).toEqual([null, true, FAILED]);
     }
   });
 

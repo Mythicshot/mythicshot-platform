@@ -414,17 +414,22 @@ export const CONNECTIONS_JS = String.raw`(function () {
   // The question, as the owner approved it: "Connect <computer> to the workspace <workspace>?"
   // in the heading and "You are signed in as <email>." under it, each value in its own
   // bidi-isolated, wrapping element, all through textContent. The workspace and the address
-  // are this page's own session's, never the lookup's.
+  // are this page's own session's, never the lookup's. A part whose value the session lacks is
+  // left out: no workspace, "Connect <computer>?"; no address, no line under it.
   function question(device) {
     var title = $("confirm-title");
     title.textContent = "";
     title.appendChild(el("span", "", TEXT.askConnect));
     title.appendChild(el("span", "name", device));
-    title.appendChild(el("span", "", TEXT.toWorkspace));
-    title.appendChild(el("span", "name", cut(workspace, WORKSPACE_MAX)));
+    if (workspace !== "") {
+      title.appendChild(el("span", "", TEXT.toWorkspace));
+      title.appendChild(el("span", "name", cut(workspace, WORKSPACE_MAX)));
+    }
     title.appendChild(el("span", "", TEXT.askEnd));
     var who = $("confirm-who");
     who.textContent = "";
+    who.hidden = email === "";
+    if (email === "") return;
     who.appendChild(el("span", "", TEXT.signedInAs));
     who.appendChild(el("span", "name", cut(email, EMAIL_MAX)));
     who.appendChild(el("span", "", TEXT.signedInAsEnd));
@@ -438,7 +443,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
     $("confirm-workspace").textContent = workspace;
     // The extra warning when the request came from another network than this page's.
     $("confirm-elsewhere").hidden = !p.elsewhere;
-    $("confirm-box").setAttribute("aria-describedby", p.elsewhere ? "confirm-who confirm-facts confirm-elsewhere confirm-warn" : "confirm-who confirm-facts confirm-warn");
+    $("confirm-box").setAttribute("aria-describedby", (email !== "" ? "confirm-who " : "") + (p.elsewhere ? "confirm-facts confirm-elsewhere confirm-warn" : "confirm-facts confirm-warn"));
     var opened = confirmQ.open({
       focus: "confirm-refuse",
       back: function () { return $("connect-code"); },
@@ -507,8 +512,11 @@ export const CONNECTIONS_JS = String.raw`(function () {
 
   // "Use a different account": this browser's session ends, as with the Account page's Sign
   // out, and the browser goes to the sign-in page. Nothing about the code is sent (no confirm,
-  // no refuse): the request stays open until it expires. When the sign-out fails, the person
-  // is still signed in here, so the question stays open with the failure.
+  // no refuse): the request stays open until it expires. A refusal for a stale session (Dash.staleSession) means
+  // this tab's session is not the browser's any more (another account signed in elsewhere in
+  // it), so the page loads again and starts from the current session. When the sign-out
+  // fails otherwise, the person is still signed in here, so the question stays open with the
+  // failure.
   function otherAccount() {
     if (pending === null || confirmQ.isWorking()) return;
     confirmQ.say("");
@@ -520,6 +528,7 @@ export const CONNECTIONS_JS = String.raw`(function () {
     }
     Dash.api("POST", SIGNOUT).then(function (res) {
       if (res.status === 204 || res.status === 401) { Dash.signedOut(); return; }
+      if (Dash.staleSession(res)) { Dash.reload(); return; }
       failed(res);
     }, function () { failed(null); });
   }
