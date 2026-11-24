@@ -8,7 +8,7 @@ import { normaliseHost } from "./hosts.ts";
 import type { Deps, Stmt } from "./ports.ts";
 
 /** The longest address a mail server takes. */
-const MAX_EMAIL_CHARS = 254;
+export const MAX_EMAIL_CHARS = 254;
 
 /** Printable ASCII without the space. Checked before lowercasing: some non-ASCII letters lowercase to ASCII ones. */
 const VISIBLE_ASCII = /^[\x21-\x7e]+$/;

@@ -76,6 +76,10 @@ function openPage(respond: Responder): Tab {
     replace(path: string) {
       left = path;
     },
+    // The page loaded again where it is, recorded as "reload".
+    reload() {
+      left = "reload";
+    },
   };
   const fetch = (path: string, init: Record<string, unknown> = {}) => {
     const req: Fetched = { method: String(init.method ?? "GET"), path, headers: { ...(init.headers as Record<string, string>) }, body: init.body === undefined ? undefined : JSON.parse(String(init.body)) };
@@ -458,7 +462,7 @@ describe("the Connections page: connecting with a code", () => {
   it("the question shows exactly the computer and the time the lookup gave, and the workspace", async () => {
     const tab = await lookedUp(standard({ [LOOKUP]: found() }));
     expect(tab.$("confirm-dialog").shown).toBe(true);
-    expect([tab.$("confirm-title").textContent, tab.$("confirm-device").textContent, tab.$("confirm-device").tagName, tab.$("confirm-asked").textContent, tab.$("confirm-workspace").textContent]).toEqual(["Connect this computer?", "ALEX-DESKTOP", "b", "2 minutes ago", "Cowfee Raid Tools"]);
+    expect([tab.$("confirm-title").textContent, tab.$("confirm-device").textContent, tab.$("confirm-device").tagName, tab.$("confirm-asked").textContent, tab.$("confirm-workspace").textContent]).toEqual(["Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools?", "ALEX-DESKTOP", "b", "2 minutes ago", "Cowfee Raid Tools"]);
     expect([tab.$("confirm-elsewhere").shown, tab.$("confirm-warn").textContent]).toEqual([false, WARN]);
     expect(tab.doc.activeElement?.id).toBe("confirm-refuse");
     expect(tab.$("connections-page").getAttribute("inert")).toBe("");
@@ -476,11 +480,11 @@ describe("the Connections page: connecting with a code", () => {
   it("adds the other-network warning only when the lookup says same_network false", async () => {
     const other = await lookedUp(standard({ [LOOKUP]: found({ same_network: false }) }));
     expect([other.$("confirm-elsewhere").shown, other.$("confirm-elsewhere").textContent]).toEqual([true, ELSEWHERE]);
-    expect(other.$("confirm-box").getAttribute("aria-describedby")).toBe("confirm-facts confirm-elsewhere confirm-warn");
+    expect(other.$("confirm-box").getAttribute("aria-describedby")).toBe("confirm-who confirm-facts confirm-elsewhere confirm-warn");
     expect(other.shows()).toContain(ELSEWHERE);
     for (const same of [true, undefined]) {
       const t = await lookedUp(standard({ [LOOKUP]: found({ same_network: same }) }));
-      expect([t.$("confirm-elsewhere").shown, t.$("confirm-box").getAttribute("aria-describedby")], String(same)).toEqual([false, "confirm-facts confirm-warn"]);
+      expect([t.$("confirm-elsewhere").shown, t.$("confirm-box").getAttribute("aria-describedby")], String(same)).toEqual([false, "confirm-who confirm-facts confirm-warn"]);
     }
   });
 
@@ -776,6 +780,194 @@ describe("the Connections page: connecting with a code", () => {
   });
 });
 
+/** A session whose account and workspace are named as given. */
+const signedInAs = (workspace: unknown, email: unknown): Answer => {
+  const base = (session as { json: Record<string, unknown> }).json;
+  return { status: 200, json: { ...base, account: { id: "usr_1", username: "solex", email, admin: false }, workspace: { id: "ws_1", name: workspace } } };
+};
+/** The question as a person reads it: the heading, then the line under it. */
+const questionOf = (tab: Tab) => `${tab.$("confirm-title").textContent} ${tab.$("confirm-who").textContent}`;
+/** An element's children: [tag, class, text] for an element, ["#text", "", text] for text. */
+const partsOf = (el: FakeElement) => el.children.map((c) => (c instanceof FakeElement ? [c.tagName, c.className, c.textContent] : ["#text", "", c.text]));
+const OTHER_ACCOUNT = "Use a different account";
+
+describe("the Connections page: the question names the account", () => {
+  it("names the computer, the caller's own workspace and the caller's own sign-in email, each in its own isolated element", async () => {
+    const tab = await lookedUp(standard({ [LOOKUP]: found() }));
+    expect(questionOf(tab)).toBe("Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com.");
+    expect(partsOf(tab.$("confirm-title"))).toEqual([["span", "", "Connect "], ["span", "name", "ALEX-DESKTOP"], ["span", "", " to the workspace "], ["span", "name", "Cowfee Raid Tools"], ["span", "", "?"]]);
+    expect(partsOf(tab.$("confirm-who"))).toEqual([["span", "", "You are signed in as "], ["span", "name", "solex@example.com"], ["span", "", "."]]);
+    // The heading and the line under it, then the facts, the warning, the two buttons and the link under them.
+    const shown = tab.shows();
+    const from = shown.indexOf("Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools?");
+    expect(shown.slice(from)).toEqual(["Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools?", "You are signed in as solex@example.com.", WARN, "Not me", "Connect", OTHER_ACCOUNT]);
+    expect(tab.$("confirm-facts").textContent).toBe("ComputerALEX-DESKTOPAsked2 minutes agoWorkspaceCowfee Raid Tools");
+    expect(tab.$("confirm-box").getAttribute("aria-labelledby")).toBe("confirm-title");
+    // Asked again, the heading and the line are rebuilt, not added to.
+    key(tab.$("confirm-go"), "Escape");
+    tab.$("connect-go").click();
+    await tab.settle();
+    expect([tab.$("confirm-title").children.length, tab.$("confirm-who").children.length, questionOf(tab)]).toEqual([5, 3, "Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com."]);
+  });
+
+  it("long names are cut as the server stores them and wrap: the computer at 60 characters, the workspace at 80, the address at 254", async () => {
+    const workspace = "W".repeat(81) + "tail";
+    const email = "e".repeat(250) + "@example.com";
+    const tab = await lookedUp(answers({ "GET /api/v1/session": signedInAs(workspace, email), "GET /api/v1/tokens": list(MOCKUP), [LOOKUP]: found({ device_name: "😀".repeat(80) }) }));
+    expect(questionOf(tab)).toBe(`Connect ${"😀".repeat(60)} to the workspace ${"W".repeat(80)}? You are signed in as ${email.slice(0, 254)}.`);
+    // Each value in the class the stylesheet isolates and wraps anywhere.
+    for (const el of [...tab.$("confirm-title").children, ...tab.$("confirm-who").children].filter((c): c is FakeElement => c instanceof FakeElement && c.className === "name")) expect(el.textContent.length).toBeGreaterThan(50);
+    // Names that fit are shown whole.
+    const fits = await lookedUp(answers({ "GET /api/v1/session": signedInAs("W".repeat(80), "a@b.c"), "GET /api/v1/tokens": list(MOCKUP), [LOOKUP]: found({ device_name: "D".repeat(60) }) }));
+    expect(questionOf(fits)).toBe(`Connect ${"D".repeat(60)} to the workspace ${"W".repeat(80)}? You are signed in as a@b.c.`);
+  });
+
+  it("hostile names (markup, quotes, a bidi override) are shown as text, never markup", async () => {
+    const device = '<img src=x onerror="alert(1)">';
+    const workspace = '<b>"Evil" & co</b>‮';
+    const email = '"><script>alert(1)</script>@example.com';
+    const tab = await lookedUp(answers({ "GET /api/v1/session": signedInAs(workspace, email), "GET /api/v1/tokens": list(MOCKUP), [LOOKUP]: found({ device_name: device }) }));
+    expect(questionOf(tab)).toBe(`Connect ${device} to the workspace ${workspace}? You are signed in as ${email}.`);
+    for (const id of ["confirm-title", "confirm-who"]) {
+      for (const c of tab.$(id).children) {
+        expect(c instanceof FakeElement && c.tagName === "span", id).toBe(true);
+        expect((c as FakeElement).children.every((g) => !(g instanceof FakeElement)), id).toBe(true);
+      }
+    }
+    // No element made from them: no image but the brand's, no script but the page's own two, no bold but the facts' computer.
+    expect(tab.doc.root.all().filter((e) => (e.tagName === "img" && !isBrandMark(e)) || (e.tagName === "script" && !["/dash/dash.js", "/dash/connections.js"].includes(e.getAttribute("src") ?? "")) || (e.tagName === "b" && e.id !== "confirm-device"))).toEqual([]);
+  });
+
+  it("uses only what the page's own session says: an answer to the lookup that names another account or workspace changes nothing", async () => {
+    const tab = await lookedUp(standard({ [LOOKUP]: found({ workspace: { name: "Someone else's" }, workspace_name: "Someone else's", email: "other@example.com", account: { email: "other@example.com" } }) }));
+    expect(questionOf(tab)).toBe("Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com.");
+    expect(tab.shows().join("\n")).not.toContain("other@example.com");
+  });
+
+  it("a part whose value the session lacks is left out: no workspace, no address, or neither", async () => {
+    const cases: [unknown, unknown, string, string][] = [
+      ["", "solex@example.com", "Connect ALEX-DESKTOP?", "You are signed in as solex@example.com."],
+      [7, "solex@example.com", "Connect ALEX-DESKTOP?", "You are signed in as solex@example.com."],
+      ["Cowfee Raid Tools", "", "Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools?", ""],
+      ["Cowfee Raid Tools", null, "Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools?", ""],
+      ["", null, "Connect ALEX-DESKTOP?", ""],
+    ];
+    for (const [workspace, email, title, who] of cases) {
+      const what = JSON.stringify([workspace, email]);
+      const tab = await lookedUp(answers({ "GET /api/v1/session": signedInAs(workspace, email), "GET /api/v1/tokens": list(MOCKUP), [LOOKUP]: found() }));
+      expect([tab.$("confirm-title").textContent, tab.$("confirm-who").textContent, tab.$("confirm-who").shown], what).toEqual([title, who, who !== ""]);
+      expect(tab.$("confirm-box").getAttribute("aria-describedby"), what).toBe(who === "" ? "confirm-facts confirm-warn" : "confirm-who confirm-facts confirm-warn");
+      expect(tab.shows().join("\n"), what).not.toMatch(/workspace \?|signed in as \./);
+    }
+    // No address and another network: the warning is still described, without the missing line.
+    const other = await lookedUp(answers({ "GET /api/v1/session": signedInAs("Cowfee Raid Tools", ""), "GET /api/v1/tokens": list(MOCKUP), [LOOKUP]: found({ same_network: false }) }));
+    expect(other.$("confirm-box").getAttribute("aria-describedby")).toBe("confirm-facts confirm-elsewhere confirm-warn");
+    // Asked again with both present, after a question without them, the full wording is back (the same page keeps its session, so open a fresh one).
+    const full = await lookedUp(standard({ [LOOKUP]: found() }));
+    expect([questionOf(full), full.$("confirm-who").shown]).toEqual(["Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com.", true]);
+  });
+
+  it("the lookup, confirm and refuse requests send what they sent before: the code alone", async () => {
+    const tab = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/connect/confirm": DONE }));
+    tab.$("confirm-go").click();
+    await tab.settle();
+    const no = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/connect/refuse": DONE }));
+    no.$("confirm-refuse").click();
+    await no.settle();
+    for (const t of [tab, no]) {
+      for (const f of t.fetched.filter((x) => x.path.startsWith("/api/v1/connect/"))) {
+        expect([f.method, f.body, Object.keys(f.headers).sort()], f.path).toEqual(["POST", { user_code: "K7QM2HXD" }, ["X-Csrf-Token", "content-type"]]);
+      }
+    }
+    expect(tab.fetched.map((f) => `${f.method} ${f.path}`).slice(0, 4)).toEqual(["GET /api/v1/session", "GET /api/v1/tokens", LOOKUP, "POST /api/v1/connect/confirm"]);
+    expect(no.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", "GET /api/v1/tokens", LOOKUP, "POST /api/v1/connect/refuse"]);
+  });
+});
+
+describe("the Connections page: Use a different account", () => {
+  it("ends this browser's session only, sends neither confirm nor refuse nor anything about the code, and goes to the sign-in page", async () => {
+    const tab = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/signout": DONE }));
+    const link = tab.$("confirm-other");
+    expect([link.tagName, link.getAttribute("type"), link.textContent, link.shown]).toEqual(["button", "button", OTHER_ACCOUNT, true]);
+    link.click();
+    await tab.settle();
+    expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", "GET /api/v1/tokens", LOOKUP, "POST /api/v1/signout"]);
+    const out = of(tab, "POST", "/api/v1/signout")[0];
+    // No body at all: nothing of the code, the device or the request.
+    expect([out.body, out.headers["X-Csrf-Token"]]).toEqual([undefined, CSRF]);
+    expect(tab.left()).toBe("/signin");
+    // A 401 (the session had ended already) goes to sign in the same way.
+    const ended = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/signout": SIGNED_OUT }));
+    ended.$("confirm-other").click();
+    await ended.settle();
+    expect([ended.left(), ended.fetched.filter((f) => /confirm|refuse|everywhere/.test(f.path))]).toEqual(["/signin", []]);
+  });
+
+  it("a sign-out that fails keeps the person signed in here, the question open with the sentence, and nothing else sent; Connect still works after it", async () => {
+    for (const [answer, text] of [[{ status: 500, json: { error: "internal" } }, FAILED], [{ status: 429 }, TOO_MANY_REQUESTS], ["network", FAILED], [{ status: 403, json: { error: "forbidden" } }, FAILED]] as [Answer, string][]) {
+      const tab = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/signout": answer, "POST /api/v1/connect/confirm": DONE }));
+      tab.$("confirm-other").click();
+      await tab.settle();
+      expect([tab.left(), tab.$("confirm-dialog").shown, tab.$("confirm-message").textContent, tab.$("confirm-other").disabled, tab.$("confirm-go").disabled, tab.doc.activeElement?.id], String(answer)).toEqual([null, true, text, false, false, "confirm-other"]);
+      expect(tab.fetched.filter((f) => /confirm|refuse/.test(f.path)), String(answer)).toEqual([]);
+      tab.$("confirm-go").click();
+      await tab.settle();
+      expect(of(tab, "POST", "/api/v1/connect/confirm").map((f) => f.body), String(answer)).toEqual([{ user_code: "K7QM2HXD" }]);
+    }
+  });
+
+  it("a stale tab (403 bad_csrf or bad_origin, as when another account signed in elsewhere in this browser) reloads the page to start from the current session; other 403s keep the sentence", async () => {
+    for (const error of ["bad_csrf", "bad_origin"]) {
+      const tab = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/signout": { status: 403, json: { error } } }));
+      tab.$("confirm-other").click();
+      await tab.settle();
+      expect(tab.left(), error).toBe("reload");
+      expect(tab.fetched.filter((f) => /confirm|refuse/.test(f.path)), error).toEqual([]);
+    }
+    for (const json of [{ error: "forbidden" }, {}, null]) {
+      const tab = await lookedUp(standard({ [LOOKUP]: found(), "POST /api/v1/signout": json === null ? { status: 403 } : { status: 403, json } }));
+      tab.$("confirm-other").click();
+      await tab.settle();
+      expect([tab.left(), tab.$("confirm-dialog").shown, tab.$("confirm-message").textContent], JSON.stringify(json)).toEqual([null, true, FAILED]);
+    }
+  });
+
+  it("while it runs: one request for a double press, and Connect, Not me and Escape do nothing", async () => {
+    const h = holding((r) => r.path === "/api/v1/signout", standard({ [LOOKUP]: found() }));
+    const tab = await lookedUp(h.respond);
+    tab.$("confirm-other").click();
+    tab.$("confirm-other").click();
+    tab.$("confirm-go").click();
+    tab.$("confirm-refuse").click();
+    key(tab.$("confirm-other"), "Escape");
+    await tab.settle();
+    expect([of(tab, "POST", "/api/v1/signout").length, tab.$("confirm-dialog").shown, tab.$("confirm-other").getAttribute("aria-busy"), tab.$("confirm-go").disabled]).toEqual([1, true, "true", true]);
+    h.answer(DONE);
+    await tab.settle();
+    expect(tab.fetched.filter((f) => /confirm|refuse/.test(f.path))).toEqual([]);
+    expect(tab.left()).toBe("/signin");
+  });
+
+  it("sits under the two buttons, in the question's Tab order after them", async () => {
+    const tab = await lookedUp(standard({ [LOOKUP]: found() }));
+    const box = tab.$("confirm-box");
+    const two = box.all().find((e) => e.className === "two")!;
+    const other = tab.$("confirm-other");
+    expect(two.contains(other)).toBe(false);
+    const order = box.all().filter((e) => e.tagName === "button").map((e) => e.id);
+    expect(order).toEqual(["confirm-refuse", "confirm-go", "confirm-other"]);
+    tab.$("confirm-go").focus();
+    key(tab.$("confirm-go"), "Tab");
+    expect(tab.doc.activeElement?.id).toBe("confirm-other");
+    key(tab.$("confirm-other"), "Tab");
+    expect(tab.doc.activeElement?.id).toBe("confirm-refuse");
+    // The script goes nowhere itself: leaving is the shared sign-out only, to the fixed sign-in page.
+    expect(CONNECTIONS_JS).toContain('Dash.api("POST", SIGNOUT)');
+    expect(CONNECTIONS_JS).toContain('var SIGNOUT = "/api/v1/signout";');
+    expect(CONNECTIONS_JS).not.toMatch(/signout\/everywhere|next=|return_to|redirect/i);
+  });
+});
+
 describe("the Connections page: rename and disconnect", () => {
   it("Rename asks with the name prefilled, checks the server's rule first, saves and reads the list again", async () => {
     const renamed = [token(T1, "Desk", { created_at: day(2026, 11, 20), last_used_at: NOW }), ...MOCKUP.slice(1)];
@@ -1012,6 +1204,53 @@ describe("the Connections page against the real app", () => {
     await tab.settle();
     expect(tab.$("connect-message").textContent).toBe(BAD_CODE);
     expect(rows(tab).map((r) => nameOf(r).textContent)).toEqual(["First token"]);
+  });
+
+  it("Use a different account: the first account's question names it, its session here ends and nothing else; the request stays open; the second account's question names it, and its confirm connects the computer to its own workspace", async () => {
+    const { deps } = await makeDeps({ hosts: { tours: "tours.example.com", app: "app.example.com" } });
+    await seedAccount(deps, { admin: true, username: "connreal-admin" });
+    const a = await seedAccount(deps, { username: "connreal-a" });
+    const b = await seedAccount(deps, { username: "connreal-b" });
+    await deps.db.run("UPDATE workspace SET name = 'Workspace of A' WHERE id = ?", [a.workspaceId]);
+    await deps.db.run("UPDATE workspace SET name = 'Workspace of B' WHERE id = ?", [b.workspaceId]);
+    const cookieOf = async (userId: string) => `${SESSION_COOKIE}=${(await redeemSignInCode(deps, await createSignInCode(deps, userId), FIREFOX, null))!.secret}`;
+    const cookieA = await cookieOf(a.userId);
+    const cookieAElsewhere = await cookieOf(a.userId);
+    const started = await appAsks(deps, "/api/v1/connect/start", { device_name: "Shared laptop" });
+    const code = String(started.json.user_code);
+
+    const first = openPage(browser(deps, cookieA));
+    await first.settle();
+    type(first, code);
+    first.$("connect-go").click();
+    await first.settle();
+    expect(questionOf(first)).toBe(`Connect Shared laptop to the workspace Workspace of A? You are signed in as ${a.email}.`);
+    first.$("confirm-other").click();
+    await first.settle();
+    expect(first.left()).toBe("/signin");
+    expect(first.fetched.filter((f) => /confirm|refuse/.test(f.path))).toEqual([]);
+    const askSession = (cookie: string) => browser(deps, cookie)({ method: "GET", path: "/api/v1/session", headers: {}, body: undefined }) as Promise<{ status: number }>;
+    // This browser's session ended; the account's other browser is still signed in.
+    expect([(await askSession(cookieA)).status, (await askSession(cookieAElsewhere)).status]).toEqual([401, 200]);
+    // The request is still open: the app is still told to wait.
+    expect((await appAsks(deps, "/api/v1/connect/token", { device_code: started.json.device_code })).json.status).toBe("pending");
+
+    const cookieB = await cookieOf(b.userId);
+    const second = openPage(browser(deps, cookieB));
+    await second.settle();
+    type(second, code);
+    second.$("connect-go").click();
+    await second.settle();
+    expect(questionOf(second)).toBe(`Connect Shared laptop to the workspace Workspace of B? You are signed in as ${b.email}.`);
+    expect(second.shows().join("\n")).not.toContain(a.email);
+    second.$("confirm-go").click();
+    await second.settle();
+    later(deps);
+    const collected = await appAsks(deps, "/api/v1/connect/token", { device_code: started.json.device_code });
+    expect([collected.status, collected.json.workspace]).toEqual([200, { id: b.workspaceId, name: "Workspace of B" }]);
+    const namesOf = async (cookie: string) => ((await browser(deps, cookie)({ method: "GET", path: "/api/v1/tokens", headers: {}, body: undefined })) as { json: { tokens: { name: string }[] } }).json.tokens.map((t) => t.name);
+    expect(await namesOf(cookieB)).toContain("Shared laptop");
+    expect(await namesOf(cookieAElsewhere)).not.toContain("Shared laptop");
   });
 
   it("a confirm that went through but whose answer was lost: the second lookup gets the real 404 and the page closes with the note", async () => {

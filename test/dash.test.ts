@@ -535,7 +535,10 @@ describe("the dashboard's pages and files", () => {
     expect(navigations).toEqual(['"/terms?next=" + encodeURIComponent(location.pathname', '"/signin"']);
     expect(DASH_JS + TOURS_JS).not.toMatch(/\blocation\s*=(?!=)/);
     const uses = [...(DASH_JS + TOURS_JS).matchAll(/\blocation\b\s*(\.\s*[a-zA-Z]+)?/g)].map((m) => (m[1] ?? "").replace(/\s/g, ""));
-    expect(new Set(uses)).toEqual(new Set([".replace", ".origin", ".pathname"]));
+    expect(new Set(uses)).toEqual(new Set([".replace", ".origin", ".pathname", ".reload"]));
+    // The one reload: Dash.reload, the page where it is, for a tab whose session changed under it.
+    expect(DASH_JS.match(/location\.reload\(/g)).toHaveLength(1);
+    expect(DASH_JS).toContain("function reload() {\n    location.reload();\n  }");
     // The timers are the moment "Copied" shows and the Sharing box's pauses (between the sends
     // of a move, and before its warning's button works); the one browser API beyond the page is
     // the clipboard, and the one window event the page listens to is pagehide.

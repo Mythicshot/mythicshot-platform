@@ -2,6 +2,13 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.64 (2026-11-24)
+
+- Connections: the question asked before a computer is connected names the account. It reads "Connect <computer> to the workspace <workspace>? You are signed in as <email>.", with the signed-in account's own workspace and address. A part the page does not have is left out.
+- Connections: "Use a different account" under the question's buttons signs this browser out, and nothing else, and opens the sign-in page. The code is neither confirmed nor refused, so it still works for the account that signs in next, until it runs out. After signing in, open Connections and type the code again.
+- In a tab left open from another sign-in, "Use a different account" loads the page again, so it shows the account that is signed in now.
+- No change to the database or to any other route.
+
 ## 0.1.63 (2026-11-24)
 
 - `GET /api/v1/me` also answers `workspace_id`, the caller's own workspace, and `account_id`, the account the token or session belongs to, or `null` when no account is recorded for the token. Both describe only the caller's own credential. Mythicshot uses them to tell signed-in accounts apart.
