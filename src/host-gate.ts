@@ -131,6 +131,9 @@ export const HOST_RULES: Readonly<Record<string, HostRule>> = {
   "GET /api/v1/tokens": "app",
   "PATCH /api/v1/tokens/:id": "app",
   "DELETE /api/v1/tokens/:id": "app",
+  // A token ending itself: a token alone, on both addresses like every route a token calls (the
+  // app talks to whichever address it was set up with); never on the img address.
+  "DELETE /api/v1/token": "both",
 
   // The site admin's routes: they take an admin's session alone, so they answer only where
   // the session cookie lives.

@@ -322,3 +322,24 @@ export function visibleText(doc: FakeDocument): string[] {
   }
   return out;
 }
+
+/**
+ * A stand-in for a browser's localStorage, one per browser: tabs of the same browser share one.
+ * `log` holds every call in order ("get <key>", "set <key> <value>", "remove <key>").
+ */
+export class FakeStorage {
+  readonly items = new Map<string, string>();
+  readonly log: string[] = [];
+  getItem(key: string): string | null {
+    this.log.push(`get ${key}`);
+    return this.items.has(key) ? this.items.get(key)! : null;
+  }
+  setItem(key: string, value: string): void {
+    this.log.push(`set ${key} ${value}`);
+    this.items.set(String(key), String(value));
+  }
+  removeItem(key: string): void {
+    this.log.push(`remove ${key}`);
+    this.items.delete(String(key));
+  }
+}

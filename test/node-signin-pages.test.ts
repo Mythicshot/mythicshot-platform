@@ -14,8 +14,10 @@ import { createApp } from "../src/app.ts";
 import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode } from "../src/sessions.ts";
 import { LINK_HTML, SIGNIN_HTML, SIGNIN_JS } from "../src/signin/page.ts";
+import { CONNECT_MS } from "../src/connect.ts";
+import { RETURN_KEY, RETURN_MAX_CHARS } from "../src/dash/connect-return.ts";
 import { NODE_SETTINGS, configFromEnv } from "../src/node/config.ts";
-import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
+import { FakeDocument, FakeElement, FakeStorage, visibleText } from "./pages-dom.ts";
 
 const APP = "https://app.example.com";
 const CODE = "dpl_" + "0123456789abcdef0123456789abcdef01234567";
@@ -49,8 +51,12 @@ afterEach(() => {
   for (const tab of open.splice(0)) expect(tab.violations, "the script used something it must not").toEqual([]);
 });
 
-/** Opens `html` at `url` and runs the script, as a browser would after parsing the page. */
-function openPage(html: string, url: string, respond: Responder): Tab {
+/**
+ * Opens `html` at `url` and runs the script, as a browser would after parsing the page. The
+ * browser's localStorage is `storage` (a fresh, empty one unless given; tabs of one browser
+ * share one), or "blocked": every use of it throws, as in a browser that keeps no site data.
+ */
+function openPage(html: string, url: string, respond: Responder, storage: FakeStorage | "blocked" = new FakeStorage()): Tab {
   const doc = new FakeDocument(html);
   const log: string[] = [];
   doc.log = log;
@@ -103,7 +109,13 @@ function openPage(html: string, url: string, respond: Responder): Tab {
   };
 
   const context: Record<string, unknown> = { document: doc, location, history: historyApi, fetch };
-  for (const name of ["localStorage", "sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "navigator", "window", "self", "top", "parent", "opener", "open", "postMessage", "setTimeout", "setInterval", "console", "alert"]) {
+  Object.defineProperty(context, "localStorage", {
+    get() {
+      if (storage === "blocked") throw new Error("SecurityError: the browser keeps no data for this site");
+      return storage;
+    },
+  });
+  for (const name of ["sessionStorage", "indexedDB", "caches", "cookieStore", "XMLHttpRequest", "WebSocket", "EventSource", "navigator", "window", "self", "top", "parent", "opener", "open", "postMessage", "setTimeout", "setInterval", "console", "alert"]) {
     Object.defineProperty(context, name, {
       get() {
         violations.push(name);
@@ -405,6 +417,100 @@ describe("the page a sign-in link opens", () => {
 //
 // The account page's tests moved to test/node-dash-account.test.ts when /account became a
 // dashboard page; its storage block's to the Storage page's (test/node-dash-storage.test.ts).
+
+// ---- Back to Connections after "Use a different account" ----
+
+/** The record the Connections page keeps when "Use a different account" is pressed (src/dash/connect-return.ts). */
+const record = (over: Record<string, unknown> = {}) => JSON.stringify({ to: "connections", user_code: "K7QM2HXD", until: NOW + CONNECT_MS, ...over });
+const storageWith = (text: string) => {
+  const s = new FakeStorage();
+  s.items.set(RETURN_KEY, text);
+  return s;
+};
+/** Records that are no way back: each is removed and ignored. */
+const BAD_RECORDS: [string, string][] = [
+  ["expired", record({ until: NOW })],
+  ["expired long ago", record({ until: NOW - 86_400_000 })],
+  ["longer than a code lives", record({ until: NOW + CONNECT_MS + 1 })],
+  ["no expiry", JSON.stringify({ to: "connections", user_code: "K7QM2HXD" })],
+  ["an expiry that is no number", record({ until: String(NOW + 1000) })],
+  ["another destination", record({ to: "tours" })],
+  ["a destination as an address", record({ to: "/connections" })],
+  ["an address to go to", record({ to: "https://evil.example.net/" })],
+  ["a key more", record({ next: "/admin" })],
+  ["a code of the wrong shape", record({ user_code: "K7QM-2HXD" })],
+  ["a code in small letters", record({ user_code: "k7qm2hxd" })],
+  ["a code that is no text", record({ user_code: 12345678 })],
+  ["not JSON", "connections"],
+  ["JSON that is no object", "[\"connections\"]"],
+  ["null", "null"],
+  // A valid record but for its length: blanks JSON allows, so only the size refuses it.
+  ["oversized", record().replace("{", "{" + " ".repeat(RETURN_MAX_CHARS))],
+];
+
+describe("back to Connections after Use a different account", () => {
+  it("the link page goes to Connections instead of Tours when a valid, unexpired record is there, and leaves it for the Connections page", async () => {
+    for (const text of [record(), record({ until: NOW + 1 }), JSON.stringify({ to: "connections", until: NOW + CONNECT_MS })]) {
+      const storage = storageWith(text);
+      const tab = openPage(LINK_HTML, `${APP}/signin/link#c=${CODE}`, answers({ "POST /api/v1/signin/complete": { status: 200, json: { ok: true } } }), storage);
+      tab.$("finish-button").click();
+      await tab.settle();
+      expect(tab.left(), text).toBe("/connections");
+      expect(tab.log.filter((l) => l.startsWith("replace ")), text).toEqual(["replace /connections"]);
+      // Read once, after the sign-in worked, and kept: the Connections page takes it.
+      expect(storage.log, text).toEqual([`get ${RETURN_KEY}`]);
+      expect(storage.items.get(RETURN_KEY), text).toBe(text);
+    }
+  });
+
+  it("without a record, or with storage the browser does not keep, the link page goes to Tours as before", async () => {
+    for (const storage of [new FakeStorage(), "blocked" as const]) {
+      const tab = openPage(LINK_HTML, `${APP}/signin/link#c=${CODE}`, answers({ "POST /api/v1/signin/complete": { status: 200, json: { ok: true } } }), storage);
+      tab.$("finish-button").click();
+      await tab.settle();
+      expect(tab.left()).toBe("/tours");
+      expect(tab.shows()).toContain("Finish signing in");
+    }
+  });
+
+  it("a malformed, oversized or expired record is removed and ignored: the link page goes to Tours", async () => {
+    for (const [what, text] of BAD_RECORDS) {
+      const storage = storageWith(text);
+      const tab = openPage(LINK_HTML, `${APP}/signin/link#c=${CODE}`, answers({ "POST /api/v1/signin/complete": { status: 200, json: { ok: true } } }), storage);
+      tab.$("finish-button").click();
+      await tab.settle();
+      expect(tab.left(), what).toBe("/tours");
+      expect(storage.items.has(RETURN_KEY), what).toBe(false);
+    }
+    expect(BAD_RECORDS.find(([w]) => w === "oversized")![1].length).toBeGreaterThan(RETURN_MAX_CHARS);
+  });
+
+  it("the record is not read before the sign-in worked, nor when it failed", async () => {
+    const storage = storageWith(record());
+    const tab = openPage(LINK_HTML, `${APP}/signin/link#c=${CODE}`, answers({ "POST /api/v1/signin/complete": { status: 403, json: { error: "link_invalid" } } }), storage);
+    await tab.settle();
+    expect(storage.log).toEqual([]);
+    tab.$("finish-button").click();
+    await tab.settle();
+    expect([tab.left(), storage.log, storage.items.get(RETURN_KEY)]).toEqual([null, [], record()]);
+  });
+
+  it("the sign-in page: signed in already (in another tab) goes to Tours as before and drops the record; signed out leaves it alone", async () => {
+    const signedIn = storageWith(record());
+    const tab = openPage(SIGNIN_HTML, `${APP}/signin`, answers({ "GET /api/v1/session": { status: 200, json: { account: {}, csrf: CSRF } } }), signedIn);
+    await tab.settle();
+    expect(tab.left()).toBe("/tours");
+    expect(signedIn.items.has(RETURN_KEY)).toBe(false);
+    const out = storageWith(record());
+    const form = openPage(SIGNIN_HTML, `${APP}/signin`, answers({ "GET /api/v1/session": SIGNED_OUT }), out);
+    await form.settle();
+    expect([form.left(), out.log]).toEqual([null, []]);
+    // Storage the browser does not keep changes nothing of either.
+    const blocked = openPage(SIGNIN_HTML, `${APP}/signin`, answers({ "GET /api/v1/session": { status: 200, json: { account: {}, csrf: CSRF } } }), "blocked");
+    await blocked.settle();
+    expect(blocked.left()).toBe("/tours");
+  });
+});
 
 describe("the Node settings of the sign-in page", () => {
   it("INVITE_CONTACT is read from the Node settings as text, and a value it cannot use never stops the start", () => {

@@ -2,6 +2,13 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.65 (2026-11-24)
+
+- A connection can end itself: `DELETE /api/v1/token`, sent with the token alone, revokes exactly the token that sent it and nothing else, so an app that disconnects ends its connection on the site too. It answers on the app and the tours address, works whatever the workspace's billing state or the site's terms, and is in the audit record as `token_ended_itself`.
+- Only a connection made by signing in from the app can end itself. A token made at setup is shared by everything set up with it, so it answers `409 not_a_connection` and keeps working.
+- Connections: after "Use a different account", signing in lands back on Connections with the code already filled in and looked up, in the same browser and while the code still works. The question still has to be answered by hand. This is remembered in the browser only: nothing is added to the sign-in link or kept on the server.
+- `token` became a reserved username. No change to the database.
+
 ## 0.1.64 (2026-11-24)
 
 - Connections: the question asked before a computer is connected names the account. It reads "Connect <computer> to the workspace <workspace>? You are signed in as <email>.", with the signed-in account's own workspace and address. A part the page does not have is left out.

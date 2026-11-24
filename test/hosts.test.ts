@@ -150,6 +150,8 @@ const ROWS: Record<string, Row> = {
   "GET /api/v1/tokens": session("GET", "/api/v1/tokens", 401),
   "PATCH /api/v1/tokens/:id": session("PATCH", `/api/v1/tokens/${TOKEN}`, 401, { name: "Laptop" }),
   "DELETE /api/v1/tokens/:id": session("DELETE", `/api/v1/tokens/${TOKEN}`, 401),
+  // A token ending itself: a token alone, on both addresses like every route a token calls.
+  "DELETE /api/v1/token": api("DELETE", "/api/v1/token"),
   // The site admin's routes: on the app address only, and nobody here is an admin.
   "GET /api/v1/admin/accounts": admin("GET", "/api/v1/admin/accounts"),
   "GET /api/v1/admin/summary": admin("GET", "/api/v1/admin/summary"),
@@ -404,8 +406,8 @@ describe("the host-routing matrix", () => {
     expect(ADMIN_KEYS.length).toBe(12);
     expect(DESCRIPTION_KEYS.length).toBe(2);
     expect(DOCS_FILE_KEYS.length).toBe(2);
-    // 15, the eight routes of shared items, the read of who may view one, and a tour's chapters read and changed.
-    expect(API_KEYS.length).toBe(27);
+    // 15, the eight routes of shared items, the read of who may view one, a tour's chapters read and changed, and a token ending itself.
+    expect(API_KEYS.length).toBe(28);
     expect(WIZARD_KEYS.length).toBe(5);
     // The shared items' routes are the media routes, and the img address has them and health alone.
     expect(MEDIA_KEYS.length).toBe(19);

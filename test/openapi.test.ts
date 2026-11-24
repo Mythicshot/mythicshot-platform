@@ -54,6 +54,8 @@ const PUBLIC = [
 const VIEWER_ONLY = ["GET /api/v1/view/session", "GET /api/v1/media-view/session"];
 /** The operations that take a session and no token. */
 const SESSION_ONLY = ["GET /api/v1/session", "GET /api/v1/sessions", "DELETE /api/v1/sessions/:id", "POST /api/v1/signout", "POST /api/v1/signout/everywhere", "POST /api/v1/account/email", "POST /api/v1/account/email/confirm", "POST /api/v1/connect/lookup", "POST /api/v1/connect/confirm", "POST /api/v1/connect/refuse", "GET /api/v1/tokens", "PATCH /api/v1/tokens/:id", "DELETE /api/v1/tokens/:id", "PUT /api/v1/tours/:id/access", "PUT /api/v1/media/:id/access", "GET /api/v1/terms", "GET /api/v1/terms/agreed", "POST /api/v1/terms/agree"];
+/** The operations that take a token and no session: a token ending itself. */
+const TOKEN_ONLY = ["DELETE /api/v1/token"];
 /** The site admin's operations: an admin's session alone, and a 404 (never a 401) to everyone else. */
 const ADMIN_ONLY = [
   "GET /api/v1/admin/summary",
@@ -310,6 +312,7 @@ describe("the API description", () => {
       "List the workspace's tokens",
       "Rename a token",
       "Revoke a token",
+      "End the token that sends this request",
       "Every account's storage use in all",
       "List every account's storage use",
       "Set a workspace's storage allowance",
@@ -408,10 +411,10 @@ describe("the API description", () => {
       mediaViewer: { type: "apiKey", in: "cookie", name: "__Host-dp_media_viewer" },
     });
     const keys = operations(doc).map((o) => o.key);
-    for (const key of [...PUBLIC, ...SESSION_ONLY, ...ADMIN_ONLY, ...VIEWER_ONLY]) expect(keys, key).toContain(key);
+    for (const key of [...PUBLIC, ...SESSION_ONLY, ...ADMIN_ONLY, ...VIEWER_ONLY, ...TOKEN_ONLY]) expect(keys, key).toContain(key);
     for (const { key, op } of operations(doc)) {
       const sessionOnly = SESSION_ONLY.includes(key) || ADMIN_ONLY.includes(key);
-      const want = PUBLIC.includes(key) ? [] : VIEWER_ONLY.includes(key) ? [key.includes("/media-view/") ? { mediaViewer: [] } : { viewer: [] }] : sessionOnly ? [{ session: [] }] : [{ token: [] }, { session: [] }];
+      const want = PUBLIC.includes(key) ? [] : VIEWER_ONLY.includes(key) ? [key.includes("/media-view/") ? { mediaViewer: [] } : { viewer: [] }] : sessionOnly ? [{ session: [] }] : TOKEN_ONLY.includes(key) ? [{ token: [] }] : [{ token: [] }, { session: [] }];
       if (VIEWER_ONLY.includes(key)) expect(op.description, key).toContain("cannot be tried from the documentation page");
       expect(op.security, key).toEqual(want);
       // An operation a session may call says that the documentation page cannot try it with one.

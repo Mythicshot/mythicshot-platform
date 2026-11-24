@@ -1277,6 +1277,7 @@ It prints the last rows, oldest first: 20 without `--last`, and at most 1000. Ea
 | `connection_mail_not_sent` | The mail telling the confirming account that a computer was connected was not sent; the subject is the token, and the detail names the request and why, such as `{"request":"crq_…","reason":"limit_account"}`: `limit_account` (5 such mails to the account that day), `limit_site` (30 from the site that hour), `no_address` (the account's address cannot be used), or the mail server's word (`connect`, `tls`, `auth`, `refused`, `timeout`) or `failed`. It is not tried again, and the connection itself is not affected |
 | `token_renamed` | A token of the workspace was renamed; the subject is the token |
 | `token_revoked` | A token of the workspace was revoked; the subject is the token |
+| `token_ended_itself` | A token revoked itself (`DELETE /api/v1/token`, as an app disconnecting sends it); the subject is the token, the account is the one the token belongs to (empty when none is recorded) |
 | `invite_sent` | The admin invited an address; the subject is the invite, and the detail says whether it replaced an open invite to the same address, `{"replaced":1}`, or not, `{"replaced":0}`. The address is not recorded |
 | `invite_resent` | The admin sent an invite again with a new link; the subject is the invite |
 | `invite_cancelled` | The admin cancelled an invite; the subject is the invite |

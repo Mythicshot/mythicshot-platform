@@ -38,7 +38,7 @@ const RESERVED_NAMES = [
   "public", "register", "removed", "report", "root", "safety", "sales", "search", "security",
   "service", "session", "sessions", "settings", "setup", "share", "sign-in", "sign-out", "sign-up",
   "signin", "signout", "signup", "smtp", "staff", "staging", "static", "status", "storage",
-  "superuser", "support", "sysadmin", "system", "team", "teams", "terms", "test", "tokens", "tour",
+  "superuser", "support", "sysadmin", "system", "team", "teams", "terms", "test", "token", "tokens", "tour",
   "tours", "true", "trust", "undefined", "unknown", "upload", "uploads", "usage", "user", "users",
   "view", "web", "webmail", "webmaster", "workspace", "workspaces", "www", "you",
 ] as const;

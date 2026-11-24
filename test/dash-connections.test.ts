@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
 import { USER_CODE_ALPHABET } from "../src/connect.ts";
+import { RETURN_SHARED_JS } from "../src/dash/connect-return.ts";
 import { CONNECTIONS_HTML, CONNECTIONS_JS } from "../src/dash/connections.ts";
 import { DASH_PAGES } from "../src/dash/routes.ts";
 import { DASH_JS } from "../src/dash/script.ts";
@@ -280,8 +281,12 @@ describe("the Connections page", () => {
     expect(calls).toEqual(["POST LOOKUP", 'POST how === "confirm" ? CONFIRM : REFUSE', "POST SIGNOUT", "GET TOKENS", 'PATCH TOKENS + "/" + encodeURIComponent(id', 'DELETE TOKENS + "/" + encodeURIComponent(id', "GET USAGE"]);
     expect(CONNECTIONS_JS).toContain('var USAGE = "/api/v1/usage";');
     expect(CONNECTIONS_JS).toContain("var TOKEN_ID = /^tok_[0-9a-f]{24}$/;");
-    // Nothing is stored, logged or read from the address, and no request leaves through anything but Dash.api.
-    const forbidden = ["location", "history", "localStorage", "sessionStorage", "indexedDB", "cookie", "caches", "postMessage", "window.name", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "fetch(", "csrf", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer", "innerHTML", "navigator."];
+    // Nothing is logged or read from the address, nothing is stored but the record of the way
+    // back (src/dash/connect-return.ts), and no request leaves through anything but Dash.api.
+    expect([...CONNECTIONS_JS.matchAll(/localStorage\.([a-zA-Z]+)\(([^)]*)\)/g)].map((m) => `${m[1]}(${m[2]})`)).toEqual(["getItem(RETURN_KEY)", "removeItem(RETURN_KEY)", "setItem(RETURN_KEY, JSON.stringify(r)"]);
+    expect(CONNECTIONS_JS.match(/localStorage/g)).toHaveLength(3);
+    expect(CONNECTIONS_JS).toContain(RETURN_SHARED_JS);
+    const forbidden = ["location", "history", "sessionStorage", "indexedDB", "cookie", "caches", "postMessage", "window.name", "sendBeacon", "XMLHttpRequest", "WebSocket", "EventSource", "fetch(", "csrf", "import(", "eval(", "Function(", "console.", "window.open", "setInterval(", "document.referrer", "innerHTML", "navigator."];
     for (const api of forbidden) expect(CONNECTIONS_JS, api).not.toContain(api);
     expect(CONNECTIONS_JS).not.toMatch(/\.style\b|setAttribute\("(?:style|on[a-z]+|src|href)"|\.on[a-z]+\s*=/);
   });
@@ -297,12 +302,13 @@ describe("the Connections page", () => {
     expect(CONNECTIONS_JS).toContain("if (Dash.staleSession(res)) { Dash.reload(); return; }");
     expect(DASH_JS).toContain('return res !== null && typeof res === "object" && res.status === 403 && (errorOf(res) === "bad_csrf" || errorOf(res) === "bad_origin");');
     expect(CONNECTIONS_JS.match(/Dash\.reload\(/g)).toHaveLength(1);
-    // The sign-in pages take no return address: they read no query and land on the fixed Tours page.
+    // The sign-in pages take no return address: they read no query and land on the fixed Tours
+    // page, or on the fixed Connections page while this browser holds the record of the way back.
     expect(SIGNIN_JS).not.toMatch(/[?&]next|return_?to|URLSearchParams|searchParams/i);
     // Its one use of the query: keeping it in the address bar while the link's code is taken out.
     expect(SIGNIN_JS.match(/location\.search/g)).toHaveLength(1);
     expect(SIGNIN_JS).toContain('history.replaceState(null, "", location.pathname + location.search);');
-    expect([...SIGNIN_JS.matchAll(/location\.(?:replace|assign)\(([^)]*)\)/g)].map((m) => m[1])).toEqual(['"/tours"', '"/signin"', '"/tours"']);
+    expect([...SIGNIN_JS.matchAll(/location\.(?:replace|assign)\(([^)]*)\)/g)].map((m) => m[1])).toEqual(['"/tours"', '"/signin"', '"/connections"', '"/tours"']);
     // A sign-in page asked with a return address answers byte for byte as without one.
     const { deps } = await makeDeps({ hosts: HOSTS });
     const plain = await send(deps, "GET", "/signin", { origin: APP });

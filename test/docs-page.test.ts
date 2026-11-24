@@ -719,7 +719,9 @@ describe("the documentation page's parts", () => {
         requests.push({ url, method: method.toUpperCase(), credentials: "include", headers: { Accept: "application/json" } });
         // The operations a session may call are described with it, so the viewer knows of the cookie.
         // A visitor's viewer requests (src/viewers.ts) take no session, and the one that reads the viewer cookie says so instead.
-        if (path.startsWith("/api/v1/view/") || path.startsWith("/api/v1/media-view/")) expect(JSON.stringify(op.security), `${method} ${path}`).not.toContain("session");
+        // A token ending itself takes the token alone, and is described without the session.
+        if (path === "/api/v1/token") expect(op.security, `${method} ${path}`).toEqual([{ token: [] }]);
+        else if (path.startsWith("/api/v1/view/") || path.startsWith("/api/v1/media-view/")) expect(JSON.stringify(op.security), `${method} ${path}`).not.toContain("session");
         else if (path !== "/healthz" && !path.startsWith("/api/v1/signin/") && !path.startsWith("/api/v1/invite/") && path !== "/api/v1/connect/start" && path !== "/api/v1/connect/token") expect(JSON.stringify(op.security), `${method} ${path}`).toContain("session");
       }
     }

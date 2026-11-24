@@ -460,7 +460,10 @@ describe("the Account page and the page an email-change link opens", () => {
 
 describe("the sign-in pages after the account page moved", () => {
   it("send a person who is signed in, or who just signed in, to the Tours page", () => {
-    expect(SIGNIN_JS).toContain('if (res.status === 200) location.replace("/tours");');
+    // Signed in already: Tours, whatever the Connections page's record of the way back says.
+    expect(SIGNIN_JS).toContain('if (res.status !== 200) return;\n      returnClear();\n      location.replace("/tours");');
+    // Just signed in: Tours, or Connections while a valid record of the way back is there (src/dash/connect-return.ts).
+    expect(SIGNIN_JS).toContain('if (backToConnections()) location.replace("/connections");\n          else location.replace("/tours");');
     expect(SIGNIN_JS.match(/location\.replace\("\/tours"\)/g)).toHaveLength(2);
     expect(SIGNIN_JS).not.toContain("/account");
     expect(SIGNIN_JS).not.toContain('page === "account"');

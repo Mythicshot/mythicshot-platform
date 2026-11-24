@@ -120,6 +120,8 @@ const GATE: Record<string, Entry> = {
   "GET /api/v1/tokens": held("GET", "/api/v1/tokens"),
   "PATCH /api/v1/tokens/:id": held("PATCH", `/api/v1/tokens/${TOKEN_ID}`, { name: "Gate" }),
   "DELETE /api/v1/tokens/:id": held("DELETE", `/api/v1/tokens/${TOKEN_ID}`),
+  // A token ending itself takes a token alone: a session is never asked about the terms there.
+  "DELETE /api/v1/token": none("DELETE", "/api/v1/token"),
   // The admin's routes: held for the admin (a member gets the one 404 either way).
   "GET /api/v1/admin/summary": heldAdmin("GET", "/api/v1/admin/summary"),
   "GET /api/v1/admin/accounts": heldAdmin("GET", "/api/v1/admin/accounts"),
