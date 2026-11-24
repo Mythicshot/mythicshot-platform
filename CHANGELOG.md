@@ -2,6 +2,10 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.61 (2026-11-24)
+
+- The Subscribe page shows Stripe's payment form in a centred card, at most 480 pixels wide, with the page's border and rounded corners, once the form has loaded. Before it loads, and when it cannot load, there is no card. No wording, route or Stripe call changes. The form's own colours are set in Stripe's Branding settings (Checkout styling: background and button), which is where a dark form comes from.
+
 ## 0.1.60 (2026-11-23)
 
 - Download all my data: the Account page has a new card, in every billing state and whether billing is on or off, read-only workspaces included, and whether or not the account has agreed to the site's current terms (a disabled account cannot sign in, so it cannot download), with the approved wording and a Download button. It gives one zip file, `mythicshot-data.zip`, with every tour (a folder with its pictures, its logo, its chapters, steps and settings as `tour.json`, and `index.html`, the tour's draft as a click-through page that opens from disk with no server and no network), every shared image and clip as its own file, and `README.txt` and `account.json`, which list each tour, image and clip with its title, dates, whether it is published, who may view it and its size, and the account's email address, username and workspace. Nothing of another account or workspace, and no token, session, key or audit record.
