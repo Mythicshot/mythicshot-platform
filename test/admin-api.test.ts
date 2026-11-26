@@ -442,13 +442,27 @@ describe("setting a workspace's allowance", () => {
     const after = await dumpOf(deps, w.keys, { files: true, touched });
     const audit = await deps.db.all<Json>("SELECT event, user_id, workspace_id, subject, detail FROM audit WHERE event = 'allowance_set'");
     expect(audit).toEqual([{ event: "allowance_set", user_id: a.userId, workspace_id: b.workspaceId, subject: b.workspaceId, detail: '{"old_bytes":null,"new_bytes":12345}' }]);
-    // B now uses more than its allowance: its own account got the low storage mail (0.1.66), recorded for B alone.
-    const mailRow = (x: Json) => `${x.workspace_id} ${x.stage}`;
-    const mailBefore = (before.rows.storage_mail ?? []).map(mailRow);
-    expect((after.rows.storage_mail ?? []).map(mailRow).filter((x) => !mailBefore.includes(x))).toEqual([`${b.workspaceId} 100`]);
+    // B now uses more than its allowance: its own account got the low storage mail (0.1.66). The new
+    // record and audit row carry B's ids; A's records and audit rows are exactly as they were.
+    const ofB = (x: Json) => x.workspace_id === b.workspaceId;
+    const mailsBefore = before.rows.storage_mail ?? [];
+    const mailsAfter = after.rows.storage_mail ?? [];
+    expect(mailsAfter.filter((x) => !ofB(x))).toEqual(mailsBefore.filter((x) => !ofB(x)));
+    const newMails = mailsAfter.filter((x) => !mailsBefore.some((y) => JSON.stringify(y) === JSON.stringify(x)));
+    expect(newMails.map((x) => [x.workspace_id, x.stage, x.sent_at === null])).toEqual([[b.workspaceId, 100, false]]);
+    const sentBefore = before.rows.audit.filter((x) => x.event === "storage_mail_sent");
+    const sentAfter = after.rows.audit.filter((x) => x.event === "storage_mail_sent");
+    expect(sentAfter.filter((x) => !ofB(x))).toEqual(sentBefore.filter((x) => !ofB(x)));
+    expect(sentAfter.filter((x) => !sentBefore.some((y) => y.id === x.id)).map((x) => [x.workspace_id, x.subject, x.detail])).toEqual([[b.workspaceId, b.userId, '{"stage":100}']]);
+    // Everything else is as it was, but B's allowance and these rows of B's.
     const withoutAllowance = (d: typeof before) => ({
       ...d,
-      rows: { ...d.rows, storage_mail: [], audit: d.rows.audit.filter((x) => x.event !== "allowance_set" && x.event !== "storage_mail_sent"), workspace: d.rows.workspace.map((x) => ({ ...x, storage_allowance_bytes: null })) },
+      rows: {
+        ...d.rows,
+        storage_mail: (d.rows.storage_mail ?? []).filter((x) => !ofB(x)),
+        audit: d.rows.audit.filter((x) => x.event !== "allowance_set" && !(x.event === "storage_mail_sent" && ofB(x))),
+        workspace: d.rows.workspace.map((x) => ({ ...x, storage_allowance_bytes: null })),
+      },
     });
     expect(withoutAllowance(after)).toEqual(withoutAllowance(before));
     expect(after.rows.workspace.find((x) => x.id === b.workspaceId)!.storage_allowance_bytes).toBe(12_345);

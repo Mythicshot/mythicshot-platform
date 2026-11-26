@@ -69,7 +69,7 @@ export type StorageFacts = {
   images: number;
   /** linkOrigin of the site, or null: then the mail says where to go in words and has no button. */
   origin: string | null;
-  /** True only on a site with billing for a workspace on its trial: the line about a subscription is added. */
+  /** True only on a site with billing for a workspace on its trial: the line about a subscription is added, while the allowance is below the plan's. */
   trial: boolean;
   /** The footer line of the operator (MAIL_FOOTER), or null for none. */
   footer: string | null;
@@ -148,7 +148,8 @@ export function storageMail(to: string, f: StorageFacts): Mail {
   const left = full ? STORAGE_WORDS.nothingLeft : `${formatBytes(Math.max(0, f.allowance - f.used))} left`;
   const origin = isOrigin(f.origin) ? f.origin : null;
   const storageLink = origin === null ? null : `${origin}${STORAGE_PATH}`;
-  const subscribeLink = origin === null || !f.trial ? null : `${origin}${SUBSCRIBE_PATH}`;
+  // Only where a subscription would give more room than the workspace has now.
+  const subscribeLink = origin === null || !f.trial || f.allowance >= PLAN_BYTES ? null : `${origin}${SUBSCRIBE_PATH}`;
   const plan = formatBytes(PLAN_BYTES);
   const footer = mailFooterOf(f.footer);
   const subject = full ? `Your ${site} storage is full` : `Your ${site} storage is ${percent}% full`;
@@ -203,7 +204,7 @@ export function storageMail(to: string, f: StorageFacts): Mail {
     '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">',
     // The logo: the mark and the wordmark, pictures carried inside the mail.
     `<tr><td ${cell("padding:0 0 24px;")}><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>` +
-      `<td valign="middle" ${cell("padding:0 10px 0 0;")}><img src="cid:${MARK_CID}" width="${MARK_MAIL_SIZE}" height="${MARK_MAIL_SIZE}" alt="Mythicshot mark" ${cell(`display:block;border:0;width:${MARK_MAIL_SIZE}px;height:${MARK_MAIL_SIZE}px;`)}></td>` +
+      `<td valign="middle" ${cell("padding:0 10px 0 0;")}><img src="cid:${MARK_CID}" width="${MARK_MAIL_SIZE}" height="${MARK_MAIL_SIZE}" alt="" ${cell(`display:block;border:0;width:${MARK_MAIL_SIZE}px;height:${MARK_MAIL_SIZE}px;`)}></td>` +
       `<td valign="middle"><img src="cid:${WORDMARK_CID}" width="${WORDMARK_WIDTH}" height="${WORDMARK_HEIGHT}" alt="Mythicshot" ${cell(`display:block;border:0;width:${WORDMARK_WIDTH}px;height:${WORDMARK_HEIGHT}px;`)}></td>` +
       "</tr></table></td></tr>",
     `<tr><td ${cell(`padding:0 0 6px;font-family:${FONT};font-size:22px;font-weight:600;line-height:1.3;color:${C.text};`)}>${e(headline)}</td></tr>`,
