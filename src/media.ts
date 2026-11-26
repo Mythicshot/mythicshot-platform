@@ -73,6 +73,7 @@ import { LIMITS_MEDIA, hitLimit, workspaceKey, type Limit } from "./rate.ts";
 import { checkImage, mediaInfo, type ImageType, type MediaType } from "./sniff.ts";
 import { allowanceOfSqlFor, USED_SQL, allowanceParams, storageFull, usageOf } from "./usage.ts";
 import { readOnlyRefusal } from "./billing.ts";
+import { storageMailSoon } from "./storage-alert.ts";
 import { linksUpSql } from "./removal-rules.ts";
 import { itemCreationAccess } from "./media-access.ts";
 import { ACCESS_BODY_BYTES, creationAccess, hasAccessFields, type Access } from "./viewing.ts";
@@ -886,6 +887,8 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
       } catch {
         console.error("media: could not remove replaced files of a finished item; the sweep removes them");
       }
+      // The low storage mail, after the answer: it never delays or fails this request.
+      storageMailSoon(deps, auth.workspaceId);
       return json(200, committedOut(deps, now));
     }
     if (done.changes === 0) return incomplete("a part was being sent again while finishing; finish it once more");
@@ -915,6 +918,8 @@ export function mediaRoutes(app: Hono, deps: Deps): void {
       console.error("delete: could not remove some files of a deleted item; the next delete call retries");
       return pending();
     }
+    // What it freed may arm the low storage mail again, after the answer.
+    if (gone) storageMailSoon(deps, auth.workspaceId);
     return gone ? noContent() : pending();
   });
 

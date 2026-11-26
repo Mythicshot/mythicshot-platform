@@ -63,6 +63,10 @@ export const AUDIT_EVENTS = [
   "billing_stale_confirmed",
   "billing_answer_refused",
   "data_exported",
+  // 0.1.66: a low storage mail was taken by the mail server (src/storage-alert.ts).
+  "storage_mail_sent",
+  // The admin cleared a workspace's unconfirmed storage mail claims (storage-sweep --clear-claim).
+  "storage_mail_claim_cleared",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 

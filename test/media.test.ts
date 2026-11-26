@@ -1211,7 +1211,8 @@ describe("the call budget", () => {
     expect(await objectsOf(draftKeys, id)).toEqual([]);
     for (const c of [...calls, done.calls, listed.calls, gone.calls]) expect(c).toBeLessThanOrEqual(SUBREQUEST_BUDGET);
     // The delete is a handful of calls whatever the number of parts: one store delete takes them all.
+    // The commit and the delete each make one more after the answer: the low storage mail's read (0.1.66).
     expect(gone.calls).toBeLessThanOrEqual(8);
-    expect({ create: calls[0], parts: Math.max(...calls.slice(1)), commit: done.calls, list: listed.calls, remove: gone.calls }).toEqual({ create: 7, parts: 8, commit: 7, list: 3, remove: 7 });
+    expect({ create: calls[0], parts: Math.max(...calls.slice(1)), commit: done.calls, list: listed.calls, remove: gone.calls }).toEqual({ create: 7, parts: 8, commit: 8, list: 3, remove: 8 });
   });
 });

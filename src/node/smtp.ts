@@ -93,12 +93,33 @@ function isAddress(value: unknown): value is string {
   return LOCAL_PART.test(value.slice(0, at)) && DOMAIN.test(value.slice(at + 1));
 }
 
+/** The most pictures one mail may carry inline, and the most bytes each may have. */
+export const MAX_INLINE = 4;
+export const MAX_INLINE_BYTES = 100_000;
+
+// A Content-ID as this client writes it, between angle brackets: an id, one @, a domain-like
+// part, nothing that could end a header line. A picture's file name: lower case, short.
+const CONTENT_ID = /^[A-Za-z0-9._-]{1,64}@[A-Za-z0-9.-]{1,64}$/;
+const PICTURE_NAME = /^[a-z0-9][a-z0-9._-]{0,39}$/;
+
+const tooLong = (text: unknown): boolean => typeof text !== "string" || text.length > MAX_TEXT_BYTES || Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES;
+
 function checkEnvelope(mail: Mail, from: string): void {
   if (mail === null || typeof mail !== "object") throw new SmtpError("refused");
   if (!isAddress(mail.to) || !isAddress(from)) throw new SmtpError("refused");
   if (typeof mail.subject !== "string" || !SUBJECT.test(mail.subject)) throw new SmtpError("refused");
-  if (typeof mail.text !== "string" || mail.text.length > MAX_TEXT_BYTES || Buffer.byteLength(mail.text, "utf8") > MAX_TEXT_BYTES) {
-    throw new SmtpError("refused");
+  if (tooLong(mail.text)) throw new SmtpError("refused");
+  // The designed part (0.1.66): text like the plain part, and pictures only beside it.
+  if (mail.html !== undefined && tooLong(mail.html)) throw new SmtpError("refused");
+  if (mail.inline !== undefined) {
+    if (mail.html === undefined || !Array.isArray(mail.inline) || mail.inline.length > MAX_INLINE) throw new SmtpError("refused");
+    const ids = new Set<string>();
+    for (const p of mail.inline) {
+      if (p === null || typeof p !== "object" || typeof p.cid !== "string" || !CONTENT_ID.test(p.cid) || ids.has(p.cid)) throw new SmtpError("refused");
+      if (p.contentType !== "image/png" || typeof p.name !== "string" || !PICTURE_NAME.test(p.name)) throw new SmtpError("refused");
+      if (!(p.bytes instanceof Uint8Array) || p.bytes.length === 0 || p.bytes.length > MAX_INLINE_BYTES) throw new SmtpError("refused");
+      ids.add(p.cid);
+    }
   }
 }
 
@@ -139,6 +160,8 @@ export function buildMessage(mail: Mail, from: string, now: number, messageId: s
   checkEnvelope(mail, from);
   if (typeof messageId !== "string" || !MESSAGE_ID.test(messageId)) throw new SmtpError("refused");
   if (typeof now !== "number" || !Number.isFinite(now) || Number.isNaN(new Date(now).getTime())) throw new SmtpError("refused");
+  // A designed mail has its own shape; a mail without `html` is built below exactly as before it existed.
+  if (mail.html !== undefined) return designedMessage(mail, mail.html, from, now, messageId);
   const lines = mail.text.split(/\r\n|\r|\n/);
   const plain = lines.every((line) => /^[\t\x20-\x7e]{0,998}$/.test(line));
   let body = lines.join("\r\n");
@@ -158,6 +181,65 @@ export function buildMessage(mail: Mail, from: string, now: number, messageId: s
     "X-Auto-Response-Suppress: All",
     "",
     body,
+  ].join("\r\n");
+}
+
+/** Bytes as base64 in lines of 76 characters, each ending in CRLF. */
+const base64Lines = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64").replace(/.{1,76}/g, "$&\r\n");
+
+/**
+ * A mail with an HTML part (0.1.66), as multipart/alternative: the plain text first, then the
+ * HTML, so a client that shows only text shows the text. With pictures, the HTML part is a
+ * multipart/related part holding the HTML and each picture under its Content-ID, so the mail
+ * shows them with no request anywhere. The headers are those of a plain mail but the content
+ * type. The text travels as a plain mail's does (as it is when plain ASCII in short lines, else
+ * base64), the HTML and the pictures always as base64, so no line of them can pass for a
+ * boundary or for the end of the message. The boundaries are made from the message id; a text
+ * line that starts as a boundary does sends the text as base64 too.
+ */
+function designedMessage(mail: Mail, html: string, from: string, now: number, messageId: string): string {
+  const alternative = `=_alt_${messageId}`;
+  const related = `=_rel_${messageId}`;
+  const lines = mail.text.split(/\r\n|\r|\n/);
+  const plain = lines.every((line) => /^[\t\x20-\x7e]{0,998}$/.test(line) && !line.startsWith("--=_"));
+  let text = lines.join("\r\n");
+  if (!text.endsWith("\r\n")) text += "\r\n";
+  if (!plain) text = base64Lines(new TextEncoder().encode(text));
+  const htmlPart = ["Content-Type: text/html; charset=utf-8", "Content-Transfer-Encoding: base64", "", base64Lines(new TextEncoder().encode(html))].join("\r\n");
+  const pictures = mail.inline ?? [];
+  const second =
+    pictures.length === 0
+      ? htmlPart
+      : [
+          `Content-Type: multipart/related; boundary="${related}"; type="text/html"`,
+          "",
+          `--${related}`,
+          htmlPart,
+          ...pictures.map((p) =>
+            [`--${related}`, `Content-Type: ${p.contentType}`, "Content-Transfer-Encoding: base64", `Content-ID: <${p.cid}>`, `Content-Disposition: inline; filename="${p.name}"`, "", base64Lines(p.bytes)].join("\r\n"),
+          ),
+          `--${related}--`,
+        ].join("\r\n");
+  return [
+    `From: ${from}`,
+    `To: ${mail.to}`,
+    `Subject: ${subjectHeader(mail.subject)}`,
+    `Date: ${dateHeader(now)}`,
+    `Message-ID: <${messageId}@${from.slice(from.indexOf("@") + 1)}>`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/alternative; boundary="${alternative}"`,
+    "Auto-Submitted: auto-generated",
+    "X-Auto-Response-Suppress: All",
+    "",
+    `--${alternative}`,
+    "Content-Type: text/plain; charset=utf-8",
+    `Content-Transfer-Encoding: ${plain ? "7bit" : "base64"}`,
+    "",
+    text,
+    `--${alternative}`,
+    second,
+    `--${alternative}--`,
+    "",
   ].join("\r\n");
 }
 

@@ -244,8 +244,9 @@ describe("the call budget, route by route", () => {
     const done = noted(await commit(deps, a.token, changed.json.upload_id), COMMIT);
     expect(done.status).toBe(201);
     expect(done.json.steps).toBe(200);
-    // 2 authentication, the upload, its stored steps, the batch, the answer, 3 to remove a page.
-    expect(done.calls).toBe(9);
+    // 2 authentication, the upload, its stored steps, the batch, the answer, 3 to remove a page,
+    // and after the answer the low storage mail's one read (0.1.66; no allowance, so nothing more).
+    expect(done.calls).toBe(10);
     expect(await ctx.draftKeys()).toHaveLength(201);
     // The 200 pictures and the previous logo went first; the rest of the page came from the leftovers.
     expect((await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM replaced_object"))!.n).toBe(251);

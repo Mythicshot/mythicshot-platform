@@ -43,13 +43,14 @@ describe("the token account migration across an upgrade", () => {
   it("a database at 0024 gets 0025 alone, and one at 0022 gets 0024 and then 0025", async () => {
     const at24 = await makeDepsBefore((n) => n < "0025");
     expect((await at24.applied()).at(-1)).toBe("0024_billing_removal.sql");
-    expect(await at24.migrate()).toEqual([MINE]);
+    // 0026 (0.1.66, the low storage mails) follows it.
+    expect(await at24.migrate()).toEqual([MINE, "0026_storage_mail.sql"]);
     expect(await at24.migrate()).toEqual([]);
-    expect((await at24.applied()).at(-1)).toBe(MINE);
+    expect((await at24.applied()).at(-1)).toBe("0026_storage_mail.sql");
 
     const at22 = await makeDepsBefore((n) => n < "0023");
     expect((await at22.applied()).at(-1)).toBe("0022_billing_checks.sql");
-    expect(await at22.migrate()).toEqual(["0024_billing_removal.sql", MINE]);
+    expect(await at22.migrate()).toEqual(["0024_billing_removal.sql", MINE, "0026_storage_mail.sql"]);
     expect((await at22.applied()).filter((n) => n.startsWith("0023_"))).toEqual([]);
   });
 

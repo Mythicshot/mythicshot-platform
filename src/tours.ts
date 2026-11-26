@@ -32,6 +32,7 @@
 // the batch a no-op (409) or, landing after it, finds no tour and writes nothing.
 import type { Hono } from "hono";
 import { readOnlyRefusal } from "./billing.ts";
+import { storageMailSoon } from "./storage-alert.ts";
 import { isBeforeAccounts } from "./accounts.ts";
 import { isBeforeTokenAccount, requireAuth, type Auth } from "./auth.ts";
 import { apiError, json, readCapped } from "./http.ts";
@@ -347,6 +348,8 @@ export function tourRoutes(app: Hono, deps: Deps): void {
       state = await deletionState(deps, auth, id);
       // Still there: a publish started between the look and the batch, which then did nothing.
       if (state.tour) return publishBusy();
+      // Its room is free now, which may arm the low storage mail again, after the answer.
+      storageMailSoon(deps, auth.workspaceId);
     }
     if (state.total === null) return noSuchTour();
 

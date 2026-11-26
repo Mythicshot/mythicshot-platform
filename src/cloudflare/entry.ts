@@ -6,6 +6,7 @@ import { stripeOverFetch } from "../stripe.ts";
 import { mediaLimitsProblem } from "../limits.ts";
 import { withBudget } from "../budget.ts";
 import { sweepWithinBudget, type SweepSummary } from "../billing-sweep.ts";
+import { storageSweepWithinBudget, type StorageSweepSummary } from "../storage-alert.ts";
 import { setClientAddress } from "../client.ts";
 import { downloadUrlSetting, homeUrlSetting } from "../https-address.ts";
 import { DEFAULT_LIFETIMES, LIFETIME_SETTINGS, lifetimesSetting, sameLifetimes, type LifetimeSetting } from "../lifetimes.ts";
@@ -194,15 +195,36 @@ export async function scheduledSweep(env: WorkerEnv & { BILLING_REMOVAL?: unknow
   return (await sweepWithinBudget(deps, env.BILLING_REMOVAL)).summary;
 }
 
+/**
+ * The storage sweep on Workers (src/storage-alert.ts, 0.1.66): the low storage mails a request's
+ * own check did not send, and the re-arming of workspaces seen below 70%, within the call budget
+ * of one invocation, with or without billing. This target sends no mail in this version, so the
+ * deps carry no mailer and the sweep reads and sends nothing (it says mail is off). NOT wired:
+ * wrangler.jsonc has no cron trigger, so it runs only once an install adds one, beside the
+ * billing sweep in the same scheduled handler. Settings that cannot be used make it do nothing.
+ */
+export async function scheduledStorageSweep(env: WorkerEnv): Promise<StorageSweepSummary | null> {
+  const hosts = hostsFromWorkerEnv(env);
+  const allowance = allowanceFromWorkerEnv(env);
+  const billing = billingFromWorkerEnv(env);
+  if (!hosts.ok || !allowance.ok || !billing.ok) {
+    console.error("storage sweep: a setting cannot be used; nothing was swept");
+    return null;
+  }
+  const deps = depsFromEnv(env, hosts.hosts, allowance.bytes, undefined, billing.billing);
+  return (await storageSweepWithinBudget(deps)).summary;
+}
+
 /** The answer to every request while a setting cannot be used. */
 function misconfigured(): Response {
   return new Response('{"error":"misconfigured"}', { status: 500, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
 export default {
-  // The billing sweep, for a cron trigger an install may add (scheduledSweep above); none is configured.
+  // The billing sweep and the storage sweep, for a cron trigger an install may add (scheduledSweep and scheduledStorageSweep above); none is configured.
   async scheduled(_controller: ScheduledController, env: WorkerEnv, _ctx: ExecutionContext): Promise<void> {
     await scheduledSweep(env);
+    await scheduledStorageSweep(env);
   },
   fetch(request: Request, env: WorkerEnv, ctx: ExecutionContext): Response | Promise<Response> {
     // A Worker cannot refuse to start, so a pair of addresses that cannot be used closes

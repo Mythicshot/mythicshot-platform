@@ -17,6 +17,7 @@ export class FakeMailer implements Mailer {
       this.failures -= 1;
       throw new Error("the fake mailer was told to fail");
     }
-    this.sent.push({ to: mail.to, subject: mail.subject, text: mail.text });
+    // A plain mail is kept as its three strings; a designed one (0.1.66) with its HTML part and pictures too.
+    this.sent.push({ to: mail.to, subject: mail.subject, text: mail.text, ...(mail.html === undefined ? {} : { html: mail.html }), ...(mail.inline === undefined ? {} : { inline: mail.inline }) });
   }
 }

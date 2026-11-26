@@ -207,6 +207,8 @@ async function finalStatements(deps: Deps, t: Target, adminId: string): Promise<
     { sql: "DELETE FROM stripe_checkout WHERE workspace_id = ?", params: [ws] },
     // The record of its warning mails before removal (migration 0024).
     { sql: "DELETE FROM billing_warning WHERE workspace_id = ?", params: [ws] },
+    // The record of its low storage mails (migration 0026).
+    { sql: "DELETE FROM storage_mail WHERE workspace_id = ?", params: [ws] },
     { sql: "DELETE FROM workspace WHERE id = ?", params: [ws] },
   ];
 }

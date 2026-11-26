@@ -27,7 +27,7 @@ export const NODE_SETTINGS: readonly string[] = [
   "APP_HOST", "CLIENT_ADDRESS_HEADER", "DATA_DIR", "MAIL_FROM", "MAIL_MODE", "PORT", "PUBLIC_IMAGE_BASE", "SETUP_CODE",
   "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST",
   "INVITE_CONTACT", "IMG_HOST", "DOWNLOAD_URL", "SESSION_MAX_DAYS", "CONNECTION_IDLE_DAYS", "CONNECTION_MAX_DAYS",
-  "HOME_URL", "STRIPE_API_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_ID", "STRIPE_PUBLISHABLE_KEY",
+  "HOME_URL", "STRIPE_API_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_ID", "STRIPE_PUBLISHABLE_KEY", "MAIL_FOOTER",
 ];
 
 /**
@@ -82,6 +82,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   const siteHost = hosts.hosts === null && typeof env.SITE_HOST === "string" ? normaliseHost(env.SITE_HOST) : null;
   // Who to ask for an invite: passed on as written, checked by the sign-in page, never a reason to stop.
   const inviteContact = typeof env.INVITE_CONTACT === "string" ? env.INVITE_CONTACT.trim() : "";
+  // The operator's line at the foot of a designed mail: passed on as written, checked by the mail, never a reason to stop.
+  const mailFooter = typeof env.MAIL_FOOTER === "string" ? env.MAIL_FOOTER.trim() : "";
   // The app's download page: kept only when usable, never a reason to stop (the entry says
   // the one line for a value that cannot be used, from downloadUrlSetting).
   const downloadUrl = downloadUrlSetting(env.DOWNLOAD_URL).url;
@@ -97,6 +99,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
     ...(allowance.bytes === null ? {} : { storageAllowanceBytes: allowance.bytes }),
     ...(siteHost === null ? {} : { siteHost }),
     ...(inviteContact === "" ? {} : { inviteContact }),
+    ...(mailFooter === "" ? {} : { mailFooter }),
     ...(downloadUrl === null ? {} : { downloadUrl }),
     ...(homeUrl === null ? {} : { homeUrl }),
     ...(sameLifetimes(lifetimes, DEFAULT_LIFETIMES) ? {} : { lifetimes }),
