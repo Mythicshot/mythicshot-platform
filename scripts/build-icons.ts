@@ -19,6 +19,12 @@ export const ICON_SIZES: readonly { size: number; mark: string }[] = [
   { size: 48, mark: "mythicshot-mark.svg" },
 ];
 
+/**
+ * The mark as a picture for mails (0.1.66, the storage mail): mail apps show no SVG, so the small
+ * mark is drawn once as a PNG, three times the 30 pixels the mail shows it at, and committed.
+ */
+export const MAIL_MARK = { size: 90, mark: "mythicshot-mark-small.svg", file: "mythicshot-mark-mail.png" } as const;
+
 /** An ICO file holding the given PNGs, each `size` pixels square, in the order given. */
 export function icoOf(images: readonly { size: number; png: Uint8Array }[]): Uint8Array {
   const header = 6;
@@ -59,6 +65,9 @@ async function main(): Promise<void> {
   }
   writeFileSync(FILES + "favicon.ico", icoOf(images));
   console.log("wrote src/brand-files/favicon.ico");
+  const mailMark = await sharp(readFileSync(FILES + MAIL_MARK.mark), { density: 384 }).resize(MAIL_MARK.size, MAIL_MARK.size).png({ compressionLevel: 9, palette: false }).toBuffer();
+  writeFileSync(FILES + MAIL_MARK.file, mailMark);
+  console.log(`wrote src/brand-files/${MAIL_MARK.file}`);
 }
 
 if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) await main();

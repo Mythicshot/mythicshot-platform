@@ -73,6 +73,16 @@ export function brandModule(): string {
       `export const ${id}_PNG = lazy(${JSON.stringify(png.toString("base64"))});`,
     );
   }
+  // The mark as a mail's picture (scripts/build-icons.ts, MAIL_MARK): a square three times the size a mail shows it at.
+  const mailMark = brandFile("mythicshot-mark-mail.png");
+  const [markW, markH] = pngSize(mailMark);
+  if (markW !== markH || markW % 3 !== 0) throw new Error("the mail's mark is not a square three times a whole size");
+  lines.push(
+    "/** The small mark as a PNG for mails (mythicshot-mark-mail.png, scripts/build-icons.ts), drawn at three times its size: mail apps show no SVG. */",
+    `export const MARK_MAIL_PNG = lazy(${JSON.stringify(mailMark.toString("base64"))});`,
+    "/** The size a mail shows the mark at, in CSS pixels: a third of the picture's. */",
+    `export const MARK_MAIL_SIZE = ${markW / 3};`,
+  );
   const [width, height] = pngSize(brandFile("wordmark-light.png"));
   if (width % 3 !== 0 || height % 3 !== 0 || pngSize(brandFile("wordmark-dark.png")).join() !== [width, height].join()) throw new Error("the wordmark's pictures are not one size, three times a whole size");
   lines.push(
