@@ -10,6 +10,7 @@
 //   node dist/node/admin.js terms show <id>
 //   node dist/node/admin.js billing-sweep [--dry-run]
 //   node dist/node/admin.js billing-sweep --clear-claim <workspace id>
+//   node dist/node/admin.js storage-sweep [--dry-run]
 //
 // Without a command, `--email` with `--username` is first-admin and `--email` alone is
 // signin-link, which is how `./cpanel.sh admin --email … --username …` reads.
@@ -33,6 +34,7 @@ import { fileURLToPath } from "node:url";
 import { parseEmail } from "../accounts.ts";
 import { claimFirstAdmin, setEmailOnServer, signInLinkFor, type ClaimProblem, type EmailSetProblem } from "../admin.ts";
 import { billingSweep, clearClaim, sweepLines } from "../billing-sweep.ts";
+import { storageSweep, storageSweepLines } from "../storage-alert.ts";
 import type { Mailer } from "../mail.ts";
 import type { Config, Deps, FileStore } from "../ports.ts";
 import { removalSwitchedOn } from "../removal-rules.ts";
@@ -123,6 +125,9 @@ const TERMS_MIGRATION = "0018_terms.sql";
 /** The migration that made the record of warning mails, which billing-sweep reads and writes. */
 const REMOVAL_MIGRATION = "0024_billing_removal.sql";
 
+/** The migration that made the record of low storage mails, which storage-sweep reads and writes. */
+const STORAGE_MAIL_MIGRATION = "0026_storage_mail.sql";
+
 /** How the usage names the command when nothing else is said: run as its own file. */
 const DIRECT_NAME = "node dist/node/admin.js";
 
@@ -159,6 +164,8 @@ const usage = (name: string): string[] => [
   "      On a site with billing: send the warning mails that are due and, only while the settings file holds BILLING_REMOVAL=on, remove what is due, a few workspaces at most. Prints counts. With --dry-run, says what it would do and changes nothing. Run it once a day.",
   "  billing-sweep --clear-claim <workspace id>",
   "      Clear a workspace's warning mail whose sending was never confirmed, so the next sweep sends it again.",
+  "  storage-sweep [--dry-run]",
+  "      Send the low storage mails that are due and were not sent when the storage filled up (mail was off, or the mail server refused), with or without billing. Prints counts. With --dry-run, says what it would send and changes nothing. Run it once a day.",
   "",
   "Without a command, --email with --username is first-admin, and --email alone is signin-link.",
 ];
@@ -275,7 +282,8 @@ type Parsed =
   | { kind: "terms-list" }
   | { kind: "terms-show"; id: string }
   | { kind: "billing-sweep"; dryRun: boolean }
-  | { kind: "clear-claim"; workspaceId: string };
+  | { kind: "clear-claim"; workspaceId: string }
+  | { kind: "storage-sweep"; dryRun: boolean };
 
 const COMMANDS = ["first-admin", "signin-link", "change-email", "mail-check", "audit"] as const;
 type Command = (typeof COMMANDS)[number];
@@ -296,6 +304,12 @@ function parseArgs(argv: readonly string[]): Parsed | null {
     if (argv.length === 1) return { kind: "billing-sweep", dryRun: false };
     if (argv.length === 2 && argv[1] === "--dry-run") return { kind: "billing-sweep", dryRun: true };
     if (argv.length === 3 && argv[1] === "--clear-claim" && /^ws_[0-9a-f]{24}$/.test(argv[2])) return { kind: "clear-claim", workspaceId: argv[2] };
+    return null;
+  }
+  // So does the storage sweep.
+  if (argv[0] === "storage-sweep") {
+    if (argv.length === 1) return { kind: "storage-sweep", dryRun: false };
+    if (argv.length === 2 && argv[1] === "--dry-run") return { kind: "storage-sweep", dryRun: true };
     return null;
   }
   // The terms commands take words, not options: exactly these shapes and nothing more.
@@ -473,6 +487,14 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
       return await sweepCommand(parsed.dryRun, db, config, env, out, opts);
     }
 
+    if (parsed.kind === "storage-sweep") {
+      if ((await db.first("SELECT 1 AS x FROM _migrations WHERE name = ?", [STORAGE_MAIL_MIGRATION])) === null) {
+        out(SAID.older);
+        return 1;
+      }
+      return await storageSweepCommand(parsed.dryRun, db, config, env, out, opts);
+    }
+
     if (parsed.kind === "terms-publish" || parsed.kind === "terms-list" || parsed.kind === "terms-show") {
       if ((await db.first("SELECT 1 AS x FROM _migrations WHERE name = ?", [TERMS_MIGRATION])) === null) {
         out(SAID.older);
@@ -587,6 +609,26 @@ async function sweepCommand(dryRun: boolean, db: NodeDb, config: Config, env: No
   };
   const summary = await billingSweep(deps, { dryRun, removal: removalSwitchedOn(env[REMOVAL_SETTING]) });
   for (const line of sweepLines(summary)) out(line);
+  return 0;
+}
+
+/**
+ * storage-sweep (src/storage-alert.ts): with the site's own data folder and its mail (sent
+ * directly, as mail-check and billing-sweep send, without the mail thread), one storage sweep,
+ * with or without billing. Prints the sweep's lines, counts only. Exit 0 when the sweep ran.
+ */
+async function storageSweepCommand(dryRun: boolean, db: NodeDb, config: Config, env: NodeJS.ProcessEnv, out: (line: string) => void, opts: AdminOptions): Promise<number> {
+  const root = resolve(env.DATA_DIR as string);
+  const mail = mailFromEnv(env, config, opts.makeMailer ?? smtpMailer);
+  const deps: Deps = {
+    db,
+    drafts: new NodeFileStore(join(root, "drafts")),
+    pub: new NodeFileStore(join(root, "public")),
+    config,
+    now: () => Date.now(),
+    ...(mail.mode === "smtp" ? { mail: mail.mailer } : {}),
+  };
+  for (const line of storageSweepLines(await storageSweep(deps, { dryRun }))) out(line);
   return 0;
 }
 

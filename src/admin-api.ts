@@ -32,6 +32,7 @@ import { requireAuth } from "./auth.ts";
 import { apiError, json, readCapped } from "./http.ts";
 import { isNotNullViolation, type Deps } from "./ports.ts";
 import { isBeforeTerms } from "./sessions.ts";
+import { storageMailSoon } from "./storage-alert.ts";
 import { allowanceSqlFor, USAGE_COLUMNS, usageFromRow, usageOf, type Usage } from "./usage.ts";
 
 /** The most accounts one page of the list holds. */
@@ -283,6 +284,9 @@ export function adminRoutes(app: Hono, deps: Deps): void {
     }
 
     const u = await usageOf(deps, id);
+    // A new allowance can cross a line of the low storage mail either way: that workspace's own
+    // account is mailed, or its mails armed again, after the answer.
+    storageMailSoon(deps, id);
     return json(200, { workspace_id: id, allowance_bytes: u.allowance, storage_allowance_bytes: wanted, used_bytes: u.used, over: u.over });
   });
 }

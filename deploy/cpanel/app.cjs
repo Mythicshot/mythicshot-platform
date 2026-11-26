@@ -34,7 +34,8 @@
 // cannot use leaves the logo without a link, with one line in the log), and the three sign-in
 // lifetimes in whole days, SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and CONNECTION_MAX_DAYS
 // (0 or off switches one off; a value the app cannot use is its default, with one line in
-// the log), and billing's four, which go together or not at all: STRIPE_API_KEY (a Stripe
+// the log), MAIL_FOOTER (the operator's line at the foot of a designed mail, such as a
+// company's name and town; a value the mail cannot use is left out), and billing's four, which go together or not at all: STRIPE_API_KEY (a Stripe
 // restricted key), STRIPE_WEBHOOK_SECRET (the listener's signing secret), STRIPE_PRICE_ID
 // and STRIPE_PUBLISHABLE_KEY (the app refuses a setting of the wrong shape, with a line that
 // names it and never its value). PORT and PUBLIC_IMAGE_BASE are read by the app too

@@ -433,14 +433,23 @@ describe("setting a workspace's allowance", () => {
     expect(r.headers.get("cache-control")).toBe("no-store");
     expect(Object.keys(r.json).sort()).toEqual(SET_KEYS);
     expect(r.json).toEqual({ workspace_id: b.workspaceId, allowance_bytes: 12_345, storage_allowance_bytes: 12_345, used_bytes: usedB, over: usedB > 12_345 });
-    expect(batches).toHaveLength(1);
-    expect(batches[0].map((s) => s.sql.split(" ").slice(0, 3).join(" "))).toEqual(["UPDATE workspace SET", "INSERT INTO audit"]);
+    // The batches of the low storage mail that the new allowance set off after the answer (0.1.66) are its own.
+    const own = batches.filter((b) => !b[0].sql.startsWith("UPDATE storage_mail"));
+    expect(own).toHaveLength(1);
+    expect(own[0].map((s) => s.sql.split(" ").slice(0, 3).join(" "))).toEqual(["UPDATE workspace SET", "INSERT INTO audit"]);
 
     // Only that workspace's allowance changed, and one audit row was added.
     const after = await dumpOf(deps, w.keys, { files: true, touched });
     const audit = await deps.db.all<Json>("SELECT event, user_id, workspace_id, subject, detail FROM audit WHERE event = 'allowance_set'");
     expect(audit).toEqual([{ event: "allowance_set", user_id: a.userId, workspace_id: b.workspaceId, subject: b.workspaceId, detail: '{"old_bytes":null,"new_bytes":12345}' }]);
-    const withoutAllowance = (d: typeof before) => ({ ...d, rows: { ...d.rows, audit: d.rows.audit.filter((x) => x.event !== "allowance_set"), workspace: d.rows.workspace.map((x) => ({ ...x, storage_allowance_bytes: null })) } });
+    // B now uses more than its allowance: its own account got the low storage mail (0.1.66), recorded for B alone.
+    const mailRow = (x: Json) => `${x.workspace_id} ${x.stage}`;
+    const mailBefore = (before.rows.storage_mail ?? []).map(mailRow);
+    expect((after.rows.storage_mail ?? []).map(mailRow).filter((x) => !mailBefore.includes(x))).toEqual([`${b.workspaceId} 100`]);
+    const withoutAllowance = (d: typeof before) => ({
+      ...d,
+      rows: { ...d.rows, storage_mail: [], audit: d.rows.audit.filter((x) => x.event !== "allowance_set" && x.event !== "storage_mail_sent"), workspace: d.rows.workspace.map((x) => ({ ...x, storage_allowance_bytes: null })) },
+    });
     expect(withoutAllowance(after)).toEqual(withoutAllowance(before));
     expect(after.rows.workspace.find((x) => x.id === b.workspaceId)!.storage_allowance_bytes).toBe(12_345);
     expect(after.rows.workspace.find((x) => x.id === a.workspaceId)!.storage_allowance_bytes).toBeNull();
@@ -604,9 +613,11 @@ describe("setting a workspace's allowance", () => {
     const after = await snapshotOf(deps, b, w.keys);
     expect(w.writes()).toEqual([]);
     expect(after.files).toEqual(before.files);
-    const { workspace: _w1, audit: _a1, session: _s1, ...rowsBefore } = before.rows;
-    const { workspace: _w2, audit: _a2, session: _s2, ...rowsAfter } = after.rows;
+    // Its storage mail record (0.1.66) gains the full mail, which went to its own account: nothing else is touched.
+    const { workspace: _w1, audit: _a1, session: _s1, storage_mail: m1, ...rowsBefore } = before.rows;
+    const { workspace: _w2, audit: _a2, session: _s2, storage_mail: m2, ...rowsAfter } = after.rows;
     expect(rowsAfter).toEqual(rowsBefore);
+    expect((m2 ?? []).length).toBe((m1 ?? []).length + 1);
     expect(await snapshotOf(deps, a, w.keys)).toEqual({ ...beforeA, rows: { ...beforeA.rows, audit: expect.any(Array), session: expect.any(Array) } });
     expect(await send(deps, "GET", "/api/v1/tours", { token: b.token })).toMatchObject({ status: 200, text: tours.text });
     expect(seen(await send(deps, "GET", `/t/${b.ids.published.slug}`))).toEqual(seen(pageBefore));

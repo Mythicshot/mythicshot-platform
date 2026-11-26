@@ -444,6 +444,8 @@ async function side(deps: Deps, name: string, base: number, fill: number, admin:
   await deps.db.run("INSERT INTO billing_warning (workspace_id, removal_at, stage, email_sha256, claimed_at, sent_at, named_at) VALUES (?, ?, 30, ?, ?, ?, ?)", [
     workspaceId, T0 + 91 * 86_400_000, "ab".repeat(32), deps.now(), deps.now(), T0 + 91 * 86_400_000,
   ]);
+  // A low storage mail, as a check records it (migration 0026): the same for it.
+  await deps.db.run("INSERT INTO storage_mail (workspace_id, stage, email_sha256, claimed_at, sent_at) VALUES (?, 80, ?, ?, ?)", [workspaceId, "cd".repeat(32), deps.now(), deps.now()]);
   return { name, workspaceId, workspaceName, userId: account.userId, email: account.email, token, tokenId, connectedToken, revokedToken, revokedTokenId, session, emailCode, ids };
 }
 
@@ -516,6 +518,8 @@ export const OWNED: Readonly<Record<string, string>> = {
   stripe_checkout: "workspace_id = ?",
   // The warning mails before a workspace's removal (migration 0024).
   billing_warning: "workspace_id = ?",
+  // The low storage mails of a workspace's present fill-up (migration 0026).
+  storage_mail: "workspace_id = ?",
   signin_method: BY_USER,
   signin_code: BY_USER,
   session: BY_USER,

@@ -64,6 +64,8 @@ services:
       SMTP_PORT: ${SMTP_PORT:-}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      # The operator's line at the foot of a designed mail, such as a company's name and town.
+      MAIL_FOOTER: ${MAIL_FOOTER:-}
       # The host name sign-in links use on one address (with two, the app address is used).
       SITE_HOST: ${SITE_HOST:-}
       # The header in which a proxy writes the visitor's address, for rate limits only.

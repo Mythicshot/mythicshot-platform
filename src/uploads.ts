@@ -37,6 +37,7 @@ import { chapterPictures, chapterTimesMissing, clearReplaced, findChapter, first
 import { LOGO_RULE, STEP_IMAGE_RULE, checkImage, type ImageType } from "./sniff.ts";
 import { allowanceOfSqlFor, USED_SQL, allowanceParams, reservedFor, storageFull, usageOf } from "./usage.ts";
 import { readOnlyRefusal } from "./billing.ts";
+import { storageMailSoon } from "./storage-alert.ts";
 
 /** An upload older than this is swept by the workspace's next create. It lives in src/limits.ts; the name stays here for the files that import it from this one. */
 export { UPLOAD_MAX_AGE_MS };
@@ -711,6 +712,8 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       // The pictures this replace took out of the chapter go now (3 calls at most; it never
       // throws), unless a publish of the older draft is still copying from them.
       await clearReplaced(deps, auth.workspaceId, up.tour_id);
+      // The low storage mail, after the answer: it never delays or fails this request.
+      storageMailSoon(deps, auth.workspaceId);
       // Not found only if yet another replace of the chapter landed since the batch: then
       // the draft holds more than this replace, and publishing is not this client's call.
       return json(201, answer ?? { tour_id: up.tour_id ?? "", chapter_id: up.replaces_chapter_id, steps: m.steps.length, publish: "other_changes" });
@@ -747,6 +750,8 @@ export function uploadRoutes(app: Hono, deps: Deps): void {
       }
     }
 
+    // The low storage mail, after the answer: it never delays or fails this request.
+    storageMailSoon(deps, auth.workspaceId);
     return json(201, result);
   });
 

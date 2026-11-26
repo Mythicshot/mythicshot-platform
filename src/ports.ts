@@ -173,6 +173,14 @@ export type Config = {
    * any byte is sent.
    */
   exportFileReads?: number | null;
+  /**
+   * The operator's line at the foot of a designed mail (0.1.66, the storage mail), such as a
+   * company's name and town, from the MAIL_FOOTER setting, trimmed, as written. The mail checks
+   * it (mailFooterOf, src/storage-mail.ts: one line of at most 200 characters) and leaves out a
+   * value it cannot use. Absent or null: no such line. Nothing of the product's own is written
+   * there by default, since others run the platform too.
+   */
+  mailFooter?: string | null;
 };
 
 export type Deps = {

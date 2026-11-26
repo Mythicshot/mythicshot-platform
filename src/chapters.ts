@@ -58,6 +58,7 @@ import { apiError, json, readCapped } from "./http.ts";
 import { isNotNullViolation, type Deps, type Stmt } from "./ports.ts";
 import { REPLACED_FILES_PER_CALL, clearReplaced } from "./replace.ts";
 import { MAX_CHAPTERS, removeClosedReplaces } from "./uploads.ts";
+import { storageMailSoon } from "./storage-alert.ts";
 
 /**
  * The most ids one PUT lists: the most chapters a tour has, which uploads hold it to
@@ -211,6 +212,8 @@ export function chapterRoutes(app: Hono, deps: Deps): void {
     for (let page = 0; page < CLEAR_PAGES; page++) {
       if ((await clearReplaced(deps, ws, id)) < REPLACED_FILES_PER_CALL) break;
     }
+    // A removed chapter frees room, which may arm the low storage mail again, after the answer.
+    if (removed.length > 0) storageMailSoon(deps, ws);
     const after = await readChapters(deps, auth, id);
     return after === null ? noSuchTour() : json(200, after);
   });
