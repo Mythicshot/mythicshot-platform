@@ -142,6 +142,7 @@ export async function checkStorage(deps: Deps, workspaceId: string, opts: { dryR
   const to = parseEmail(row.email);
   const readOnly = billingConfigured(deps.config) && isReadOnly(standingOf(row, now));
   if (to === null || row.user_id === null || row.user_status !== "active" || row.removing !== 0 || readOnly) return { did: "skipped" };
+  // The line about a subscription: a trial on a site with billing (storageMail also asks that its allowance is below the plan's).
   const trial = billingConfigured(deps.config) && standingOf(row, now).kind === "trial";
   const mail = storageMail(to, {
     stage,
@@ -157,12 +158,15 @@ export async function checkStorage(deps: Deps, workspaceId: string, opts: { dryR
   });
   if (opts.dryRun === true) return { did: "would_send" };
   const claimedAt = now;
-  const claimed = await deps.db.run("INSERT INTO storage_mail (workspace_id, stage, email_sha256, claimed_at, sent_at) VALUES (?, ?, ?, ?, NULL) ON CONFLICT DO NOTHING", [
-    workspaceId,
-    stage,
-    await emailSha256(to),
-    claimedAt,
-  ]);
+  // The claim, guarded in the statement itself: nothing is written (and nothing sent) when the
+  // workspace is gone or its removal has started since the read, nor an 80% claim once a full
+  // mail of this fill-up is claimed or sent (two checks of rising usage, the later one first).
+  const claimed = await deps.db.run(
+    "INSERT INTO storage_mail (workspace_id, stage, email_sha256, claimed_at, sent_at) SELECT ?, ?, ?, ?, NULL" +
+      " WHERE EXISTS (SELECT 1 FROM workspace WHERE id = ?) AND NOT EXISTS (SELECT 1 FROM account_removal WHERE workspace_id = ?)" +
+      " AND (? = 100 OR NOT EXISTS (SELECT 1 FROM storage_mail WHERE workspace_id = ? AND stage = 100)) ON CONFLICT DO NOTHING",
+    [workspaceId, stage, await emailSha256(to), claimedAt, workspaceId, workspaceId, stage, workspaceId],
+  );
   if (claimed.changes !== 1) return { did: "none" };
   try {
     await mailOf(deps).send(mail);
@@ -219,6 +223,9 @@ export type StorageSweepSummary = {
   rearmed: number;
   wouldSend: number;
   waiting: number;
+  /** Workspaces holding a claim older than CLAIM_STALE_MS that was never confirmed, while their usage is at 70% or more: that mail is not sent again until the admin clears it. */
+  staleClaims: number;
+  staleClaimIds: string[];
   stoppedEarly: boolean;
 };
 
@@ -239,7 +246,7 @@ function pageSql(deps: Pick<Deps, "config">): string {
  * `calls` (a metered invocation, the Worker's scheduled handler) it stops before the call budget.
  */
 export async function storageSweep(deps: Deps, opts: { dryRun?: boolean; calls?: () => number; mailsPerRun?: number } = {}): Promise<StorageSweepSummary> {
-  const s: StorageSweepSummary = { dryRun: opts.dryRun === true, mailOff: false, checked: 0, sentLow: 0, sentFull: 0, failed: 0, unconfirmed: 0, skipped: 0, rearmed: 0, wouldSend: 0, waiting: 0, stoppedEarly: false };
+  const s: StorageSweepSummary = { dryRun: opts.dryRun === true, mailOff: false, checked: 0, sentLow: 0, sentFull: 0, failed: 0, unconfirmed: 0, skipped: 0, rearmed: 0, wouldSend: 0, waiting: 0, staleClaims: 0, staleClaimIds: [], stoppedEarly: false };
   if (mailOf(deps) === NO_MAIL) {
     s.mailOff = true;
     return s;
@@ -261,6 +268,13 @@ export async function storageSweep(deps: Deps, opts: { dryRun?: boolean; calls?:
       const usage = usageFromRow(row);
       const stage = stageOf(usage.used, usage.allowance);
       const records = recordsOf(row.mails);
+      // A claim never confirmed and old enough that no send is on its way (a mail handed over and
+      // then failed, a process that stopped, a claim that could not be taken back): it holds that
+      // mail back for the whole fill-up, so it is said on every run until a re-arm or the admin clears it.
+      if (stage !== "rearm" && records.some((r) => r.sent_at === null && r.claimed_at < deps.now() - CLAIM_STALE_MS)) {
+        s.staleClaims += 1;
+        s.staleClaimIds.push(row.id);
+      }
       const due = stage === 100 ? !records.some((r) => r.stage === 100) : stage === 80 ? records.length === 0 : stage === "rearm" && records.length > 0;
       if (!due) continue;
       const mailing = stage !== "rearm";
@@ -287,6 +301,27 @@ export async function storageSweep(deps: Deps, opts: { dryRun?: boolean; calls?:
   }
 }
 
+const WORKSPACE_ID = /^ws_[0-9a-f]{24}$/;
+
+/**
+ * Clears one workspace's storage mail claims that were never confirmed (sent_at NULL), so the
+ * next check or sweep sends that mail again if it is still due: the admin's decision, never the
+ * sweep's (`storage-sweep --clear-claim <workspace id>`), since such a mail may have arrived.
+ * Confirmed rows stay. The count cleared; with one or more, the audit row
+ * `storage_mail_claim_cleared` (the workspace's id and the count). A malformed id clears nothing.
+ */
+export async function clearStorageClaim(deps: Deps, workspaceId: string): Promise<number> {
+  if (!WORKSPACE_ID.test(workspaceId)) return 0;
+  const found = await deps.db.first<{ n: number }>("SELECT count(*) AS n FROM storage_mail WHERE workspace_id = ? AND sent_at IS NULL", [workspaceId]);
+  const n = found?.n ?? 0;
+  if (n === 0) return 0;
+  await deps.db.batch([
+    { sql: "DELETE FROM storage_mail WHERE workspace_id = ? AND sent_at IS NULL", params: [workspaceId] },
+    auditStatement(deps, { event: "storage_mail_claim_cleared", workspaceId, detail: { count: n } }),
+  ]);
+  return n;
+}
+
 /** What a storage sweep says, one line each, counts only. The admin command prints these; the Worker's scheduled handler logs them. */
 export function storageSweepLines(s: StorageSweepSummary): string[] {
   if (s.mailOff) return ["Mail is off, so no storage mail was sent. Nothing was changed."];
@@ -296,6 +331,10 @@ export function storageSweepLines(s: StorageSweepSummary): string[] {
   } else {
     lines.push(`Storage mails sent: ${s.sentLow + s.sentFull} (running low: ${s.sentLow}, full: ${s.sentFull}). Not sent, tried again next time: ${s.failed}.`);
     if (s.unconfirmed > 0) lines.push(`Storage mails handed to the mail server but never confirmed, not sent again until the storage drops below 70%: ${s.unconfirmed}.`);
+  }
+  if (s.staleClaims > 0) {
+    lines.push(`Storage mails whose sending was never confirmed (not sent again for this fill-up until the claim is cleared with storage-sweep --clear-claim): ${s.staleClaims}.`);
+    for (const id of s.staleClaimIds) lines.push(`  unconfirmed ${id}`);
   }
   if (s.waiting > 0) lines.push(`Storage mails over this run's cap, sent next time: ${s.waiting}.`);
   if (s.skipped > 0) lines.push(`Workspaces left out (read-only, disabled, being removed, or no usable address): ${s.skipped}.`);

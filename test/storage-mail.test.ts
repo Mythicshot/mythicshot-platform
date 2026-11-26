@@ -9,12 +9,12 @@ import { makeDeps, seedAccount } from "#harness";
 import { DAY, PLAN_BYTES, TRIAL_BYTES } from "../src/billing-rules.ts";
 import { MARK_MAIL_PNG, WORDMARK_LIGHT_PNG } from "../src/brand-assets.ts";
 import type { Mail, Mailer } from "../src/mail.ts";
-import { DEFER_FAILED, type Deps } from "../src/ports.ts";
+import { DEFER_FAILED, type Db, type Deps } from "../src/ports.ts";
 import { emailSha256 } from "../src/removal-store.ts";
-import { CLAIM_STALE_MS, STORAGE_MAILS_PER_RUN, checkStorage, storageMailSoon, storageSweep, storageSweepLines, storageSweepWithinBudget } from "../src/storage-alert.ts";
+import { CLAIM_STALE_MS, STORAGE_MAILS_PER_RUN, checkStorage, clearStorageClaim, storageMailSoon, storageSweep, storageSweepLines, storageSweepWithinBudget } from "../src/storage-alert.ts";
 import { MARK_CID, STORAGE_WORDS, WORDMARK_CID, escapeHtml, mailFooterOf, percentOf, stageOf, storageMail } from "../src/storage-mail.ts";
 import { formatBytes } from "../src/usage.ts";
-import { clone, fixtures, send, sendAll, uploadTour, type Json } from "./bundle.ts";
+import { clone, fixtures, png, send, sendAll, uploadTour, type Json } from "./bundle.ts";
 import { FakeMailer } from "./fake-mail.ts";
 import { withBilling } from "./fake-stripe.ts";
 import { SIZE_TABLE } from "./sizes.ts";
@@ -56,6 +56,27 @@ const resize = (deps: Deps, id: string, bytes: number) => deps.db.run("UPDATE me
 const records = (deps: Deps, ws: string) => deps.db.all<{ stage: number; sent_at: number | null; email_sha256: string }>("SELECT stage, sent_at, email_sha256 FROM storage_mail WHERE workspace_id = ? ORDER BY stage", [ws]);
 const audits = (deps: Deps, ws?: string) =>
   deps.db.all<{ workspace_id: string; subject: string; detail: string; user_id: string | null }>("SELECT workspace_id, subject, detail, user_id FROM audit WHERE event = 'storage_mail_sent'" + (ws ? " AND workspace_id = ?" : "") + " ORDER BY at, id", ws ? [ws] : []);
+
+/** A record of a mail of the present fill-up, written as a check writes it. */
+const seedRecord = (deps: Deps, ws: string, stage: 80 | 100, claimedAt: number, sentAt: number | null) =>
+  deps.db.run("INSERT INTO storage_mail (workspace_id, stage, email_sha256, claimed_at, sent_at) VALUES (?, ?, ?, ?, ?)", [ws, stage, "0".repeat(64), claimedAt, sentAt]);
+
+/** The database with `before` run ahead of the first statement whose text starts with `prefix`. */
+function interleaved(db: Db, prefix: string, before: () => Promise<unknown>): Db {
+  let done = false;
+  const ahead = async (sql: string) => {
+    if (!done && sql.startsWith(prefix)) {
+      done = true;
+      await before();
+    }
+  };
+  return {
+    all: async (sql, params) => (await ahead(sql), db.all(sql, params)),
+    first: async (sql, params) => (await ahead(sql), db.first(sql, params)),
+    run: async (sql, params) => (await ahead(sql), db.run(sql, params)),
+    batch: (stmts) => db.batch(stmts),
+  };
+}
 
 /** A mailer that fails as the SMTP client does after the message was handed over: it may have arrived. */
 class HandedOverThenFailed implements Mailer {
@@ -479,7 +500,8 @@ describe("the words", () => {
     // Pictures by Content-ID only, with alt text; nothing that reaches a server when opened.
     expect(html).toContain(`src="cid:${MARK_CID}"`);
     expect(html).toContain(`src="cid:${WORDMARK_CID}"`);
-    for (const img of html.match(/<img[^>]*>/g) ?? []) expect(img).toMatch(/ alt="[^"]+"/);
+    // The mark is decoration beside the name (empty alt); the wordmark says the name.
+    expect(html.match(/<img[^>]*>/g)?.map((img) => / alt="([^"]*)"/.exec(img)?.[1])).toEqual(["", "Mythicshot"]);
     const urls = [...html.matchAll(/https?:\/\/[^"'\s<)]+/g)].map((u) => u[0]);
     expect(new Set(urls)).toEqual(new Set([`${ORIGIN}/storage`, `${ORIGIN}/billing/subscribe`]));
     for (const banned of ["<script", "<link", "@import", "url(", "<style", "<div", "display:flex", "<svg"]) expect(html.toLowerCase()).not.toContain(banned);
@@ -491,7 +513,7 @@ describe("the words", () => {
     const png = MARK_MAIL_PNG();
     const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
     expect([view.getUint32(0), view.getUint32(16), view.getUint32(20)]).toEqual([0x89504e47, 90, 90]);
-    expect(html).toContain('width="30" height="30" alt="Mythicshot mark"');
+    expect(html).toContain('width="30" height="30" alt=""');
   });
 
   it("the footer line is the operator's setting, shown only when it is one usable line", () => {
@@ -674,7 +696,7 @@ describe("the requests that ask for a check", () => {
     expect(lines.join(" ")).not.toContain(DEFER_FAILED);
   });
 
-  it("a deleted item and a deleted tour arm the mails again after the answer", async () => {
+  it("a deleted item arms the mails again after the answer", async () => {
     const w = await world();
     const a = await seedAccount(w.deps);
     const img = await item(w.deps, a.workspaceId, 85 * MB);
@@ -684,6 +706,235 @@ describe("the requests that ask for a check", () => {
     expect(r.status).toBe(204);
     await w.settle();
     expect(await records(w.deps, a.workspaceId)).toEqual([]);
+  });
+});
+
+
+describe("claims and races", () => {
+  it("usage rising from 79%: a full mail claimed first makes a later 80% claim impossible, in the claim itself", async () => {
+    const w = await world();
+    const a = await seedAccount(w.deps);
+    const img = await item(w.deps, a.workspaceId, 79 * MB);
+    expect(await checkStorage(w.deps, a.workspaceId)).toEqual({ did: "none" });
+    // The first commit takes it to 85% and its check reads that; before it claims, the second
+    // commit takes it to 100% and its own check sends the full mail.
+    await resize(w.deps, img, 85 * MB);
+    const slow: Deps = {
+      ...w.deps,
+      db: interleaved(w.deps.db, "INSERT INTO storage_mail", async () => {
+        await resize(w.deps, img, 100 * MB);
+        expect(await checkStorage(w.deps, a.workspaceId)).toEqual({ did: "sent", stage: 100 });
+      }),
+    };
+    expect(await checkStorage(slow, a.workspaceId)).toEqual({ did: "none" });
+    expect(w.mail.sent.map((m) => m.subject)).toEqual(["Your Mythicshot storage is full"]);
+    expect((await records(w.deps, a.workspaceId)).map((r) => r.stage)).toEqual([100]);
+    // An unconfirmed full claim blocks it as well.
+    await w.deps.db.run("UPDATE storage_mail SET sent_at = NULL WHERE workspace_id = ?", [a.workspaceId]);
+    await resize(w.deps, img, 85 * MB);
+    expect(await checkStorage(w.deps, a.workspaceId)).toEqual({ did: "none" });
+    expect(w.mail.sent).toHaveLength(1);
+  });
+
+  it("a workspace whose removal starts, or that is gone, between the read and the claim: nothing written, nothing sent", async () => {
+    const w = await world();
+    const a = await seedAccount(w.deps);
+    await item(w.deps, a.workspaceId, 90 * MB);
+    const removing: Deps = {
+      ...w.deps,
+      db: interleaved(w.deps.db, "INSERT INTO storage_mail", () =>
+        w.deps.db.run("INSERT INTO account_removal (user_id, workspace_id, started_by, total, created_at) VALUES (?, ?, ?, 0, ?)", [a.userId, a.workspaceId, a.userId, T0]),
+      ),
+    };
+    expect(await checkStorage(removing, a.workspaceId)).toEqual({ did: "none" });
+    expect(await records(w.deps, a.workspaceId)).toEqual([]);
+    expect(w.mail.sent).toEqual([]);
+
+    const b = await seedAccount(w.deps);
+    await item(w.deps, b.workspaceId, 90 * MB);
+    const gone: Deps = {
+      ...w.deps,
+      db: interleaved(w.deps.db, "INSERT INTO storage_mail", () =>
+        w.deps.db.batch([
+          { sql: "DELETE FROM media WHERE workspace_id = ?", params: [b.workspaceId] },
+          { sql: "DELETE FROM api_token WHERE workspace_id = ?", params: [b.workspaceId] },
+          { sql: "DELETE FROM signin_method WHERE user_id = ?", params: [b.userId] },
+          { sql: "DELETE FROM session WHERE user_id = ?", params: [b.userId] },
+          { sql: "DELETE FROM signin_code WHERE user_id = ?", params: [b.userId] },
+          { sql: "DELETE FROM membership WHERE workspace_id = ?", params: [b.workspaceId] },
+          { sql: "DELETE FROM user WHERE id = ?", params: [b.userId] },
+          { sql: "DELETE FROM workspace WHERE id = ?", params: [b.workspaceId] },
+        ]),
+      ),
+    };
+    expect(await checkStorage(gone, b.workspaceId)).toEqual({ did: "none" });
+    expect(await records(w.deps, b.workspaceId)).toEqual([]);
+    expect(w.mail.sent).toEqual([]);
+  });
+
+  it("a stale unconfirmed claim is said on every sweep, never resent by itself, and cleared by the admin for that workspace alone", async () => {
+    const w = await world();
+    const a = await seedAccount(w.deps);
+    const b = await seedAccount(w.deps);
+    await item(w.deps, a.workspaceId, 90 * MB);
+    await item(w.deps, b.workspaceId, 90 * MB);
+    // A's claim was left two hours ago (a process that stopped); B's was made a minute ago.
+    await seedRecord(w.deps, a.workspaceId, 80, T0 - 2 * 3_600_000, null);
+    await seedRecord(w.deps, b.workspaceId, 80, T0 - 60_000, null);
+    for (let run = 0; run < 2; run++) {
+      const s = await storageSweep(w.deps);
+      expect(s).toMatchObject({ staleClaims: 1, staleClaimIds: [a.workspaceId], sentLow: 0, sentFull: 0 });
+      const lines = storageSweepLines(s);
+      expect(lines).toContain(`  unconfirmed ${a.workspaceId}`);
+      expect(lines).toContain("Storage mails whose sending was never confirmed (not sent again for this fill-up until the claim is cleared with storage-sweep --clear-claim): 1.");
+    }
+    expect(w.mail.sent).toEqual([]);
+    expect(await clearStorageClaim(w.deps, "ws_bad")).toBe(0);
+    expect(await clearStorageClaim(w.deps, a.workspaceId)).toBe(1);
+    expect(await clearStorageClaim(w.deps, a.workspaceId)).toBe(0);
+    expect(await records(w.deps, a.workspaceId)).toEqual([]);
+    expect(await records(w.deps, b.workspaceId)).toHaveLength(1);
+    const cleared = await w.deps.db.all<{ workspace_id: string; detail: string }>("SELECT workspace_id, detail FROM audit WHERE event = 'storage_mail_claim_cleared'");
+    expect(cleared).toEqual([{ workspace_id: a.workspaceId, detail: '{"count":1}' }]);
+    // A confirmed row is never cleared.
+    await seedRecord(w.deps, a.workspaceId, 100, T0, T0);
+    expect(await clearStorageClaim(w.deps, a.workspaceId)).toBe(0);
+    await w.deps.db.run("DELETE FROM storage_mail WHERE workspace_id = ?", [a.workspaceId]);
+    // Cleared: the next sweep sends A's mail; B's young claim is neither sent nor stale yet.
+    const after = await storageSweep(w.deps);
+    expect(after).toMatchObject({ sentLow: 1, staleClaims: 0 });
+    expect(w.mail.sent.map((m) => m.to)).toEqual([a.email]);
+  });
+});
+
+describe("each request that changes the usage asks for a check", () => {
+  const manifestOf = (title: string): Json => {
+    const m = clone(fixtures.v3 as Json);
+    m.title = title;
+    return m;
+  };
+
+  it("a shared item's first commit sends the mail it crosses", async () => {
+    const w = await world({ allowance: 10_000 });
+    const a = await seedAccount(w.deps);
+    await item(w.deps, a.workspaceId, 4_000);
+    const made = await send(w.deps, "POST", "/api/v1/media", { token: a.token, body: JSON.stringify({ kind: "image", content_type: "image/png", bytes: 5_000, width: 64, height: 64 }), headers: { "content-type": "application/json" } });
+    expect(made.status, made.text).toBe(201);
+    await w.settle();
+    expect(w.mail.sent).toEqual([]);
+    const part = await send(w.deps, "PUT", `/api/v1/media/${made.json.id}/parts/0`, { token: a.token, body: png(64, 64, 5_000) as NonNullable<RequestInit["body"]> });
+    expect(part.status, part.text).toBe(204);
+    const done = await send(w.deps, "POST", `/api/v1/media/${made.json.id}/commit`, { token: a.token });
+    expect(done.status, done.text).toBe(200);
+    await w.settle();
+    expect(w.mail.sent.map((m) => [m.to, m.subject])).toEqual([[a.email, "Your Mythicshot storage is 90% full"]]);
+  });
+
+  it("a replace of a chapter sends the mail its workspace is due", async () => {
+    const w = await world({ allowance: null });
+    const a = await seedAccount(w.deps);
+    const tour = await uploadTour(w.deps, a.token, manifestOf("Replace me"));
+    const used = (await send(w.deps, "GET", "/api/v1/usage", { token: a.token })).json.used_bytes as number;
+    // An allowance with room for the replace's logo, and the workspace past 80% without a check yet.
+    const allowance = 10 * (used + 200_000);
+    await w.deps.db.run("UPDATE workspace SET storage_allowance_bytes = ? WHERE id = ?", [allowance, a.workspaceId]);
+    await item(w.deps, a.workspaceId, Math.floor(0.85 * allowance) - used);
+    const id = await sendAll(w.deps, a.token, manifestOf("Replace me"), { kind: "replace", tour_id: tour.tour_id, chapter_id: tour.chapter_id });
+    const r = await send(w.deps, "POST", `/api/v1/uploads/${id}/commit`, { token: a.token });
+    expect(r.status, r.text).toBe(201);
+    await w.settle();
+    expect(w.mail.sent.map((m) => m.to)).toEqual([a.email]);
+    expect(await records(w.deps, a.workspaceId)).toHaveLength(1);
+  });
+
+  it("removing a chapter and deleting a tour arm the mails again", async () => {
+    const w = await world({ allowance: 1000 * MB });
+    const a = await seedAccount(w.deps);
+    const tour = await uploadTour(w.deps, a.token, manifestOf("Two chapters"));
+    await uploadTour(w.deps, a.token, manifestOf("Second"), { kind: "chapter", tour_id: tour.tour_id });
+    await w.settle();
+    await seedRecord(w.deps, a.workspaceId, 80, T0, T0);
+    const chapters = await send(w.deps, "GET", `/api/v1/tours/${tour.tour_id}/chapters`, { token: a.token });
+    expect(chapters.status, chapters.text).toBe(200);
+    const keep = [chapters.json.chapters[0].id];
+    const put = await send(w.deps, "PUT", `/api/v1/tours/${tour.tour_id}/chapters`, { token: a.token, body: JSON.stringify({ revision: chapters.json.revision, chapters: keep }), headers: { "content-type": "application/json" } });
+    expect(put.status, put.text).toBe(200);
+    await w.settle();
+    expect(await records(w.deps, a.workspaceId)).toEqual([]);
+
+    await seedRecord(w.deps, a.workspaceId, 100, T0, T0);
+    let gone = await send(w.deps, "DELETE", `/api/v1/tours/${tour.tour_id}`, { token: a.token });
+    while (gone.status === 202) gone = await send(w.deps, "DELETE", `/api/v1/tours/${tour.tour_id}`, { token: a.token });
+    expect(gone.status, gone.text).toBe(200);
+    await w.settle();
+    expect(await records(w.deps, a.workspaceId)).toEqual([]);
+  });
+});
+
+describe("the subscription line", () => {
+  it("is absent when billing is off, even for a workspace marked for a trial", async () => {
+    const w = await world();
+    const a = await seedAccount(w.deps);
+    await w.deps.db.run("UPDATE workspace SET billing_trial = 1, created_at = ? WHERE id = ?", [T0 - DAY, a.workspaceId]);
+    await item(w.deps, a.workspaceId, 90 * MB);
+    expect(await checkStorage(w.deps, a.workspaceId)).toEqual({ did: "sent", stage: 80 });
+    expect(w.mail.sent[0].text).not.toContain("subscription");
+    expect(w.mail.sent[0].html).not.toContain("subscribe");
+  });
+
+  it("is absent for a trial whose allowance, set by the admin, is already the plan's or more", async () => {
+    const facts = { stage: 80 as const, workspaceName: "W", tours: 0, gifs: 0, images: 0, origin: ORIGIN, trial: true, footer: null };
+    expect(storageMail("a@example.com", { ...facts, used: Math.floor(PLAN_BYTES * 0.9), allowance: PLAN_BYTES }).text).not.toContain("subscription");
+    expect(storageMail("a@example.com", { ...facts, used: Math.floor(PLAN_BYTES * 1.8), allowance: PLAN_BYTES * 2 }).html).not.toContain("subscribe");
+    expect(storageMail("a@example.com", { ...facts, used: PLAN_BYTES - 1000, allowance: PLAN_BYTES - 1 }).text).toContain("A subscription raises the allowance to 5 GB:");
+    // Through the check: a trial on a site with billing whose admin set 6 GB.
+    const w = await world({ allowance: null });
+    withBilling(w.deps);
+    w.deps.config = { ...w.deps.config, siteHost: SITE };
+    await seedAccount(w.deps, { admin: true });
+    const a = await seedAccount(w.deps);
+    await w.deps.db.run("UPDATE workspace SET created_at = ?, storage_allowance_bytes = ? WHERE id = ?", [T0 - DAY, 6 * 1024 * MB, a.workspaceId]);
+    await item(w.deps, a.workspaceId, 6 * 1024 * MB);
+    expect(await checkStorage(w.deps, a.workspaceId)).toEqual({ did: "sent", stage: 100 });
+    expect(w.mail.sent[0].text).not.toContain("subscription");
+  });
+});
+
+describe("the storage sweep on Workers", () => {
+  it("the scheduled handler runs it with no mailer, reading nothing, and nothing on settings it cannot use", async () => {
+    const load = import.meta.glob("../src/cloudflare/entry.ts");
+    const entry = (await load["../src/cloudflare/entry.ts"]()) as {
+      scheduledStorageSweep(env: Record<string, unknown>): Promise<unknown>;
+      default: { scheduled(c: unknown, env: Record<string, unknown>, ctx: unknown): Promise<void> };
+    };
+    const untouchable = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error("the database was used");
+        },
+      },
+    );
+    const env = { DB: untouchable, DRAFTS: untouchable, PUB: untouchable };
+    const logged: string[] = [];
+    const errors: string[] = [];
+    const log = console.log;
+    const error = console.error;
+    console.log = (...a: unknown[]) => void logged.push(a.map(String).join(" "));
+    console.error = (...a: unknown[]) => void errors.push(a.map(String).join(" "));
+    try {
+      expect(await entry.scheduledStorageSweep(env)).toEqual(expect.objectContaining({ mailOff: true, checked: 0 }));
+      await entry.default.scheduled({}, env, {});
+      expect(await entry.scheduledStorageSweep({ ...env, TOURS_HOST: "tours.example.com" })).toBeNull();
+      expect(await entry.scheduledStorageSweep({ ...env, STORAGE_ALLOWANCE_BYTES: "lots" })).toBeNull();
+      expect(await entry.scheduledStorageSweep({ ...env, STRIPE_API_KEY: "rk_test_FAKE" })).toBeNull();
+    } finally {
+      console.log = log;
+      console.error = error;
+    }
+    expect(logged).toContain("Mail is off, so no storage mail was sent. Nothing was changed.");
+    expect(errors).toContain("storage sweep: a setting cannot be used; nothing was swept");
+    for (const line of [...logged, ...errors]) expect(line).not.toContain("rk_test_FAKE");
   });
 });
 

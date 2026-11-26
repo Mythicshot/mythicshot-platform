@@ -11,6 +11,7 @@
 //   node dist/node/admin.js billing-sweep [--dry-run]
 //   node dist/node/admin.js billing-sweep --clear-claim <workspace id>
 //   node dist/node/admin.js storage-sweep [--dry-run]
+//   node dist/node/admin.js storage-sweep --clear-claim <workspace id>
 //
 // Without a command, `--email` with `--username` is first-admin and `--email` alone is
 // signin-link, which is how `./cpanel.sh admin --email … --username …` reads.
@@ -34,7 +35,7 @@ import { fileURLToPath } from "node:url";
 import { parseEmail } from "../accounts.ts";
 import { claimFirstAdmin, setEmailOnServer, signInLinkFor, type ClaimProblem, type EmailSetProblem } from "../admin.ts";
 import { billingSweep, clearClaim, sweepLines } from "../billing-sweep.ts";
-import { storageSweep, storageSweepLines } from "../storage-alert.ts";
+import { clearStorageClaim, storageSweep, storageSweepLines } from "../storage-alert.ts";
 import type { Mailer } from "../mail.ts";
 import type { Config, Deps, FileStore } from "../ports.ts";
 import { removalSwitchedOn } from "../removal-rules.ts";
@@ -166,6 +167,8 @@ const usage = (name: string): string[] => [
   "      Clear a workspace's warning mail whose sending was never confirmed, so the next sweep sends it again.",
   "  storage-sweep [--dry-run]",
   "      Send the low storage mails that are due and were not sent when the storage filled up (mail was off, or the mail server refused), with or without billing. Prints counts. With --dry-run, says what it would send and changes nothing. Run it once a day.",
+  "  storage-sweep --clear-claim <workspace id>",
+  "      Clear a workspace's low storage mail whose sending was never confirmed, so the next check or sweep sends it again if it is still due.",
   "",
   "Without a command, --email with --username is first-admin, and --email alone is signin-link.",
 ];
@@ -283,7 +286,8 @@ type Parsed =
   | { kind: "terms-show"; id: string }
   | { kind: "billing-sweep"; dryRun: boolean }
   | { kind: "clear-claim"; workspaceId: string }
-  | { kind: "storage-sweep"; dryRun: boolean };
+  | { kind: "storage-sweep"; dryRun: boolean }
+  | { kind: "storage-clear-claim"; workspaceId: string };
 
 const COMMANDS = ["first-admin", "signin-link", "change-email", "mail-check", "audit"] as const;
 type Command = (typeof COMMANDS)[number];
@@ -310,6 +314,7 @@ function parseArgs(argv: readonly string[]): Parsed | null {
   if (argv[0] === "storage-sweep") {
     if (argv.length === 1) return { kind: "storage-sweep", dryRun: false };
     if (argv.length === 2 && argv[1] === "--dry-run") return { kind: "storage-sweep", dryRun: true };
+    if (argv.length === 3 && argv[1] === "--clear-claim" && /^ws_[0-9a-f]{24}$/.test(argv[2])) return { kind: "storage-clear-claim", workspaceId: argv[2] };
     return null;
   }
   // The terms commands take words, not options: exactly these shapes and nothing more.
@@ -487,10 +492,15 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
       return await sweepCommand(parsed.dryRun, db, config, env, out, opts);
     }
 
-    if (parsed.kind === "storage-sweep") {
+    if (parsed.kind === "storage-sweep" || parsed.kind === "storage-clear-claim") {
       if ((await db.first("SELECT 1 AS x FROM _migrations WHERE name = ?", [STORAGE_MAIL_MIGRATION])) === null) {
         out(SAID.older);
         return 1;
+      }
+      if (parsed.kind === "storage-clear-claim") {
+        const n = await clearStorageClaim(deps, parsed.workspaceId);
+        out(n === 0 ? "That workspace has no unconfirmed storage mail. Nothing was changed." : `Cleared ${n === 1 ? "1 unconfirmed storage mail" : `${n} unconfirmed storage mails`}; the next check or sweep sends it again if it is still due.`);
+        return 0;
       }
       return await storageSweepCommand(parsed.dryRun, db, config, env, out, opts);
     }
