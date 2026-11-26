@@ -10,7 +10,8 @@
 //
 // Rules this file keeps, each with a test in test/node-mail-thread.test.ts:
 // - The settings, the password with them, go to the worker once, when it is made, in its
-//   workerData. A message to the worker holds an id and the mail (to, subject, text); a
+//   workerData. A message to the worker holds an id and the mail (to, subject, text, and
+//   since 0.1.66 the HTML part and its pictures when the mail has them); a
 //   message back holds the id and either ok or a fixed reason and a yes or no, except the
 //   worker's first, `{ ready: true }`, which says it loaded and serves mail. Nothing a
 //   server said, no setting and no password ever comes back, and an error the worker
@@ -29,7 +30,7 @@
 //   or stopped before it said it was ready) is said in one fixed line on this side,
 //   startFailedLine, so the log never makes it look as if a mail server refused.
 import { Worker } from "node:worker_threads";
-import type { Mail, Mailer } from "../mail.ts";
+import type { InlinePicture, Mail, Mailer } from "../mail.ts";
 import { SMTP_LIMITS, SmtpError, type SmtpReason, type SmtpSettings } from "./smtp.ts";
 
 /** The most mails that wait for the one being sent. One more is refused at once, and not sent. */
@@ -56,8 +57,20 @@ export const MAIL_WORKER_URL = new URL(`./mail-worker${import.meta.url.endsWith(
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object";
 
-/** What goes to the worker: an id and one mail. */
-export type MailRequest = { id: number; to: string; subject: string; text: string };
+/** What goes to the worker: an id and one mail, with its HTML part and pictures when it has them (0.1.66). */
+export type MailRequest = { id: number; to: string; subject: string; text: string; html?: string; inline?: InlinePicture[] };
+
+/** A copy of the mail's own fields, and only those: the HTML part and the pictures only when the mail has them. */
+function mailFields(m: { to: string; subject: string; text: string; html?: unknown; inline?: unknown }): Mail {
+  const mail: Mail = { to: m.to, subject: m.subject, text: m.text };
+  if (m.html !== undefined) mail.html = m.html as string;
+  if (m.inline !== undefined) {
+    mail.inline = Array.isArray(m.inline)
+      ? m.inline.map((p: InlinePicture) => (isRecord(p) ? { cid: p.cid, contentType: p.contentType, name: p.name, bytes: p.bytes instanceof Uint8Array ? new Uint8Array(p.bytes) : p.bytes } : p))
+      : (m.inline as InlinePicture[]);
+  }
+  return mail;
+}
 
 /** What comes back: the id, and ok or one of the client's fixed reasons with whether the message had left. */
 export type MailAnswer = { id: number; ok: true } | { id: number; ok: false; reason: SmtpReason; bodyWritten: boolean };
@@ -133,7 +146,8 @@ export function serveMail(port: MailPort, mailer: Mailer): void {
       answer = { id, ok: false, reason: "refused", bodyWritten: false };
     } else {
       try {
-        await mailer.send({ to: message.to, subject: message.subject, text: message.text });
+        // The SMTP client checks the HTML part and the pictures; a mail without them is the three strings, as before.
+        await mailer.send(mailFields(message as { to: string; subject: string; text: string }));
         answer = { id, ok: true };
       } catch (error) {
         answer = answerFor(id, error);
@@ -331,7 +345,7 @@ export function workerMailer(s: SmtpSettings, options: WorkerMailerOptions = {})
         if (!isRecord(mail) || typeof mail.to !== "string" || typeof mail.subject !== "string" || typeof mail.text !== "string") return reject(notSent());
         if (queue.length >= MAIL_QUEUE_MAX) return reject(notSent());
         lastId += 1;
-        const pending: Pending = { request: { id: lastId, to: mail.to, subject: mail.subject, text: mail.text }, resolve, reject, timer: null };
+        const pending: Pending = { request: { id: lastId, ...mailFields(mail) } as MailRequest, resolve, reject, timer: null };
         pending.timer = setTimeout(() => {
           const at = queue.indexOf(pending);
           if (at < 0) return;

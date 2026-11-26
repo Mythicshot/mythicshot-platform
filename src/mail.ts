@@ -4,8 +4,19 @@
 import { normaliseHost, originOf } from "./hosts.ts";
 import type { Config } from "./ports.ts";
 
-/** One plain-text mail to one recipient. The sender is the mailer's own setting. */
-export type Mail = { to: string; subject: string; text: string };
+/**
+ * A picture carried inside a mail (0.1.66), shown by the HTML part through `cid:<cid>`, so the
+ * mail needs no remote picture and opening it makes no request anywhere. PNG only.
+ */
+export type InlinePicture = { cid: string; contentType: "image/png"; name: string; bytes: Uint8Array };
+
+/**
+ * One mail to one recipient. The sender is the mailer's own setting. `text` is always there;
+ * `html`, when present, is the same mail designed (0.1.66: the storage mail is the first), sent
+ * beside the text as multipart/alternative, with the pictures of `inline` in a multipart/related
+ * part. A mail without `html` goes out exactly as a plain-text mail did before it existed.
+ */
+export type Mail = { to: string; subject: string; text: string; html?: string; inline?: readonly InlinePicture[] };
 
 /**
  * Hands one mail to whatever delivers it. Resolves when it was handed over, rejects
@@ -75,7 +86,7 @@ export function linkOrigin(config: Config): string | null {
 const CODE_CHARS = /^[A-Za-z0-9_-]{1,200}$/;
 
 /** True for exactly what originOf gives for a normalised host: a scheme and a host, nothing after. */
-function isOrigin(origin: unknown): origin is string {
+export function isOrigin(origin: unknown): origin is string {
   if (typeof origin !== "string") return false;
   const match = /^https?:\/\/([^/?#\s]+)$/.exec(origin);
   if (match === null) return false;
@@ -97,7 +108,7 @@ export function signInLink(origin: string, code: string): string {
 }
 
 /** The site name a mail uses: the one given when it is plain, else the default. */
-function siteNameOf(siteName: unknown): string {
+export function siteNameOf(siteName: unknown): string {
   const trimmed = typeof siteName === "string" ? siteName.trim() : "";
   return PLAIN_NAME.test(trimmed) ? trimmed : DEFAULT_SITE_NAME;
 }
@@ -162,8 +173,9 @@ const AT_SIGNS = /[@\uff20\ufe6b]/gu;
  * ` at `, so no mail client links an address or a mail address in it. Only then is a name
  * longer than MAIL_NAME_MAX characters cut there and marked "…". An empty name, or one that
  * is not text, is "(no name)". This is for the mail alone: the dashboard shows a name as it is.
+ * The storage mail (src/storage-mail.ts) puts a workspace's name through it too.
  */
-function lineName(name: unknown): string {
+export function lineName(name: unknown): string {
   const inert = (typeof name === "string" ? name : "")
     .replace(NOT_IN_A_LINE, "\ufffd")
     .replace(QUOTE_LIKE, "'")
