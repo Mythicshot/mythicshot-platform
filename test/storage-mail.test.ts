@@ -421,6 +421,7 @@ describe("the words", () => {
     expect(full.html).not.toContain("subscribe");
     expect(full.html).not.toContain(STORAGE_WORDS.once);
     expect(full.html).toContain(">Nothing left<");
+    expect(full.html).toContain(">See your storage page</a>");
     expect(full.html).toContain("background-color:#b42323;");
     expect(full.html).not.toContain("#f5b841");
 
@@ -495,7 +496,10 @@ describe("the words", () => {
     for (const [label, size] of [["Tours", "52 MB"], ["GIFs", "21 MB"], ["Images", "8 MB"]]) expect(html).toMatch(new RegExp(`>${label}</td><td align="right"[^>]*>${size}</td>`));
     expect(html).not.toContain("Logos");
     expect(html).toContain(`<a href="${ORIGIN}/storage"`);
-    expect(html).toContain(">See what takes the room</a>");
+    expect(html).toContain(">See your storage page</a>");
+    // The button alone changed (owner, 2026-11-26): the plain text keeps its line.
+    expect(html).not.toContain(">See what takes the room</a>");
+    expect(m.text).toContain("See what takes the room, and delete what you no longer need:");
     expect(html).toContain(`${STORAGE_WORDS.once}<br>Example Co · Sometown</td>`);
     // Pictures by Content-ID only, with alt text; nothing that reaches a server when opened.
     expect(html).toContain(`src="cid:${MARK_CID}"`);

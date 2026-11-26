@@ -93,7 +93,7 @@ export const STORAGE_WORDS = {
   lowSentence: "When it is full, new uploads are refused. Everything that is already online keeps working, and nothing is deleted.",
   fullSentence: "New uploads are refused until there is room again. Everything that is already online keeps working, and nothing is deleted.",
   once: "You get this mail once. A second one follows only if the storage fills up completely.",
-  button: "See what takes the room",
+  button: "See your storage page",
   linkLead: "See what takes the room, and delete what you no longer need:",
   // Proposed (not in the mockup): a site without an address for links, as the connection mail does.
   noLink: "To see what takes the room, and delete what you no longer need, open the Storage page of your dashboard.",

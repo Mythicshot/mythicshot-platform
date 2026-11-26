@@ -63,6 +63,7 @@ describe("the storage mail samples", () => {
     for (const [name, m] of [["storage-80-trial", low], ["storage-100-subscribed", full]] as const) {
       expect(previewHtml(m)).not.toContain("cid:");
       expect(previewHtml(m)).toContain(FOOTER);
+      expect(m.html).toContain(">See your storage page</a>");
       expect(buildMessage(m, "no-reply@app.example", AT, messageId(name)).length).toBeGreaterThan(2000);
     }
     if (process.env[SAMPLES_SETTING] !== "1") return;
