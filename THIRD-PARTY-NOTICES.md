@@ -1,6 +1,6 @@
 # Third-party notices
 
-This repository is all rights reserved (see [LICENSE](LICENSE)). The parts below come from other authors and keep their own licences.
+This repository is licensed under the GNU Affero General Public License, version 3 or later (see [LICENSE](LICENSE)). The parts below come from other authors and keep their own licences.
 
 ## Manrope
 
