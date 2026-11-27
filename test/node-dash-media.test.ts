@@ -186,7 +186,7 @@ function holding(held: (req: Fetched) => boolean, rest: Responder): { respond: R
 const SIGNED_OUT: Answer = { status: 401, json: { error: "unauthorized" } };
 const session = (workspace = "Cowfee Raid Tools"): Answer => ({
   status: 200,
-  json: { account: { id: "usr_1", username: "solex", email: "solex@example.com", admin: false }, workspace: { id: "ws_1", name: workspace }, session: { id: "ses_1", created_at: NOW, expires_at: NOW }, csrf: CSRF },
+  json: { account: { id: "usr_1", username: "morgan", email: "morgan@example.com", admin: false }, workspace: { id: "ws_1", name: workspace }, session: { id: "ses_1", created_at: NOW, expires_at: NOW }, csrf: CSRF },
 });
 
 const M1 = "med_" + "1".repeat(24);
@@ -315,7 +315,7 @@ describe("the Images page", () => {
     expect(tab.$("media-in").className).toBe("wide-only");
     expect(tab.shows()).toEqual([
       "Mythicshot",
-      "solex",
+      "morgan",
       "Images",
       "3 images in Cowfee Raid Tools · 2.1 MB used",
       "Copy link",
@@ -336,7 +336,7 @@ describe("the Images page", () => {
     const none = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: list([]) }));
     await none.settle();
     expect([none.$("media-list").shown, none.$("media-hint").shown, none.$("media-empty").shown, none.$("media-more").shown]).toEqual([false, false, true, false]);
-    expect(none.shows()).toEqual(["Mythicshot", "solex", "Images", "0 images in Cowfee Raid Tools · 0 bytes used", "No images yet", "Take a screenshot in Mythicshot and choose Publish to. It shows up here with a link to share."]);
+    expect(none.shows()).toEqual(["Mythicshot", "morgan", "Images", "0 images in Cowfee Raid Tools · 0 bytes used", "No images yet", "Take a screenshot in Mythicshot and choose Publish to. It shows up here with a link to share."]);
 
     // A workspace without a name leaves " in …" out.
     const unnamed = openPage("images", standard("images", { "GET /api/v1/session": session("") }));
@@ -458,7 +458,7 @@ describe("the GIFs page", () => {
     const onlyImages = openPage("gifs", standard("gifs", { [`GET ${GIFS_LIST}`]: list(MOCKUP_IMAGES) }));
     await onlyImages.settle();
     expect(rows(onlyImages)).toEqual([]);
-    expect(onlyImages.shows()).toEqual(["Mythicshot", "solex", "GIFs", "0 GIFs in Cowfee Raid Tools · 0 bytes used", "No GIFs yet", "Record a clip in Mythicshot and choose Publish to. It shows up here with a link to share."]);
+    expect(onlyImages.shows()).toEqual(["Mythicshot", "morgan", "GIFs", "0 GIFs in Cowfee Raid Tools · 0 bytes used", "No GIFs yet", "Record a clip in Mythicshot and choose Publish to. It shows up here with a link to share."]);
     // And the Images page never asks for clips.
     const images = openPage("images", standard("images"));
     await images.settle();

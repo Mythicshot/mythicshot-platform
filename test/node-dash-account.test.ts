@@ -195,7 +195,7 @@ function sessionAnswer(o: { username?: string | null; email?: string; workspace?
   return {
     status: 200,
     json: {
-      account: { id: "usr_x", username: o.username === undefined ? "solex" : o.username, email: o.email ?? "you@example.com", admin: false },
+      account: { id: "usr_x", username: o.username === undefined ? "morgan" : o.username, email: o.email ?? "you@example.com", admin: false },
       workspace: { id: "ws_x", name: o.workspace ?? "Cowfee Raid Tools" },
       session: { id: ME, created_at: day(2026, 11, 2), expires_at: NOW + 1 },
       csrf: CSRF,
@@ -239,9 +239,9 @@ describe("the Account page", () => {
     expect(tab.left()).toBeNull();
     expect(tab.shows()).toEqual([
       "Mythicshot",
-      "solex",
+      "morgan",
       "Account",
-      "Signed in as solex",
+      "Signed in as morgan",
       "Your details",
       "Change",
       "Download all my data",
@@ -258,7 +258,7 @@ describe("the Account page", () => {
     ]);
     // The details, row by row.
     const details = tab.$("h-details").parent!.all().filter((e) => e.className === "row" && e.shown);
-    expect(details.map((r) => r.textContent)).toEqual(["Usernamesolex", "Email addressyou@example.comChange", "WorkspaceCowfee Raid Tools"]);
+    expect(details.map((r) => r.textContent)).toEqual(["Usernamemorgan", "Email addressyou@example.comChange", "WorkspaceCowfee Raid Tools"]);
     expect(tab.$("email-off").shown).toBe(false);
     // Each row's button names its row for a screen reader, by reference; this browser's row has none.
     const rows = sessionRows(tab);
@@ -508,7 +508,7 @@ describe("the Account page", () => {
       await tab.settle();
       expect(tab.$("account").hidden).toBe(false);
       expect([tab.$("account-message").textContent, tab.$("account-message").hidden]).toEqual([text, false]);
-      expect(tab.$("account-who").textContent).toBe("Signed in as solex");
+      expect(tab.$("account-who").textContent).toBe("Signed in as morgan");
     }
     const out = account({}, { sessions: SIGNED_OUT });
     await out.settle();
@@ -565,9 +565,9 @@ describe("the Account page's download card", () => {
     expect(card.shown).toBe(true);
     expect(tab.shows()).toEqual([
       "Mythicshot",
-      "solex",
+      "morgan",
       "Account",
-      "Signed in as solex",
+      "Signed in as morgan",
       "Your details",
       "Change",
       DOWNLOAD_TITLE,
@@ -820,7 +820,7 @@ describe("the page an email-change link opens", () => {
     await tab.settle();
     expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session"]);
     expect(states(tab)).toEqual(["confirm"]);
-    expect(tab.shows()).toEqual(["Mythicshot", "solex", "Confirm your new email address", "Press the button to make this your Mythicshot email address.", "Confirm"]);
+    expect(tab.shows()).toEqual(["Mythicshot", "morgan", "Confirm your new email address", "Press the button to make this your Mythicshot email address.", "Confirm"]);
     // Nothing of the code is on the page or in any request so far.
     expect(tab.doc.root.all().some((e) => e.textContent.includes(CODE) || [...e.attrs.values()].some((v) => v.includes(CODE)))).toBe(false);
     expect(JSON.stringify(tab.fetched)).not.toContain(CODE.slice(4));
@@ -843,7 +843,7 @@ describe("the page an email-change link opens", () => {
     server.answer(confirmed());
     await tab.settle();
     expect(states(tab)).toEqual(["done"]);
-    expect(tab.shows()).toEqual(["Mythicshot", "solex", "Your email address is now new@example.com", "Sign-in links go to this address from now on. We sent a notice to you@example.com."]);
+    expect(tab.shows()).toEqual(["Mythicshot", "morgan", "Your email address is now new@example.com", "Sign-in links go to this address from now on. We sent a notice to you@example.com."]);
     expect([tab.$("done-back").getAttribute("href"), tab.$("done-back").textContent]).toEqual(["/account", "Back to your account"]);
     expect(tab.doc.activeElement?.id).toBe("h-done");
     // The code is forgotten: the hidden button, pressed by any means, sends nothing.
@@ -859,7 +859,7 @@ describe("the page an email-change link opens", () => {
     tab.$("confirm-button").click();
     await tab.settle();
     expect(states(tab)).toEqual(["dead"]);
-    expect(tab.shows()).toEqual(["Mythicshot", "solex", "Confirm your new email address", BAD_CODE, OTHER_ACCOUNT]);
+    expect(tab.shows()).toEqual(["Mythicshot", "morgan", "Confirm your new email address", BAD_CODE, OTHER_ACCOUNT]);
     expect(tab.$("dead").all().filter((e) => e.tagName === "a").map((a) => [a.getAttribute("href"), a.textContent])).toEqual([["/account", "Back to your account"]]);
     expect(tab.doc.activeElement?.id).toBe("h-dead");
     expect(tab.$("confirm-button").disabled).toBe(false);
@@ -953,7 +953,7 @@ describe("the page an email-change link opens", () => {
     await tab.settle();
     // The first press did go through: the session now has the new address.
     expect(states(tab)).toEqual(["done"]);
-    expect(tab.shows()).toEqual(["Mythicshot", "solex", "Your email address is now new@example.com", "Sign-in links go to this address from now on. We sent a notice to you@example.com."]);
+    expect(tab.shows()).toEqual(["Mythicshot", "morgan", "Your email address is now new@example.com", "Sign-in links go to this address from now on. We sent a notice to you@example.com."]);
     expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", "POST /api/v1/account/email/confirm", "POST /api/v1/account/email/confirm", "GET /api/v1/session"]);
     expect(tab.doc.activeElement?.id).toBe("h-done");
   });
@@ -983,13 +983,13 @@ describe("the page an email-change link opens", () => {
     const made = await makeDeps(TWO);
     const { deps, mail } = made;
     await seedAccount(deps, { admin: true, username: "acct-admin" });
-    const owner = await seedAccount(deps, { username: "solex" });
+    const owner = await seedAccount(deps, { username: "morgan" });
     const me = browser(deps);
     await me.signIn(owner.userId);
     const page = me.account();
     await page.settle();
     page.$("email-change").click();
-    page.$("change-email").value = "solex.new@example.com";
+    page.$("change-email").value = "morgan.new@example.com";
     page.$("change-send").click();
     await page.settle();
     await made.settle();
@@ -1014,11 +1014,11 @@ describe("the page an email-change link opens", () => {
     await tab.settle();
     await made.settle();
     expect(tab.$("confirm-message").textContent).toBe(FAILED);
-    expect(await emailOf(deps, owner.userId)).toBe("solex.new@example.com");
+    expect(await emailOf(deps, owner.userId)).toBe("morgan.new@example.com");
     tab.$("confirm-button").click();
     await tab.settle();
     expect(states(tab)).toEqual(["done"]);
-    expect(tab.$("h-done").textContent).toBe("Your email address is now solex.new@example.com");
+    expect(tab.$("h-done").textContent).toBe("Your email address is now morgan.new@example.com");
     expect(tab.$("done-old").textContent).toBe(owner.email);
   });
 
@@ -1078,7 +1078,7 @@ describe("the Account page and the link page against the real app", () => {
     const made = await makeDeps(TWO);
     const { deps, mail } = made;
     await seedAccount(deps, { admin: true, username: "acct-admin" });
-    const owner = await seedAccount(deps, { username: "solex" });
+    const owner = await seedAccount(deps, { username: "morgan" });
     const me = browser(deps);
     await me.signIn(owner.userId);
 
@@ -1087,13 +1087,13 @@ describe("the Account page and the link page against the real app", () => {
     expect(page.$("account-email").textContent).toBe(owner.email);
     expect(page.$("email-change").shown).toBe(true);
     page.$("email-change").click();
-    page.$("change-email").value = "Solex.New@Example.com";
+    page.$("change-email").value = "Morgan.New@Example.com";
     page.$("change-send").click();
     await page.settle();
     await made.settle();
-    expect(page.$("sent-title").textContent).toBe("Check solex.new@example.com");
+    expect(page.$("sent-title").textContent).toBe("Check morgan.new@example.com");
     expect(page.$("sent-old").textContent).toBe(owner.email);
-    expect(mail.sent.map((m) => m.to)).toEqual(["solex.new@example.com"]);
+    expect(mail.sent.map((m) => m.to)).toEqual(["morgan.new@example.com"]);
     expect(mail.sent[0].text).toContain("It works once and for 15 minutes, and you need to be signed in to that Mythicshot account when you open it.");
     const link = /https:\/\/app\.example\.com\/account\/email#c=dpe_[0-9a-f]{40}/.exec(mail.sent[0].text)![0];
     // Nothing has changed yet.
@@ -1107,25 +1107,25 @@ describe("the Account page and the link page against the real app", () => {
     opened.$("confirm-button").click();
     await opened.settle();
     await made.settle();
-    expect(opened.shows().slice(-2)).toEqual(["Your email address is now solex.new@example.com", `Sign-in links go to this address from now on. We sent a notice to ${owner.email}.`]);
-    expect(await emailOf(deps, owner.userId)).toBe("solex.new@example.com");
+    expect(opened.shows().slice(-2)).toEqual(["Your email address is now morgan.new@example.com", `Sign-in links go to this address from now on. We sent a notice to ${owner.email}.`]);
+    expect(await emailOf(deps, owner.userId)).toBe("morgan.new@example.com");
     // The old address got the notice, with the new one partly hidden.
     expect(mail.sent.map((m) => [m.to, m.subject])).toEqual([
-      ["solex.new@example.com", "Confirm your new Mythicshot email address"],
+      ["morgan.new@example.com", "Confirm your new Mythicshot email address"],
       [owner.email, "Your Mythicshot email address was changed"],
     ]);
-    expect(mail.sent[1].text).toContain('The email address of the Mythicshot account "solex" was changed to s…@example.com.');
+    expect(mail.sent[1].text).toContain('The email address of the Mythicshot account "morgan" was changed to s…@example.com.');
 
     // Back on the account page, the new address; the same link again is a dead link.
     const back = me.account();
     await back.settle();
-    expect(back.$("account-email").textContent).toBe("solex.new@example.com");
+    expect(back.$("account-email").textContent).toBe("morgan.new@example.com");
     const again = me.link(link);
     await again.settle();
     again.$("confirm-button").click();
     await again.settle();
     expect(states(again)).toEqual(["dead"]);
-    expect(await emailOf(deps, owner.userId)).toBe("solex.new@example.com");
+    expect(await emailOf(deps, owner.userId)).toBe("morgan.new@example.com");
   });
 
   it("the page behaves the same for a free address, one another account has, and the account's own", async () => {
@@ -1133,7 +1133,7 @@ describe("the Account page and the link page against the real app", () => {
       const made = await makeDeps(TWO);
       const { deps, mail } = made;
       await seedAccount(deps, { admin: true, username: "acct-admin" });
-      const owner = await seedAccount(deps, { username: "solex" });
+      const owner = await seedAccount(deps, { username: "morgan" });
       const other = await seedAccount(deps, { username: "someone" });
       const me = browser(deps);
       await me.signIn(owner.userId);
@@ -1173,13 +1173,13 @@ describe("the Account page and the link page against the real app", () => {
     const made = await makeDeps(TWO);
     const { deps, mail } = made;
     await seedAccount(deps, { admin: true, username: "acct-admin" });
-    const owner = await seedAccount(deps, { username: "solex" });
+    const owner = await seedAccount(deps, { username: "morgan" });
     const me = browser(deps);
     await me.signIn(owner.userId);
     const page = me.account();
     await page.settle();
     page.$("email-change").click();
-    page.$("change-email").value = "solex.new@example.com";
+    page.$("change-email").value = "morgan.new@example.com";
     page.$("change-send").click();
     await page.settle();
     await made.settle();
@@ -1201,7 +1201,7 @@ describe("the Account page and the link page against the real app", () => {
     const made = await makeDeps(TWO, { mail: false });
     const { deps } = made;
     await seedAccount(deps, { admin: true, username: "acct-admin" });
-    const owner = await seedAccount(deps, { username: "solex" });
+    const owner = await seedAccount(deps, { username: "morgan" });
     const me = browser(deps);
     await me.signIn(owner.userId);
     const page = me.account();

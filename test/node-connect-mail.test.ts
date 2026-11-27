@@ -112,7 +112,7 @@ describe("the connection mail through the SMTP client", () => {
   it("arrives with the approved subject and text, to the confirming account alone", async () => {
     const made = await site();
     const { server, a } = made;
-    await collect(made, a.userId, "ALEX-DESKTOP");
+    await collect(made, a.userId, "ROBIN-DESKTOP");
     expect(server.sessions).toHaveLength(1);
     expect(server.sessions[0].commands.filter((c) => c.startsWith("RCPT TO:"))).toEqual([`RCPT TO:<${a.email}>`]);
     const mail = stored(server.sessions[0].bodies[0]);
@@ -120,7 +120,7 @@ describe("the connection mail through the SMTP client", () => {
     expect(mail.headers.find(([n]) => n === "To")).toEqual(["To", a.email]);
     expect(mail.text).toBe(
       [
-        'Mythicshot on the computer "ALEX-DESKTOP" was connected to your account on 15 Jan 2027 at 08:00 UTC. It can publish, change and delete everything in your workspace.',
+        'Mythicshot on the computer "ROBIN-DESKTOP" was connected to your account on 15 Jan 2027 at 08:00 UTC. It can publish, change and delete everything in your workspace.',
         "",
         "If that was you, nothing needs to be done.",
         "",

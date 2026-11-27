@@ -212,15 +212,15 @@ describe("the cPanel archive", () => {
       writeFileSync(join(home, "apps", "tours-config.env"), `DATA_DIR=${data}\nSETUP_CODE=made-up-setup-code-0123456789abcdef\nTOURS_HOST=tours.example.com\nAPP_HOST=app.example.com\n`);
       const base: Record<string, string> = {};
       for (const k of ["PATH", "Path", "SystemRoot", "TEMP", "TMP"]) if (process.env[k] !== undefined) base[k] = process.env[k] as string;
-      const r = spawnSync(process.execPath, ["app.cjs", "admin", "--email", "you@example.com", "--username", "alex"], { cwd: app, env: base, encoding: "utf8", timeout: 60_000, windowsHide: true });
+      const r = spawnSync(process.execPath, ["app.cjs", "admin", "--email", "you@example.com", "--username", "robin"], { cwd: app, env: base, encoding: "utf8", timeout: 60_000, windowsHide: true });
       expect(r.stderr).toBe("");
       expect(r.status).toBe(0);
       const out = r.stdout.split("\n");
-      expect(out.slice(0, 4)).toEqual(['The admin account "alex" was created.', "Your tours, their links and your tokens stay exactly as they are.", "", "Open this link within 15 minutes to sign in:"]);
+      expect(out.slice(0, 4)).toEqual(['The admin account "robin" was created.', "Your tours, their links and your tokens stay exactly as they are.", "", "Open this link within 15 minutes to sign in:"]);
       expect(out[4]).toMatch(/^https:\/\/app\.example\.com\/signin\/link#c=dpl_[0-9a-f]{40}$/);
       expect(out.slice(5)).toEqual([""]);
       // Run directly, as in a container, it reads the same settings from the environment.
-      const again = spawnSync(process.execPath, ["dist/node/admin.js", "first-admin", "--email", "you@example.com", "--username", "alex"], { cwd: app, env: { ...base, DATA_DIR: data }, encoding: "utf8", timeout: 60_000, windowsHide: true });
+      const again = spawnSync(process.execPath, ["dist/node/admin.js", "first-admin", "--email", "you@example.com", "--username", "robin"], { cwd: app, env: { ...base, DATA_DIR: data }, encoding: "utf8", timeout: 60_000, windowsHide: true });
       expect(again.stdout).toBe("This site already has an admin. Nothing was changed.\n");
       expect(again.status).toBe(1);
 

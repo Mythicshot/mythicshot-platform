@@ -284,7 +284,7 @@ describe("the Account page and the page an email-change link opens", () => {
     // The script's words are exactly these, and it has no other sentence.
     expect(scriptText(ACCOUNT_JS)).toEqual(ACCOUNT_TEXT);
     expect(ACCOUNT_TEXT.checkBefore + "new@example.com").toBe("Check new@example.com");
-    expect(ACCOUNT_TEXT.signedInAs + "solex").toBe("Signed in as solex");
+    expect(ACCOUNT_TEXT.signedInAs + "morgan").toBe("Signed in as morgan");
     const words = new Set(Object.values(ACCOUNT_TEXT));
     for (const t of scriptStrings(ACCOUNT_JS).filter((t) => /[a-z]/i.test(t) && /\s/.test(t) && t !== "use strict")) expect(words.has(t) || CLASS_NAMES.includes(t), `a text outside TEXT: ${JSON.stringify(t)}`).toBe(true);
     // The busy label, the address check and the failure sentences are the sign-in page's own.

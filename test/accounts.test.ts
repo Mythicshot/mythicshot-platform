@@ -145,7 +145,7 @@ describe("accounts", () => {
     const { deps } = await makeDeps();
     const plain = await seedAccount(deps);
     const named = await seedAccount(deps, { username: "sam" });
-    const admin = await seedAccount(deps, { username: "alex", admin: true });
+    const admin = await seedAccount(deps, { username: "robin", admin: true });
     for (const s of [plain, named, admin]) {
       expect(Object.keys(s).sort()).toEqual(["email", "token", "userId", "workspaceId"]);
       expect(s.userId).toMatch(/^usr_[0-9a-f]{24}$/);
@@ -156,7 +156,7 @@ describe("accounts", () => {
     expect(await deps.db.all("SELECT id, workspace_id, email, username, status, is_admin FROM user ORDER BY created_at, rowid")).toEqual([
       { id: plain.userId, workspace_id: plain.workspaceId, email: plain.email, username: null, status: "active", is_admin: 0 },
       { id: named.userId, workspace_id: named.workspaceId, email: named.email, username: "sam", status: "active", is_admin: 0 },
-      { id: admin.userId, workspace_id: admin.workspaceId, email: admin.email, username: "alex", status: "active", is_admin: 1 },
+      { id: admin.userId, workspace_id: admin.workspaceId, email: admin.email, username: "robin", status: "active", is_admin: 1 },
     ]);
     expect(new Set([plain.email, named.email, admin.email]).size).toBe(3);
   });
@@ -172,9 +172,9 @@ describe("accounts", () => {
     expect(await accountByEmail(deps, a.email)).toEqual({ id: a.userId, status: "active", admin: false, username: "sam" });
     expect(await accountByEmail(deps, "c@example.com")).toMatchObject({ status: "active", admin: false, username: null });
 
-    const boss = await seedAccount(deps, { username: "alex", admin: true });
+    const boss = await seedAccount(deps, { username: "robin", admin: true });
     expect(await hasAdmin(deps)).toBe(true);
-    expect(await accountByEmail(deps, boss.email)).toEqual({ id: boss.userId, status: "active", admin: true, username: "alex" });
+    expect(await accountByEmail(deps, boss.email)).toEqual({ id: boss.userId, status: "active", admin: true, username: "robin" });
     expect(await accountByEmail(deps, a.email)).toMatchObject({ admin: false });
 
     // A stranger, and an address that only differs in case from a stored one: the lookup is exact.
@@ -322,7 +322,7 @@ describe("accounts", () => {
     // An account, a workspace and a subject are named by id and by nothing else: a prefix of
     // two to four lowercase letters, an underscore and 24 lowercase hex characters.
     const HEX = "0123456789abcdef01234567";
-    for (const id of ["", "usr_1", "ses_1", "usr_" + HEX.slice(1), "usr_" + HEX + "0", "USR_" + HEX, "usr_" + HEX.toUpperCase(), "u_" + HEX, "users_" + HEX, "usr-" + HEX, HEX, " usr_" + HEX, "usr_" + HEX + "\n", "owner", "alex"]) {
+    for (const id of ["", "usr_1", "ses_1", "usr_" + HEX.slice(1), "usr_" + HEX + "0", "USR_" + HEX, "usr_" + HEX.toUpperCase(), "u_" + HEX, "users_" + HEX, "usr-" + HEX, HEX, " usr_" + HEX, "usr_" + HEX + "\n", "owner", "robin"]) {
       for (const field of ["userId", "workspaceId", "subject"]) {
         expect(() => auditStatement(deps, { event: "signin", [field]: id }), `${field} ${JSON.stringify(id)}`).toThrow("audit: a value that must not be recorded");
       }

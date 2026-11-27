@@ -148,7 +148,7 @@ function answers(table: Record<string, Answer | Answer[]>): Responder {
 const SIGNED_OUT: Answer = { status: 401, json: { error: "unauthorized" } };
 const session = (workspace = "Cowfee Raid Tools"): Answer => ({
   status: 200,
-  json: { account: { id: "usr_1", username: "solex", email: "solex@example.com", admin: false }, workspace: { id: "ws_1", name: workspace }, session: { id: "ses_1", created_at: 0, expires_at: 0 }, csrf: CSRF },
+  json: { account: { id: "usr_1", username: "morgan", email: "morgan@example.com", admin: false }, workspace: { id: "ws_1", name: workspace }, session: { id: "ses_1", created_at: 0, expires_at: 0 }, csrf: CSRF },
 });
 type UsageNumbers = { pictures: number; logos: number; uploads: number; allowance: number | null; tours: number; imageBytes?: number; gifBytes?: number; images?: number; gifs?: number };
 const usage = (n: UsageNumbers): Answer => {
@@ -235,7 +235,7 @@ describe("the Storage page", () => {
     expect(tab.$("largest").shown).toBe(true);
     expect(tab.shows()).toEqual([
       "Mythicshot",
-      "solex",
+      "morgan",
       "Storage",
       "Cowfee Raid Tools",
       "1.2 GB of 5 GB used · 48 images · 9 GIFs · 12 tours",

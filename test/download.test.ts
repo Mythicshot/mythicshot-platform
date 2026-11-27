@@ -119,7 +119,7 @@ describe("DOWNLOAD_URL", () => {
 describe("the session answer's download_url", () => {
   async function sessionOf(config: Record<string, unknown>) {
     const { deps } = await makeDeps({ ...TWO, ...config });
-    const a = await seedAccount(deps, { username: "solex", admin: true });
+    const a = await seedAccount(deps, { username: "morgan", admin: true });
     const made = await redeemSignInCode(deps, await createSignInCode(deps, a.userId), "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0", null);
     return send(deps, "GET", "/api/v1/session", { origin: APP, headers: { cookie: `${SESSION_COOKIE}=${made!.secret}` } });
   }

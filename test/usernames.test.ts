@@ -19,12 +19,12 @@ describe("usernames", () => {
     expect(USERNAME_MAX).toBe(30);
     for (const name of [
       "abc",
-      "alex",
+      "robin",
       "a1b",
       "a-b",
       "a12",
       "x-1",
-      "alex-the-2nd",
+      "robin-the-2nd",
       "a-b-c-d-e-f",
       "raid-leader-42",
       "a".repeat(30),
@@ -40,30 +40,30 @@ describe("usernames", () => {
       expect(parseUsername(name), name).toEqual(taken(name));
     }
     // Only the two documented keys, and the name exactly as stored.
-    expect(Object.keys(parseUsername("alex")).sort()).toEqual(["ok", "username"]);
+    expect(Object.keys(parseUsername("robin")).sort()).toEqual(["ok", "username"]);
     expect(Object.keys(parseUsername("-")).sort()).toEqual(["ok", "problem"]);
   });
 
   it("capitals and outer spaces are lowered and trimmed", () => {
-    expect(parseUsername("Alex")).toEqual(taken("alex"));
-    expect(parseUsername("ALEX-THE-2ND")).toEqual(taken("alex-the-2nd"));
-    expect(parseUsername("  alex  ")).toEqual(taken("alex"));
-    expect(parseUsername("\t Alex-1 \r\n")).toEqual(taken("alex-1"));
+    expect(parseUsername("Robin")).toEqual(taken("robin"));
+    expect(parseUsername("ROBIN-THE-2ND")).toEqual(taken("robin-the-2nd"));
+    expect(parseUsername("  robin  ")).toEqual(taken("robin"));
+    expect(parseUsername("\t Robin-1 \r\n")).toEqual(taken("robin-1"));
     // The length is measured after trimming.
     expect(parseUsername("  " + "A".repeat(30) + "  ")).toEqual(taken("a".repeat(30)));
     expect(parseUsername("   ab   ")).toEqual(SHAPE);
     expect(parseUsername(" ".repeat(40))).toEqual(SHAPE);
     // Space, tab, CR and LF are the only outer characters dropped.
-    expect(parseUsername(" \t\r\n alex \n\r\t ")).toEqual(taken("alex"));
+    expect(parseUsername(" \t\r\n robin \n\r\t ")).toEqual(taken("robin"));
     for (const outer of ["\u00a0", "\ufeff", "\u2028", "\u2029", "\u3000", "\u000b", "\u000c", "\u0085", "\u1680", "\u2003", "\u202f", "\u205f", "\u200b", "\u0000"]) {
-      expect(parseUsername(outer + "alex"), JSON.stringify(outer)).toEqual(SHAPE);
-      expect(parseUsername("alex" + outer), JSON.stringify(outer)).toEqual(SHAPE);
-      expect(parseUsername(" " + outer + "alex" + outer + " "), JSON.stringify(outer)).toEqual(SHAPE);
+      expect(parseUsername(outer + "robin"), JSON.stringify(outer)).toEqual(SHAPE);
+      expect(parseUsername("robin" + outer), JSON.stringify(outer)).toEqual(SHAPE);
+      expect(parseUsername(" " + outer + "robin" + outer + " "), JSON.stringify(outer)).toEqual(SHAPE);
       expect(parseUsername(outer + "admin"), JSON.stringify(outer)).toEqual(SHAPE);
     }
     // Trimming does not uncover a hyphen rule.
-    expect(parseUsername(" -alex ")).toEqual(SHAPE);
-    expect(parseUsername(" alex- ")).toEqual(SHAPE);
+    expect(parseUsername(" -robin ")).toEqual(SHAPE);
+    expect(parseUsername(" robin- ")).toEqual(SHAPE);
   });
 
   it("a digit or hyphen first, a hyphen last, two hyphens, a dot, an underscore, a space inside, a non-ASCII letter, 2 and 31 characters are refused", () => {
@@ -77,14 +77,14 @@ describe("usernames", () => {
       "a---b",
       "a-b--c",
       "a.b",
-      "alex.smith",
+      "robin.smith",
       "a_b",
       "_abc",
       "a b",
-      "al ex",
+      "ro bin",
       "a\tb",
-      "al\nex",
-      "alex\nadmin",
+      "ro\nbin",
+      "robin\nadmin",
       "ab",
       "a",
       "",
@@ -93,38 +93,38 @@ describe("usernames", () => {
       "a".repeat(30) + "-",
       "a" + "-b".repeat(15),
       // Non-ASCII letters, including the ones that read as ASCII or lowercase into it.
-      "alex\u00e9", // \u00e9
-      "\u00e9lex",
+      "robin\u00e9", // \u00e9
+      "\u0155obin",
       "\u0430dmin", // Cyrillic \u0430
       "\u0251dmin", // Latin alpha
       "adm\u0131n", // dotless i
       "ADM\u0130N", // capital dotted I: lowercases to i plus a combining dot
       "\u212aelvin", // Kelvin sign: lowercases to k
       "kelvin\u212a",
-      "\uff41lex", // fullwidth a
-      "\uff21lex", // fullwidth A
-      "ale\u03c7", // Greek chi
+      "\uff52obin", // fullwidth r
+      "\uff32obin", // fullwidth R
+      "r\u03bfbin", // Greek omicron
       "stra\u00dfe", // \u00df
-      "a\u0301lex", // a plus a combining accent
-      "alex\u200b", // zero-width space
-      "al\u200dex", // zero-width joiner
-      "al\u00adex", // soft hyphen
-      "alex\u202e", // right-to-left override
+      "ro\u0301bin", // o plus a combining accent
+      "robin\u200b", // zero-width space
+      "ro\u200dbin", // zero-width joiner
+      "ro\u00adbin", // soft hyphen
+      "robin\u202e", // right-to-left override
       "a\u2010b", // Unicode hyphen
       "a\u2013b", // en dash
       "a\u2212b", // minus sign
-      "al\u00a0ex", // no-break space inside
+      "ro\u00a0bin", // no-break space inside
       "\ud83d\ude00abc", // emoji
       "abc\ud83d", // a lone surrogate
-      "alex\u0000",
-      "\u0000alex",
-      "al\u0000ex",
+      "robin\u0000",
+      "\u0000robin",
+      "ro\u0000bin",
       // Punctuation that means something in a path, a host, a mail address or markup.
       "a/b",
       "a\\b",
       "../abc",
       "a@b",
-      "alex@example.com",
+      "robin@example.com",
       "a:b",
       "a%2db",
       "a+b",
@@ -189,22 +189,22 @@ describe("usernames", () => {
       NaN,
       Infinity,
       10n ** 20n,
-      Symbol("alex"),
+      Symbol("robin"),
       Symbol.iterator,
       [],
-      ["alex"],
-      ["a", "l", "e", "x"],
+      ["robin"],
+      ["r", "o", "b", "i", "n"],
       {},
-      { username: "alex" },
-      { toString: () => "alex" },
-      { length: 4, trim: () => "alex", toLowerCase: () => "alex" },
-      new String("alex"),
+      { username: "robin" },
+      { toString: () => "robin" },
+      { length: 5, trim: () => "robin", toLowerCase: () => "robin" },
+      new String("robin"),
       Object.create(null),
-      () => "alex",
+      () => "robin",
       new Date(0),
-      /alex/,
+      /robin/,
       new Map(),
-      new Uint8Array([97, 108, 101, 120]),
+      new Uint8Array([114, 111, 98, 105, 110]),
       hostile,
       trapped,
     ];
@@ -235,11 +235,11 @@ describe("usernames", () => {
     // A generous bound: each case is one pass over the text, never a search that backs up.
     expect(Date.now() - started).toBeLessThan(5000);
     // Outer characters that are not dropped, in bulk.
-    expect(parseUsername("\u00a0".repeat(1_000_000) + "alex")).toEqual(SHAPE);
-    expect(parseUsername("alex" + "\t\r\n ".repeat(500_000))).toEqual(taken("alex"));
+    expect(parseUsername("\u00a0".repeat(1_000_000) + "robin")).toEqual(SHAPE);
+    expect(parseUsername("robin" + "\t\r\n ".repeat(500_000))).toEqual(taken("robin"));
     expect(parseUsername("\n".repeat(2_000_000) + "a" + "\n".repeat(2_000_000) + "b" + "\n".repeat(2_000_000))).toEqual(SHAPE);
     // Outer spaces alone never make a name too long.
-    expect(parseUsername(" ".repeat(100_000) + "Alex" + " ".repeat(100_000))).toEqual(taken("alex"));
+    expect(parseUsername(" ".repeat(100_000) + "Robin" + " ".repeat(100_000))).toEqual(taken("robin"));
   });
 
   it("every reserved name is refused, also in capitals", () => {
@@ -400,13 +400,13 @@ describe("usernames", () => {
   it("the same input always gives the same answer", () => {
     // No state is kept between calls, as a global or sticky pattern would keep.
     for (let i = 0; i < 5; i++) {
-      expect(parseUsername("alex")).toEqual(taken("alex"));
-      expect(parseUsername("al ex")).toEqual(SHAPE);
+      expect(parseUsername("robin")).toEqual(taken("robin"));
+      expect(parseUsername("ro bin")).toEqual(SHAPE);
       expect(parseUsername("admin")).toEqual(RESERVED_ANSWER);
     }
     // An answer the caller changes does not change the next one.
-    const first = parseUsername("alex") as { ok: true; username: string };
+    const first = parseUsername("robin") as { ok: true; username: string };
     first.username = "admin";
-    expect(parseUsername("alex")).toEqual(taken("alex"));
+    expect(parseUsername("robin")).toEqual(taken("robin"));
   });
 });

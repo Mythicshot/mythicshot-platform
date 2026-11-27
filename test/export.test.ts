@@ -122,7 +122,7 @@ async function full(deps: Deps, a: Acct, fill = 0) {
 describe("Download all my data: the zip", () => {
   it("an empty workspace gives a zip of the two lists alone, with the download's headers", async () => {
     const { deps } = await clocked();
-    const a = await account(deps, { username: "solex" });
+    const a = await account(deps, { username: "morgan" });
     const { file } = await download(deps, a.session);
     expect(file.headers.get("content-disposition")).toBe(`attachment; filename="${EXPORT_FILE_NAME}"`);
     expect(file.headers.get("cache-control")).toBe("no-store");
@@ -132,7 +132,7 @@ describe("Download all my data: the zip", () => {
     const list = JSON.parse(text(zip.entries[1].bytes));
     expect(list).toEqual({
       exported_at: new Date(T0).toISOString(),
-      account: { email: a.email, username: "solex" },
+      account: { email: a.email, username: "morgan" },
       workspace: { name: "Account" },
       tours: [],
       images: [],
@@ -140,7 +140,7 @@ describe("Download all my data: the zip", () => {
       not_included: [],
     });
     const readme = text(zip.entries[0].bytes);
-    expect(readme).toContain(`Account: ${a.email} (username solex)`);
+    expect(readme).toContain(`Account: ${a.email} (username morgan)`);
     expect(readme).toContain("Workspace: Account");
     expect(readme).toContain("Tours (0)\r\n\r\nNone.");
   });

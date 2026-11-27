@@ -54,12 +54,12 @@ async function signIn(deps: Deps, userId: string): Promise<Signed> {
   return { ...made, cookie: `${SESSION_COOKIE}=${made.secret}`, csrf: await csrfFor(made.secret) };
 }
 
-/** A site with a clock the test moves, a signed-in admin called "solex" and a member. */
+/** A site with a clock the test moves, a signed-in admin called "morgan" and a member. */
 async function site(config: Partial<Config> = TWO, opts: MakeOptions & { adminName?: string | null } = {}) {
   const made = await makeDeps(config, opts);
   const clock = { now: NOW };
   made.deps.now = () => clock.now;
-  const admin = await seedAccount(made.deps, { admin: true, username: opts.adminName === null ? undefined : (opts.adminName ?? "solex") });
+  const admin = await seedAccount(made.deps, { admin: true, username: opts.adminName === null ? undefined : (opts.adminName ?? "morgan") });
   const member = await seedAccount(made.deps, { username: "tess" });
   const adminSession = await signIn(made.deps, admin.userId);
   const memberSession = await signIn(made.deps, member.userId);
@@ -144,11 +144,11 @@ describe("the invite mail", () => {
   it("is the mockup's text, with the inviter's username, the link once and the date in UTC", () => {
     const link = inviteLink(APP, "dpi_" + "a".repeat(40));
     expect(link).toBe(`${APP}/invite#dpi_${"a".repeat(40)}`);
-    expect(inviteMail(MARA, "solex", link, Date.UTC(2026, 10, 27, 23, 59))).toEqual({
+    expect(inviteMail(MARA, "morgan", link, Date.UTC(2026, 10, 27, 23, 59))).toEqual({
       to: MARA,
       subject: "You are invited to Mythicshot",
       text: [
-        "solex invited you to Mythicshot, a tool for sharing screenshots, clips and click-through tours.",
+        "morgan invited you to Mythicshot, a tool for sharing screenshots, clips and click-through tours.",
         "",
         "Open this link to choose a username and get started:",
         "",
@@ -162,7 +162,7 @@ describe("the invite mail", () => {
 
   it("names nobody when the inviter has no username, or one that is not a stored username's shape", () => {
     const link = inviteLink(APP, "dpi_" + "b".repeat(40));
-    for (const inviter of [null, "", "Solex", "a b", "x".repeat(31), "evil\ninjected"]) {
+    for (const inviter of [null, "", "Morgan", "a b", "x".repeat(31), "evil\ninjected"]) {
       const mail = inviteMail(MARA, inviter, link, NOW);
       expect(mail.text.split("\n")[0], String(inviter)).toBe("You are invited to Mythicshot, a tool for sharing screenshots, clips and click-through tours.");
       expect(mail.subject).toBe("You are invited to Mythicshot");
@@ -196,7 +196,7 @@ describe("sending an invite", () => {
       to: MARA,
       subject: "You are invited to Mythicshot",
       text: [
-        "solex invited you to Mythicshot, a tool for sharing screenshots, clips and click-through tours.",
+        "morgan invited you to Mythicshot, a tool for sharing screenshots, clips and click-through tours.",
         "",
         "Open this link to choose a username and get started:",
         "",
@@ -444,7 +444,7 @@ describe("the admin's list, resend and cancel", () => {
     const code = codeIn(mail.sent[1].text);
     expect(mail.sent[1].text).toContain("until 30 Jan 2027");
     expect(seen(await check(deps, first.code)).body).toBe(INVALID);
-    expect((await check(deps, code)).json).toEqual({ email: MARA, invited_by: "solex", expires_at: NOW + 15 * DAY });
+    expect((await check(deps, code)).json).toEqual({ email: MARA, invited_by: "morgan", expires_at: NOW + 15 * DAY });
     expect((await audits(deps, "invite_resent")).map((a) => [a.user_id, a.workspace_id, a.subject])).toEqual([[admin.userId, admin.workspaceId, first.id]]);
   });
 
@@ -522,7 +522,7 @@ describe("looking an invite up", () => {
     const { code } = await invited(deps, mail, adminSession, MARA);
     const before = await rows(deps);
     const r = await check(deps, code);
-    expect(seen(r)).toEqual({ status: 200, headers: API_HEADERS, body: JSON.stringify({ email: MARA, invited_by: "solex", expires_at: NOW + INVITE_MS }) });
+    expect(seen(r)).toEqual({ status: 200, headers: API_HEADERS, body: JSON.stringify({ email: MARA, invited_by: "morgan", expires_at: NOW + INVITE_MS }) });
     expect(r.headers.getSetCookie()).toEqual([]);
     expect(await rows(deps)).toEqual(before);
     // Looked up again, it still works.
@@ -671,7 +671,7 @@ describe("accepting an invite", () => {
   it("refuses a username that is taken, and the invite stays usable", async () => {
     const { deps, mail, adminSession } = await site();
     const { code } = await invited(deps, mail, adminSession, MARA);
-    for (const name of ["tess", "solex", "TESS"]) expect(seen(await accept(deps, code, name)), name).toEqual({ status: 409, headers: API_HEADERS, body: TAKEN });
+    for (const name of ["tess", "morgan", "TESS"]) expect(seen(await accept(deps, code, name)), name).toEqual({ status: 409, headers: API_HEADERS, body: TAKEN });
     expect(await countOf(deps, "user")).toBe(2);
     expect((await accept(deps, code, "mara")).status).toBe(200);
   });

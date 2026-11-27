@@ -41,9 +41,9 @@ describe("the shared script", () => {
   });
 
   it("fills the username with text, shows Admin only for an admin, and every request goes to this site with the session", async () => {
-    const member = openTours(standard({ "GET /api/v1/session": session({ username: "<b>solex</b>" }) }));
+    const member = openTours(standard({ "GET /api/v1/session": session({ username: "<b>morgan</b>" }) }));
     await member.settle();
-    expect(member.$("dash-user").textContent).toBe("<b>solex</b>");
+    expect(member.$("dash-user").textContent).toBe("<b>morgan</b>");
     expect(member.$("dash-user").children.every((c) => !(c instanceof FakeElement))).toBe(true);
     expect(member.$("tab-admin").hidden).toBe(true);
     for (const f of member.fetched) {
@@ -63,7 +63,7 @@ describe("the shared script", () => {
       const noName = openTours(standard({ "GET /api/v1/session": session({ username }) }));
       await noName.settle();
       expect(noName.$("dash-user").textContent, String(username)).toBe("Account");
-      expect(noName.doc.root.textContent, String(username)).not.toContain("solex@example.com");
+      expect(noName.doc.root.textContent, String(username)).not.toContain("morgan@example.com");
     }
   });
 
@@ -185,7 +185,7 @@ describe("the Tours page", () => {
     expect(none.$("tours-hint").shown).toBe(false);
     expect(none.shows()).toEqual([
       "Mythicshot",
-      "solex",
+      "morgan",
       "Tours",
       "0 tours in Cowfee Raid Tools · 0 bytes used",
       "No tours yet",

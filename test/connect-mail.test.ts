@@ -99,8 +99,8 @@ function recordKinds(deps: Deps): string[] {
 
 describe("the mail's text", () => {
   it("is the approved wording: the subject, the device's name in quotes, the day and time in UTC, and the Connections page", () => {
-    const mail = connectedMail("ada@example.com", "ALEX-DESKTOP", NOW, APP);
-    expect(mail).toEqual({ to: "ada@example.com", subject: SUBJECT, text: withLink("ALEX-DESKTOP", WHEN, APP) });
+    const mail = connectedMail("ada@example.com", "ROBIN-DESKTOP", NOW, APP);
+    expect(mail).toEqual({ to: "ada@example.com", subject: SUBJECT, text: withLink("ROBIN-DESKTOP", WHEN, APP) });
     // A day of one digit has no zero before it; hours and minutes always have two digits.
     expect(connectedMail("ada@example.com", "x", Date.UTC(2026, 10, 5, 4, 7, 59), APP).text).toContain(" on 5 Nov 2026 at 04:07 UTC.");
     expect(connectedMail("ada@example.com", "x", Date.UTC(2026, 11, 31, 23, 59), APP).text).toContain(" on 31 Dec 2026 at 23:59 UTC.");
@@ -180,7 +180,7 @@ describe("the mail's text", () => {
     const quotes = ['"', "\u201c", "\u201d", "\u201e", "\u201f", "\u2018", "\u2019", "\u00ab", "\u00bb", "\u2039", "\u203a", "\u2e02", "\uff02", "\uff07", "\u2033", "\u2036", "\u02ba", "\u02dd", "\u02ee", "\u3003", "\u301d", "\u301e", "\u301f", "\u275d", "\u275e"];
     for (const q of quotes) expect(shown(`a${q}b`), q).toBe("a'b");
     // Ordinary names are shown as they are.
-    for (const name of ["ALEX-DESKTOP", "Mara's laptop", "Work laptop", "Büro-PC 2", "Lenovo T14 (home)"]) expect(shown(name)).toBe(name);
+    for (const name of ["ROBIN-DESKTOP", "Mara's laptop", "Work laptop", "Büro-PC 2", "Lenovo T14 (home)"]) expect(shown(name)).toBe(name);
     // The cut at 60 characters comes after the replacements.
     expect(shown("@".repeat(30))).toBe(" at ".repeat(30).trim().slice(0, 60) + "…");
     expect([...shown("a@".repeat(30))].length).toBe(61);

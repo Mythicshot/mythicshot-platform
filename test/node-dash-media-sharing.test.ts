@@ -25,7 +25,7 @@ type Which = "images" | "gifs";
 const M1 = "med_" + "1".repeat(24);
 const M2 = "med_" + "2".repeat(24);
 const M3 = "med_" + "3".repeat(24);
-const MAIL = "solex@example.com";
+const MAIL = "morgan@example.com";
 const LIST = ["bram@example.com", "mara@example.com", "rook@example.com", "tess@example.com"];
 
 /** Each page: its document and script, its kind and the words that name its items. */

@@ -146,7 +146,7 @@ describe("the invites: the list", () => {
     }
     // An invites route that answers 404 means this session is no admin: the missing page.
     const gone = await opened(standard({ "GET /api/v1/admin/invites": NOT_FOUND }));
-    expect(gone.shows()).toEqual(["Mythicshot", "solex", "Page not found", "Back to Tours"]);
+    expect(gone.shows()).toEqual(["Mythicshot", "morgan", "Page not found", "Back to Tours"]);
   });
 
   it("shows addresses holding markup, quotes, right-to-left letters and great length as text, each in its own isolated element", async () => {
@@ -318,7 +318,7 @@ describe("the invites: sending one", () => {
     type(gone, "tess@example.com", "invite-email");
     gone.$("invite-go").click();
     await gone.settle();
-    expect(gone.shows()).toEqual(["Mythicshot", "solex", "Page not found", "Back to Tours"]);
+    expect(gone.shows()).toEqual(["Mythicshot", "morgan", "Page not found", "Back to Tours"]);
   });
 });
 
@@ -479,7 +479,7 @@ describe("each account's More menu", () => {
     const otherAdmin = account(U3, W3, { username: "bram", admin: true });
     const tab = await opened(standard({ "GET /api/v1/admin/accounts": list([MOCKUP[0], TESS, ROOK, deleting, odd, otherAdmin]) }));
     expect(rows(tab).map((r) => [rowOf(r).name, rowOf(r).tags, entries(r)])).toEqual([
-      ["solex", ["Admin"], ["Set allowance"]],
+      ["morgan", ["Admin"], ["Set allowance"]],
       ["tess", [], ["Set allowance", "Disable"]],
       ["rook", ["Disabled"], ["Set allowance", "Enable", "Delete"]],
       ["vale", ["Deleting"], ["Delete"]],
@@ -495,7 +495,7 @@ describe("each account's More menu", () => {
 
   it("with no account id of the API's shape in the session, no row offers Disable, Enable or Delete", async () => {
     for (const id of ["usr_1", null, 7]) {
-      const tab = await opened(standard({ "GET /api/v1/session": session(true, "solex", id), "GET /api/v1/admin/accounts": list([MOCKUP[0], TESS, ROOK]) }));
+      const tab = await opened(standard({ "GET /api/v1/session": session(true, "morgan", id), "GET /api/v1/admin/accounts": list([MOCKUP[0], TESS, ROOK]) }));
       expect(rows(tab).map(entries), String(id)).toEqual([["Set allowance"], ["Set allowance"], ["Set allowance"]]);
     }
   });
@@ -776,7 +776,7 @@ describe("deleting an account", () => {
     // Each call carried the row's id and the name typed, with the anti-forgery header.
     expect(deletes(tab).map((f) => [f.headers["X-Csrf-Token"], f.body])).toEqual(Array(3).fill([CSRF, '{"username":"rook"}']));
     expect(tab.$("delete-dialog").hidden).toBe(true);
-    expect(rows(tab).map((r) => rowOf(r).name)).toEqual(["solex"]);
+    expect(rows(tab).map((r) => rowOf(r).name)).toEqual(["morgan"]);
     expect(tab.$("admin-summary").textContent).toBe("1 account · 1 byte used in all · standard allowance 5 GB");
     expect(noteOf(tab, "admin-note")).toEqual(["rook was deleted.", "note"]);
     expect(tab.doc.activeElement).toBe(tab.$("h-accounts"));
@@ -801,12 +801,12 @@ describe("deleting an account", () => {
     expect(tab.$("delete-dialog").shown).toBe(true);
     held[0](list([vale]));
     await tab.settle();
-    expect(rows(tab).map((r) => rowOf(r).name)).toEqual(["solex", "rook", "vale"]);
+    expect(rows(tab).map((r) => rowOf(r).name)).toEqual(["morgan", "rook", "vale"]);
     type(tab, "rook", "delete-input");
     tab.$("delete-go").click();
     await drain(tab);
     // Interrupted; the list read again now has another account where rook was.
-    expect(rows(tab).map((r) => rowOf(r).name)).toEqual(["vale", "solex", "rook"]);
+    expect(rows(tab).map((r) => rowOf(r).name)).toEqual(["vale", "morgan", "rook"]);
     expect(tab.$("delete-dialog").shown).toBe(true);
     tab.$("delete-go").click();
     await drain(tab);
@@ -1012,7 +1012,7 @@ describe("deleting an account", () => {
     const gone = await openDelete({ [REMOVAL]: NOT_FOUND, "GET /api/v1/admin/accounts": [withRook, withoutRook] });
     // Gone: the list shows it, and there is nothing to say.
     expect([gone.$("delete-dialog").hidden, gone.$("admin-message").shown]).toEqual([true, false]);
-    expect(rows(gone).map((r) => rowOf(r).name)).toEqual(["solex"]);
+    expect(rows(gone).map((r) => rowOf(r).name)).toEqual(["morgan"]);
     const out = await openDelete({ [REMOVAL]: SIGNED_OUT });
     expect(out.left()).toBe("/signin");
     // While it is read, no menu opens and nothing else starts.
@@ -1050,7 +1050,7 @@ describe("the Admin page for a member learns nothing new", () => {
     const notAdmin = openAdmin(standard({ "GET /api/v1/admin/accounts": NOT_FOUND }));
     await notAdmin.settle();
     expect(notAdmin.fetched.map((f) => f.path)).not.toContain("/api/v1/admin/invites");
-    expect(notAdmin.shows()).toEqual(["Mythicshot", "solex", "Page not found", "Back to Tours"]);
+    expect(notAdmin.shows()).toEqual(["Mythicshot", "morgan", "Page not found", "Back to Tours"]);
   });
 });
 

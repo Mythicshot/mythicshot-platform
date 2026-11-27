@@ -262,7 +262,7 @@ describe("the dashboard while the terms wait", () => {
   });
 
   it("the Account page shows the line on the terms agreed to, and no line without one", async () => {
-    const session = (extra: Record<string, unknown>): Answer => ({ status: 200, json: { account: { id: "usr_x", username: "solex", email: "you@example.com", admin: false }, workspace: { id: "ws_x", name: "W" }, session: { id: "ses_" + "a".repeat(24), created_at: NOW, expires_at: NOW + 1 }, csrf: CSRF, email_change: true, ...extra } });
+    const session = (extra: Record<string, unknown>): Answer => ({ status: 200, json: { account: { id: "usr_x", username: "morgan", email: "you@example.com", admin: false }, workspace: { id: "ws_x", name: "W" }, session: { id: "ses_" + "a".repeat(24), created_at: NOW, expires_at: NOW + 1 }, csrf: CSRF, email_change: true, ...extra } });
     const sessions: Answer = { status: 200, json: { sessions: [] } };
     const tab = openPage(ACCOUNT_HTML, [DASH_JS, ACCOUNT_JS], `${APP}/account`, answers({ "GET /api/v1/session": session({ terms_agreed: { version: "21 November 2026", agreed_at: NOW } }), "GET /api/v1/sessions": sessions }));
     await tab.settle();

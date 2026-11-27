@@ -179,7 +179,7 @@ describe("the cPanel startup file run as the admin command", () => {
     const l = layout();
     withAdmin(l);
     writeFileSync(l.settings, [`DATA_DIR=/data/tours`, `SETUP_CODE=${SECRET}`, `APP_HOST="app.example.com"`, `SMTP_PASSWORD=pw with spaces=and+signs`, ""].join("\n"));
-    const args = ["admin", "first-admin", "--email", "You@Example.com", "--username=alex", "a b", ""];
+    const args = ["admin", "first-admin", "--email", "You@Example.com", "--username=robin", "a b", ""];
     const r = start(l.app, {}, args);
     expect(r.stderr).toBe("");
     expect(r.status).toBe(0);

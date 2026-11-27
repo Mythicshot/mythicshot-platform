@@ -188,7 +188,7 @@ export function answers(table: Record<string, Answer | Answer[]>): Responder {
 export const SIGNED_OUT: Answer = { status: 401, json: { error: "unauthorized" } };
 export const session = (account: Record<string, unknown> = {}, workspace = "Cowfee Raid Tools"): Answer => ({
   status: 200,
-  json: { account: { id: "usr_1", username: "solex", email: "solex@example.com", admin: false, ...account }, workspace: { id: "ws_1", name: workspace }, session: { id: "ses_1", created_at: NOW, expires_at: NOW }, csrf: CSRF },
+  json: { account: { id: "usr_1", username: "morgan", email: "morgan@example.com", admin: false, ...account }, workspace: { id: "ws_1", name: workspace }, session: { id: "ses_1", created_at: NOW, expires_at: NOW }, csrf: CSRF },
 });
 export const ME_ONE: Answer = { status: 200, json: { workspace: "Cowfee Raid Tools", version: "0.1.12" } };
 export const meTwo = (tours: string): Answer => ({ status: 200, json: { workspace: "Cowfee Raid Tools", version: "0.1.12", addresses: { tours, app: "app.example.com" } } });
