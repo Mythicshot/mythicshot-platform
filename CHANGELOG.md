@@ -2,6 +2,10 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.67 (2026-11-26)
+
+- The sample names in the tests and in the install scripts' tests are neutral, and the rate test uses another private address. No change to behaviour, the database or any route.
+
 ## 0.1.66 (2026-11-26)
 
 - The low storage mail, the platform's first designed mail. A workspace with an allowance gets one mail when it uses 80% of it ("Your Mythicshot storage is 81% full", the percent rounded down, never 100) and one when it uses all of it ("Your Mythicshot storage is full"), in the approved words, at its own account's address, the one the removal warnings use. A workspace that goes from under 80% straight to 100% or more gets only the full one. Neither comes again until the workspace uses less than 70% of its allowance; then both are armed again. No mail without an allowance (or with one of 0), for a read-only workspace (a trial that is over, an ended subscription), or for an account that is disabled or being removed. Each mail holds its own workspace's name, numbers and address alone.
