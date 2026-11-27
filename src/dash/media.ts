@@ -42,9 +42,11 @@
 //
 // Delete, in More, asks first (Dash.question). While it answers 500 cleanup_pending (the item is
 // deleted; some of its files are not removed yet) it is sent again after a pause, at most
-// MAX_TRIES times in all. 204, 404 (already gone) and cleanup_pending are done, as on the
-// Tours page. When no answer came, the item itself is asked (GET /api/v1/media/<id>): only the
-// API's own 404 not_found means it was deleted; an item still there (online or still being
+// MAX_TRIES times in all. 204, a 404 with the error not_found from this app (already gone) and
+// cleanup_pending are done; once a send answered cleanup_pending the item is done whatever a
+// resend answers, as on the Storage page. When no answer came to a first send, the item itself is
+// asked (GET /api/v1/media/<id>): only a 404 with the error not_found from this app means it was
+// deleted; an item still there (online or still being
 // sent), or no usable answer to that either, is a failure, told with that answer's sentence.
 // The list read again never decides it, because newer items can push a still-online item off
 // the pages shown. However it ends the list is read again (every page shown so far), so the page shows what is true; a
@@ -541,12 +543,8 @@ ${shareViewOf(p.sharing)}
 
   // The ids of the items selected, in the list's order, each once.
   function pickedIds() {
-    return items.filter(function (it, i) { return picked[it.id] === true && indexOfId(it.id) === i; }).map(function (it) { return it.id; });
-  }
-
-  function indexOfId(id) {
-    for (var i = 0; i < items.length; i++) if (items[i].id === id) return i;
-    return -1;
+    // items holds each id once (joined, the one way it is filled).
+    return items.filter(function (it) { return picked[it.id] === true; }).map(function (it) { return it.id; });
   }
 
   // The header's checkbox and words, and the bar; the count is said politely in a line of its
@@ -567,6 +565,8 @@ ${shareViewOf(p.sharing)}
     bar.hidden = n === 0;
     bar.className = k === 0 ? "pick-bar idle" : "pick-bar";
     if (k === 0) {
+      // A focus on the bar's buttons goes to Select all first, never to the document as the bar turns inert.
+      if (bar.contains(document.activeElement)) (n > 0 ? all : $("h-page")).focus();
       bar.setAttribute("inert", "");
       bar.setAttribute("aria-hidden", "true");
     } else {
@@ -742,23 +742,40 @@ ${shareViewOf(p.sharing)}
     return res !== null && res.status === 500 && Dash.errorOf(res) === "cleanup_pending";
   }
 
-  // Sends the delete, again after a pause while it answers cleanup_pending, at most MAX_TRIES times; the last answer.
+  // Sends the delete, again after a pause while it answers cleanup_pending, at most MAX_TRIES
+  // times; the last answer. Once one answered cleanup_pending the item is deleted for everyone,
+  // so a later resend that answers anything but 204 or a not_found, or none, gives that
+  // cleanup_pending instead, as the Storage page does: the page never says it was not deleted.
   function run(id) {
     var tries = 0;
+    var pending = null;
     function send() {
       tries++;
       return Dash.api("DELETE", ITEM + encodeURIComponent(id)).then(function (res) {
-        return cleaning(res) && tries < MAX_TRIES ? pause(PAUSES_MS[tries - 1]).then(send) : res;
+        if (cleaning(res)) {
+          pending = res;
+          return tries < MAX_TRIES ? pause(PAUSES_MS[tries - 1]).then(send) : res;
+        }
+        return pending !== null && res.status !== 204 && !notFound(res) ? pending : res;
+      }, function (err) {
+        if (pending !== null) return pending;
+        throw err;
       });
     }
     return send();
   }
 
+  // A 404 with the error not_found from this app: the item is gone, or never was this workspace's.
+  // A 404 without it (from something in between, say) says nothing about the item.
+  function notFound(res) {
+    return res !== null && res.status === 404 && Dash.errorOf(res) === "not_found";
+  }
+
   // Whether the item is gone (null: no answer came): deleted now (with or without files
-  // left to remove), or already gone, which only the API's own 404 not_found says (as for
-  // itemGone); a 404 from something in between is a failure.
+  // left to remove), or already gone, which only a 404 with the error not_found from this app
+  // says (as for itemGone); any other 404 is a failure.
   function done(res) {
-    return res !== null && (res.status === 204 || (res.status === 404 && Dash.errorOf(res) === "not_found") || cleaning(res));
+    return res !== null && (res.status === 204 || notFound(res) || cleaning(res));
   }
 
   // No answer came to a delete: the item itself decides, not the list (newer items can push a
@@ -896,6 +913,11 @@ ${shareListeners(p.sharing)}    [${shareRepeatIds(p.sharing)}, "delete-keep", "d
           question.busy(false, "delete-go");
           rowsDisabled(false);
           if (got.ok && r === true) clearPicks();
+          // Deleted, but the list as last shown still has it: it leaves the selection all the same.
+          else if (got.ok) {
+            delete picked[it.id];
+            showPicks();
+          }
           if (got.ok) {
             say(r === true ? "" : TEXT.notReloaded);
             $("h-page").focus();

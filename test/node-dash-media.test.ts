@@ -682,7 +682,7 @@ describe("deleting an item", () => {
     for (const b of rowButtons(gone)) expect(b.disabled, b.textContent).toBe(false);
     expect(gone.doc.activeElement).toBe(gone.$("h-page"));
 
-    // A lost answer after a cleanup_pending: the item decides too.
+    // A lost answer after a cleanup_pending: the item was deleted by then (the first answer said so), and nothing is asked, as on the Storage page.
     const later = openPage("images", standard("images", { [`DELETE /api/v1/media/${M1}`]: [{ status: 500, json: { error: "cleanup_pending" } }, "network"], [ITEM_M1]: { status: 404, json: { error: "not_found" } }, [`GET ${IMAGES_LIST}`]: [list(MOCKUP_IMAGES), list(MOCKUP_IMAGES.slice(1))] }));
     await later.settle();
     pressDelete(rows(later)[0]);
@@ -691,7 +691,7 @@ describe("deleting an item", () => {
     later.tick();
     await later.settle();
     expect(deletes(later)).toHaveLength(2);
-    expect(items(later)).toHaveLength(1);
+    expect(items(later)).toHaveLength(0);
     expect(later.$("delete-dialog").hidden).toBe(true);
     expect(rows(later)).toHaveLength(2);
 
@@ -846,8 +846,16 @@ const FIVE = [
 ];
 const pickIn = (row: FakeElement) => cells(row)[0].all().find((e) => e.tagName === "input")!;
 const picks = (tab: Tab) => rows(tab).map((row) => pickIn(row).checked);
-/** What the selection shows: the header's words, checked and mixed; the bar; the polite line. */
-const picked = (tab: Tab) => ({
+/**
+ * What the selection shows: the header's words, checked and mixed; the bar's count while it is
+ * active (null while it is idle); the polite line. While the list is shown the bar must be active
+ * or idle, never gone (out of the layout, which would move the rows): that fails here.
+ */
+const picked = (tab: Tab) => {
+  if (tab.$("media-list").shown && barState(tab) === "gone") throw new Error("the bar left the layout while the list is shown");
+  return pickedNow(tab);
+};
+const pickedNow = (tab: Tab) => ({
   header: tab.$("media-all-text").textContent,
   checked: tab.$("media-all").checked,
   mixed: tab.$("media-all").indeterminate,
@@ -966,6 +974,28 @@ describe("selecting items", () => {
     const none = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: list([]) }));
     await none.settle();
     expect(barState(none)).toBe("gone");
+  });
+
+  it("moves the focus to Select all when the bar goes idle with the focus in it, never to the document", async () => {
+    for (const inBar of ["pick-clear", "pick-delete"]) {
+      const tab = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: list(FIVE) }));
+      await tab.settle();
+      select(tab, 1);
+      // A keyboard user is on a button of the bar; then the last tick is taken off with the mouse, which does not move the focus.
+      tab.$(inBar).focus();
+      select(tab, 1);
+      expect(barState(tab), inBar).toBe("idle");
+      expect(tab.doc.activeElement, inBar).toBe(tab.$("media-all"));
+      // The focus moved before the bar became inert: the last two focus moves are the bar's button, then Select all.
+      expect(tab.doc.focusLog.slice(-2), inBar).toEqual([inBar, "media-all"]);
+    }
+    // With the focus elsewhere, an idle bar leaves it where it is.
+    const tab = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: list(FIVE) }));
+    await tab.settle();
+    select(tab, 1);
+    tab.$("h-page").focus();
+    select(tab, 1);
+    expect(tab.doc.activeElement).toBe(tab.$("h-page"));
   });
 
   it("Select all selects only the items shown; Show more adds items unselected and the header's count and state follow", async () => {
@@ -1285,6 +1315,53 @@ describe("deleting the selected items", () => {
       expect(rows(tab)).toHaveLength(5);
       expect(picked(tab).bar).toBe(`${at.length} selected`);
     }
+  });
+
+  it("once a send answered cleanup_pending the item is deleted, whatever a resend answers: the single delete and a run say so truthfully", async () => {
+    for (const later of [{ status: 429, json: { error: "rate_limited" } }, { status: 500, json: { error: "internal" } }, { status: 503 }, "network"] as Answer[]) {
+      const what = JSON.stringify(later);
+      // The single delete: the question closes as for a delete that worked; the item is not asked about.
+      const one = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: [list(FIVE), list(FIVE.slice(1))], [DELETE(M1)]: [PENDING, later] }));
+      await one.settle();
+      pressDelete(rows(one)[0]);
+      one.$("delete-go").click();
+      await drain(one);
+      expect(deletes(one), what).toHaveLength(2);
+      expect([one.$("delete-dialog").hidden, one.$("delete-message").hidden, one.$("media-message").hidden], what).toEqual([true, true, true]);
+      expect(one.fetched.some((f) => f.method === "GET" && f.path === `/api/v1/media/${M1}`), what).toBe(false);
+      expect(rows(one), what).toHaveLength(4);
+      // A run of several: the first item answers cleanup_pending, then the later answer; it counts as deleted and the run goes on.
+      const run = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: [list(FIVE), list(FIVE.slice(2))], [DELETE(M1)]: [PENDING, later], [DELETE(M2)]: { status: 204 } }));
+      await run.settle();
+      select(run, 0, 1);
+      run.$("pick-delete").click();
+      run.$("bulk-go").click();
+      await drain(run);
+      expect(deletes(run).map((f) => f.path.slice("/api/v1/media/".length)), what).toEqual([M1, M1, M2]);
+      expect([run.$("media-message").textContent, run.$("media-message").className], what).toEqual(["2 images deleted.", "message plain"]);
+      // Alone, it is not "The image was not deleted."
+      const alone = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: [list(FIVE), list(FIVE.slice(1))], [DELETE(M1)]: [PENDING, later] }));
+      await alone.settle();
+      select(alone, 0);
+      alone.$("pick-delete").click();
+      alone.$("bulk-go").click();
+      await drain(alone);
+      expect(alone.$("media-message").textContent, what).toBe("1 image deleted.");
+    }
+  });
+
+  it("a delete in More that worked, whose list cannot be read again, takes its item out of the selection", async () => {
+    const tab = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: [list(FIVE), { status: 500, json: { error: "internal" } }], [DELETE(M1)]: { status: 204 } }));
+    await tab.settle();
+    select(tab, 0, 2);
+    pressDelete(rows(tab)[0]);
+    tab.$("delete-go").click();
+    await tab.settle();
+    expect(tab.$("media-message").textContent).toBe(NOT_RELOADED);
+    // The list is as last shown, its deleted row unticked; the bar counts only what is still there.
+    expect(rows(tab)).toHaveLength(5);
+    expect(picks(tab)).toEqual([false, false, true, false, false]);
+    expect(picked(tab).bar).toBe("1 selected");
   });
 
   it("counts only the route's own 404 not_found as gone: any other 404 stops the run, and fails the single delete", async () => {
