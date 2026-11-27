@@ -212,6 +212,7 @@ SKIP_IMG_CHECK=0  # 1 when status found that the Caddyfile does not answer for I
 ACME_EMAIL=""
 DATA_DIR=""   # the resolved path as the host sees it, without DP_ROOT; stored in .env
 DATA_PATH=""  # "$DP_ROOT$DATA_DIR", the path this script works on
+FILES_ON_R2=0 # 1 when .env says FILE_STORE=r2: the files are in two R2 buckets, not in the data folder
 IMAGE=""
 FIRST_RUN=0
 CODE_GENERATED=0
@@ -992,6 +993,8 @@ read_env_file() {
       DEPLOY_MODE) mode="$value" ;;
       TUNNEL_TOKEN) TOKEN="$value" ;;
       TOURS_HOST | APP_HOST) host_lines=1 ;;
+      # Only whether it says r2, for what backup and status say; never printed.
+      FILE_STORE) case "$value" in [Rr]2 | \"[Rr]2\" | \'[Rr]2\') FILES_ON_R2=1 ;; *) FILES_ON_R2=0 ;; esac ;;
     esac
   done <"$ENV_FILE"
   # The app's own two settings: the stack file sets both from DOMAIN and APP_DOMAIN, so
@@ -1944,9 +1947,15 @@ do_backup() {
   run "${DC[@]}" exec -T app node dist/node/backup.js "/data/$copy" \
     || die "the database copy failed; is the platform running? Check with: sudo bash $SELF status"
   members=("$copy")
-  [ ! -d "$DATA_PATH/drafts" ] || members+=(drafts)
-  [ ! -d "$DATA_PATH/public" ] || members+=(public)
-  say "Writing $archive (mode 600): the database copy and the drafts and public folders"
+  if [ "$FILES_ON_R2" = 1 ]; then
+    # The folders are not the site's files then: left out, and said.
+    info "the files are on R2 (FILE_STORE=r2 in .env), so they are not part of this backup: it holds the database only. Keep a copy of the two buckets yourself."
+    say "Writing $archive (mode 600): the database copy"
+  else
+    [ ! -d "$DATA_PATH/drafts" ] || members+=(drafts)
+    [ ! -d "$DATA_PATH/public" ] || members+=(public)
+    say "Writing $archive (mode 600): the database copy and the drafts and public folders"
+  fi
   if [ "$DRY_RUN" = 1 ]; then
     run tar -czf "$archive" -C "$DATA_PATH" --transform "s|^\\.backup-$ts\\.sqlite\$|db.sqlite|" -- "${members[@]}"
     return 0
@@ -2059,6 +2068,7 @@ cmd_status() {
   fi
   say "Data folder"
   if [ -d "$DATA_PATH" ]; then du -sh -- "$DATA_PATH" || true; else warn "$DATA_DIR is missing"; fi
+  [ "$FILES_ON_R2" = 0 ] || info "files: on R2 (FILE_STORE=r2 in .env), not in the data folder; a backup does not hold them"
   info "address: https://$DOMAIN"
   if [ -n "$APP_DOMAIN" ]; then
     info "app address: https://$APP_DOMAIN (the address above is the address of the tours)"
