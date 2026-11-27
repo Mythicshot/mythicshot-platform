@@ -84,6 +84,9 @@ const ALLOWED_HOSTS = new Set([
   "www.debian.org",
   "r2.dev",
   "workers.dev",
+  // The licence's own text, unchanged: the addresses of its publisher.
+  "fsf.org",
+  "www.gnu.org",
   // Stripe, the billing integration (README, "Billing (optional)"): its hosts the Subscribe page's policy names.
   "js.stripe.com",
   "checkout.stripe.com",
@@ -266,8 +269,8 @@ function recoverySql(md: string): string {
 describe("the docs", () => {
   it("exist: the README, both runbooks and the licence", () => {
     for (const p of [README, DOCKER, CLOUDFLARE, "LICENSE"]) expect(docs[p], p).toBeTypeOf("string");
-    expect(docs.LICENSE).toMatch(/All rights reserved\./);
-    expect(docs[README]).toMatch(/All rights reserved/);
+    expect(docs.LICENSE).toMatch(/^\s*GNU AFFERO GENERAL PUBLIC LICENSE\r?\n\s*Version 3, 19 November 2007/);
+    expect(docs[README]).toContain("Copyright (c) 2026 Mythicshot, LLC. Licensed under the GNU Affero General Public License, version 3 or later: see [LICENSE](LICENSE).");
     for (const p of MARKDOWN) expect(docs[p].toLowerCase(), p).not.toContain("open source");
   });
 
