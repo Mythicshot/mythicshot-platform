@@ -84,6 +84,8 @@ const ALLOWED_HOSTS = new Set([
   "www.debian.org",
   "r2.dev",
   "workers.dev",
+  // R2's S3 address (README, "Files on R2"), named as the one the Node site talks to with FILE_STORE=r2; never linked.
+  "r2.cloudflarestorage.com",
   // Stripe, the billing integration (README, "Billing (optional)"): its hosts the Subscribe page's policy names.
   "js.stripe.com",
   "checkout.stripe.com",

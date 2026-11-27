@@ -572,6 +572,24 @@ docker compose up -d --force-recreate --wait
 
 **How to tell it worked:** `sudo bash install.sh status` shows the app `healthy`, and Mythicshot's Test connection works with the token from before. Once you are sure, delete `data-before-restore` yourself.
 
+### Keep the files on R2
+
+From version 0.1.71 the files can be kept in two Cloudflare R2 buckets instead of `drafts/` and `public/` in the data folder; [Files on R2](../README.md#files-on-r2) in the README says what the six settings mean and why the copy is made with the app stopped. In the container, from the stack's folder:
+
+1. Update to 0.1.71 or later. Nothing changes yet.
+2. Add the five R2 settings to `.env` as root, each on a line of its own and in single quotes (Compose reads the file): `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_PRIVATE_BUCKET` and `R2_PUBLIC_BUCKET`. The direct route hands the app the whole `.env`; the tunnel route's stack file passes each of the six on by name. Recreate the app with `docker compose up -d --force-recreate --wait` so it sees them.
+3. Check the key and the buckets: `docker compose exec app node dist/node/admin.js r2-check`. The last line must be `R2 check passed: both buckets can be written, read and deleted with this key.`
+4. Leave the app running but idle (no uploads, publishes or changes while the copy runs; the command runs inside the app's container), then copy: `docker compose exec app node dist/node/admin.js files-copy --from disk --to r2 --app-is-stopped`. It prints counts only and ends with `Done: every file at the destination is the source's, checked by size and SHA-256.`; run it again until it does.
+5. Add `FILE_STORE='r2'` to `.env`, recreate the app as in step 2, and check a public tour, a restricted tour, a shared image, an upload, a delete and the data download.
+
+The way back is the reverse copy, `files-copy --from r2 --to disk --app-is-stopped`, then `FILE_STORE='disk'` (or no such line) and the app recreated. `sudo bash install.sh status` says `files: on R2 (FILE_STORE=r2 in .env), not in the data folder; a backup does not hold them` while they are.
+
+> [!WARNING]
+> With `FILE_STORE=r2`, `sudo bash install.sh backup` and the backup `update` takes hold the database only, and say so. R2 has no bin to recover a deleted file from: keep a copy of the two buckets yourself.
+
+> [!WARNING]
+> Restoring an older database after files were deleted from R2 leaves tours pointing at pictures that are gone. The way back from R2 is the reverse copy and `FILE_STORE=disk`, not a database restore.
+
 ## 10. Move to a new server
 
 1. On the old server, make a backup and copy it off, as in [step 9](#9-back-up-and-restore).
