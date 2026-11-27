@@ -84,9 +84,6 @@ const ALLOWED_HOSTS = new Set([
   "www.debian.org",
   "r2.dev",
   "workers.dev",
-  // The licence's own text, unchanged: the addresses of its publisher.
-  "fsf.org",
-  "www.gnu.org",
   // Stripe, the billing integration (README, "Billing (optional)"): its hosts the Subscribe page's policy names.
   "js.stripe.com",
   "checkout.stripe.com",
@@ -101,6 +98,9 @@ const ALLOWED_HOSTS = new Set([
   "charge.refunded",
   "charge.dispute.created",
 ]);
+
+/** The SHA-256 of LICENSE as committed (LF line ends, forced by .gitattributes). */
+const LICENSE_SHA256 = "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0";
 
 /** Last labels that are file extensions, not top-level domains. */
 const FILE_EXTENSIONS = new Set(["sh", "md", "yml", "yaml", "json", "jsonc", "ts", "js", "mjs", "sqlite", "tar", "gz", "sql", "txt", "asc", "sources", "lock", "old", "new", "bak", "toml", "vars", "png", "svg", "ico", "ttf", "py", "zip", "html"]);
@@ -339,9 +339,17 @@ describe("the docs", () => {
     expect(problems).toEqual([]);
   });
 
+  it("the licence is the AGPL-3.0 text, byte for byte", async () => {
+    // Pinned by its hash, so the one scan that leaves it out (the hostnames below: the
+    // text names its publisher's addresses) cannot let a change to it through.
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(docs.LICENSE)));
+    expect([...digest].map((b) => b.toString(16).padStart(2, "0")).join("")).toBe(LICENSE_SHA256);
+  });
+
   it("no doc names a hostname other than the placeholders and the vendor pages", () => {
     const problems: string[] = [];
-    for (const [p, text] of Object.entries(docs)) {
+    // The licence is left out of this scan only; its text is pinned by hash above.
+    for (const [p, text] of Object.entries(docs).filter(([p]) => p !== "LICENSE")) {
       for (const m of text.matchAll(/\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+([a-z]{2,63})\b/g)) {
         const host = m[0];
         const at = m.index ?? 0;

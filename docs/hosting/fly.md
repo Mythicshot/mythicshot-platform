@@ -4,7 +4,7 @@
 > Draft: Not yet verified on a real account. This guide is written from Fly.io's documentation and from the code in this repository, and has not yet been run on a real Fly.io account. Steps that could not be confirmed from either are marked **Unconfirmed**.
 
 > [!NOTE]
-> The software is not public yet: there is no public repository. You need a copy of this repository from the owner. You do not need Docker: Fly builds the image from the repository's own Dockerfile on its own builders, so no published image is needed either.
+> You need a copy of this repository. You do not need Docker: Fly builds the image from the repository's own Dockerfile on its own builders, so no published image is needed either.
 
 Fly.io runs the platform as one small virtual machine, which Fly calls a Machine, with one disk, which Fly calls a volume. Fly serves HTTPS for you. There is no server to log in to or to patch.
 
@@ -27,7 +27,7 @@ Examples use `tours.example.com` for the platform's address and `tours-example` 
 
 1. A domain name, and a login at the company that runs its DNS. This is usually where you bought the domain.
 2. A Fly.io account with a credit card on file. You create it yourself; this guide does not cover sign-up. Without a card the account is on a [free trial](https://docs.fly.io/about/free-trial) whose Machines stop by themselves after 5 minutes, which is of no use here.
-3. A copy of this repository, from the owner.
+3. A copy of this repository.
 4. Fly's command-line tool, `fly` (also called flyctl). [Fly's install page](https://docs.fly.io/flyctl/install) has one command each for Windows, macOS and Linux.
 
 Prices checked 2026-11-17 on [Fly's pricing page](https://docs.fly.io/about/pricing), in US dollars before tax. Machine prices differ by region; these are the figures the page gives.

@@ -241,7 +241,12 @@ make_release() {
   cp "$SCRIPT" "$d/cpanel.sh"
   chmod +x "$d/cpanel.sh"
   printf '%s\n' "$v" >"$d/VERSION"
+  printf 'licence text, as shipped with %s\n' "$v" >"$d/LICENSE"
+  printf '# notices, as shipped with %s\n' "$v" >"$d/THIRD-PARTY-NOTICES.md"
 }
+# What an install of a version before the licence and the notices were shipped leaves:
+# the same app folder without the two files. without_notices [app folder].
+without_notices() { rm -f -- "${1:-$APP}/LICENSE" "${1:-$APP}/THIRD-PARTY-NOTICES.md"; }
 
 # Runs a command line in the sandbox: cpanel_raw <stdin text> <command...>; sets RC,
 # OUT, ERR. The health check does not wait between tries.
@@ -390,7 +395,7 @@ test_install_happy_path() {
   expect "the Node.js app is created exactly as it was by hand" grep -qxF \
     "cloudlinux-selector create --json --interpreter nodejs --version 24 --app-root apps/tours --domain $DOMAIN --app-uri / --startup-file app.cjs --app-mode production" "$LOG"
   local f
-  for f in dist/node/entry.js dist/player/assets.js migrations/0001_init.sql package.json package-lock.json app.cjs cpanel.sh VERSION; do
+  for f in dist/node/entry.js dist/player/assets.js migrations/0001_init.sql package.json package-lock.json app.cjs cpanel.sh VERSION LICENSE THIRD-PARTY-NOTICES.md; do
     expect "$f is in the app folder, unchanged" cmp -s "$REL/$f" "$APP/$f"
   done
   expect "the data folder exists" test -d "$DATA"
@@ -682,7 +687,7 @@ test_update_backs_up_then_replaces() {
   expect "the previous build is kept as dist.old" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.1"
   expect "the previous migrations are kept as migrations.old" test "$(cat "$APP/migrations.old/0001_init.sql")" = "-- schema of 0.1.1"
   local f
-  for f in package.json package-lock.json app.cjs cpanel.sh VERSION; do
+  for f in package.json package-lock.json app.cjs cpanel.sh VERSION LICENSE THIRD-PARTY-NOTICES.md; do
     expect "$f is the new one" cmp -s "$T/new/$f" "$APP/$f"
   done
   expect "the installed version is the new one" test "$(cat "$APP/VERSION")" = 0.2.0
@@ -787,7 +792,7 @@ test_update_reports_a_failed_health_check_with_rollback_commands() {
   # guarded so that a second paste does nothing.
   local want="cd '$APP' && [ -d dist.old ] && rm -rf dist && mv dist.old dist
 cd '$APP' && [ -d migrations.old ] && rm -rf migrations && mv migrations.old migrations
-cd '$APP' && tar -xzf '$b/app.tgz' package.json package-lock.json app.cjs cpanel.sh VERSION
+cd '$APP' && tar -xzf '$b/app.tgz' package.json package-lock.json app.cjs cpanel.sh VERSION LICENSE THIRD-PARTY-NOTICES.md
 cd '$APP' && source '$ACTIVATE' && npm ci --omit=dev --ignore-scripts
 cd '$APP' && rm -f .cpanel-update && touch tmp/restart.txt"
   expect "prints exactly these rollback commands (got: $(cat "$T/rollback"))" test "$(cat "$T/rollback")" = "$want"
@@ -1102,14 +1107,135 @@ test_rollback_of_a_hand_made_install_removes_what_it_never_had() {
   STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel "" update --yes --domain "$DOMAIN"
   expect "exit code non-zero" test "$RC" != 0
   local b; b="$(only_backup)"
-  expect "removes the files that were not there before" grep -qxF "    cd '$APP' && rm -f cpanel.sh VERSION" "$OUT"
+  expect "removes the files that were not there before" grep -qxF "    cd '$APP' && rm -f cpanel.sh VERSION LICENSE THIRD-PARTY-NOTICES.md" "$OUT"
   expect "restores the files that were" grep -qxF "    cd '$APP' && tar -xzf '$b/app.tgz' package.json package-lock.json app.cjs" "$OUT"
   rollback_lines >"$T/rollback"
   paste_rollback "$T/rollback"
   paste_rollback "$T/rollback"
   expect "the hand-made build is back" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.1.0"
   expect "the hand-made package.json is back" cmp -s "$T/hand/package.json" "$APP/package.json"
-  expect "the files it never had are gone" test ! -e "$APP/VERSION" -a ! -e "$APP/cpanel.sh"
+  expect "the files it never had are gone" test ! -e "$APP/VERSION" -a ! -e "$APP/cpanel.sh" -a ! -e "$APP/LICENSE" -a ! -e "$APP/THIRD-PARTY-NOTICES.md"
+}
+
+# ---------------------------------------------------------------- the licence and the notices
+
+test_install_and_update_carry_the_licence_and_the_notices() {
+  new_sandbox
+  cpanel "" install --domain "$DOMAIN" --yes --dry-run
+  expect "install --dry-run: lists both among the files it would copy" grep -qxF \
+    "    would copy into $APP: package.json package-lock.json app.cjs cpanel.sh VERSION LICENSE THIRD-PARTY-NOTICES.md" "$OUT"
+  fresh_install
+  app_has_run
+  local f
+  for f in LICENSE THIRD-PARTY-NOTICES.md; do
+    expect "install: $f is in the app folder, unchanged" cmp -s "$REL/$f" "$APP/$f"
+    if [ "$MODES" = 1 ]; then expect "install: $f is a plain file others may read" test "$(mode_of "$APP/$f")" = 644; fi
+  done
+  make_release "$T/new" 0.2.0
+  cpanel_in "$T/new" "" update --dry-run
+  expect "update --dry-run: lists both among the files it would copy" grep -qxF \
+    "    would copy into $APP: package.json package-lock.json app.cjs cpanel.sh VERSION LICENSE THIRD-PARTY-NOTICES.md" "$OUT"
+  expect "update --dry-run: and among the files of the backup" grep -qxF \
+    "    would write app.tgz from $APP: dist migrations package.json package-lock.json app.cjs cpanel.sh VERSION LICENSE THIRD-PARTY-NOTICES.md .cpanel-install" "$OUT"
+  cpanel_in "$T/new" "" update --yes
+  expect "update: succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+  local b; b="$(only_backup)"
+  for f in LICENSE THIRD-PARTY-NOTICES.md; do
+    expect "update: $f is the new one" cmp -s "$T/new/$f" "$APP/$f"
+    expect "update: the backup's app.tgz holds the $f that ran before" test "$(tar -xzOf "$b/app.tgz" "$f")" = "$(cat "$REL/$f")"
+  done
+  cpanel "" backup
+  expect "backup: works (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "backup: its app.tgz holds both" test "$(tar -tzf "$(backup_dirs | tail -n 1)/app.tgz" | grep -cxE 'LICENSE|THIRD-PARTY-NOTICES.md')" = 2
+}
+
+test_update_from_a_version_without_the_notices() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  without_notices
+  cpanel "" backup --dry-run
+  expect "backup --dry-run: lists only the files that are there" grep -qxF \
+    "    would write app.tgz from $APP: dist migrations package.json package-lock.json app.cjs cpanel.sh VERSION .cpanel-install" "$OUT"
+  cpanel "" backup
+  expect "backup: works without them (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "backup: its app.tgz has neither" test "$(tar -tzf "$(only_backup)/app.tgz" | grep -cxE 'LICENSE|THIRD-PARTY-NOTICES.md')" = 0
+  rm -rf "$BACKUPS"
+  make_release "$T/new" 0.2.0
+  STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "update: the health check fails, as asked" test "$RC" != 0
+  local b; b="$(only_backup)"
+  local f
+  for f in LICENSE THIRD-PARTY-NOTICES.md; do expect "update: $f is now in the app folder" cmp -s "$T/new/$f" "$APP/$f"; done
+  expect "update: the backup's app.tgz has neither" test "$(tar -tzf "$b/app.tgz" | grep -cxE 'LICENSE|THIRD-PARTY-NOTICES.md')" = 0
+  rollback_lines >"$T/rollback"
+  expect "the way back removes the two files the previous version did not have" grep -qxF "cd '$APP' && rm -f LICENSE THIRD-PARTY-NOTICES.md" "$T/rollback"
+  expect "and restores only files its backup holds" grep -qxF "cd '$APP' && tar -xzf '$b/app.tgz' package.json package-lock.json app.cjs cpanel.sh VERSION" "$T/rollback"
+  # The restore line, run on its own, succeeds: it names no file the backup lacks.
+  expect "the restore line runs without an error" env HOME="$H" bash -c "$(grep -F 'tar -xzf' "$T/rollback")"
+  paste_rollback "$T/rollback"
+  paste_rollback "$T/rollback"
+  expect "after the commands: the previous version" test "$(cat "$APP/VERSION")" = 0.1.1
+  expect "after the commands: the previous build" test "$(cat "$APP/dist/node/entry.js")" = "// build 0.1.1"
+  expect "after the commands: neither file is left" test ! -e "$APP/LICENSE" -a ! -e "$APP/THIRD-PARTY-NOTICES.md"
+  # Forward again: both files come back.
+  cpanel_in "$T/new" "" update --yes
+  expect "the next update succeeds (stderr: $(cat "$ERR"))" test "$RC" = 0
+  for f in LICENSE THIRD-PARTY-NOTICES.md; do expect "the next update: $f is in place" cmp -s "$T/new/$f" "$APP/$f"; done
+}
+
+test_a_resumed_update_with_an_earlier_marker_removes_the_notices_on_the_way_back() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  without_notices
+  make_release "$T/new" 0.2.0
+  STUB_NPM_FAIL=1 cpanel_in "$T/new" "" update --yes
+  expect "first try: fails" test "$RC" != 0
+  expect "first try: the marker lists both to remove" grep -qxF "REMOVE=LICENSE THIRD-PARTY-NOTICES.md" "$APP/.cpanel-update"
+  # As a version before them wrote it: neither name to restore nor to remove.
+  sed -i 's/^REMOVE=.*/REMOVE=/' "$APP/.cpanel-update"
+  STUB_NPM_FAIL=1 cpanel_in "$T/new" "" update --yes
+  expect "resumed: fails again" test "$RC" != 0
+  expect "resumed: says it resumes" has "$OUT" "An earlier update was cut off"
+  rollback_lines >"$T/rollback"
+  expect "resumed: the way back still removes both" grep -qxF "cd '$APP' && rm -f LICENSE THIRD-PARTY-NOTICES.md" "$T/rollback"
+  paste_rollback "$T/rollback"
+  expect "after the commands: the previous version, without either file" test "$(cat "$APP/VERSION")" = 0.1.1 -a ! -e "$APP/LICENSE" -a ! -e "$APP/THIRD-PARTY-NOTICES.md"
+  # A marker that lists nothing at all is not read as a list: nothing is removed on its account.
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  STUB_NPM_FAIL=1 cpanel_in "$T/new" "" update --yes
+  sed -i '/^RESTORE=/d; /^REMOVE=/d' "$APP/.cpanel-update"
+  STUB_NPM_FAIL=1 cpanel_in "$T/new" "" update --yes
+  expect "no lists in the marker: no file is removed on the way back" hasnt "$OUT" "rm -f LICENSE"
+}
+
+test_an_archive_without_the_notices_is_refused() {
+  local f
+  for f in LICENSE THIRD-PARTY-NOTICES.md; do
+    new_sandbox
+    rm "$REL/$f"
+    cpanel "" install --domain "$DOMAIN" --yes
+    expect "install without $f: refused" test "$RC" != 0
+    expect "install without $f: names it" has "$ERR" "$f is missing"
+    expect "install without $f: nothing was called" test ! -s "$LOG"
+    expect "install without $f: nothing was created" test ! -e "$H/apps"
+    make_release "$REL" 0.1.1
+    fresh_install
+    app_has_run
+    make_release "$T/new" 0.2.0
+    rm "$T/new/$f"
+    local before; before="$(snapshot)"
+    : >"$LOG"
+    cpanel_in "$T/new" "" update --yes
+    expect "update without $f: refused" test "$RC" != 0
+    expect "update without $f: names it" has "$ERR" "$f is missing"
+    expect "update without $f: nothing was called" test ! -s "$LOG"
+    expect "update without $f: nothing was changed" test "$(snapshot)" = "$before"
+  done
 }
 
 # ---------------------------------------------------------------- an interrupted update
@@ -1179,7 +1305,7 @@ test_rerun_after_an_interrupted_update_keeps_the_last_good_build() {
   expect "dist.old is still the last good build" test "$(cat "$APP/dist.old/node/entry.js")" = "// build 0.1.1"
   expect "migrations.old is still the last good one" test "$(cat "$APP/migrations.old/0001_init.sql")" = "-- schema of 0.1.1"
   expect "the half-made build was not kept anywhere" test -z "$(find "$APP" -name partial.js)"
-  expect "the rollback names the backup from before the first run" grep -qxF "    cd '$APP' && tar -xzf '$first/app.tgz' package.json package-lock.json app.cjs cpanel.sh VERSION" "$OUT"
+  expect "the rollback names the backup from before the first run" grep -qxF "    cd '$APP' && tar -xzf '$first/app.tgz' package.json package-lock.json app.cjs cpanel.sh VERSION LICENSE THIRD-PARTY-NOTICES.md" "$OUT"
   expect "that backup holds the version that ran" test "$(tar -xzOf "$first/app.tgz" VERSION)" = 0.1.1
 
   cpanel_in "$T/new" "" update --yes
@@ -1504,7 +1630,7 @@ test_backup_contents() {
   expect "the script never copies the database file with cp" test "$(grep -cE '^[^#]*\bcp\b[^#]*db\.sqlite' "$REL/cpanel.sh")" = 0
   expect "drafts are copied" cmp -s "$DATA/drafts/u1/step-001.png" "$b/drafts/u1/step-001.png"
   expect "public files are copied" cmp -s "$DATA/public/t1/step-001.png" "$b/public/t1/step-001.png"
-  expect "the app files are archived" test "$(tar -tzf "$b/app.tgz" | grep -cxE 'dist/node/entry.js|migrations/0001_init.sql|package.json|package-lock.json|app.cjs|cpanel.sh|VERSION|.cpanel-install')" = 8
+  expect "the app files are archived" test "$(tar -tzf "$b/app.tgz" | grep -cxE 'dist/node/entry.js|migrations/0001_init.sql|package.json|package-lock.json|app.cjs|cpanel.sh|VERSION|LICENSE|THIRD-PARTY-NOTICES.md|.cpanel-install')" = 10
   expect "node_modules is not archived" test "$(tar -tzf "$b/app.tgz" | grep -c node_modules)" = 0
   expect "the app archive holds no settings" test "$(tar -xzOf "$b/app.tgz" | grep -cF -- "$(setup_code)")" = 0
   expect "the settings file is in the backup" cmp -s "$SETTINGS" "$b/tours-config.env"

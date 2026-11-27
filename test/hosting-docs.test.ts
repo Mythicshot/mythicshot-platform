@@ -268,14 +268,26 @@ describe("the hosting guides", () => {
   });
 
   it("every guide says at its top how the software is obtained today", () => {
-    for (const p of [INDEX, ...GUIDES]) {
-      const top = hosting[p].split("\n").slice(0, 10).join("\n");
-      expect(top, p).toMatch(/The software is not public yet/);
-      expect(top, p).toMatch(/no public repository/);
-      expect(top, p).toMatch(/from the owner/);
-    }
+    const top = (p: string) => hosting[p].split("\n").slice(0, 10).join("\n");
+    expect(top(INDEX)).toContain(
+      "> There is no published image yet, so every guide starts from a copy of this repository. The server guides also need Docker on your own computer to build the image.",
+    );
     // The server guides need the image built by hand; the Fly guide builds it on Fly.
-    for (const p of SERVER_GUIDES) expect(hosting[p].split("\n").slice(0, 10).join("\n"), p).toMatch(/no published image/);
+    for (const p of SERVER_GUIDES) {
+      expect(top(p), p).toContain(
+        "> There is no published image yet. You need a copy of this repository, and a computer with Docker to build the image from it, as [step 4 of the Docker runbook](../runbook-docker.md#4-build-the-app-image-and-copy-it-to-the-server) describes.",
+      );
+    }
+    expect(top(FLY)).toMatch(/^> You need a copy of this repository\. You do not need Docker: Fly builds the image from the repository's own Dockerfile/m);
+    expect(top(CPANEL)).toContain("> There is no published archive yet. You need a copy of this repository, and a computer with Node.js 24 or later to build the archive from it.");
+    for (const p of [INDEX, ...GUIDES, CPANEL]) {
+      // What each one needs, in its list: a copy, from nobody in particular.
+      if (p !== INDEX) expect(hosting[p], p).toMatch(/^\d+\. A copy of this repository\.$/m);
+      // The old claims are gone, wherever they were, and no repository's address is given.
+      for (const gone of [/not public/i, /no public repository/i, /from the owner/i, /private repositor/i]) expect(hosting[p], `${p}: ${gone}`).not.toMatch(gone);
+      expect(hosting[p], p).not.toMatch(/https:\/\/[^\s)]*(github|gitlab|codeberg|bitbucket)\./i);
+    }
+    expect(hosting[INDEX]).toMatch(/^1\. You get a copy of this repository\.$/m);
   });
 
   it("no guide holds a real token or a real setup code", () => {
@@ -442,8 +454,8 @@ describe("the shared cPanel hosting guide", () => {
     // Of the script, an update and a status have run there once; the rest has not.
     expect(top).toMatch(/`cpanel\.sh`[^\n]*the `update` and `status` commands of an earlier version have run once on that account, from an archive unpacked there/);
     expect(top).toMatch(/`install`, `backup` as a command of its own, the commands to go back and the second address have only been tested on a development computer against stand-ins/);
-    expect(top).toMatch(/The software is not public yet/);
-    expect(top).toMatch(/from the owner/);
+    expect(top).toContain("> There is no published archive yet. You need a copy of this repository, and a computer with Node.js 24 or later to build the archive from it.");
+    expect(top).not.toMatch(/not public|from the owner/);
     // The closing section keeps the two sides apart, and names the script's tests.
     expect(sections(guide)[sections(guide).length - 1]).toBe("What has been run where");
     const last = guide.slice(guide.indexOf("## What has been run where"));
@@ -557,7 +569,7 @@ describe("the shared cPanel hosting guide", () => {
       s
         .replace("$ACTIVATE", "/home/you/nodevenv/apps/tours/24/bin/activate")
         .replace("$ROLLBACK_BACKUP", "/home/you/backups/tours-<date>-<time>")
-        .replace("$ROLLBACK_RESTORE", "package.json package-lock.json app.cjs cpanel.sh VERSION")
+        .replace("$ROLLBACK_RESTORE", capture(cpanelSh, /^readonly RELEASE_FILES="([^"]+)"$/m, "RELEASE_FILES in cpanel.sh"))
         .replace("$MARKER_NAME", ".cpanel-update");
     expect(cpanelSh).toMatch(/^readonly MARKER_NAME=\.cpanel-update$/m);
     // The one line left out is printed only for an install that lacked some files before.
@@ -572,6 +584,21 @@ describe("the shared cPanel hosting guide", () => {
     expect((JSON.parse(packageJson) as { scripts: Record<string, string> }).scripts["package:cpanel"]).toBe("node scripts/package-cpanel.ts");
     expect(lines).toContain("npm run package:cpanel");
     expect(lines).toContain("tar -xzf ~/demo-platform-<version>-cpanel.tgz -C ~/tours-release");
+  });
+
+  it("lists what the archive and the app folder hold as the packager and the script make them, the licence and the notices included", () => {
+    const top = capture(packageCpanelTs, /^export const ARCHIVE_TOP_LEVEL = \[([^\]]+)\] as const;$/m, "ARCHIVE_TOP_LEVEL").match(/"[^"]+"/g)!.map((s) => s.slice(1, -1));
+    expect(top).toEqual(expect.arrayContaining(["LICENSE", "THIRD-PARTY-NOTICES.md"]));
+    // The archive's top level, as `ls` sorts it in step 4.
+    const listed = capture(guide, /^\*\*How to tell it worked:\*\* this lists (`[^\n]*`)\.$/m, "the listing of the unpacked archive").match(/`[^`]+`/g)!.map((s) => s.slice(1, -1));
+    expect(listed).toEqual([...top].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)));
+    // The app folder holds the archive's files, the same ones cpanel.sh copies.
+    const files = capture(cpanelSh, /^readonly RELEASE_FILES="([^"]+)"$/m, "RELEASE_FILES").split(" ");
+    const dirs = capture(cpanelSh, /^readonly RELEASE_DIRS="([^"]+)"$/m, "RELEASE_DIRS").split(" ");
+    expect([...dirs, ...files].sort()).toEqual([...top].sort());
+    const row = capture(guide, /^\| `\/home\/you\/apps\/tours` \| The app: ([^\n]*) \|$/m, "the app folder's row");
+    for (const name of [...dirs, ...files]) expect(row, name).toContain(`\`${name}\``);
+    expect(guide).toContain("a `VERSION` file, the licence `LICENSE` and the notices of the code it includes, `THIRD-PARTY-NOTICES.md`");
   });
 
   it("reaches the setup wizard, reads the code from the settings file and never shows one", () => {

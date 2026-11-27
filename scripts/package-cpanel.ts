@@ -2,8 +2,10 @@
 // cPanel hosting, dist/cpanel/demo-platform-<version>-cpanel.tgz. Unpacked, it holds
 // exactly: dist/ (the compiled app, with the player's and the documentation page's files inside it),
 // migrations/, package.json, package-lock.json, app.cjs (the startup file), cpanel.sh
-// (install, update, backup, status) and VERSION. No source, no tests, no settings and no
-// node_modules: the hosting installs the two runtime packages itself with npm ci.
+// (install, update, backup, status), VERSION, and the licence (LICENSE) and the notices
+// of the code it includes (THIRD-PARTY-NOTICES.md), unchanged. No source, no tests, no
+// settings and no node_modules: the hosting installs the two runtime packages itself
+// with npm ci.
 //
 // The build goes into a scratch folder, not into dist/, so nothing stale in dist/ and no
 // earlier archive in dist/cpanel can end up inside a new one. The archive is written
@@ -21,7 +23,7 @@ import { siteModule, viewerModule } from "./docs-bundle.ts";
 import { assetsModule } from "./player-bundle.ts";
 
 /** What the unpacked archive holds at its top level, and nothing else. */
-export const ARCHIVE_TOP_LEVEL = ["dist", "migrations", "package.json", "package-lock.json", "app.cjs", "cpanel.sh", "VERSION"] as const;
+export const ARCHIVE_TOP_LEVEL = ["dist", "migrations", "package.json", "package-lock.json", "app.cjs", "cpanel.sh", "VERSION", "LICENSE", "THIRD-PARTY-NOTICES.md"] as const;
 
 export type ArchiveFile = { path: string; data: Buffer; mode: number };
 export type PackageResult = { file: string; version: string; paths: string[] };
@@ -149,6 +151,9 @@ export async function packageCpanel(opts: PackageOptions): Promise<PackageResult
     add("app.cjs", join(root, "deploy", "cpanel", "app.cjs"));
     add("cpanel.sh", join(root, "deploy", "cpanel", "cpanel.sh"), 0o755);
     files.push({ path: "VERSION", data: Buffer.from(`${version}\n`, "utf8"), mode: 0o644 });
+    // The licence and the notices go with every copy, as they are in the repository.
+    add("LICENSE", join(root, "LICENSE"));
+    add("THIRD-PARTY-NOTICES.md", join(root, "THIRD-PARTY-NOTICES.md"));
 
     // Checks on what is about to ship, so a change to the build cannot widen it unseen.
     if (!files.some((f) => f.path === "dist/node/entry.js")) throw new Error("the build has no dist/node/entry.js");
@@ -160,7 +165,7 @@ export async function packageCpanel(opts: PackageOptions): Promise<PackageResult
       if (f.path.startsWith("dist/") && !f.path.endsWith(".js")) throw new Error(`unexpected file in the build: ${f.path}`);
       if (f.path.startsWith("migrations/") && !/^migrations\/[^/]+\.sql$/.test(f.path)) throw new Error(`unexpected file in migrations: ${f.path}`);
     }
-    for (const name of ["app.cjs", "cpanel.sh"]) {
+    for (const name of ["app.cjs", "cpanel.sh", "LICENSE", "THIRD-PARTY-NOTICES.md"]) {
       if (files.find((f) => f.path === name)?.data.includes(13)) throw new Error(`${name} has Windows line ends; check it out again with LF line ends`);
     }
 
