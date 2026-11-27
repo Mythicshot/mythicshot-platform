@@ -12,7 +12,7 @@ import { DEFER_FAILED, deferTracker, type Deps } from "../ports.ts";
 import { clientAddressReader, configFromEnv, fileStoreFromEnv, guardTarget, mailFromEnv, proxyHint, type Incoming } from "./config.ts";
 import { APP_UID, prepareDataDir } from "./datadir.ts";
 import { NodeDb } from "./db.ts";
-import { makeFileStores, siteFileStores } from "./file-stores.ts";
+import { diskModeR2Line, makeFileStores, siteFileStores } from "./file-stores.ts";
 import { startMarkerCheck } from "./file-tools.ts";
 import type { ClosableMailer } from "./mail-thread.ts";
 import { migrate } from "./migrate.ts";
@@ -88,6 +88,8 @@ async function main(): Promise<void> {
   // command uses, so nothing falls back to the folders by itself.
   const fileSettings = fileStoreFromEnv(process.env);
   const files = siteFileStores(fileSettings, root);
+  // R2 settings typed in while the files are still on disk, not usable yet: said once, never a value.
+  if (fileSettings.r2Problem !== undefined) console.error(diskModeR2Line(fileSettings.r2Problem));
   // With the files on R2, each bucket must carry its own role marker (written by r2-check): a
   // missing or wrong one stops the start, so swapped bucket names never serve; R2 not answering
   // just now is said in one line and the start goes on. One quick try, not the retries.

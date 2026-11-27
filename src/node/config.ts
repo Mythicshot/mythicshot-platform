@@ -151,6 +151,9 @@ export function fileStoreFromEnv(env: NodeJS.ProcessEnv): FileStoreSettings {
     R2_PRIVATE_BUCKET: env.R2_PRIVATE_BUCKET,
     R2_PUBLIC_BUCKET: env.R2_PUBLIC_BUCKET,
   });
+  // With the files on disk, R2 settings that cannot be used yet never stop the site: it runs on
+  // disk and says the line at its start, and r2-check and files-copy refuse with it.
+  if (!files.ok && files.mode === "disk") return { mode: "disk", r2: null, r2Problem: files.problem };
   if (!files.ok) throw new Error(files.problem);
   return files.settings;
 }

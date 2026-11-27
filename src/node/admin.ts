@@ -811,6 +811,11 @@ async function markBucket(role: "private" | "public", store: ListableStore, out:
 async function filesCommand(parsed: { kind: "r2-check" } | FilesCopy, env: NodeJS.ProcessEnv, out: (line: string) => void, opts: AdminOptions): Promise<number> {
   const settings = fileSettingsOrSay(env, out);
   if (settings === null) return 1;
+  // R2 settings that cannot be used yet, while the files are on disk: the site runs, these two refuse.
+  if (settings.r2Problem !== undefined) {
+    out(settings.r2Problem);
+    return 1;
+  }
   if (settings.r2 === null) {
     out(FILES_SAID.notSetUp(parsed.kind === "r2-check" ? "checked" : "copied"));
     return 1;

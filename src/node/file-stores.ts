@@ -22,8 +22,12 @@ import { R2Secret, r2Stores, type R2Options, type R2Settings } from "./r2-files.
 export const R2_SETTING_NAMES = ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_PRIVATE_BUCKET", "R2_PUBLIC_BUCKET"] as const;
 type R2SettingName = (typeof R2_SETTING_NAMES)[number];
 
-/** The file settings as checked: where the files are, and the R2 settings when they are written. */
-export type FileStoreSettings = { mode: "disk" | "r2"; r2: R2Settings | null };
+/**
+ * The file settings as checked: where the files are, and the R2 settings when they are written.
+ * `r2Problem` (0.1.71): with the files on disk, the one line for R2 settings that cannot be used
+ * yet. The site runs on disk and says it at its start; r2-check and files-copy refuse with it.
+ */
+export type FileStoreSettings = { mode: "disk" | "r2"; r2: R2Settings | null; r2Problem?: string };
 
 /** A store whose keys can be listed: both kinds have it, for the admin command's tools and the tests. */
 export type ListableStore = FileStore & { keys(): Promise<string[]> };
@@ -47,38 +51,43 @@ const KEEP_ON_DISK = "Fix it, or remove all five R2 settings (and FILE_STORE=r2)
  * The file settings from their raw values. Each is trimmed; a value that is unset, empty or
  * only spaces is missing. Never throws, and a problem never holds a value.
  */
-export function fileStoreFromSettings(raw: Partial<Record<"FILE_STORE" | R2SettingName, unknown>>): { ok: true; settings: FileStoreSettings } | { ok: false; problem: string } {
+export function fileStoreFromSettings(raw: Partial<Record<"FILE_STORE" | R2SettingName, unknown>>): { ok: true; settings: FileStoreSettings } | { ok: false; problem: string; mode: "disk" | "r2" | null } {
   const modeRaw = raw.FILE_STORE;
   const modeText = typeof modeRaw === "string" ? modeRaw.trim().toLowerCase() : modeRaw === undefined || modeRaw === null ? "" : null;
   if (modeText !== "" && modeText !== "disk" && modeText !== "r2") {
-    return { ok: false, problem: "files: FILE_STORE is neither disk nor r2. Fix it, or remove the line to keep the files on disk." };
+    return { ok: false, problem: "files: FILE_STORE is neither disk nor r2. Fix it, or remove the line to keep the files on disk.", mode: null };
   }
   const mode = modeText === "r2" ? "r2" : "disk";
   const values: Partial<Record<R2SettingName, string>> = {};
   for (const name of R2_SETTING_NAMES) {
     const v = raw[name];
     if (v === undefined || v === null) continue;
-    if (typeof v !== "string") return { ok: false, problem: `files: ${name} is not ${SHAPES[name].says}. ${KEEP_ON_DISK}` };
+    if (typeof v !== "string") return { ok: false, problem: `files: ${name} is not ${SHAPES[name].says}. ${KEEP_ON_DISK}`, mode };
     const text = v.trim();
     if (text === "") continue;
-    if (!SHAPES[name].test(text)) return { ok: false, problem: `files: ${name} is not ${SHAPES[name].says}. ${KEEP_ON_DISK}` };
+    if (!SHAPES[name].test(text)) return { ok: false, problem: `files: ${name} is not ${SHAPES[name].says}. ${KEEP_ON_DISK}`, mode };
     values[name] = text;
   }
   const missing = R2_SETTING_NAMES.filter((name) => values[name] === undefined);
   if (missing.length === R2_SETTING_NAMES.length) {
     if (mode === "r2") {
-      return { ok: false, problem: "files: FILE_STORE is r2, but the five R2 settings are missing. Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET, or set FILE_STORE=disk." };
+      return { ok: false, problem: "files: FILE_STORE is r2, but the five R2 settings are missing. Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET, or set FILE_STORE=disk.", mode };
     }
     return { ok: true, settings: { mode: "disk", r2: null } };
   }
   const { R2_ACCOUNT_ID: accountId, R2_ACCESS_KEY_ID: accessKeyId, R2_SECRET_ACCESS_KEY: secret, R2_PRIVATE_BUCKET: privateBucket, R2_PUBLIC_BUCKET: publicBucket } = values;
   if (accountId === undefined || accessKeyId === undefined || secret === undefined || privateBucket === undefined || publicBucket === undefined) {
-    return { ok: false, problem: `files: ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} missing. Set all five R2 settings, or none of them to keep the files on disk.` };
+    return { ok: false, problem: `files: ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} missing. Set all five R2 settings, or none of them to keep the files on disk.`, mode };
   }
   if (privateBucket === publicBucket) {
-    return { ok: false, problem: "files: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET name the same bucket. The private and the public files must be in two different buckets." };
+    return { ok: false, problem: "files: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET name the same bucket. The private and the public files must be in two different buckets.", mode };
   }
   return { ok: true, settings: { mode, r2: { accountId, accessKeyId, secret: new R2Secret(secret), privateBucket, publicBucket } } };
+}
+
+/** The line the start writes for R2 settings that cannot be used while the files are on disk. */
+export function diskModeR2Line(problem: string): string {
+  return `${problem} The files stay on disk and the site runs; r2-check shows the same line, and FILE_STORE=r2 is refused until this is fixed.`;
 }
 
 /**

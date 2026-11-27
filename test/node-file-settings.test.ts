@@ -12,7 +12,7 @@ import { inspect } from "node:util";
 import { describe, expect, it } from "vitest";
 import { ADMIN_SETTINGS, runAdmin } from "../src/node/admin.ts";
 import { configFromEnv, fileStoreFromEnv, NODE_SETTINGS } from "../src/node/config.ts";
-import { fileStoreFromSettings, makeFileStores, R2_SETTING_NAMES, siteFileStores } from "../src/node/file-stores.ts";
+import { diskModeR2Line, fileStoreFromSettings, makeFileStores, R2_SETTING_NAMES, siteFileStores } from "../src/node/file-stores.ts";
 import { NodeFileStore } from "../src/node/files.ts";
 
 const SECRET = "Zq9-made-up-secret-for-the-settings-test-7Hk2";
@@ -29,9 +29,20 @@ const ALL_SIX = ["FILE_STORE", ...R2_SETTING_NAMES];
 function refusal(env: Record<string, string>): string | null {
   try {
     configFromEnv(env);
-    return null;
   } catch (err) {
     return (err as Error).message;
+  }
+  // With the files on disk the line does not stop the start: the site says it and runs (0.1.71).
+  return fileStoreFromEnv(env).r2Problem ?? null;
+}
+
+/** Whether these settings stop the start. Only with FILE_STORE=r2, or a FILE_STORE that is neither disk nor r2. */
+function stops(env: Record<string, string>): boolean {
+  try {
+    configFromEnv(env);
+    return false;
+  } catch {
+    return true;
   }
 }
 
@@ -94,8 +105,10 @@ describe("the file settings", () => {
     ["one bucket for both", { FILE_STORE: "r2", ...GOOD, R2_PUBLIC_BUCKET: GOOD.R2_PRIVATE_BUCKET }, "files: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET name the same bucket. The private and the public files must be in two different buckets."],
     ["one bucket for both, on disk too", { ...GOOD, R2_PUBLIC_BUCKET: GOOD.R2_PRIVATE_BUCKET }, "files: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET name the same bucket. The private and the public files must be in two different buckets."],
   ];
-  it.each(REFUSALS)("refuses %s with one fixed line and no value", (_name, env, line) => {
+  it.each(REFUSALS)("refuses %s with one fixed line and no value; it stops the start only with FILE_STORE=r2 or a FILE_STORE that is neither", (_name, env, line) => {
     expect(refusal(env)).toBe(line);
+    const mode = (env.FILE_STORE ?? "").trim().toLowerCase();
+    expect(stops(env)).toBe(mode !== "" && mode !== "disk");
     for (const v of valuesOf(env)) expect(line).not.toContain(v);
   });
 
@@ -133,6 +146,7 @@ describe("the file settings", () => {
     for (const mode of ["disk", "r2", ""]) {
       const env = { FILE_STORE: mode, ...GOOD, [name]: value };
       const line = refusal(env);
+      expect(stops(env), mode).toBe(mode === "r2");
       expect(line).toBe(`files: ${name} is not ${SHAPE_SAYS[name]}. Fix it, or remove all five R2 settings (and FILE_STORE=r2) to keep the files on disk.`);
       for (const v of valuesOf(env)) expect(line).not.toContain(v);
     }
@@ -146,8 +160,8 @@ describe("the file settings", () => {
 
   it("a value that is not text is refused as of the wrong shape", () => {
     const r = fileStoreFromSettings({ FILE_STORE: "r2", ...GOOD, R2_ACCOUNT_ID: 42 });
-    expect(r).toEqual({ ok: false, problem: expect.stringMatching(/^files: R2_ACCOUNT_ID is not /) });
-    expect(fileStoreFromSettings({ FILE_STORE: 7 })).toEqual({ ok: false, problem: "files: FILE_STORE is neither disk nor r2. Fix it, or remove the line to keep the files on disk." });
+    expect(r).toEqual({ ok: false, mode: "r2", problem: expect.stringMatching(/^files: R2_ACCOUNT_ID is not /) });
+    expect(fileStoreFromSettings({ FILE_STORE: 7 })).toEqual({ ok: false, mode: null, problem: "files: FILE_STORE is neither disk nor r2. Fix it, or remove the line to keep the files on disk." });
   });
 });
 
@@ -186,6 +200,41 @@ describe("the one factory", () => {
       expect(read(f), f).not.toMatch(/new NodeFileStore\(|r2Stores\(/);
     }
   });
+});
+
+describe("with the files on disk, R2 settings that cannot be used yet never stop the site", () => {
+  it("the start says one line that names the setting and never a value, and goes on; r2-check and files-copy refuse with the line", async () => {
+    const env = { R2_ACCOUNT_ID: GOOD.R2_ACCOUNT_ID, R2_SECRET_ACCESS_KEY: SECRET };
+    const settings = fileStoreFromEnv(env);
+    expect(settings).toMatchObject({ mode: "disk", r2: null, r2Problem: "files: R2_ACCESS_KEY_ID, R2_PRIVATE_BUCKET, R2_PUBLIC_BUCKET are missing. Set all five R2 settings, or none of them to keep the files on disk." });
+    expect(diskModeR2Line(settings.r2Problem!)).toBe(
+      "files: R2_ACCESS_KEY_ID, R2_PRIVATE_BUCKET, R2_PUBLIC_BUCKET are missing. Set all five R2 settings, or none of them to keep the files on disk. The files stay on disk and the site runs; r2-check shows the same line, and FILE_STORE=r2 is refused until this is fixed.",
+    );
+    const read = (f: string) => readFileSync(fileURLToPath(new URL(f, import.meta.url)), "utf8");
+    expect(read("../src/node/entry.ts")).toContain("if (fileSettings.r2Problem !== undefined) console.error(diskModeR2Line(fileSettings.r2Problem));");
+    for (const argv of [["r2-check"], ["files-copy", "--from", "disk", "--to", "r2", "--dry-run"]]) {
+      const lines: string[] = [];
+      expect(await runAdmin(argv, { DATA_DIR: tmpdir(), ...env }, (l) => lines.push(l)), argv[0]).toBe(1);
+      expect(lines).toEqual([settings.r2Problem]);
+    }
+    // The site's own stores are the folders.
+    expect(siteFileStores(settings, tmpdir()).drafts).toBeInstanceOf(NodeFileStore);
+  });
+
+  it("the app itself starts: the line on standard error, then it listens", () => {
+    const data = mkdtempSync(join(tmpdir(), "dp-files-entry-disk-"));
+    const base: Record<string, string> = {};
+    for (const k of ["PATH", "Path", "SystemRoot", "TEMP", "TMP"]) if (process.env[k] !== undefined) base[k] = process.env[k] as string;
+    const entry = fileURLToPath(new URL("../src/node/entry.ts", import.meta.url));
+    const env = { ...base, DATA_DIR: data, PORT: String(40000 + Math.floor(Math.random() * 20000)), R2_PUBLIC_BUCKET: "Bad_Bucket", R2_SECRET_ACCESS_KEY: SECRET };
+    // It would listen for ever: the test ends it as soon as it says it listens.
+    const r = spawnSync(process.execPath, ["-e", `process.on("message", () => {}); const c = require("node:child_process").spawn(process.execPath, [${JSON.stringify(entry)}], { env: process.env, stdio: ["ignore", "pipe", "pipe"] }); let out = "", err = ""; c.stdout.on("data", (d) => { out += d; if (out.includes("listening")) { c.kill(); } }); c.stderr.on("data", (d) => (err += d)); c.on("exit", () => { process.stdout.write(JSON.stringify({ out, err })); }); setTimeout(() => c.kill(), 30000);`], { env, encoding: "utf8", timeout: 60_000, windowsHide: true });
+    const seen = JSON.parse(r.stdout) as { out: string; err: string };
+    expect(seen.out).toContain("listening on port");
+    expect(seen.err.trim()).toBe("files: R2_PUBLIC_BUCKET is not an R2 bucket name: 3 to 63 lowercase letters, digits and hyphens, beginning and ending with a letter or digit. Fix it, or remove all five R2 settings (and FILE_STORE=r2) to keep the files on disk. The files stay on disk and the site runs; r2-check shows the same line, and FILE_STORE=r2 is refused until this is fixed.");
+    expect(seen.out + seen.err).not.toContain(SECRET);
+    expect(seen.out + seen.err).not.toContain("Bad_Bucket");
+  }, 60_000);
 });
 
 describe("the start stops on a bad set, with one line and no value", () => {

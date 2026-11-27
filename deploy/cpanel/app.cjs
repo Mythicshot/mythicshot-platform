@@ -71,7 +71,10 @@ try {
   process.exit(1);
 }
 
-/** The lines of the settings file as [NAME, value], with one pair of quotes dropped. */
+/** Settings left out of what is handed on: a duplicated R2 setting while the files are plainly on disk (below). */
+const leftOut = new Set();
+
+/** The lines of the settings file as [NAME, value], with one pair of quotes dropped, without those left out. */
 function settingsLines() {
   const out = [];
   for (const raw of text.split(/\r?\n/)) {
@@ -79,6 +82,7 @@ function settingsLines() {
     if (line === "" || line.startsWith("#")) continue;
     const m = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
     if (!m) continue;
+    if (leftOut.has(m[1])) continue;
     const quoted = /^"(.*)"$/.exec(m[2]) || /^'(.*)'$/.exec(m[2]);
     out.push([m[1], quoted ? quoted[1] : m[2]]);
   }
@@ -86,17 +90,33 @@ function settingsLines() {
 }
 
 // Where the files are must be read the same way by the app, the admin command and cpanel.sh.
-// For a duplicate line the app takes the first and the admin command the last, so a settings
-// file that holds FILE_STORE or one of the five R2 settings more than once is refused for
-// both, with one line that names the setting and never a value. Every other setting's
-// duplicates behave as before.
-const ONCE_ONLY = ["FILE_STORE", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_PRIVATE_BUCKET", "R2_PUBLIC_BUCKET"];
-for (const name of ONCE_ONLY) {
-  if (settingsLines().filter(([n]) => n === name).length > 1) {
+// For a duplicate line the app takes the first and the admin command the last. So a settings
+// file that holds FILE_STORE more than once is refused for both, with one line that names it
+// and never a value: which mode it means cannot be told. One of the five R2 settings more than
+// once is refused the same way unless the files are plainly on disk (no FILE_STORE line, an
+// empty one or disk, and for the app no other FILE_STORE in its environment): then the site
+// runs on disk, the line is said once, and that setting is left out for the app and the
+// command alike, so the R2 set reads as half-filled (the app says so and runs; r2-check and
+// files-copy refuse). Every other setting's duplicates behave as before.
+const R2_ONCE = ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_PRIVATE_BUCKET", "R2_PUBLIC_BUCKET"];
+const forCommand = require.main === module && process.argv[2] === "admin";
+const fileStoreLines = settingsLines().filter(([n]) => n === "FILE_STORE");
+if (fileStoreLines.length > 1) {
+  console.error(`demo-platform: the settings file ${settingsFile} holds FILE_STORE more than once. Keep one FILE_STORE line and start again.`);
+  process.exit(1);
+}
+const diskOnly = (v) => v === undefined || ["", "disk"].includes(String(v).trim().toLowerCase());
+const plainlyOnDisk = diskOnly(fileStoreLines.length === 1 ? fileStoreLines[0][1] : undefined) && (forCommand || diskOnly(process.env.FILE_STORE));
+for (const name of R2_ONCE) {
+  if (settingsLines().filter(([n]) => n === name).length <= 1) continue;
+  if (!plainlyOnDisk) {
     console.error(`demo-platform: the settings file ${settingsFile} holds ${name} more than once. Keep one ${name} line and start again.`);
     process.exit(1);
   }
+  console.error(`demo-platform: the settings file ${settingsFile} holds ${name} more than once. The files stay on disk and the site runs without that setting; keep one ${name} line before you run r2-check or set FILE_STORE=r2.`);
+  leftOut.add(name);
 }
+
 
 // `node app.cjs admin <arguments>` runs the site's admin command (dist/node/admin.js)
 // instead of the app: that is how `cpanel.sh admin` runs it. The guard is the first
