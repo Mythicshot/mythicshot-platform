@@ -9,6 +9,9 @@
 // width, the preview pictures as a browser loads them (lazily, under the policy), focus
 // rings, a screen reader, and the browser's clipboard.
 import { isBrandMark } from "./dash-checks.ts";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import vm from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeDeps, seedAccount } from "#harness";
@@ -1466,3 +1469,59 @@ describe("the Images and GIFs pages against the real app", () => {
   });
 });
 
+// ---- Static samples for a person to look at ----
+//
+// With MULTI_DELETE_SAMPLES=1 in the environment, this writes two static copies of the Images
+// page as its script left it, in the light colours, into <temp>/demo-platform-multi-delete-samples/:
+// three of five images selected, and the question for those three open. The stylesheet, the
+// mark, the wordmark and the font are beside them. The page's own scripts are left out; one line
+// of script sets the header's mixed state, which no attribute can say. Without it nothing is written.
+describe("static samples of selecting and deleting several", () => {
+  const wanted = process.env.MULTI_DELETE_SAMPLES === "1";
+
+  it.runIf(wanted)("writes the Images page with three of five selected, and with the question for three open", async () => {
+    const out = join(tmpdir(), "demo-platform-multi-delete-samples");
+    rmSync(out, { recursive: true, force: true });
+    mkdirSync(out, { recursive: true });
+    const { deps } = await makeDeps();
+    const save = (path: string, bytes: Uint8Array | string) => {
+      const file = join(out, path.replace(/^\//, ""));
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, bytes);
+    };
+    // Paths of the app become paths beside the copy; the dark colours are switched off, so the copy is light whatever the system's scheme.
+    const light = (text: string) => text.replace(/prefers-color-scheme: dark/g, "prefers-color-scheme: sample-light-only").replace(/color-scheme: light dark;/g, "color-scheme: light;").replace(/<meta name="color-scheme" content="light dark">/g, '<meta name="color-scheme" content="light">');
+    const local = (text: string) => light(text.replace(/(href|src|srcset)="\/(?!\/)/g, '$1="./').replace(/url\("\/(?!\/)/g, 'url("../'));
+    for (const path of ["/dash/dash.css", "/dash/mark.svg", "/dash/wordmark-light.png", "/dash/wordmark-dark.png", "/favicon.svg", "/favicon.ico"]) {
+      const r = await send(deps, "GET", path);
+      expect(r.status, path).toBe(200);
+      save(path, path.endsWith(".css") ? local(r.text) : r.bytes);
+    }
+    const css = (await send(deps, "GET", "/dash/dash.css")).text;
+    const font = /url\("(\/fonts\/[^"]+)"\)/.exec(css)?.[1];
+    expect(font).toBeDefined();
+    save(font!, (await send(deps, "GET", font!)).bytes);
+
+    const shown = FIVE.map((it) => ({ ...it, has_preview: false }));
+    const write = (tab: Tab, name: string) => {
+      // What a property holds (a checkbox ticked) is written as its attribute, so the copy shows it.
+      for (const e of tab.doc.root.all()) if (e.tagName === "input" && e.type === "checkbox" && e.checked) e.setAttribute("checked", "");
+      const html = tab.doc.root.all().find((e) => e.tagName === "html")!;
+      for (const s of html.all().filter((e) => e.tagName === "script")) s.remove();
+      const mixed = tab.$("media-all").indeterminate ? '<script>document.getElementById("media-all").indeterminate = true;</script>' : "";
+      save(name, local("<!doctype html>\n" + markupOf(html).replace("</body>", `${mixed}</body>`)));
+    };
+    const tab = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: list(shown) }));
+    await tab.settle();
+    select(tab, 0, 2, 3);
+    expect(picked(tab)).toEqual({ header: "Select all 5 shown", checked: false, mixed: true, bar: "3 selected", said: "3 selected" });
+    write(tab, "sample-images-selected.html");
+    const asking = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: list(shown) }));
+    await asking.settle();
+    select(asking, 0, 2, 3);
+    asking.$("pick-delete").click();
+    expect(asking.$("bulk-title").textContent).toBe("Delete 3 images?");
+    write(asking, "sample-images-question.html");
+    console.log(`samples: ${join(out, "sample-images-selected.html")} and ${join(out, "sample-images-question.html")}`);
+  });
+});
