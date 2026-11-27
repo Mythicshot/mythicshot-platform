@@ -94,7 +94,7 @@ async function main(): Promise<void> {
   // missing or wrong one stops the start, so swapped bucket names never serve; R2 not answering
   // just now is said in one line and the start goes on. One quick try, not the retries.
   if (fileSettings.mode === "r2") {
-    const marks = await startMarkerCheck(makeFileStores("r2", fileSettings, root, { timeoutMs: 10_000, retryPausesMs: [] }));
+    const marks = await startMarkerCheck(makeFileStores("r2", fileSettings, root, { timeoutMs: 10_000, bodyTimeoutMs: 10_000, retryPausesMs: [] }));
     if (marks !== null && "stop" in marks) throw new Error(marks.stop);
     if (marks !== null) console.error(marks.warn);
   }

@@ -618,7 +618,7 @@ describe("the app's check of the role markers at its start (FILE_STORE=r2)", () 
     const { fileStoreFromEnv } = await import("../src/node/config.ts");
     const { makeFileStores } = await import("../src/node/file-stores.ts");
     const { startMarkerCheck } = await import("../src/node/file-tools.ts");
-    return startMarkerCheck(makeFileStores("r2", fileStoreFromEnv({ ...env, FILE_STORE: "r2" }), "", { endpoint: st.url, timeoutMs: 500, retryPausesMs: [] }));
+    return startMarkerCheck(makeFileStores("r2", fileStoreFromEnv({ ...env, FILE_STORE: "r2" }), "", { endpoint: st.url, timeoutMs: 500, bodyTimeoutMs: 500, retryPausesMs: [] }));
   }
 
   it("both markers right: nothing to say", async () => {
@@ -629,11 +629,28 @@ describe("the app's check of the role markers at its start (FILE_STORE=r2)", () 
 
   it("a missing marker, swapped names, or a marker r2-check never writes: the start stops with one line", async () => {
     const s = site();
-    expect(await check(s.env)).toEqual({ stop: "files: the private bucket has no role marker. Run the admin command r2-check before setting FILE_STORE=r2." });
+    expect(await check(s.env)).toEqual({ stop: "files: the private bucket has no role marker. Run the admin command r2-check, then start the site again." });
     await run(s.env, ["r2-check"]);
     expect(await check({ ...s.env, R2_PRIVATE_BUCKET: s.publicBucket, R2_PUBLIC_BUCKET: s.privateBucket })).toEqual({ stop: "files: the private bucket is marked as the public one: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET are swapped." });
     s.publ().set(MARKER, { body: Buffer.from("x"), contentType: "text/plain", cacheControl: null, etag: '"x"' });
     expect(await check(s.env)).toEqual({ stop: "files: the public bucket's role marker holds something r2-check never writes. Run the admin command r2-check." });
+  });
+
+  it("R2 sending the headers of a marker and then nothing: the body's deadline ends it quickly, one line, and the start goes on", async () => {
+    const s = site();
+    await run(s.env, ["r2-check"]);
+    st.fault = (q) => (q.method === "GET" && q.path.endsWith("/r2-check/role.txt") ? { kind: "stall", send: 3 } : null);
+    try {
+      const at = Date.now();
+      const r = await check(s.env);
+      expect(Date.now() - at).toBeLessThan(5000);
+      expect(r).toEqual({ warn: "files: the role markers of the two R2 buckets could not be checked at the start (R2 did not answer in time). The site starts; run the admin command r2-check." });
+    } finally {
+      st.fault = null;
+    }
+    // The site's own start bounds the body too: one try, ten seconds for the headers and ten for the body.
+    const { readFileSync } = await import("node:fs");
+    expect(readFileSync(new URL("../src/node/entry.ts", import.meta.url), "utf8")).toContain("{ timeoutMs: 10_000, bodyTimeoutMs: 10_000, retryPausesMs: [] }");
   });
 
   it("R2 not answering: one line, and the start goes on", async () => {

@@ -288,7 +288,7 @@ export async function startMarkerCheck(stores: { drafts: FileStore; pub: FileSto
   const m = await checkMarkers(stores);
   if (m.ok) return null;
   if (m.problem === "unreadable") return { warn: `files: the role markers of the two R2 buckets could not be checked at the start (${m.reason}). The site starts; run the admin command r2-check.` };
-  if (m.problem === "missing") return { stop: `files: the ${m.role} bucket has no role marker. Run the admin command r2-check before setting FILE_STORE=r2.` };
+  if (m.problem === "missing") return { stop: `files: the ${m.role} bucket has no role marker. Run the admin command r2-check, then start the site again.` };
   if (m.problem === "wrong") {
     return { stop: m.role === "private" ? "files: the private bucket is marked as the public one: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET are swapped." : "files: the public bucket is marked as the private one: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET are swapped." };
   }
