@@ -94,6 +94,11 @@ describe("SOURCE_URL on Node", () => {
   it("is passed on by the cPanel startup file, the tunnel stack and its copy in install.sh, and kept by the Cloudflare update", () => {
     expect(read("../deploy/cpanel/app.cjs")).toContain("SOURCE_URL");
     for (const f of ["../deploy/tunnel/docker-compose.yml", "../deploy/install.sh"]) expect(read(f), f).toContain("      SOURCE_URL: ${SOURCE_URL:-}\n");
+    // A SOURCE_URL left in the shell is taken out before Compose could read it, as HOME_URL is,
+    // and deploy/test-install.sh holds that (it needs Docker's stand-ins and Bash, so it is not run here).
+    expect(read("../deploy/install.sh")).toContain("unset HOME_URL\nunset SOURCE_URL\n");
+    expect(read("../deploy/test-install.sh")).toContain("test_source_url_in_the_environment_does_not_reach_the_stack() {");
+    expect(read("../deploy/test-install.sh")).toContain(`printf '%s\\n' "\${SOURCE_URL-unset}" >>"$STUB_STATE/up-source-url"`);
     expect(read("../scripts/setup-cloudflare.ts")).toMatch(/const KEPT_VARS = \[[^\]]*"SOURCE_URL"[^\]]*\] as const;/);
   });
 

@@ -150,11 +150,13 @@ unset TUNNEL_TOKEN
 # script never takes either from the environment. One left there would be read by
 # Compose before .env, so both are taken out. So is the third address's IMG_HOST, which
 # the tunnel stack file passes on from .env, and the site's home page, HOME_URL, which it
-# passes on the same way: only .env supplies either.
+# passes on the same way, and the address of the copy's source code, SOURCE_URL, likewise:
+# only .env supplies any of them.
 unset APP_DOMAIN
 unset DOMAIN
 unset IMG_HOST
 unset HOME_URL
+unset SOURCE_URL
 
 case "$0" in
   install.sh | */install.sh) SELF="$0" ;;
