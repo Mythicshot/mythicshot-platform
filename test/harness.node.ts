@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NodeDb } from "../src/node/db.ts";
-import { NodeFileStore } from "../src/node/files.ts";
+import { fileStoreFromEnv } from "../src/node/config.ts";
+import { siteFileStores } from "../src/node/file-stores.ts";
 import { migrate } from "../src/node/migrate.ts";
 import type { Config, Deps } from "../src/ports.ts";
 import { newId } from "../src/auth.ts";
@@ -11,6 +12,7 @@ import { createWorkspace, workspaceStatements } from "../src/workspaces.ts";
 import { background as trackBackground, checkAtEndOfTest } from "./background.ts";
 import { counted } from "./counting.ts";
 import { FakeMailer } from "./fake-mail.ts";
+import { startStandIn, type StandIn } from "./node-r2-standin.ts";
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url));
 
@@ -19,6 +21,36 @@ const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/", import.meta.url))
  * all, so `mailOf` gives the mailer that is off. By default the deps carry the fake mailer.
  */
 export type MakeOptions = { mail?: boolean };
+
+/**
+ * Where these deps keep their files (0.1.71): "disk", the two folders, unless the run says
+ * DP_TEST_FILE_STORE=r2 (the node-r2 project of vitest.node.config.ts), which keeps them in two
+ * new buckets of the stand-in for R2 (test/node-r2-standin.ts). Either way the stores come from
+ * the settings through the factory the app uses, src/node/file-stores.ts.
+ */
+export const HARNESS_FILES: "disk" | "r2" = process.env.DP_TEST_FILE_STORE === "r2" ? "r2" : "disk";
+
+let standIn: Promise<StandIn> | null = null;
+let bucketPairs = 0;
+
+/** The one stand-in of this test file (made at the first use), for a test that looks into its buckets. */
+export function harnessStandIn(): Promise<StandIn> {
+  standIn ??= startStandIn();
+  return standIn;
+}
+
+/** The two stores of a new set of deps, and on R2 which buckets they are. */
+async function harnessStores(root: string) {
+  if (HARNESS_FILES === "disk") return { ...siteFileStores(fileStoreFromEnv({}), root), r2: null };
+  const st = await harnessStandIn();
+  bucketPairs += 1;
+  const privateBucket = `harness-private-${bucketPairs}`;
+  const publicBucket = `harness-public-${bucketPairs}`;
+  st.createBucket(privateBucket);
+  st.createBucket(publicBucket);
+  const settings = fileStoreFromEnv({ FILE_STORE: "r2", R2_ACCOUNT_ID: st.accountId, R2_ACCESS_KEY_ID: st.accessKeyId, R2_SECRET_ACCESS_KEY: st.secret, R2_PRIVATE_BUCKET: privateBucket, R2_PUBLIC_BUCKET: publicBucket });
+  return { ...siteFileStores(settings, root, { endpoint: st.url }), r2: { standIn: st, privateBucket, publicBucket } };
+}
 
 /** The database under each deps makeDeps made, uncounted, for makeDepsBefore's runner. */
 const rawDbOf = new WeakMap<Deps, NodeDb>();
@@ -35,8 +67,7 @@ export async function makeDeps(config?: Partial<Config>, opts: MakeOptions = {},
     for (const f of await readdir(MIGRATIONS_DIR)) if (f.endsWith(".sql") && keep(f)) await copyFile(join(MIGRATIONS_DIR, f), join(some, f));
     await migrate(db, some);
   }
-  const drafts = new NodeFileStore(join(root, "drafts"));
-  const pub = new NodeFileStore(join(root, "public"));
+  const { drafts, pub, r2 } = await harnessStores(root);
   const c = counted(db, drafts, pub);
   const mail = new FakeMailer();
   const background = trackBackground();
@@ -64,6 +95,8 @@ export async function makeDeps(config?: Partial<Config>, opts: MakeOptions = {},
     draftKeys: () => drafts.keys(),
     publicKeys: () => pub.keys(),
     calls: c.calls,
+    /** On an R2 run: the stand-in and the two buckets of these deps; null on disk. */
+    r2,
   };
 }
 
