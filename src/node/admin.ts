@@ -668,6 +668,17 @@ async function sweepCommand(dryRun: boolean, db: NodeDb, config: Config, env: No
   const fileSettings = fileSettingsOrSay(env, out);
   if (fileSettings === null) return 1;
   const files = siteFileStores(fileSettings, root, opts.r2);
+  // A sweep that may remove what is due deletes stored files: on R2, only once both buckets are
+  // known to carry their own role, so swapped bucket names in an edited settings file cannot make
+  // it delete from the wrong bucket while it removes the rows.
+  const removal = removalSwitchedOn(env[REMOVAL_SETTING]);
+  if (fileSettings.mode === "r2" && removal && !dryRun) {
+    const marks = await checkMarkers(files);
+    if (!marks.ok) {
+      out(FILES_SAID.sweepMarkers(marks));
+      return 1;
+    }
+  }
   const deps: Deps = {
     db,
     drafts: files.drafts,
@@ -677,7 +688,7 @@ async function sweepCommand(dryRun: boolean, db: NodeDb, config: Config, env: No
     ...(mail.mode === "smtp" ? { mail: mail.mailer } : {}),
     ...(billing === null ? {} : { stripe: (opts.makeStripe ?? ((key: string) => stripeOverFetch(key)))(billing.apiKey) }),
   };
-  const summary = await billingSweep(deps, { dryRun, removal: removalSwitchedOn(env[REMOVAL_SETTING]) });
+  const summary = await billingSweep(deps, { dryRun, removal });
   for (const line of sweepLines(summary)) out(line);
   return 0;
 }
@@ -768,6 +779,17 @@ export const FILES_SAID = {
   prefixes: (name: string, list: string) => `${name} files at the destination, by key prefix: ${list}.`,
   notListed: (name: string, reason: string) => `${name} files: not copied, the files could not be listed: ${reason}.`,
   dryDone: "Dry run: nothing was changed.",
+  sweepMarkers: (m: Exclude<MarkerCheck, { ok: true }>) => {
+    const why =
+      m.problem === "unreadable"
+        ? `the role markers of the two R2 buckets could not be read (${m.reason})`
+        : m.problem === "missing"
+          ? `the ${m.role} bucket has no role marker; run r2-check`
+          : m.problem === "wrong"
+            ? FILES_SAID.markWrong(m.role).replace(/\.$/, "")
+            : `the ${m.role} bucket's role marker holds something r2-check never writes`;
+    return `billing-sweep did not run: ${why}. Nothing was removed and no mail was sent.`;
+  },
   done: "Done: every file of the source is at the destination, checked by size and SHA-256.",
   someFailed: (n: number) => `Not done: ${n === 1 ? "1 file" : `${n} files`} failed. Run the command again, and do not change FILE_STORE until it ends with 0 failed.`,
   someBad: (n: number) =>
