@@ -579,15 +579,24 @@ docker compose up -d --force-recreate --wait
 From version 0.1.71 the files can be kept in two Cloudflare R2 buckets instead of `drafts/` and `public/` in the data folder; [Files on R2](../README.md#files-on-r2) in the README says what the six settings mean and why the copy is made with the app stopped. The admin commands run in a one-off container of the app's service, with the same data folder and the same environment as the app, while the app itself is stopped. **Unconfirmed:** the `docker compose stop`, `docker compose run` and `docker compose start` commands below have not been run on a server; they follow from how the stack is defined. From a root shell in the stack's folder:
 
 1. Update to 0.1.71 or later. Nothing changes yet.
-2. Add the five R2 settings to `.env` as root, each on a line of its own and in single quotes (Compose reads the file): `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_PRIVATE_BUCKET` and `R2_PUBLIC_BUCKET`. The direct route hands the app the whole `.env`; the tunnel route's stack file passes each of the six on by name. A mistyped value stops the app at its next start, so check them at once, in step 3.
+2. Add the five R2 settings to `.env` as root, each on a line of its own and in single quotes (Compose reads the file): `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_PRIVATE_BUCKET` and `R2_PUBLIC_BUCKET`. The direct route hands the app the whole `.env`; the tunnel route's stack file passes each of the six on by name. While the files are on disk a mistyped value does not stop the app, which says it in its log; check them at once, in step 3.
 3. Check the key and the buckets, and mark each bucket with its role: `docker compose run --rm --no-deps app node dist/node/admin.js r2-check`. The last line must be `R2 check passed: both buckets are marked with their roles and can be written, read and deleted with this key.`
 4. Stop the app with `docker compose stop app`, then copy: `docker compose run --rm --no-deps app node dist/node/admin.js files-copy --from disk --to r2 --app-is-stopped`. It prints counts only and ends with `Done: every file of the source is at the destination, checked by size and SHA-256.`; it removes nothing, so run it again until it does.
-5. Look at the line `public files at the destination, by key prefix: …`: it must name `p/` and nothing else.
+5. Look at the public files' lines: `extra at the destination` must be `0` and the prefix line must name `p/` and nothing else. A run that leaves extra files in the public bucket ends with `Not done:` and says how to see and remove them.
 6. Add `FILE_STORE='r2'` to `.env` and start the app again on it with `docker compose up -d --force-recreate --wait`, then check a public tour, a restricted tour, a shared image, an upload, a delete and the data download.
 
-The way back: `docker compose stop app`, then `docker compose run --rm --no-deps app node dist/node/admin.js files-copy --from r2 --to disk --app-is-stopped` while `.env` still says `FILE_STORE='r2'`, then `FILE_STORE='disk'` (or no such line) and `docker compose up -d --force-recreate --wait`. `sudo bash install.sh status` says `files: on R2 (.env's FILE_STORE is not disk), not in the data folder; a backup does not hold them` while they are.
+The way back: `docker compose stop app`, then `docker compose run --rm --no-deps app node dist/node/admin.js files-copy --from r2 --to disk --app-is-stopped` while `.env` still says `FILE_STORE='r2'`, then `FILE_STORE='disk'` (or no such line) and `docker compose up -d --force-recreate --wait`. `sudo bash install.sh status` says `files: on R2 (FILE_STORE=r2 in .env), not in the data folder; a backup does not hold them` while they are, and `files: may be on R2 (.env's FILE_STORE is not plainly disk or r2); a backup holds the data folder's drafts and public folders all the same` for a value it cannot read plainly.
 
 `install.sh` takes `FILE_STORE` and the five R2 settings out of its own environment before it runs Compose, because Compose prefers the shell's variables over `.env`. A `docker compose` command you type yourself does not: if your shell has any of the six exported, unset them first, or the app would start on those values instead of the ones in `.env`.
+
+**Before giving the public bucket its own address:**
+
+- `R2_PUBLIC_BUCKET` in the settings file, not a bucket's name, decides which bucket holds the public pictures: in the Cloudflare dashboard, confirm that exactly that bucket gets public access, and that the private bucket has no public address of any kind.
+- Once the public address exists, `<that address>/r2-check/role.txt` must read `demo-platform bucket role: public`.
+- The last copy toward R2 showed `extra at the destination: 0` for the public files, and only `p/` in their prefix line.
+- `FILE_STORE` and the R2 settings belong in `.env` only: never in the hosting panel's own environment screen or in an exported shell variable, since the update script and the admin commands read that file only.
+- Never use `--remove-extra` toward R2 after the site has served from R2, unless the way-back copy to disk completed first.
+- Keep your own copy of both buckets: R2 has no bin.
 
 > [!WARNING]
 > With `FILE_STORE=r2`, `sudo bash install.sh backup` and the backup `update` takes hold the database only, and say so. R2 has no bin to recover a deleted file from: keep a copy of the two buckets yourself.
