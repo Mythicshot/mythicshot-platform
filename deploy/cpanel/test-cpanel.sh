@@ -967,6 +967,142 @@ test_update_refuses_the_way_back_when_an_item_is_restricted() {
   expect "no restricted item: the commands are shown" has "$OUT" "To go back to the version that ran before"
 }
 
+# ---------------------------------------------------------------- files on R2
+
+# The five R2 settings with made-up values, and FILE_STORE as given (written as is): files_on_r2 <FILE_STORE line>.
+R2_MADE_UP_SECRET="made-up-r2-secret-for-the-cpanel-tests-0123456789"
+files_on_r2() {
+  printf '%s\nR2_ACCOUNT_ID=0123456789abcdef0123456789abcdef\nR2_ACCESS_KEY_ID=made-up-r2-key-id\nR2_SECRET_ACCESS_KEY=%s\nR2_PRIVATE_BUCKET=made-up-private-bucket\nR2_PUBLIC_BUCKET=made-up-public-bucket\n' "$1" "$R2_MADE_UP_SECRET" >>"$SETTINGS"
+}
+# No R2 setting's value appears in what a run printed or in any stand-in's command line.
+r2_values_not_shown() {
+  local v
+  for v in "$R2_MADE_UP_SECRET" made-up-r2-key-id made-up-private-bucket made-up-public-bucket 0123456789abcdef0123456789abcdef; do
+    ! grep -qF -- "$v" "$OUT" "$ERR" "$LOG" || return 1
+  done
+}
+
+test_backup_says_the_files_on_r2_are_not_in_it() {
+  local line
+  for line in 'FILE_STORE=r2' 'FILE_STORE="r2"' "  FILE_STORE='R2'  "; do
+    new_sandbox
+    fresh_install
+    app_has_run
+    files_on_r2 "$line"
+    cpanel "" backup
+    expect "$line: exit code 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
+    expect "$line: says so in one line" has "$OUT" "the files are on R2 (FILE_STORE=r2 in the settings file), so they are not part of this backup: it holds the database, the app files and the settings file only."
+    local b; b="$(only_backup)"
+    expect "$line: the stale folders are not copied" test ! -e "$b/drafts" -a ! -e "$b/public"
+    expect "$line: the database is" test -s "$b/db.sqlite"
+    expect "$line: no R2 value is shown" r2_values_not_shown
+    expect "$line: the setup code is not shown" code_not_shown
+  done
+  # Empty or missing folders do not make it fail.
+  new_sandbox
+  fresh_install
+  app_has_run
+  rm -rf -- "$DATA/drafts" "$DATA/public"
+  files_on_r2 FILE_STORE=r2
+  cpanel "" backup
+  expect "no folders: exit code 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
+  cpanel "" backup --dry-run
+  expect "dry run: says so" has "$OUT" "the files are on R2 (FILE_STORE=r2 in the settings file)"
+  expect "dry run: would not copy the folders" hasnt "$OUT" "would copy $DATA/drafts"
+  # disk, or no line, is today's backup, without a word about R2.
+  new_sandbox
+  fresh_install
+  app_has_run
+  files_on_r2 FILE_STORE=disk
+  cpanel "" backup
+  b="$(only_backup)"
+  expect "disk: the folders are copied" cmp -s "$DATA/drafts/u1/step-001.png" "$b/drafts/u1/step-001.png"
+  expect "disk: nothing about R2" hasnt "$OUT" "on R2"
+  # A value the app does not take: said, and the folders are copied all the same.
+  new_sandbox
+  fresh_install
+  app_has_run
+  files_on_r2 FILE_STORE=s3
+  cpanel "" backup
+  b="$(only_backup)"
+  expect "other: said" has "$OUT" "the FILE_STORE line of the settings file is neither disk nor r2"
+  expect "other: the folders are copied" test -d "$b/drafts"
+  expect "other: the value is not shown" hasnt "$OUT" "s3"
+}
+
+test_update_backup_and_status_say_the_files_are_on_r2() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  files_on_r2 FILE_STORE=r2
+  make_release "$T/new" 0.2.0
+  cpanel_in "$T/new" "" update --yes
+  expect "update works (stderr: $(cat "$ERR"))" test "$RC" = 0
+  expect "its backup says so" has "$OUT" "the files are on R2 (FILE_STORE=r2 in the settings file), so they are not part of this backup"
+  expect "update: no R2 value is shown" r2_values_not_shown
+  cpanel "" status
+  expect "status works" test "$RC" = 0
+  expect "status says so beside the data folder" has "$OUT" "files:          on R2 (FILE_STORE=r2), not in the data folder; a backup does not hold them"
+  expect "status: no R2 value is shown" r2_values_not_shown
+  new_sandbox
+  fresh_install
+  app_has_run
+  cpanel "" status
+  expect "disk: status says nothing of R2" hasnt "$OUT" "files:"
+}
+
+test_downgrade_below_r2_is_refused_while_the_files_are_on_r2() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  make_release "$T/new" 0.2.0
+  cpanel_in "$T/new" "" update --yes
+  expect "the update to 0.2.0 works (stderr: $(cat "$ERR"))" test "$RC" = 0
+  files_on_r2 FILE_STORE=r2
+  make_release "$T/older" 0.1.70
+  local before; before="$(snapshot)"
+  cpanel_in "$T/older" "" update --yes --allow-downgrade
+  expect "below 0.1.71: refused" test "$RC" != 0
+  expect "says not to go back" has "$OUT" "Do not go back to version 0.1.70"
+  expect "says why" has "$OUT" "The settings file says FILE_STORE=r2: the files are in the two R2 buckets. Versions before 0.1.71 know only files on disk"
+  expect "says what to do instead" has "$OUT" "admin files-copy --from r2 --to disk --app-is-stopped until it ends with 0 failed, set FILE_STORE=disk in the settings file (or remove the line)"
+  expect "and not to restore a database" has "$OUT" "Do not restore a database backup for this"
+  expect "says nothing was changed" has "$ERR" "nothing was changed: version 0.1.70 is older than 0.1.71"
+  expect "nothing was changed" test "$(snapshot)" = "$before"
+  expect "no R2 value is shown" r2_values_not_shown
+  # Far below, too, and with a value the app does not take (fails closed).
+  make_release "$T/oldest" 0.1.1
+  cpanel_in "$T/oldest" "" update --yes --allow-downgrade
+  expect "0.1.1: refused" test "$RC" != 0
+  sed -i 's/^FILE_STORE=r2$/FILE_STORE=bucket/' "$SETTINGS"
+  cpanel_in "$T/older" "" update --yes --allow-downgrade
+  expect "other value: refused" test "$RC" != 0
+  expect "other value: says it may be on R2" has "$OUT" "could not be read as disk, so the files may be in the two R2 buckets"
+  # 0.1.71 knows R2: allowed.
+  sed -i 's/^FILE_STORE=bucket$/FILE_STORE=r2/' "$SETTINGS"
+  make_release "$T/knows" 0.1.71
+  cpanel_in "$T/knows" "" update --yes --allow-downgrade
+  expect "to 0.1.71: allowed (stderr: $(cat "$ERR"))" test "$RC" = 0
+  # Back on disk, an older version is allowed as before.
+  sed -i 's/^FILE_STORE=r2$/FILE_STORE=disk/' "$SETTINGS"
+  cpanel_in "$T/older" "" update --yes --allow-downgrade
+  expect "disk: to 0.1.70 allowed (stderr: $(cat "$ERR"))" test "$RC" = 0
+}
+
+test_update_refuses_the_way_back_while_the_files_are_on_r2() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  files_on_r2 FILE_STORE=r2
+  make_release "$T/new" 0.2.0
+  STUB_HEALTH=fail CPANEL_HEALTH_TRIES=1 cpanel_in "$T/new" "" update --yes
+  expect "exit code non-zero" test "$RC" != 0
+  expect "says not to go back" has "$OUT" "Do not go back to version 0.1.1"
+  expect "says why" has "$OUT" "The settings file says FILE_STORE=r2"
+  expect "shows no command to go back" hasnt "$OUT" "To go back to the version that ran before"
+  expect "no R2 value is shown" r2_values_not_shown
+}
+
 test_an_archive_before_access_is_checked_whatever_is_installed() {
   # The installed version cannot be read: an archive before 0.1.38 is still checked.
   new_sandbox

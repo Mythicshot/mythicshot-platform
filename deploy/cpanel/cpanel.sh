@@ -41,7 +41,12 @@
 # - The setup code is made here from /dev/urandom, written only to the settings file and
 #   never printed, logged or passed as a command argument. The script tells where the
 #   file is; the person reads the code there. Of the settings file, the script reads
-#   only the DATA_DIR line.
+#   only the DATA_DIR line and, to know whether the files are on R2, the FILE_STORE line
+#   (whether it says r2, and nothing else of it); it prints neither value.
+# - With FILE_STORE=r2 the files are in two R2 buckets, not in drafts/ and public/: backup
+#   and the backup of update say so in one line and hold the database, the app files and
+#   the settings file only; status says so beside its disk usage; and update refuses a
+#   version from before R2_SINCE, which knows only files on disk (see older_version_allowed).
 # - It never removes or overwrites the data folder, the settings file or a backup. An
 #   existing settings file or data folder is kept as it is, also by install.
 # - update takes a backup first and stops if the backup fails; a backup without the
@@ -175,6 +180,8 @@ APP_DIR=""
 APP_NAME=""
 DATA_DIR=""
 DATA_PROBLEM=""
+# Where the files are, from read_file_store: disk, r2, other or unknown.
+FILE_STORE_STATE=""
 SETTINGS=""
 STATE_FILE=""
 MARKER=""
@@ -230,7 +237,8 @@ Options:
   --dry-run           Print what would be done and change nothing.
   --allow-downgrade   With update: accept an archive older than the installed version.
                       Refused for a version before 0.1.38 while a tour is restricted,
-                      and before 0.1.47 while a shared image or clip is restricted.
+                      before 0.1.47 while a shared image or clip is restricted, and
+                      before 0.1.71 while the settings file says FILE_STORE=r2.
   --no-restricted-tours-checked-by-hand
                       With update: you checked by hand that no tour is restricted to
                       people or to its owner and none is being changed to or from that.
@@ -495,6 +503,34 @@ read_data_dir() {
     *) DATA_PROBLEM="DATA_DIR in $SETTINGS is not an absolute path"; return 1 ;;
   esac
 }
+
+# Where the files are, from the FILE_STORE line of the settings file and no other line,
+# taken as app.cjs takes it (the first such line; spaces around it and one pair of quotes
+# dropped) and as the app reads it (in any case). Sets FILE_STORE_STATE: disk (no line,
+# an empty one, or disk), r2, other (a value the app does not start with), or unknown (the
+# file cannot be read). Only the state is kept; the value is never printed.
+read_file_store() {
+  local v
+  FILE_STORE_STATE=unknown
+  [ -f "$SETTINGS" ] && [ -r "$SETTINGS" ] || return 0
+  v="$(sed -n 's/^[[:space:]]*FILE_STORE=//p' "$SETTINGS" | head -n 1 | tr -d '\r')"
+  v="${v%"${v##*[![:space:]]}"}"
+  case "$v" in
+    \"*\") v="${v#\"}"; v="${v%\"}" ;;
+    \'*\') v="${v#\'}"; v="${v%\'}" ;;
+  esac
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  case "$v" in
+    "" | [Dd][Ii][Ss][Kk]) FILE_STORE_STATE=disk ;;
+    [Rr]2) FILE_STORE_STATE=r2 ;;
+    *) FILE_STORE_STATE=other ;;
+  esac
+}
+
+# The lines backup and status say about the files when they may not be on disk.
+FILES_ON_R2_LINE="the files are on R2 (FILE_STORE=r2 in the settings file), so they are not part of this backup: it holds the database, the app files and the settings file only. Keep a copy of the two buckets yourself."
+FILES_UNKNOWN_LINE="the FILE_STORE line of the settings file is neither disk nor r2, and the app does not start with it; if the files are on R2, they are not part of this backup."
 
 # The data folder of an existing install, with its database. Stops otherwise: a backup
 # or an update that cannot find the data must not go on as if there were none.
@@ -814,13 +850,21 @@ do_backup() {
   # app's build and goes into the archive.
   if [ ! -f "$APP_DIR/dist/node/entry.js" ] && [ -e "$APP_DIR/dist.old" ]; then members+=("dist.old"); fi
   if [ ! -e "$APP_DIR/migrations" ] && [ -e "$APP_DIR/migrations.old" ]; then members+=("migrations.old"); fi
+  # With the files on R2 the two folders are not the site's files: they are left out, and
+  # the backup says so. A value the app does not start with is said too, and the folders
+  # are copied as before, since they may still be the site's files.
+  read_file_store
   if [ "$DRY_RUN" = 1 ]; then
     if [ "$NO_DATABASE" = 1 ]; then
       info "there is no database to back up yet: the app has never started"
     else
       info "would copy the database $DATA_DIR/db.sqlite with SQLite itself and check the copy; never a plain file copy"
     fi
-    info "would copy $DATA_DIR/drafts and $DATA_DIR/public"
+    case "$FILE_STORE_STATE" in
+      r2) info "$FILES_ON_R2_LINE" ;;
+      other) info "$FILES_UNKNOWN_LINE"; info "would copy $DATA_DIR/drafts and $DATA_DIR/public" ;;
+      *) info "would copy $DATA_DIR/drafts and $DATA_DIR/public" ;;
+    esac
     info "would write app.tgz from $APP_DIR: ${members[*]:-nothing}"
     info "would copy the settings file $SETTINGS (mode 600)"
     LAST_BACKUP="$dest"
@@ -838,7 +882,10 @@ do_backup() {
     info "the database $DATA_DIR/db.sqlite"
     copy_database "$DATA_DIR/db.sqlite" "$PARTIAL_BACKUP/db.sqlite" || { warn "copying the database failed"; remove_partial_backup; return 1; }
   fi
+  [ "$FILE_STORE_STATE" != r2 ] || info "$FILES_ON_R2_LINE"
+  [ "$FILE_STORE_STATE" != other ] || info "$FILES_UNKNOWN_LINE"
   for d in drafts public; do
+    [ "$FILE_STORE_STATE" != r2 ] || continue
     if [ -d "$DATA_DIR/$d" ]; then
       info "the $d folder"
       cp -R -p -- "$DATA_DIR/$d" "$PARTIAL_BACKUP/$d" || { warn "copying $DATA_DIR/$d failed"; remove_partial_backup; return 1; }
@@ -1043,6 +1090,9 @@ ACCESS_SINCE=0.1.38
 ACCESS_COLUMN_SQL="SELECT count(*) AS n FROM pragma_table_info('tour') WHERE name = 'access'"
 RESTRICTED_SQL="SELECT (SELECT count(*) FROM tour WHERE access <> 'public') + (SELECT count(*) FROM access_switch) AS n"
 MEDIA_ACCESS_SINCE=0.1.47
+# The first version that can keep the files on R2 (FILE_STORE=r2). A version before it
+# knows only the data folder's drafts and public folders.
+R2_SINCE=0.1.71
 MEDIA_ACCESS_COLUMN_SQL="SELECT count(*) AS n FROM pragma_table_info('media') WHERE name = 'access'"
 RESTRICTED_ITEMS_SQL="SELECT count(*) AS n FROM media WHERE access <> 'public'"
 # count_in_database <marker> <has-column sql> <count sql>: sets DB_COUNT, or DB_COUNT_PROBLEM
@@ -1104,9 +1154,27 @@ check_restricted_items() {
 older_version_allowed() {
   local target="$1" which
   REFUSED_SINCE=""
-  if [ -n "$target" ] && ! version_lt "$target" "$MEDIA_ACCESS_SINCE"; then return 0; fi
   which="the version that ran before"
   [ -z "$target" ] || which="version $target"
+  # A version before R2_SINCE knows only files on disk: never while the settings file says
+  # (or may say) that they are on R2. Fails closed: a FILE_STORE value the app does not
+  # take, or a settings file that cannot be read, is refused too.
+  if [ -z "$target" ] || version_lt "$target" "$R2_SINCE"; then
+    read_file_store
+    if [ "$FILE_STORE_STATE" != disk ]; then
+      say "Do not go back to $which"
+      if [ "$FILE_STORE_STATE" = r2 ]; then
+        info "The settings file says FILE_STORE=r2: the files are in the two R2 buckets. Versions before $R2_SINCE know only files on disk, and would find none of them."
+      else
+        info "The FILE_STORE line of the settings file could not be read as disk, so the files may be in the two R2 buckets. Versions before $R2_SINCE know only files on disk."
+      fi
+      REFUSED_SINCE="$R2_SINCE"
+      info "To go back, first bring the files back to disk: stop the app, run $SELF admin files-copy --from r2 --to disk --app-is-stopped until it ends with 0 failed, set FILE_STORE=disk in the settings file (or remove the line), start the app and check it. Then run this again."
+      info "Do not restore a database backup for this: the files deleted from R2 since that backup would be missing."
+      return 1
+    fi
+  fi
+  if [ -n "$target" ] && ! version_lt "$target" "$MEDIA_ACCESS_SINCE"; then return 0; fi
   if [ -z "$target" ] || version_lt "$target" "$ACCESS_SINCE"; then
     if check_restricted; then
       if [ "$RESTRICTED_COUNT" -gt 0 ]; then
@@ -1266,9 +1334,11 @@ cmd_update() {
   # Any version that does not know who may view a tour, or a shared image or clip, whatever is
   # installed (an unreadable installed version and the same version included): only when
   # nothing it does not know is restricted, or someone checked by hand when the database
-  # cannot be read. An app that never started has no database, so nothing to check.
-  if version_lt "$new" "$MEDIA_ACCESS_SINCE"; then
-    older_version_allowed "$new" || die "nothing was changed: version $new is older than $REFUSED_SINCE and must not run on this database"
+  # cannot be read. An app that never started has no database, so nothing to check. And
+  # any version that does not know files on R2, only while the settings file does not say
+  # FILE_STORE=r2.
+  if version_lt "$new" "$R2_SINCE"; then
+    older_version_allowed "$new" || die "nothing was changed: version $new is older than $REFUSED_SINCE and must not run on this site's data"
   fi
   require_node_env
   # An update is resumed when its marker is there, and also when the build exists only
@@ -1410,6 +1480,11 @@ cmd_status() {
   elif [ -d "$DATA_DIR" ]; then
     size="$(du -sh -- "$DATA_DIR" 2>/dev/null | cut -f1 || true)"
     info "data folder:    $DATA_DIR, ${size:-size unknown}"
+    read_file_store
+    case "$FILE_STORE_STATE" in
+      r2) info "files:          on R2 (FILE_STORE=r2), not in the data folder; a backup does not hold them" ;;
+      other) info "files:          the FILE_STORE line of the settings file is neither disk nor r2; the app does not start with it" ;;
+    esac
     [ -f "$DATA_DIR/db.sqlite" ] || info "database:       none at $DATA_DIR/db.sqlite yet; the app writes it the first time it starts"
   else
     info "data folder:    $DATA_DIR is MISSING"
