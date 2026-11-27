@@ -661,7 +661,9 @@ async function sweepCommand(dryRun: boolean, db: NodeDb, config: Config, env: No
   const root = resolve(env.DATA_DIR as string);
   const mail = mailFromEnv(env, config, opts.makeMailer ?? smtpMailer);
   const billing = config.billing ?? null;
-  const files = siteFileStores(fileStoreFromEnv(env), root, opts.r2);
+  const fileSettings = fileSettingsOrSay(env, out);
+  if (fileSettings === null) return 1;
+  const files = siteFileStores(fileSettings, root, opts.r2);
   const deps: Deps = {
     db,
     drafts: files.drafts,
@@ -684,7 +686,9 @@ async function sweepCommand(dryRun: boolean, db: NodeDb, config: Config, env: No
 async function storageSweepCommand(dryRun: boolean, db: NodeDb, config: Config, env: NodeJS.ProcessEnv, out: (line: string) => void, opts: AdminOptions): Promise<number> {
   const root = resolve(env.DATA_DIR as string);
   const mail = mailFromEnv(env, config, opts.makeMailer ?? smtpMailer);
-  const files = siteFileStores(fileStoreFromEnv(env), root, opts.r2);
+  const fileSettings = fileSettingsOrSay(env, out);
+  if (fileSettings === null) return 1;
+  const files = siteFileStores(fileSettings, root, opts.r2);
   const deps: Deps = {
     db,
     drafts: files.drafts,
@@ -695,6 +699,20 @@ async function storageSweepCommand(dryRun: boolean, db: NodeDb, config: Config, 
   };
   for (const line of storageSweepLines(await storageSweep(deps, { dryRun }))) out(line);
   return 0;
+}
+
+/**
+ * The file settings for a command that touches files, or null after printing their one fixed
+ * line. The admin command reads its config with `forCommands`, which does not stop on them, so
+ * a bad R2 set never closes the recovery commands; each command that touches a file asks here.
+ */
+function fileSettingsOrSay(env: NodeJS.ProcessEnv, out: (line: string) => void): FileStoreSettings | null {
+  try {
+    return fileStoreFromEnv(env);
+  } catch (err) {
+    out(err instanceof Error ? err.message : SAID.failed);
+    return null;
+  }
 }
 
 /** What the two file commands say: fixed lines, and functions for the lines with counts. Never a value of a setting. */
@@ -729,8 +747,8 @@ export const FILES_SAID = {
  * never copied into each other.
  */
 async function filesCommand(parsed: { kind: "r2-check" } | FilesCopy, env: NodeJS.ProcessEnv, out: (line: string) => void, opts: AdminOptions): Promise<number> {
-  // configFromEnv has checked the settings already.
-  const settings: FileStoreSettings = fileStoreFromEnv(env);
+  const settings = fileSettingsOrSay(env, out);
+  if (settings === null) return 1;
   if (settings.r2 === null) {
     out(FILES_SAID.notSetUp(parsed.kind === "r2-check" ? "checked" : "copied"));
     return 1;

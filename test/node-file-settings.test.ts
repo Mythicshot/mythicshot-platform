@@ -178,7 +178,7 @@ describe("the one factory", () => {
     const read = (f: string) => readFileSync(fileURLToPath(new URL(f, import.meta.url)), "utf8");
     expect(read("../src/node/entry.ts")).toContain("const files = siteFileStores(fileStoreFromEnv(process.env), root);");
     const admin = read("../src/node/admin.ts");
-    expect(admin.match(/siteFileStores\(fileStoreFromEnv\(env\), root, opts\.r2\)/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(admin.match(/const fileSettings = fileSettingsOrSay\(env, out\);\n\s+if \(fileSettings === null\) return 1;\n\s+const files = siteFileStores\(fileSettings, root, opts\.r2\);/g)?.length).toBe(2);
     for (const f of ["../src/node/entry.ts", "../src/node/admin.ts", "../src/node/config.ts"]) {
       expect(read(f), f).not.toMatch(/new NodeFileStore\(|r2Stores\(/);
     }
@@ -199,13 +199,18 @@ describe("the start stops on a bad set, with one line and no value", () => {
     expect(r.stdout + r.stderr).not.toContain(GOOD.R2_ACCOUNT_ID);
   }, 60_000);
 
-  it("the admin command: the same line and exit 1, for a command that touches no file too", async () => {
+  it("the admin command: a command that touches files refuses with the same line and exit 1; one that touches none is not closed by it", async () => {
+    const env = { DATA_DIR: tmpdir(), FILE_STORE: "r2", ...GOOD, R2_PUBLIC_BUCKET: "Bad_Bucket" };
+    const LINE = "files: R2_PUBLIC_BUCKET is not an R2 bucket name: 3 to 63 lowercase letters, digits and hyphens, beginning and ending with a letter or digit. Fix it, or remove all five R2 settings (and FILE_STORE=r2) to keep the files on disk.";
+    for (const argv of [["r2-check"], ["files-copy", "--from", "r2", "--to", "disk", "--dry-run"]]) {
+      const lines: string[] = [];
+      expect(await runAdmin(argv, env, (l) => lines.push(l)), argv[0]).toBe(1);
+      expect(lines).toEqual([LINE]);
+    }
+    // audit is not closed by the file settings: it stops for its own reason (no database here), not theirs.
     const lines: string[] = [];
-    const code = await runAdmin(["audit"], { DATA_DIR: tmpdir(), FILE_STORE: "r2", ...GOOD, R2_PUBLIC_BUCKET: "Bad_Bucket" }, (l) => lines.push(l));
-    expect(code).toBe(1);
-    expect(lines).toEqual([
-      "files: R2_PUBLIC_BUCKET is not an R2 bucket name: 3 to 63 lowercase letters, digits and hyphens, beginning and ending with a letter or digit. Fix it, or remove all five R2 settings (and FILE_STORE=r2) to keep the files on disk.",
-    ]);
+    await runAdmin(["audit"], env, (l) => lines.push(l));
+    expect(lines.join("\n")).not.toContain("files:");
   });
 });
 
