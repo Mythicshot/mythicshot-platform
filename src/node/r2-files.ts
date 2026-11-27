@@ -76,6 +76,9 @@ export const REASONS = {
   badAnswer: "R2's answer could not be read",
   truncated: "R2's answer ended before the whole file",
   deleteFailed: "R2 could not delete every file",
+  tooLarge: "R2's answer was larger than expected",
+  notPublic: "the public bucket takes public pictures only",
+  publicKey: "the private bucket never takes public pictures",
 } as const;
 export type R2Reason = keyof typeof REASONS;
 
@@ -113,7 +116,19 @@ export type R2Options = {
   bodyTimeoutMs?: number;
   /** Pauses before the tries after the first: their count is the number of retries. */
   retryPausesMs?: readonly number[];
+  /**
+   * The check of each key against the store's role, on unless a test turns it off to run the
+   * shared contract, whose keys are not the app's: the public store takes only keys under p/
+   * (and the r2-check marker and probe), the private store never one under p/.
+   */
+  roleGuard?: boolean;
 };
+
+/** The most read of an answer that is not a file: an error, a 404, a listing page or a delete's result. */
+export const MAX_ANSWER_BYTES = 1_048_576;
+
+/** The two keys of r2-check (src/node/file-tools.ts) that the public store takes besides p/: its role marker and a probe. */
+const ROLE_EXEMPT = /^r2-check\/(?:role\.txt|probe-[0-9a-f]{32}\.txt)$/;
 
 const TIMEOUT_MS = 30_000;
 const BODY_TIMEOUT_MS = 120_000;
@@ -125,7 +140,8 @@ const MAX_LIST_PAGES = 1000;
 export function r2Stores(settings: R2Settings, opts: R2Options = {}): { drafts: R2Store; pub: R2Store } {
   if (settings.privateBucket === settings.publicBucket) throw new Error("r2: the private and the public files must be in two different buckets");
   const client = new R2Client(settings, opts);
-  return { drafts: new R2BucketStore(client, settings.privateBucket, "private"), pub: new R2BucketStore(client, settings.publicBucket, "public") };
+  const guard = opts.roleGuard !== false;
+  return { drafts: new R2BucketStore(client, settings.privateBucket, "private", guard), pub: new R2BucketStore(client, settings.publicBucket, "public", guard) };
 }
 
 type Query = readonly (readonly [string, string])[];
@@ -239,11 +255,37 @@ async function discard(res: Response): Promise<void> {
 
 /** An answer's body as text, or null when it could not be read in full. */
 async function textOf(res: Response): Promise<string | null> {
+  const declared = res.headers.get("content-length");
+  if (declared !== null && Number(declared) > MAX_ANSWER_BYTES) {
+    await res.body?.cancel().catch(() => {});
+    throw new R2Error("tooLarge");
+  }
+  if (res.body === null) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
   try {
-    return await res.text();
-  } catch {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_ANSWER_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new R2Error("tooLarge");
+      }
+      chunks.push(value);
+    }
+  } catch (err) {
+    if (err instanceof R2Error) throw err;
     return null;
   }
+  const all = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    all.set(c, at);
+    at += c.byteLength;
+  }
+  return new TextDecoder().decode(all);
 }
 
 const XML_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
@@ -292,11 +334,20 @@ class R2BucketStore implements R2Store {
   readonly #client: R2Client;
   readonly #bucket: string;
   readonly role: "private" | "public";
+  readonly #guard: boolean;
 
-  constructor(client: R2Client, bucket: string, role: "private" | "public") {
+  constructor(client: R2Client, bucket: string, role: "private" | "public", guard: boolean) {
     this.#client = client;
     this.#bucket = bucket;
     this.role = role;
+    this.#guard = guard;
+  }
+
+  /** Refuses a key of the other store before anything is sent, so a wiring mistake fails loudly instead of leaking. */
+  #checkRole(key: string): void {
+    if (!this.#guard) return;
+    if (this.role === "public" && !key.startsWith("p/") && !ROLE_EXEMPT.test(key)) throw new R2Error("notPublic");
+    if (this.role === "private" && key.startsWith("p/")) throw new R2Error("publicKey");
   }
 
   toJSON(): string {
@@ -308,6 +359,7 @@ class R2BucketStore implements R2Store {
 
   async put(key: string, body: Uint8Array, meta: { contentType: string; cacheControl?: string }): Promise<void> {
     checkKey(key);
+    this.#checkRole(key);
     const headers: Record<string, string> = { "content-type": meta.contentType };
     if (meta.cacheControl !== undefined) headers["cache-control"] = meta.cacheControl;
     const res = await this.#client.send("PUT", this.#bucket, key, [], body, headers);
@@ -317,6 +369,7 @@ class R2BucketStore implements R2Store {
 
   async get(key: string): Promise<StoredFile | null> {
     checkKey(key);
+    this.#checkRole(key);
     const res = await this.#client.send("GET", this.#bucket, key, [], null, {}, true);
     if (res.status === 404) {
       const code = errorCode(await textOf(res));
@@ -342,6 +395,7 @@ class R2BucketStore implements R2Store {
   async delete(keys: string[]): Promise<void> {
     // Check every key before deleting any.
     for (const k of keys) checkKey(k);
+    for (const k of keys) this.#checkRole(k);
     for (let i = 0; i < keys.length; i += DELETE_CHUNK) {
       const chunk = keys.slice(i, i + DELETE_CHUNK);
       const xml = `<?xml version="1.0" encoding="UTF-8"?><Delete><Quiet>true</Quiet>${chunk.map((k) => `<Object><Key>${xmlEscape(k)}</Key></Object>`).join("")}</Delete>`;

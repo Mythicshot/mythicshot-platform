@@ -4,14 +4,16 @@ import { defineConfig } from "vitest/config";
 /**
  * The suites that run a second time with the files in the stand-in for R2 (0.1.71): the
  * harness (test/harness.node.ts) then builds the stores through the app's own factory with
- * FILE_STORE=r2, so the shared contract, publishing, who may view a tour or an item, uploads,
+ * FILE_STORE=r2, so publishing, who may view a tour or an item, uploads,
  * replacing and deleting are all checked on the R2 store too, and test/node-r2-isolation.test.ts
  * looks into the two buckets themselves. test/isolation.test.ts (one workspace against
  * another) is left out: over HTTP it takes more than ten minutes, and what it guards is in the
- * database queries, which do not change with the store.
+ * database queries, which do not change with the store. test/ports.test.ts is left out too: the
+ * site's R2 stores refuse keys of the other bucket's kind, which the shared contract uses on both
+ * stores; the contract runs unchanged on the R2 store without that guard in
+ * test/node-r2-files.test.ts.
  */
 export const R2_SUITES = [
-  "test/ports.test.ts",
   "test/publish.test.ts",
   "test/access.test.ts",
   "test/restricted.test.ts",

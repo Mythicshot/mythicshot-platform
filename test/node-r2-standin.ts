@@ -26,6 +26,8 @@ export type Fault =
   /** Sends the headers and the first `send` bytes, then nothing more, leaving the answer open. */
   | { kind: "stall"; send: number }
   | { kind: "redirect" }
+  /** An answer of this status whose body is `bytes` long, with its Content-Length or (chunked) without one. */
+  | { kind: "big"; status: number; bytes: number; chunked: boolean }
   | { kind: "delete-error"; key: string; code: string };
 
 export type SeenRequest = { method: string; path: string; query: string; headers: Record<string, string | string[] | undefined>; body: Buffer };
@@ -201,6 +203,12 @@ function handle(st: StandIn, req: IncomingMessage, res: ServerResponse, body: Bu
     if (fault.kind === "redirect") {
       res.writeHead(307, { location: "http://127.0.0.1:9/elsewhere" });
       res.end();
+      return;
+    }
+    if (fault.kind === "big") {
+      const body = Buffer.alloc(fault.bytes, 0x61);
+      res.writeHead(fault.status, fault.chunked ? { "content-type": "application/xml" } : { "content-type": "application/xml", "content-length": body.byteLength });
+      res.end(body);
       return;
     }
     if (fault.kind === "status") {

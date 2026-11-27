@@ -28,7 +28,7 @@ afterAll(async () => {
   await st.close();
 });
 
-/** Two new buckets in the stand-in and the pair of stores on them. */
+/** Two new buckets in the stand-in and the pair of stores on them, without the role guard unless asked (the shared contract uses keys of any shape on both). */
 function made(over: Partial<R2Settings> & { secretText?: string } = {}, opts: R2Options = {}) {
   counter += 1;
   const privateBucket = over.privateBucket ?? `private-${counter}`;
@@ -42,7 +42,7 @@ function made(over: Partial<R2Settings> & { secretText?: string } = {}, opts: R2
     privateBucket,
     publicBucket,
   };
-  const stores = r2Stores(settings, { endpoint: st.url, retryPausesMs: [1, 1], timeoutMs: 2000, ...opts });
+  const stores = r2Stores(settings, { endpoint: st.url, retryPausesMs: [1, 1], timeoutMs: 2000, roleGuard: false, ...opts });
   return { ...stores, privateBucket, publicBucket, settings };
 }
 
@@ -376,6 +376,68 @@ describe("failures", () => {
       expect(printed).toContain("[hidden]");
     } finally {
       for (const spy of spies) spy.mockRestore();
+    }
+  });
+});
+
+describe("the role guard of the site's stores", () => {
+  it("the public store takes only public pictures (and r2-check's marker and probe), refusing anything else before a request is sent", async () => {
+    const s = made({}, { roleGuard: true });
+    st.requests.length = 0;
+    for (const key of ["u/up1/step-001.png", "v/0123456789abcdef0123456789abcdef.png", "m/med1/part-000.claim", "a.png", "r2-check/other.txt", "r2-check/probe-x.txt"]) {
+      await expect(s.pub.put(key, enc("x"), PNG), key).rejects.toThrow("r2: the public bucket takes public pictures only");
+      await expect(s.pub.get(key), key).rejects.toThrow("r2: the public bucket takes public pictures only");
+      await expect(s.pub.delete(["p/0123456789abcdef0123456789abcdef.png", key]), key).rejects.toThrow("r2: the public bucket takes public pictures only");
+    }
+    expect(st.requests).toEqual([]);
+    await s.pub.put("p/0123456789abcdef0123456789abcdef.png", enc("x"), PNG);
+    await s.pub.put("r2-check/role.txt", enc("x"), { contentType: "text/plain" });
+    await s.pub.put(`r2-check/probe-${"a".repeat(32)}.txt`, enc("x"), { contentType: "text/plain" });
+    expect([...st.buckets.get(s.publicBucket)!.keys()].sort()).toEqual(["p/0123456789abcdef0123456789abcdef.png", `r2-check/probe-${"a".repeat(32)}.txt`, "r2-check/role.txt"]);
+  });
+
+  it("the private store never takes a public picture", async () => {
+    const s = made({}, { roleGuard: true });
+    st.requests.length = 0;
+    await expect(s.drafts.put("p/0123456789abcdef0123456789abcdef.png", enc("x"), PNG)).rejects.toThrow("r2: the private bucket never takes public pictures");
+    await expect(s.drafts.get("p/a.png")).rejects.toThrow("r2: the private bucket never takes public pictures");
+    await expect(s.drafts.delete(["u/a.png", "p/a.png"])).rejects.toThrow("r2: the private bucket never takes public pictures");
+    expect(st.requests).toEqual([]);
+    await s.drafts.put("u/a.png", enc("x"), PNG);
+    await s.drafts.put("r2-check/role.txt", enc("x"), { contentType: "text/plain" });
+  });
+
+  it("is on unless a test turns it off: the stores the factory makes have it", async () => {
+    const settings: R2Settings = { accountId: st.accountId, accessKeyId: st.accessKeyId, secret: new R2Secret(st.secret), privateBucket: "guard-a", publicBucket: "guard-b" };
+    const { pub } = r2Stores(settings, { endpoint: st.url });
+    await expect(pub.put("u/a.png", enc("x"), PNG)).rejects.toThrow("r2: the public bucket takes public pictures only");
+  });
+});
+
+describe("answers that are too large", () => {
+  it("an error body, a 404 body, a listing page or a delete result over 1 MB fails with the fixed reason, with or without its length", async () => {
+    const s = made();
+    for (const chunked of [false, true]) {
+      for (const [status, call] of [
+        [403, () => s.drafts.put("a.png", enc("x"), PNG)],
+        [404, () => s.drafts.get("a.png")],
+        [200, () => s.drafts.keys()],
+        [200, () => s.drafts.delete(["a.png"])],
+      ] as const) {
+        st.fault = () => ({ kind: "big", status, bytes: 1_048_577, chunked });
+        try {
+          await expect(call(), `${status} ${chunked}`).rejects.toThrow("r2: R2's answer was larger than expected");
+        } finally {
+          st.fault = null;
+        }
+      }
+    }
+    // Exactly 1 MB is read, and then judged as the answer it is.
+    st.fault = () => ({ kind: "big", status: 404, bytes: 1_048_576, chunked: true });
+    try {
+      await expect(s.drafts.get("a.png")).rejects.toThrow("r2: R2 refused the request");
+    } finally {
+      st.fault = null;
     }
   });
 });
