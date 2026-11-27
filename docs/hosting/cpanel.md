@@ -347,15 +347,15 @@ From version 0.1.71 the files can be kept in two Cloudflare R2 buckets instead o
 
 1. Update to 0.1.71 or later. Nothing changes yet.
 
-2. Add the five R2 settings to `/home/you/apps/tours-config.env` yourself, each on a line of its own: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_PRIVATE_BUCKET` and `R2_PUBLIC_BUCKET`. Leave `FILE_STORE` out for now. The secret lives in this file only, which must stay readable by this account alone.
+2. Add the five R2 settings to `/home/you/apps/tours-config.env` yourself, each on a line of its own and each once only: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_PRIVATE_BUCKET` and `R2_PUBLIC_BUCKET`. Leave `FILE_STORE` out for now. The secret lives in this file only, which must stay readable by this account alone. The site checks the five at its next start, even with the files still on disk: a mistyped value, or one of the five left out, stops the site then with one line that names the setting. So run step 3 at once, before anything else restarts the app.
 
-3. Check the key and the two buckets:
+3. Check the key and the two buckets, and mark each bucket with its role:
 
 ```sh
 ./cpanel.sh admin r2-check
 ```
 
-**How to tell it worked:** the last line is `R2 check passed: both buckets can be written, read and deleted with this key.` Otherwise a line names the bucket, the step and why, such as `public bucket: failed to write: R2 has no such bucket.`; put the setting or the token right and run it again.
+**How to tell it worked:** the last line is `R2 check passed: both buckets are marked with their roles and can be written, read and deleted with this key.` Otherwise a line names the bucket, the step and why, such as `public bucket: its marker could not be read: R2 has no such bucket.`, or `the private bucket is marked as the public one: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET are swapped.`; put the setting or the token right and run it again.
 
 4. Stop the app in cPanel's **Setup Node.js App** page, then copy the files, the private ones to the private bucket and the public ones to the public bucket:
 
@@ -363,11 +363,13 @@ From version 0.1.71 the files can be kept in two Cloudflare R2 buckets instead o
 ./cpanel.sh admin files-copy --from disk --to r2 --app-is-stopped
 ```
 
-It prints counts only, one line for the private files and one for the public ones, such as `private files: 46 copied, 0 already there, 0 removed, 0 failed.`, and ends with `Done: every file at the destination is the source's, checked by size and SHA-256.` A run that ends otherwise can be run again; `--dry-run` counts what it would do and changes nothing. The command refuses without `--app-is-stopped`: a copy while the site is live can leave behind a file deleted in the middle of it, in the public bucket too.
+It prints counts only, one line for the private files and one for the public ones, such as `private files: 46 copied, 0 already there, 0 failed, 0 that can never be copied; extra at the destination: 0, left in place.`, each followed by what that side now holds by key prefix, and ends with `Done: every file of the source is at the destination, checked by size and SHA-256.` It removes nothing, so a run that ends otherwise can be run again; `--dry-run` counts what it would do and changes nothing. The command refuses without `--app-is-stopped`: a copy while the site is live can leave behind a file deleted in the middle of it, in the public bucket too. A file it can never copy is named on a line of its own and makes it end with `Not done:`: restore that file from a backup, or remove it by hand once you are sure nothing needs it, and run it again.
 
-5. Add the line `FILE_STORE=r2` to the settings file, start the app, and check a public tour, a restricted tour, a shared image, an upload, a delete and the data download.
+5. Look at the line `public files at the destination, by key prefix: …`: it must name `p/` and nothing else. Anything else in the public bucket is not a public picture; stop and find out why before going on.
 
-The folders in the data folder are not touched and stay as the way back: stop the app, run `./cpanel.sh admin files-copy --from r2 --to disk --app-is-stopped`, set `FILE_STORE=disk` (or remove the line) and start the app. While the settings file says `FILE_STORE=r2`, `./cpanel.sh update` refuses to install a version before 0.1.71, and says so.
+6. Add the line `FILE_STORE=r2` to the settings file, start the app, and check a public tour, a restricted tour, a shared image, an upload, a delete and the data download.
+
+The folders in the data folder are not touched and stay as the way back: stop the app, run `./cpanel.sh admin files-copy --from r2 --to disk --app-is-stopped` while the settings file still says `FILE_STORE=r2`, set `FILE_STORE=disk` (or remove the line) and start the app. While the settings file says `FILE_STORE=r2`, `./cpanel.sh update` refuses to install a version before 0.1.71, and says so. `--remove-extra` makes the copy also delete what the source does not hold; see the README before you use it.
 
 > [!WARNING]
 > With `FILE_STORE=r2`, `./cpanel.sh backup` and the backup `update` takes hold the database, the app files and the settings file only, and say so: the files are not in them. R2 has no bin to recover a deleted file from, so keep a copy of the two buckets yourself.

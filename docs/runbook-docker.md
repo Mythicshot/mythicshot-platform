@@ -423,6 +423,8 @@ docker compose exec -T app node -e 'const { DatabaseSync } = process.getBuiltinM
 
 Anything but `0` means restore, not go back. An older version also cannot fully delete an item whose list of addresses holds one, whether the item is restricted now or was before (the list is kept when an item goes back to public): its delete stops serving the item and removes its files, but answers `500 cleanup_pending` every time and leaves the item's row, which 0.1.47 or later removes at the workspace's next share or when the delete is sent again.
 
+Never start an image older than 0.1.71 while `.env` says `FILE_STORE=r2`: such a version knows only files on disk and would find none of the site's files, and nothing on this route checks it for you. Bring the files back first, as [Keep the files on R2](#keep-the-files-on-r2) describes under the way back (the reverse copy with the app stopped, then `FILE_STORE='disk'`), check the site, and only then go back. Do not restore a database backup instead: the files deleted from R2 since it was taken would be missing.
+
 Going back below 0.1.51 has one more catch for tours whose first publish was started with a list and never finished: a change to the list made by the older version does not end the token's comparison of that list, so do not run an older version while such a publish is unfinished, and after coming forward again save each unpublished restricted tour's setting once in the dashboard (see [Who may view a tour](../README.md#who-may-view-a-tour) in the README).
 
 ### Make yourself the admin
@@ -574,15 +576,18 @@ docker compose up -d --force-recreate --wait
 
 ### Keep the files on R2
 
-From version 0.1.71 the files can be kept in two Cloudflare R2 buckets instead of `drafts/` and `public/` in the data folder; [Files on R2](../README.md#files-on-r2) in the README says what the six settings mean and why the copy is made with the app stopped. In the container, from the stack's folder:
+From version 0.1.71 the files can be kept in two Cloudflare R2 buckets instead of `drafts/` and `public/` in the data folder; [Files on R2](../README.md#files-on-r2) in the README says what the six settings mean and why the copy is made with the app stopped. The admin commands run in a one-off container of the app's service, with the same data folder and the same environment as the app, while the app itself is stopped. **Unconfirmed:** the `docker compose stop`, `docker compose run` and `docker compose start` commands below have not been run on a server; they follow from how the stack is defined. From a root shell in the stack's folder:
 
 1. Update to 0.1.71 or later. Nothing changes yet.
-2. Add the five R2 settings to `.env` as root, each on a line of its own and in single quotes (Compose reads the file): `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_PRIVATE_BUCKET` and `R2_PUBLIC_BUCKET`. The direct route hands the app the whole `.env`; the tunnel route's stack file passes each of the six on by name. Recreate the app with `docker compose up -d --force-recreate --wait` so it sees them.
-3. Check the key and the buckets: `docker compose exec app node dist/node/admin.js r2-check`. The last line must be `R2 check passed: both buckets can be written, read and deleted with this key.`
-4. Leave the app running but idle (no uploads, publishes or changes while the copy runs; the command runs inside the app's container), then copy: `docker compose exec app node dist/node/admin.js files-copy --from disk --to r2 --app-is-stopped`. It prints counts only and ends with `Done: every file at the destination is the source's, checked by size and SHA-256.`; run it again until it does.
-5. Add `FILE_STORE='r2'` to `.env`, recreate the app as in step 2, and check a public tour, a restricted tour, a shared image, an upload, a delete and the data download.
+2. Add the five R2 settings to `.env` as root, each on a line of its own and in single quotes (Compose reads the file): `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_PRIVATE_BUCKET` and `R2_PUBLIC_BUCKET`. The direct route hands the app the whole `.env`; the tunnel route's stack file passes each of the six on by name. A mistyped value stops the app at its next start, so check them at once, in step 3.
+3. Check the key and the buckets, and mark each bucket with its role: `docker compose run --rm --no-deps app node dist/node/admin.js r2-check`. The last line must be `R2 check passed: both buckets are marked with their roles and can be written, read and deleted with this key.`
+4. Stop the app with `docker compose stop app`, then copy: `docker compose run --rm --no-deps app node dist/node/admin.js files-copy --from disk --to r2 --app-is-stopped`. It prints counts only and ends with `Done: every file of the source is at the destination, checked by size and SHA-256.`; it removes nothing, so run it again until it does.
+5. Look at the line `public files at the destination, by key prefix: …`: it must name `p/` and nothing else.
+6. Add `FILE_STORE='r2'` to `.env` and start the app again on it with `docker compose up -d --force-recreate --wait`, then check a public tour, a restricted tour, a shared image, an upload, a delete and the data download.
 
-The way back is the reverse copy, `files-copy --from r2 --to disk --app-is-stopped`, then `FILE_STORE='disk'` (or no such line) and the app recreated. `sudo bash install.sh status` says `files: on R2 (FILE_STORE=r2 in .env), not in the data folder; a backup does not hold them` while they are.
+The way back: `docker compose stop app`, then `docker compose run --rm --no-deps app node dist/node/admin.js files-copy --from r2 --to disk --app-is-stopped` while `.env` still says `FILE_STORE='r2'`, then `FILE_STORE='disk'` (or no such line) and `docker compose up -d --force-recreate --wait`. `sudo bash install.sh status` says `files: on R2 (.env's FILE_STORE is not disk), not in the data folder; a backup does not hold them` while they are.
+
+`install.sh` takes `FILE_STORE` and the five R2 settings out of its own environment before it runs Compose, because Compose prefers the shell's variables over `.env`. A `docker compose` command you type yourself does not: if your shell has any of the six exported, unset them first, or the app would start on those values instead of the ones in `.env`.
 
 > [!WARNING]
 > With `FILE_STORE=r2`, `sudo bash install.sh backup` and the backup `update` takes hold the database only, and say so. R2 has no bin to recover a deleted file from: keep a copy of the two buckets yourself.
