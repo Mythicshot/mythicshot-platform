@@ -832,6 +832,30 @@ describe("deleting an image or a GIF from the Storage page", () => {
     expect(rows(tab)).toHaveLength(2);
   });
 
+  it("an item's 404 counts as deleted only with the error not_found; any other 404 is a failure, unless a send before it answered cleanup_pending", async () => {
+    for (const other of [{ status: 404, json: { error: "gone" } }, { status: 404, json: null }, { status: 404 }]) {
+      const what = JSON.stringify(other);
+      const tab = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: other }));
+      await tab.settle();
+      deleteOf(rows(tab)[GIF_ROW]).click();
+      tab.$("delete-go").click();
+      await tab.settle();
+      expect([tab.$("delete-dialog").shown, tab.$("delete-message").textContent], what).toEqual([true, FAILED]);
+      // After a cleanup_pending the item is deleted for everyone: the later 404 does not undo that.
+      const after = openStorage(standard({ ["DELETE /api/v1/media/" + G1]: [{ status: 500, json: { error: "cleanup_pending" } }, other], "GET /api/v1/usage/largest": [largest(M5_TOURS), withoutGif] }));
+      await after.settle();
+      deleteOf(rows(after)[GIF_ROW]).click();
+      after.$("delete-go").click();
+      for (let i = 0; i < 4; i++) {
+        await after.settle();
+        after.tick();
+      }
+      await after.settle();
+      expect(after.$("delete-dialog").shown, what).toBe(false);
+      expect(rows(after), what).toHaveLength(2);
+    }
+  });
+
   it("a delete that fails keeps the question open with its sentence and still reads the numbers again; a tour's sentence is not used for an item", async () => {
     for (const [answer, text] of [
       [{ status: 500, json: { error: "internal" } }, FAILED],

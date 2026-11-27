@@ -26,8 +26,9 @@
 //   cleanup_pending (gone, with files left for later requests to remove).
 // - An image or a GIF: DELETE /api/v1/media/:id, sent again after a pause (PAUSES_MS, at
 //   most ITEM_ROUNDS times in all) while it answers 500 cleanup_pending, as the API asks and
-//   as the Images and GIFs pages do. It is done on 204, 404 (already gone), or a last
-//   cleanup_pending: the item is closing by then, so it is no longer listed (it counts in the
+//   as the Images and GIFs pages do. It is done on 204, a 404 with the error not_found from
+//   this app (already gone; any other 404, as from something in between, is a failure, as on
+//   the Images and GIFs pages), or a cleanup_pending at any send: the item is closing by then, so it is no longer listed (it counts in the
 //   usage until its files are gone), and a later request or the sweep removes what is left.
 //   When no answer came, the item itself is asked (GET /api/v1/media/:id): only the API's own
 //   404 not_found means it was deleted. An item still there (online or still being sent), any
@@ -338,7 +339,7 @@ export const STORAGE_JS = `(function () {
             pending = res;
             return rounds < ITEM_ROUNDS ? pause(PAUSES_MS[rounds - 1]).then(next) : res;
           }
-          return pending !== null && res.status !== 204 && res.status !== 404 ? pending : res;
+          return pending !== null && res.status !== 204 && !itemNotFound(res) ? pending : res;
         },
         function (err) {
           if (pending !== null) return pending;
@@ -360,6 +361,11 @@ export const STORAGE_JS = `(function () {
     }, function () { return { gone: false, res: null }; });
   }
 
+  // A 404 with the error not_found from this app: an image or a GIF that is gone (or never was).
+  function itemNotFound(res) {
+    return res !== null && res.status === 404 && Dash.errorOf(res) === "not_found";
+  }
+
   function leftovers(res) {
     return res !== null && res.status === 500 && Dash.errorOf(res) === "cleanup_pending";
   }
@@ -368,7 +374,9 @@ export const STORAGE_JS = `(function () {
   // be removed yet is gone too: it is no longer listed, and later requests finish the cleaning.
   function done(e, res) {
     if (res === null) return false;
-    if (leftovers(res) || res.status === 404) return true;
+    if (leftovers(res)) return true;
+    // A tour's 404 is the Tours page's "already gone"; an item's must say not_found.
+    if (res.status === 404) return e.kind === "tour" || itemNotFound(res);
     return e.kind === "tour" ? res.status === 200 : res.status === 204;
   }
 
