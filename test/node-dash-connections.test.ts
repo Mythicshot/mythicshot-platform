@@ -181,7 +181,7 @@ function holding(held: (req: Fetched) => boolean, rest: Responder): { respond: R
 const SIGNED_OUT: Answer = { status: 401, json: { error: "unauthorized" } };
 const session: Answer = {
   status: 200,
-  json: { account: { id: "usr_1", username: "solex", email: "solex@example.com", admin: false }, workspace: { id: "ws_1", name: "Cowfee Raid Tools" }, session: { id: "ses_1", created_at: NOW, expires_at: NOW }, csrf: CSRF },
+  json: { account: { id: "usr_1", username: "morgan", email: "morgan@example.com", admin: false }, workspace: { id: "ws_1", name: "Cowfee Raid Tools" }, session: { id: "ses_1", created_at: NOW, expires_at: NOW }, csrf: CSRF },
 };
 
 const T1 = "tok_" + "1".repeat(24);
@@ -191,13 +191,13 @@ const T4 = "tok_" + "4".repeat(24);
 const token = (id: string, name: string, over: Record<string, unknown> = {}) => ({ id, name, created_at: day(2026, 11, 17), last_used_at: day(2026, 11, 19), kind: "sign_in", ...over });
 /** The three computers of mockup 1. */
 const MOCKUP = [
-  token(T1, "ALEX-DESKTOP", { created_at: day(2026, 11, 20), last_used_at: NOW }),
+  token(T1, "ROBIN-DESKTOP", { created_at: day(2026, 11, 20), last_used_at: NOW }),
   token(T2, "Work laptop", { created_at: day(2026, 11, 14), last_used_at: day(2026, 11, 17) }),
   token(T3, "Mythicshot", { kind: "setup", created_at: day(2026, 11, 17), last_used_at: day(2026, 11, 19) }),
 ];
 const list = (tokens: unknown[]): Answer => ({ status: 200, json: { tokens } });
 const LOOKUP = "POST /api/v1/connect/lookup";
-const found = (over: Record<string, unknown> = {}): Answer => ({ status: 200, json: { device_name: "ALEX-DESKTOP", asked_at: NOW - 2 * 60_000, same_network: true, ...over } });
+const found = (over: Record<string, unknown> = {}): Answer => ({ status: 200, json: { device_name: "ROBIN-DESKTOP", asked_at: NOW - 2 * 60_000, same_network: true, ...over } });
 const DONE: Answer = { status: 204 };
 const NO_REQUEST: Answer = { status: 404, json: { error: "not_found" } };
 const limited = (seconds?: string): Answer => ({ status: 429, json: { error: "rate_limited" }, headers: seconds === undefined ? {} : { "retry-after": seconds } });
@@ -242,7 +242,7 @@ describe("the Connections page: the list", () => {
     expect(tab.$("connections-sub").textContent).toBe("The computers where Mythicshot can publish to Cowfee Raid Tools.");
     const r = rows(tab);
     expect(r.map((row) => [nameOf(row).textContent, lineOf(row).wide, cells(row)[1].textContent, cells(row)[2].textContent, cells(row)[3].all().filter((e) => e.tagName === "button").map((b) => [b.textContent, b.className])])).toEqual([
-      ["ALEX-DESKTOP", "Signed in from Mythicshot", shown(day(2026, 11, 20)), "Today", [["Rename", "btn sm quiet"], ["Disconnect", "btn sm danger"]]],
+      ["ROBIN-DESKTOP", "Signed in from Mythicshot", shown(day(2026, 11, 20)), "Today", [["Rename", "btn sm quiet"], ["Disconnect", "btn sm danger"]]],
       ["Work laptop", "Signed in from Mythicshot", shown(day(2026, 11, 14)), shown(day(2026, 11, 17)), [["Rename", "btn sm quiet"], ["Disconnect", "btn sm danger"]]],
       ["Mythicshot", "From setup", shown(day(2026, 11, 17)), shown(day(2026, 11, 19)), [["Rename", "btn sm quiet"], ["Disconnect", "btn sm danger"]]],
     ]);
@@ -258,7 +258,7 @@ describe("the Connections page: the list", () => {
     expect([tab.$("connections-list").shown, tab.$("connections-hint").shown, tab.$("connections-empty").shown]).toEqual([true, true, false]);
     expect(tab.shows()).toEqual([
       "Mythicshot",
-      "solex",
+      "morgan",
       "Connections",
       "The computers where Mythicshot can publish to Cowfee Raid Tools.",
       "Connect Mythicshot",
@@ -341,7 +341,7 @@ describe("the Connections page: the list", () => {
   });
 });
 
-const WELCOME = "Welcome, solex. Your workspace is ready. Connect Mythicshot on your computer to start sharing: open Workspace in Mythicshot, press Sign in, and type the code it shows below.";
+const WELCOME = "Welcome, morgan. Your workspace is ready. Connect Mythicshot on your computer to start sharing: open Workspace in Mythicshot, press Sign in, and type the code it shows below.";
 const usage = (over: Record<string, unknown> = {}): Answer => ({ status: 200, json: { used_bytes: 0, allowance_bytes: 1, over: false, tours: 0, images: 0, gifs: 0, counted: {}, ...over } });
 const named = (username: unknown): Answer => ({ status: 200, json: { ...(session as { json: Record<string, unknown> }).json, account: { id: "usr_1", username, email: "x@example.com", admin: false } } });
 
@@ -352,7 +352,7 @@ describe("the Connections page: the welcome of a new account (invite mockup 7)",
     expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", "GET /api/v1/tokens", "GET /api/v1/usage"]);
     const welcome = tab.$("connections-welcome");
     expect([welcome.shown, welcome.className, welcome.textContent]).toEqual([true, "note", WELCOME]);
-    expect(tab.shows().slice(0, 4)).toEqual(["Mythicshot", "solex", WELCOME, "Connections"]);
+    expect(tab.shows().slice(0, 4)).toEqual(["Mythicshot", "morgan", WELCOME, "Connections"]);
     expect(tab.shows().slice(-2)).toEqual(["No computers connected yet", "Install Mythicshot, open Workspace and press Sign in. Then type the code it shows into the box above."]);
     // The username is its own bidi-isolated text node, never markup.
     const markup = openPage(answers({ "GET /api/v1/session": named("<img src=x onerror=alert(1)>"), "GET /api/v1/tokens": list([]), "GET /api/v1/usage": usage() }));
@@ -480,7 +480,7 @@ describe("the Connections page: connecting with a code", () => {
   it("the question shows exactly the computer and the time the lookup gave, and the workspace", async () => {
     const tab = await lookedUp(standard({ [LOOKUP]: found() }));
     expect(tab.$("confirm-dialog").shown).toBe(true);
-    expect([tab.$("confirm-title").textContent, tab.$("confirm-device").textContent, tab.$("confirm-device").tagName, tab.$("confirm-asked").textContent, tab.$("confirm-workspace").textContent]).toEqual(["Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools?", "ALEX-DESKTOP", "b", "2 minutes ago", "Cowfee Raid Tools"]);
+    expect([tab.$("confirm-title").textContent, tab.$("confirm-device").textContent, tab.$("confirm-device").tagName, tab.$("confirm-asked").textContent, tab.$("confirm-workspace").textContent]).toEqual(["Connect ROBIN-DESKTOP to the workspace Cowfee Raid Tools?", "ROBIN-DESKTOP", "b", "2 minutes ago", "Cowfee Raid Tools"]);
     expect([tab.$("confirm-elsewhere").shown, tab.$("confirm-warn").textContent]).toEqual([false, WARN]);
     expect(tab.doc.activeElement?.id).toBe("confirm-refuse");
     expect(tab.$("connections-page").getAttribute("inert")).toBe("");
@@ -523,7 +523,7 @@ describe("the Connections page: connecting with a code", () => {
     expect(of(tab, "POST", "/api/v1/connect/confirm").map((f) => f.body)).toEqual([{ user_code: "K7QM2HXD" }]);
     expect(of(tab, "POST", "/api/v1/connect/refuse")).toEqual([]);
     expect(tab.$("confirm-dialog").shown).toBe(false);
-    expect([tab.$("connect-note").shown, tab.$("connect-note").textContent, tab.$("connect-code").value]).toEqual([true, "ALEX-DESKTOP is connected. Mythicshot finishes signing in by itself within a few seconds.", ""]);
+    expect([tab.$("connect-note").shown, tab.$("connect-note").textContent, tab.$("connect-code").value]).toEqual([true, "ROBIN-DESKTOP is connected. Mythicshot finishes signing in by itself within a few seconds.", ""]);
     expect(tab.doc.activeElement?.id).toBe("connect-code");
     expect(of(tab, "GET", "/api/v1/tokens")).toHaveLength(2);
   });
@@ -543,7 +543,7 @@ describe("the Connections page: connecting with a code", () => {
     expect(tab.pendingDelays()).toEqual([3000]);
     tab.tick();
     await tab.settle();
-    expect(rows(tab).map((r) => nameOf(r).textContent)).toEqual(["NEW-PC", "ALEX-DESKTOP", "Work laptop", "Mythicshot"]);
+    expect(rows(tab).map((r) => nameOf(r).textContent)).toEqual(["NEW-PC", "ROBIN-DESKTOP", "Work laptop", "Mythicshot"]);
     // Found: no more reads; the focus is on the same control in the new rows, nowhere else.
     expect(tab.pendingDelays()).toEqual([]);
     expect(tab.doc.activeElement).toBe(button(rows(tab)[2], "Rename"));
@@ -602,7 +602,7 @@ describe("the Connections page: connecting with a code", () => {
   });
 
   it("a lost answer to Connect looks the code up once: 404 closes with the neutral note and watches the list", async () => {
-    const lists = [list(MOCKUP), list(MOCKUP), list([token(T4, "ALEX-DESKTOP-2", { created_at: NOW, last_used_at: null }), ...MOCKUP])];
+    const lists = [list(MOCKUP), list(MOCKUP), list([token(T4, "ROBIN-DESKTOP-2", { created_at: NOW, last_used_at: null }), ...MOCKUP])];
     const tab = await lookedUp(standard({ [LOOKUP]: [found(), NO_REQUEST], "POST /api/v1/connect/confirm": "network", "GET /api/v1/tokens": lists }));
     tab.$("confirm-go").click();
     await tab.settle();
@@ -621,7 +621,7 @@ describe("the Connections page: connecting with a code", () => {
     expect(tab.pendingDelays()).toEqual([3000]);
     tab.tick();
     await tab.settle();
-    expect(rows(tab).map((r) => nameOf(r).textContent)[0]).toBe("ALEX-DESKTOP-2");
+    expect(rows(tab).map((r) => nameOf(r).textContent)[0]).toBe("ROBIN-DESKTOP-2");
     expect(tab.pendingDelays()).toEqual([]);
   });
 
@@ -801,7 +801,7 @@ describe("the Connections page: connecting with a code", () => {
 /** A session whose account and workspace are named as given. */
 const signedInAs = (workspace: unknown, email: unknown): Answer => {
   const base = (session as { json: Record<string, unknown> }).json;
-  return { status: 200, json: { ...base, account: { id: "usr_1", username: "solex", email, admin: false }, workspace: { id: "ws_1", name: workspace } } };
+  return { status: 200, json: { ...base, account: { id: "usr_1", username: "morgan", email, admin: false }, workspace: { id: "ws_1", name: workspace } } };
 };
 /** The question as a person reads it: the heading, then the line under it. */
 const questionOf = (tab: Tab) => `${tab.$("confirm-title").textContent} ${tab.$("confirm-who").textContent}`;
@@ -812,20 +812,20 @@ const OTHER_ACCOUNT = "Use a different account";
 describe("the Connections page: the question names the account", () => {
   it("names the computer, the caller's own workspace and the caller's own sign-in email, each in its own isolated element", async () => {
     const tab = await lookedUp(standard({ [LOOKUP]: found() }));
-    expect(questionOf(tab)).toBe("Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com.");
-    expect(partsOf(tab.$("confirm-title"))).toEqual([["span", "", "Connect "], ["span", "name", "ALEX-DESKTOP"], ["span", "", " to the workspace "], ["span", "name", "Cowfee Raid Tools"], ["span", "", "?"]]);
-    expect(partsOf(tab.$("confirm-who"))).toEqual([["span", "", "You are signed in as "], ["span", "name", "solex@example.com"], ["span", "", "."]]);
+    expect(questionOf(tab)).toBe("Connect ROBIN-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as morgan@example.com.");
+    expect(partsOf(tab.$("confirm-title"))).toEqual([["span", "", "Connect "], ["span", "name", "ROBIN-DESKTOP"], ["span", "", " to the workspace "], ["span", "name", "Cowfee Raid Tools"], ["span", "", "?"]]);
+    expect(partsOf(tab.$("confirm-who"))).toEqual([["span", "", "You are signed in as "], ["span", "name", "morgan@example.com"], ["span", "", "."]]);
     // The heading and the line under it, then the facts, the warning, the two buttons and the link under them.
     const shown = tab.shows();
-    const from = shown.indexOf("Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools?");
-    expect(shown.slice(from)).toEqual(["Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools?", "You are signed in as solex@example.com.", WARN, "Not me", "Connect", OTHER_ACCOUNT]);
-    expect(tab.$("confirm-facts").textContent).toBe("ComputerALEX-DESKTOPAsked2 minutes agoWorkspaceCowfee Raid Tools");
+    const from = shown.indexOf("Connect ROBIN-DESKTOP to the workspace Cowfee Raid Tools?");
+    expect(shown.slice(from)).toEqual(["Connect ROBIN-DESKTOP to the workspace Cowfee Raid Tools?", "You are signed in as morgan@example.com.", WARN, "Not me", "Connect", OTHER_ACCOUNT]);
+    expect(tab.$("confirm-facts").textContent).toBe("ComputerROBIN-DESKTOPAsked2 minutes agoWorkspaceCowfee Raid Tools");
     expect(tab.$("confirm-box").getAttribute("aria-labelledby")).toBe("confirm-title");
     // Asked again, the heading and the line are rebuilt, not added to.
     key(tab.$("confirm-go"), "Escape");
     tab.$("connect-go").click();
     await tab.settle();
-    expect([tab.$("confirm-title").children.length, tab.$("confirm-who").children.length, questionOf(tab)]).toEqual([5, 3, "Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com."]);
+    expect([tab.$("confirm-title").children.length, tab.$("confirm-who").children.length, questionOf(tab)]).toEqual([5, 3, "Connect ROBIN-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as morgan@example.com."]);
   });
 
   it("long names are cut as the server stores them and wrap: the computer at 60 characters, the workspace at 80, the address at 254", async () => {
@@ -858,17 +858,17 @@ describe("the Connections page: the question names the account", () => {
 
   it("uses only what the page's own session says: an answer to the lookup that names another account or workspace changes nothing", async () => {
     const tab = await lookedUp(standard({ [LOOKUP]: found({ workspace: { name: "Someone else's" }, workspace_name: "Someone else's", email: "other@example.com", account: { email: "other@example.com" } }) }));
-    expect(questionOf(tab)).toBe("Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com.");
+    expect(questionOf(tab)).toBe("Connect ROBIN-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as morgan@example.com.");
     expect(tab.shows().join("\n")).not.toContain("other@example.com");
   });
 
   it("a part whose value the session lacks is left out: no workspace, no address, or neither", async () => {
     const cases: [unknown, unknown, string, string][] = [
-      ["", "solex@example.com", "Connect ALEX-DESKTOP?", "You are signed in as solex@example.com."],
-      [7, "solex@example.com", "Connect ALEX-DESKTOP?", "You are signed in as solex@example.com."],
-      ["Cowfee Raid Tools", "", "Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools?", ""],
-      ["Cowfee Raid Tools", null, "Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools?", ""],
-      ["", null, "Connect ALEX-DESKTOP?", ""],
+      ["", "morgan@example.com", "Connect ROBIN-DESKTOP?", "You are signed in as morgan@example.com."],
+      [7, "morgan@example.com", "Connect ROBIN-DESKTOP?", "You are signed in as morgan@example.com."],
+      ["Cowfee Raid Tools", "", "Connect ROBIN-DESKTOP to the workspace Cowfee Raid Tools?", ""],
+      ["Cowfee Raid Tools", null, "Connect ROBIN-DESKTOP to the workspace Cowfee Raid Tools?", ""],
+      ["", null, "Connect ROBIN-DESKTOP?", ""],
     ];
     for (const [workspace, email, title, who] of cases) {
       const what = JSON.stringify([workspace, email]);
@@ -882,7 +882,7 @@ describe("the Connections page: the question names the account", () => {
     expect(other.$("confirm-box").getAttribute("aria-describedby")).toBe("confirm-facts confirm-elsewhere confirm-warn");
     // Asked again with both present, after a question without them, the full wording is back (the same page keeps its session, so open a fresh one).
     const full = await lookedUp(standard({ [LOOKUP]: found() }));
-    expect([questionOf(full), full.$("confirm-who").shown]).toEqual(["Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com.", true]);
+    expect([questionOf(full), full.$("confirm-who").shown]).toEqual(["Connect ROBIN-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as morgan@example.com.", true]);
   });
 
   it("the lookup, confirm and refuse requests send what they sent before: the code alone", async () => {
@@ -1054,7 +1054,7 @@ describe("the Connections page: back here after Use a different account", () => 
     expect(tab.fetched.map((f) => `${f.method} ${f.path}`)).toEqual(["GET /api/v1/session", "GET /api/v1/tokens", LOOKUP]);
     expect(of(tab, "POST", "/api/v1/connect/lookup")[0].body).toEqual({ user_code: "K7QM2HXD" });
     expect(tab.$("confirm-dialog").shown).toBe(true);
-    expect(questionOf(tab)).toBe("Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com.");
+    expect(questionOf(tab)).toBe("Connect ROBIN-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as morgan@example.com.");
     expect(tab.doc.activeElement?.id).toBe("confirm-refuse");
     // Connect is the person's own press.
     tab.$("confirm-go").click();
@@ -1148,7 +1148,7 @@ describe("the Connections page: rename and disconnect", () => {
     const tab = openPage(standard({ ["PATCH /api/v1/tokens/" + T1]: { status: 200, json: renamed[0] }, "GET /api/v1/tokens": [list(MOCKUP), list(renamed)] }));
     await tab.settle();
     button(rows(tab)[0], "Rename").click();
-    expect([tab.$("rename-dialog").shown, tab.$("rename-title").textContent, tab.$("rename-input").value, tab.doc.activeElement?.id]).toEqual([true, "Rename this connection", "ALEX-DESKTOP", "rename-input"]);
+    expect([tab.$("rename-dialog").shown, tab.$("rename-title").textContent, tab.$("rename-input").value, tab.doc.activeElement?.id]).toEqual([true, "Rename this connection", "ROBIN-DESKTOP", "rename-input"]);
     const input = tab.$("rename-input");
     for (const bad of ["", "   ", "x".repeat(61), "a\u0000b", "a​b", "a‮b", "a b"]) {
       input.value = bad;
@@ -1230,7 +1230,7 @@ describe("the Connections page: rename and disconnect", () => {
       h.answer(answer);
       await tab.settle();
       expect(tab.fetched.filter((f) => f.method === "DELETE").map((f) => [f.path, f.headers["X-Csrf-Token"]])).toEqual([[`/api/v1/tokens/${T2}`, CSRF]]);
-      expect([tab.$("disconnect-dialog").shown, rows(tab).map((r) => nameOf(r).textContent), tab.doc.activeElement?.id, tab.$("connections-message").shown]).toEqual([false, ["ALEX-DESKTOP", "Mythicshot"], "h-page", false]);
+      expect([tab.$("disconnect-dialog").shown, rows(tab).map((r) => nameOf(r).textContent), tab.doc.activeElement?.id, tab.$("connections-message").shown]).toEqual([false, ["ROBIN-DESKTOP", "Mythicshot"], "h-page", false]);
     }
   });
 
@@ -1492,7 +1492,7 @@ describe("the Connections page: when a connection expires (Plan 2j)", () => {
     const { deps } = made;
     deps.now = () => NOW;
     await seedAccount(deps, { admin: true, username: "boss" });
-    const owner = await seedAccount(deps, { username: "solex" });
+    const owner = await seedAccount(deps, { username: "morgan" });
     const signed = await redeemSignInCode(deps, await createSignInCode(deps, owner.userId), null, null);
     const id = "tok_" + "9".repeat(24);
     await deps.db.run("INSERT INTO api_token (id, workspace_id, name, hash, created_at, kind) VALUES (?, ?, 'Laptop', ?, ?, 'sign_in')", [id, owner.workspaceId, "a".repeat(64), NOW - 5 * DAY]);

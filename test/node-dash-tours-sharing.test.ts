@@ -47,7 +47,7 @@ const PUBLIC = access({ access: "public", viewers: [] });
 const moving = (done: number, total: number): Answer => ({ status: 202, json: { status: "switching", done, total } });
 const refused = (status: number, error: string, detail = "x"): Answer => ({ status, json: { error, detail } });
 const path = (id: string) => `/api/v1/tours/${id}/access`;
-const MAIL = "solex@example.com";
+const MAIL = "morgan@example.com";
 
 const entry = (row: FakeElement, text: string) => {
   const found = menuItems(row).find((m) => m.textContent === text);

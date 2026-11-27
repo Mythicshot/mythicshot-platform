@@ -118,22 +118,22 @@ function files(dir: string): string[] {
 describe("the server command", () => {
   it("works with a HOME_URL the app cannot use: the logo's link is cosmetic and never closes the recovery commands", async () => {
     const s = await site();
-    const r = await run({ ...s.env, HOME_URL: "http://made-up.example.com/" }, ["first-admin", "--email", "You@Example.com", "--username", "Alex"]);
+    const r = await run({ ...s.env, HOME_URL: "http://made-up.example.com/" }, ["first-admin", "--email", "You@Example.com", "--username", "Robin"]);
     expect(r.code).toBe(0);
-    expect(r.lines.slice(0, 4)).toEqual(CREATED("alex"));
+    expect(r.lines.slice(0, 4)).toEqual(CREATED("robin"));
     expect(r.lines.join("\n")).not.toContain("made-up");
   });
 
   it("first-admin prints the planned sentence and exits 0", async () => {
     const s = await site();
-    const r = await run(s.env, ["first-admin", "--email", "You@Example.com", "--username", "Alex"]);
+    const r = await run(s.env, ["first-admin", "--email", "You@Example.com", "--username", "Robin"]);
     expect(r.code).toBe(0);
-    expect(r.lines.slice(0, 4)).toEqual(CREATED("alex"));
+    expect(r.lines.slice(0, 4)).toEqual(CREATED("robin"));
     expect(r.lines).toHaveLength(5);
     expect(r.lines[4]).toMatch(LINK);
 
     const db = connect(s.dir);
-    expect(await db.first("SELECT email, username, is_admin FROM user WHERE id = ?", [s.userId])).toEqual({ email: "you@example.com", username: "alex", is_admin: 1 });
+    expect(await db.first("SELECT email, username, is_admin FROM user WHERE id = ?", [s.userId])).toEqual({ email: "you@example.com", username: "robin", is_admin: 1 });
     expect(await db.all("SELECT event, user_id, workspace_id, subject, detail FROM audit ORDER BY at, event")).toEqual([
       { event: "first_admin", user_id: s.userId, workspace_id: s.workspaceId, subject: s.userId, detail: null },
       { event: "signin_link_printed", user_id: s.userId, workspace_id: s.workspaceId, subject: s.userId, detail: null },
@@ -151,9 +151,9 @@ describe("the server command", () => {
 
   it("without a command, --email with --username makes the admin and --email alone prints a link", async () => {
     const s = await site();
-    const made = await run(s.env, ["--email", "you@example.com", "--username=alex"]);
+    const made = await run(s.env, ["--email", "you@example.com", "--username=robin"]);
     expect(made.code).toBe(0);
-    expect(made.lines.slice(0, 4)).toEqual(CREATED("alex"));
+    expect(made.lines.slice(0, 4)).toEqual(CREATED("robin"));
     expect(made.lines[4]).toMatch(LINK);
     const link = await run({ ...s.env, ...ON }, ["--email=you@example.com"]);
     expect(link.code).toBe(0);
@@ -163,7 +163,7 @@ describe("the server command", () => {
 
   it("the gate is never read from the command's own environment: a direct run with RECOVERY_LINKS=on refuses and writes nothing", async () => {
     const s = await site();
-    await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     const db = connect(s.dir);
     const written = async () => [await db.all("SELECT * FROM signin_code ORDER BY id"), await db.all("SELECT * FROM audit ORDER BY id")];
     const before = await written();
@@ -178,8 +178,8 @@ describe("the server command", () => {
     expect((await written())[0]).toHaveLength((before[0] as unknown[]).length + 2);
     // first-admin is the same whatever the gate says.
     const fresh = await site();
-    const r = await runRaw({ ...fresh.env, RECOVERY_LINKS: "on" }, ["first-admin", "--email", "you@example.com", "--username", "alex"], { recoveryLinks: true });
-    expect(r.lines).toEqual([...CREATED("alex"), expect.stringMatching(LINK)]);
+    const r = await runRaw({ ...fresh.env, RECOVERY_LINKS: "on" }, ["first-admin", "--email", "you@example.com", "--username", "robin"], { recoveryLinks: true });
+    expect(r.lines).toEqual([...CREATED("robin"), expect.stringMatching(LINK)]);
   });
 
   it("run as its own file, the gate is the environment of process 1, and anything unreadable is off", () => {
@@ -243,7 +243,7 @@ describe("the server command", () => {
 
   it("started as its own file with RECOVERY_LINKS=on in its environment, it still refuses", async () => {
     const s = await site();
-    await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     const db = connect(s.dir);
     const codes = await db.all("SELECT id FROM signin_code");
     const base: Record<string, string> = {};
@@ -295,9 +295,9 @@ describe("the server command", () => {
   it("a link for an existing account is a recovery tool, off unless the settings say RECOVERY_LINKS=on", async () => {
     const s = await site();
     // The first admin's own link is part of the one act, whatever the setting says, and never reminds.
-    const first = await run({ ...s.env, RECOVERY_LINKS: "off" }, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    const first = await run({ ...s.env, RECOVERY_LINKS: "off" }, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     expect(first.code).toBe(0);
-    expect(first.lines).toEqual([...CREATED("alex"), expect.stringMatching(LINK)]);
+    expect(first.lines).toEqual([...CREATED("robin"), expect.stringMatching(LINK)]);
     const db = connect(s.dir);
     const written = async () => [await db.all("SELECT * FROM signin_code ORDER BY id"), await db.all("SELECT * FROM audit ORDER BY id")];
     const before = await written();
@@ -330,10 +330,10 @@ describe("the server command", () => {
     const before = await rows();
 
     const cases: [string[], string][] = [
-      [["--email", "you-at-example.com", "--username", "alex"], "That is not an email address."],
-      [["--email", "you@localhost", "--username", "alex"], "That is not an email address."],
-      [["--email", "other@example.com", "--username", "alex"], "That email address belongs to another account."],
-      [["--email", "you@example.com", "--username", "al"], "A username is 3 to 30 lowercase letters, digits and hyphens, and starts with a letter."],
+      [["--email", "you-at-example.com", "--username", "robin"], "That is not an email address."],
+      [["--email", "you@localhost", "--username", "robin"], "That is not an email address."],
+      [["--email", "other@example.com", "--username", "robin"], "That email address belongs to another account."],
+      [["--email", "you@example.com", "--username", "ro"], "A username is 3 to 30 lowercase letters, digits and hyphens, and starts with a letter."],
       [["--email", "you@example.com", "--username", "9lives"], "A username is 3 to 30 lowercase letters, digits and hyphens, and starts with a letter."],
       [["--email", "you@example.com", "--username", "admin"], "That username is reserved. Choose another."],
       [["--email", "you@example.com", "--username", "Mythic-Shot"], "That username is reserved. Choose another."],
@@ -347,9 +347,9 @@ describe("the server command", () => {
     expect(await rows()).toEqual(before);
 
     // Once there is an admin, every further claim is told so, the same one included.
-    expect((await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"])).code).toBe(0);
+    expect((await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "robin"])).code).toBe(0);
     const after = await rows();
-    for (const flags of [["--email", "you@example.com", "--username", "alex"], ["--email", "new@example.com", "--username", "kim"]]) {
+    for (const flags of [["--email", "you@example.com", "--username", "robin"], ["--email", "new@example.com", "--username", "kim"]]) {
       const r = await run(s.env, ["first-admin", ...flags]);
       expect(r.lines).toEqual([HAS_ADMIN]);
       expect(r.code).toBe(1);
@@ -359,7 +359,7 @@ describe("the server command", () => {
 
     // A site nobody has set up yet.
     const empty = await site({ setUp: false });
-    const r = await run(empty.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    const r = await run(empty.env, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     expect(r.lines).toEqual(["This site is not set up yet. Open the setup page first."]);
     expect(r.code).toBe(1);
   });
@@ -385,30 +385,30 @@ describe("the server command", () => {
     await app.run("UPDATE workspace SET name = 'Acme Tours' WHERE id = ?", [s.workspaceId]);
     const reading = app.raw.prepare("SELECT id FROM user").iterate();
     reading.next();
-    const r = await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    const r = await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     expect(r.code).toBe(0);
     reading.return?.();
     await app.run("UPDATE workspace SET name = 'Acme' WHERE id = ?", [s.workspaceId]);
-    expect(await app.first("SELECT username, is_admin FROM user WHERE id = ?", [s.userId])).toEqual({ username: "alex", is_admin: 1 });
+    expect(await app.first("SELECT username, is_admin FROM user WHERE id = ?", [s.userId])).toEqual({ username: "robin", is_admin: 1 });
 
     // A writer that does not let go: the command waits as long as the app would, then says so and changes nothing.
     const stuck = await site();
     const holder = connect(stuck.dir);
     holder.raw.exec("BEGIN IMMEDIATE");
     const started = Date.now();
-    const busy = await run(stuck.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    const busy = await run(stuck.env, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     holder.raw.exec("ROLLBACK");
     expect(busy.lines).toEqual(["The database is busy. Try again in a moment."]);
     expect(busy.code).toBe(1);
     expect(Date.now() - started).toBeGreaterThanOrEqual(4000);
     expect(await holder.first("SELECT count(*) AS n FROM user WHERE is_admin = 1")).toEqual({ n: 0 });
     // And it is safe to run again.
-    expect((await run(stuck.env, ["first-admin", "--email", "you@example.com", "--username", "alex"])).code).toBe(0);
+    expect((await run(stuck.env, ["first-admin", "--email", "you@example.com", "--username", "robin"])).code).toBe(0);
   }, 30_000);
 
   it("signin-link prints a link that signs in once", async () => {
     const s = await site();
-    await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     const r = await run({ ...s.env, ...ON }, ["signin-link", "--email", " You@Example.com"]);
     expect(r.code).toBe(0);
     expect(r.lines).toEqual(["Open this link within 15 minutes to sign in:", expect.stringMatching(LINK), REMIND]);
@@ -444,10 +444,10 @@ describe("the server command", () => {
     }
     expect(await written()).toEqual([[], []]);
 
-    await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     await db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [member.userId]);
     const before = await written();
-    for (const email of ["stranger@example.com", "member@example.com", "not an address", "alex"]) {
+    for (const email of ["stranger@example.com", "member@example.com", "not an address", "robin"]) {
       const r = await run({ ...s.env, ...ON }, ["signin-link", "--email", email]);
       expect(r.lines, email).toEqual([NO_LINK]);
       expect(r.code).toBe(1);
@@ -458,9 +458,9 @@ describe("the server command", () => {
   it("without an address for links the admin is still made and the link is a path", async () => {
     const s = await site();
     const env = { DATA_DIR: s.dir, SETUP_CODE };
-    const r = await run(env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    const r = await run(env, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     expect(r.code).toBe(0);
-    expect(r.lines.slice(0, 3)).toEqual(CREATED("alex").slice(0, 3));
+    expect(r.lines.slice(0, 3)).toEqual(CREATED("robin").slice(0, 3));
     expect(r.lines.slice(3, 5)).toEqual([
       "No address for sign-in links is set, so the link is shown without one. Set APP_HOST and TOURS_HOST, or SITE_HOST.",
       "Open your site's address followed by:",
@@ -487,10 +487,10 @@ describe("the server command", () => {
     const broken = await site();
     const db = connect(broken.dir);
     db.raw.exec("CREATE TRIGGER no_codes BEFORE INSERT ON signin_code BEGIN SELECT RAISE(ABORT, 'made-up failure'); END");
-    const r = await run(broken.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    const r = await run(broken.env, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     expect(r.lines).toEqual([MADE_NO_LINK]);
     expect(r.code).toBe(1);
-    expect(await db.first("SELECT username, is_admin FROM user WHERE id = ?", [broken.userId])).toEqual({ username: "alex", is_admin: 1 });
+    expect(await db.first("SELECT username, is_admin FROM user WHERE id = ?", [broken.userId])).toEqual({ username: "robin", is_admin: 1 });
     // The same error outside a claim is the plain unexpected one.
     const later = await run({ ...broken.env, ...ON }, ["signin-link", "--email", "you@example.com"]);
     expect(later.lines).toEqual(["The command stopped on an unexpected error."]);
@@ -503,7 +503,7 @@ describe("the server command", () => {
     const refused = await site();
     const db2 = connect(refused.dir);
     db2.raw.exec("CREATE TRIGGER drop_method AFTER UPDATE OF is_admin ON user BEGIN DELETE FROM signin_method WHERE user_id = NEW.id; END");
-    const r2 = await run(refused.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    const r2 = await run(refused.env, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     expect(r2.lines).toEqual([MADE_NO_LINK]);
     expect(r2.code).toBe(1);
     expect(await db2.first("SELECT count(*) AS n FROM user WHERE is_admin = 1")).toEqual({ n: 1 });
@@ -517,7 +517,7 @@ describe("the server command", () => {
       { sql: "INSERT INTO workspace (id, name, created_at) VALUES (?, 'Half', 1)", params: [ws] },
       { sql: "INSERT INTO setup (id, workspace_id, completed_at) VALUES (1, ?, 1)", params: [ws] },
     ]);
-    const r = await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    const r = await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     expect(r.lines).toEqual(['This site\'s setup did not finish. Follow "If the setup did not finish" in the hosting guide, then run this again.']);
     expect(r.code).toBe(1);
     expect(await db.all("SELECT * FROM audit")).toEqual([]);
@@ -529,7 +529,7 @@ describe("the server command", () => {
       { sql: "INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, 'newer@example.com', 20)", params: [newer, ws] },
       { sql: "INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, 'older@example.com', 10)", params: [older, ws] },
     ]);
-    expect((await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"])).code).toBe(0);
+    expect((await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "robin"])).code).toBe(0);
     expect(await db.all("SELECT id FROM user WHERE is_admin = 1")).toEqual([{ id: older }]);
   });
 
@@ -618,7 +618,7 @@ describe("the server command", () => {
   it("the command stops on a database that is not migrated", async () => {
     const old = await site({ accounts: false });
     const before = files(old.dir);
-    for (const argv of [["first-admin", "--email", "you@example.com", "--username", "alex"], ["signin-link", "--email", "you@example.com"], ["audit"]]) {
+    for (const argv of [["first-admin", "--email", "you@example.com", "--username", "robin"], ["signin-link", "--email", "you@example.com"], ["audit"]]) {
       const r = await run(old.env, argv);
       expect(r.lines, argv[0]).toEqual(["The database is from an older version. Update the site first."]);
       expect(r.code).toBe(1);
@@ -639,7 +639,7 @@ describe("the server command", () => {
   });
 
   it("without a data folder or a database it says so and creates nothing", async () => {
-    const none = await run({ ...TWO }, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    const none = await run({ ...TWO }, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     expect(none.lines).toEqual(["DATA_DIR is not set, so the site's data is not known. Nothing was changed."]);
     expect(none.code).toBe(1);
 
@@ -655,7 +655,7 @@ describe("the server command", () => {
 
     // A pair of addresses the app itself would refuse to start with: its own one line, and nothing is done.
     const s = await site();
-    const bad = await run({ DATA_DIR: s.dir, APP_HOST: "app.example.com" }, ["first-admin", "--email", "you@example.com", "--username", "alex"]);
+    const bad = await run({ DATA_DIR: s.dir, APP_HOST: "app.example.com" }, ["first-admin", "--email", "you@example.com", "--username", "robin"]);
     expect(bad.lines).toEqual(["APP_HOST is set but TOURS_HOST is not. Set both for two addresses, or neither for one."]);
     expect(bad.code).toBe(1);
     expect(await connect(s.dir).first("SELECT count(*) AS n FROM user WHERE is_admin = 1")).toEqual({ n: 0 });
@@ -696,15 +696,15 @@ describe("the server command", () => {
       ["make-admin", "--email", "you@example.com"],
       ["first-admin"],
       ["first-admin", "--email", "you@example.com"],
-      ["first-admin", "--username", "alex"],
+      ["first-admin", "--username", "robin"],
       ["first-admin", "--email", "you@example.com", "--username"],
-      ["first-admin", "--email", "--username", "alex"],
-      ["first-admin", "--email", "you@example.com", "--username", "alex", "--admin"],
-      ["first-admin", "--email", "you@example.com", "--email", "other@example.com", "--username", "alex"],
-      ["first-admin", "--email", "you@example.com", "--username", "alex", "extra"],
+      ["first-admin", "--email", "--username", "robin"],
+      ["first-admin", "--email", "you@example.com", "--username", "robin", "--admin"],
+      ["first-admin", "--email", "you@example.com", "--email", "other@example.com", "--username", "robin"],
+      ["first-admin", "--email", "you@example.com", "--username", "robin", "extra"],
       ["signin-link"],
-      ["signin-link", "--email", "you@example.com", "--username", "alex"],
-      ["--username", "alex"],
+      ["signin-link", "--email", "you@example.com", "--username", "robin"],
+      ["--username", "robin"],
       ["mail-check", "--email", "you@example.com"],
       ["audit", "--last"],
     ];
@@ -737,8 +737,8 @@ describe("the server command", () => {
     const links: string[] = [];
     for (const argv of [
       ["first-admin", "--email", "you@example.com", "--username", "admin"],
-      ["first-admin", "--email", "you@example.com", "--username", "alex"],
-      ["first-admin", "--email", "you@example.com", "--username", "alex"],
+      ["first-admin", "--email", "you@example.com", "--username", "robin"],
+      ["first-admin", "--email", "you@example.com", "--username", "robin"],
       ["signin-link", "--email", "you@example.com"],
       ["signin-link", "--email", "stranger@example.com"],
       ["mail-check"],
@@ -771,20 +771,20 @@ describe("the server command", () => {
   });
   it("change-email changes an account's address at once, behind RECOVERY_LINKS=on, and says so in one sentence", async () => {
     const s = await site();
-    expect((await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"])).code).toBe(0);
+    expect((await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "robin"])).code).toBe(0);
     const db = connect(s.dir);
     const written = async () => [await db.all("SELECT id, email FROM user ORDER BY id"), await db.all("SELECT * FROM audit ORDER BY id")];
     const before = await written();
     const CHANGE_OFF = "Changing an email address here is off. To do it, add the line RECOVERY_LINKS=on to the site's settings file, run this again, then remove the line.";
     for (const value of [undefined, "", "off", "yes", "o n"]) {
-      const r = await run({ ...s.env, RECOVERY_LINKS: value }, ["change-email", "--username", "alex", "--email", "new@example.com"]);
+      const r = await run({ ...s.env, RECOVERY_LINKS: value }, ["change-email", "--username", "robin", "--email", "new@example.com"]);
       expect(r.lines, String(value)).toEqual([CHANGE_OFF]);
       expect(r.code).toBe(1);
     }
     expect(await written()).toEqual(before);
 
-    const done = await run({ ...s.env, ...ON }, ["change-email", "--username", "Alex", "--email", "New@Example.com"]);
-    expect(done.lines).toEqual(['The account "alex" now signs in with new@example.com.', REMIND]);
+    const done = await run({ ...s.env, ...ON }, ["change-email", "--username", "Robin", "--email", "New@Example.com"]);
+    expect(done.lines).toEqual(['The account "robin" now signs in with new@example.com.', REMIND]);
     expect(done.code).toBe(0);
     expect(await db.first("SELECT email FROM user WHERE id = ?", [s.userId])).toEqual({ email: "new@example.com" });
     expect(await db.all("SELECT event, user_id, subject, detail FROM audit WHERE event = 'email_changed_on_server'")).toEqual([{ event: "email_changed_on_server", user_id: s.userId, subject: s.userId, detail: null }]);
@@ -797,12 +797,12 @@ describe("the server command", () => {
     await db.batch(other.stmts);
     const after = await written();
     const refusals: [string[], string][] = [
-      [["--username", "alex", "--email", "taken@example.com"], "That email address belongs to another account. Nothing was changed."],
-      [["--username", "alex", "--email", "new@example.com"], "That is already the account's email address. Nothing was changed."],
+      [["--username", "robin", "--email", "taken@example.com"], "That email address belongs to another account. Nothing was changed."],
+      [["--username", "robin", "--email", "new@example.com"], "That is already the account's email address. Nothing was changed."],
       [["--username", "nobody", "--email", "free@example.com"], "No account has that username. Nothing was changed."],
       [["--username", "a", "--email", "free@example.com"], "No account has that username. Nothing was changed."],
-      [["--username", "alex", "--email", "not an address"], "That is not an email address. Nothing was changed."],
-      [["--username", "alex", "--email", "x@example.com\r\nBcc: y@example.com"], "That is not an email address. Nothing was changed."],
+      [["--username", "robin", "--email", "not an address"], "That is not an email address. Nothing was changed."],
+      [["--username", "robin", "--email", "x@example.com\r\nBcc: y@example.com"], "That is not an email address. Nothing was changed."],
     ];
     for (const [args, line] of refusals) {
       const r = await run({ ...s.env, ...ON }, ["change-email", ...args]);
@@ -812,7 +812,7 @@ describe("the server command", () => {
     expect(await written()).toEqual(after);
 
     // Arguments it does not take: the usage, which names it, and exit 2.
-    for (const argv of [["change-email"], ["change-email", "--username", "alex"], ["change-email", "--email", "x@example.com"], ["change-email", "--username", "alex", "--email", "x@example.com", "--send-to", "y@example.com"]]) {
+    for (const argv of [["change-email"], ["change-email", "--username", "robin"], ["change-email", "--email", "x@example.com"], ["change-email", "--username", "robin", "--email", "x@example.com", "--send-to", "y@example.com"]]) {
       const r = await run({ ...s.env, ...ON }, argv);
       expect(r.code, argv.join(" ")).toBe(2);
       expect(r.lines.join(" ")).toContain("change-email --username <name> --email <address>");
@@ -821,10 +821,10 @@ describe("the server command", () => {
 
   it("change-email sends no notice, not even with mail set up: the person at the server tells the account's owner", async () => {
     const s = await site();
-    expect((await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "alex"])).code).toBe(0);
+    expect((await run(s.env, ["first-admin", "--email", "you@example.com", "--username", "robin"])).code).toBe(0);
     const mailers: FakeMailer[] = [];
     const opts: AdminOptions = { makeMailer: () => (mailers.push(new FakeMailer()), mailers[mailers.length - 1]) };
-    const r = await run({ ...s.env, ...SMTP, ...ON }, ["change-email", "--username", "alex", "--email", "new@example.com"], opts);
+    const r = await run({ ...s.env, ...SMTP, ...ON }, ["change-email", "--username", "robin", "--email", "new@example.com"], opts);
     expect(r.code).toBe(0);
     expect(mailers.flatMap((m) => m.sent)).toEqual([]);
     expect(mailers).toHaveLength(0);
@@ -838,9 +838,9 @@ describe("the server command", () => {
     const db = new NodeDb(join(dir, "db.sqlite"));
     await migrate(db, migrations);
     const w = await workspaceStatements(depsOn(db), "Acme", "you@example.com");
-    await db.batch([...w.stmts, { sql: "UPDATE user SET username = 'alex' WHERE id = ?", params: [w.userId] }]);
+    await db.batch([...w.stmts, { sql: "UPDATE user SET username = 'robin' WHERE id = ?", params: [w.userId] }]);
     db.close();
-    const r = await run({ DATA_DIR: dir, ...TWO, ...ON }, ["change-email", "--username", "alex", "--email", "new@example.com"]);
+    const r = await run({ DATA_DIR: dir, ...TWO, ...ON }, ["change-email", "--username", "robin", "--email", "new@example.com"]);
     expect(r.lines).toEqual(["The database is from an older version. Update the site first."]);
     expect(r.code).toBe(1);
     expect(await connect(dir).first("SELECT email FROM user WHERE id = ?", [w.userId])).toEqual({ email: "you@example.com" });

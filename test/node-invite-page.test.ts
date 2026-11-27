@@ -196,7 +196,7 @@ function holding(held: (req: Fetched) => boolean, rest: Responder): { respond: R
 
 const CHECK = "POST /api/v1/invite/check";
 const ACCEPT = "POST /api/v1/invite/accept";
-const FOUND = (email = "mara@example.com"): Answer => ({ status: 200, json: { email, invited_by: "solex", expires_at: NOW + 7 * 86_400_000 } });
+const FOUND = (email = "mara@example.com"): Answer => ({ status: 200, json: { email, invited_by: "morgan", expires_at: NOW + 7 * 86_400_000 } });
 const INVALID: Answer = { status: 404, json: { error: "invite_invalid", detail: "This invite no longer works. Ask the person who invited you to send it again." } };
 const SIGNED_IN: Answer = { status: 409, json: { error: "signed_in", detail: "You are signed in. Sign out first, then open the invite link again." } };
 const OK: Answer = { status: 200, json: { ok: true } };
@@ -521,7 +521,7 @@ function browser(deps: Deps) {
 /** The admin sends an invite to `email` through the real route; the link the mail holds. */
 async function sendInvite(made: Awaited<ReturnType<typeof makeDeps>>, email: string): Promise<string> {
   const { deps, mail } = made;
-  const admin = await seedAccount(deps, { admin: true, username: "solex" });
+  const admin = await seedAccount(deps, { admin: true, username: "morgan" });
   const signed = await redeemSignInCode(deps, await createSignInCode(deps, admin.userId), FIREFOX, null);
   const cookie = `${SESSION_COOKIE}=${signed!.secret}`;
   const r = await send(deps, "POST", "/api/v1/admin/invites", {
@@ -595,7 +595,7 @@ describe("the invite page against the real app", () => {
     await first.settle();
     await second.settle();
     // The admin's username is taken.
-    type(first, "solex");
+    type(first, "morgan");
     first.$("choose-button").click();
     await first.settle();
     expect(first.$("choose-message").textContent).toBe(TAKEN);

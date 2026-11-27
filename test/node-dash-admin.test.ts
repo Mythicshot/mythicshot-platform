@@ -200,7 +200,7 @@ describe("the Admin page for a member", () => {
     for (const which of ["GET /api/v1/admin/summary", "GET /api/v1/admin/accounts"]) {
       const tab = openAdmin(standard({ [which]: NOT_FOUND }));
       await tab.settle();
-      expect(tab.shows(), which).toEqual(["Mythicshot", "solex", "Page not found", "Back to Tours"]);
+      expect(tab.shows(), which).toEqual(["Mythicshot", "morgan", "Page not found", "Back to Tours"]);
       expect(tab.has("admin-rows"), which).toBe(false);
       expect(tab.$("dash-load").textContent).toBe("");
     }
@@ -227,13 +227,13 @@ describe("the Admin page for the admin", () => {
     expect(tab.$("tab-admin").hidden).toBe(false);
     expect(tab.$("admin-summary").textContent).toBe("3 accounts · 6.6 GB used in all · standard allowance 5 GB");
     expect(rows(tab).map(rowOf)).toEqual([
-      { name: "solex", tags: ["Admin"], email: "you@example.com", workspace: "Cowfee Raid Tools", tours: "12", bar: { cls: "mini", width: "24%" }, used: "1.2 GB", over: [], allowance: "5 GB", joined: "17 Nov 2026", button: "More", menu: ["Set allowance"] },
+      { name: "morgan", tags: ["Admin"], email: "you@example.com", workspace: "Cowfee Raid Tools", tours: "12", bar: { cls: "mini", width: "24%" }, used: "1.2 GB", over: [], allowance: "5 GB", joined: "17 Nov 2026", button: "More", menu: ["Set allowance"] },
       { name: "mara", tags: [], email: "mara@example.com", workspace: "Harbor Studio", tours: "31", bar: { cls: "mini over", width: "100%" }, used: "5.3 GBOver", over: ["Over"], allowance: "5 GB", joined: "18 Nov 2026", button: "More", menu: ["Set allowance", "Disable"] },
       { name: "bram", tags: [], email: "bram@example.com", workspace: "Bram's demos", tours: "2", bar: { cls: "mini", width: "1%" }, used: "96 MB", over: [], allowance: "20 GB", joined: "19 Nov 2026", button: "More", menu: ["Set allowance", "Disable"] },
     ]);
     expect(tab.shows()).toEqual([
       "Mythicshot",
-      "solex",
+      "morgan",
       "Admin",
       "3 accounts · 6.6 GB used in all · standard allowance 5 GB",
       "Invite someone",
@@ -303,7 +303,7 @@ describe("the Admin page for the admin", () => {
     expect(button.disabled).toBe(true);
     await tab.settle();
     expect(tab.fetched.map((f) => f.path).filter((p) => p.startsWith("/api/v1/admin/accounts"))).toEqual(["/api/v1/admin/accounts", `/api/v1/admin/accounts?after=${U3}`]);
-    expect(rows(tab).map((r) => rowOf(r).name)).toEqual(["solex", "mara", "bram", "tess", "rook"]);
+    expect(rows(tab).map((r) => rowOf(r).name)).toEqual(["morgan", "mara", "bram", "tess", "rook"]);
     expect(button.shown).toBe(false);
     expect(button.disabled).toBe(false);
     // The focus moves to the first new row.
@@ -726,7 +726,7 @@ describe("the list with two pages loaded: one request at a time", () => {
     await tab.settle();
     tab.$("admin-more").click();
     await tab.settle();
-    expect(names(tab)).toEqual(["solex", "mara", "bram", "tess", "rook"]);
+    expect(names(tab)).toEqual(["morgan", "mara", "bram", "tess", "rook"]);
     return tab;
   }
 
@@ -750,7 +750,7 @@ describe("the list with two pages loaded: one request at a time", () => {
       p.waiting.shift()!.release();
       await tab.settle();
     }
-    expect(names(tab)).toEqual(["solex", "mara", "bram", "tess", "rook"]);
+    expect(names(tab)).toEqual(["morgan", "mara", "bram", "tess", "rook"]);
     expect([tab.$("admin-more").shown, tab.$("admin-more").disabled]).toEqual([true, false]);
     expect(tab.fetched.filter((f) => f.path === `/api/v1/admin/accounts?after=${U5}`)).toEqual([]);
   });
@@ -772,7 +772,7 @@ describe("the list with two pages loaded: one request at a time", () => {
     p.hold(false);
     p.waiting.shift()!.release();
     await tab.settle();
-    expect(names(tab)).toEqual(["solex", "mara", "bram", "tess", "rook", "vale"]);
+    expect(names(tab)).toEqual(["morgan", "mara", "bram", "tess", "rook", "vale"]);
     // Then the list was read again with its three pages.
     const reads = tab.fetched.filter((f) => f.path.startsWith("/api/v1/admin/accounts")).map((f) => f.path);
     expect(reads.slice(-3)).toEqual(["/api/v1/admin/accounts", `/api/v1/admin/accounts?after=${U3}`, `/api/v1/admin/accounts?after=${U5}`]);
@@ -786,7 +786,7 @@ describe("the list with two pages loaded: one request at a time", () => {
     tab.$("allow-save").click();
     await tab.settle();
     expect(tab.$("allow-message").textContent).toBe(FAILED);
-    expect(names(tab)).toEqual(["solex", "mara", "bram", "tess", "rook"]);
+    expect(names(tab)).toEqual(["morgan", "mara", "bram", "tess", "rook"]);
     expect(tab.fetched.filter((f) => f.path.startsWith("/api/v1/admin/accounts")).map((f) => f.path).slice(-2)).toEqual(["/api/v1/admin/accounts", `/api/v1/admin/accounts?after=${U3}`]);
     expect([tab.$("admin-more").shown, tab.$("admin-more").disabled]).toEqual([true, false]);
   });
@@ -799,7 +799,7 @@ describe("the list with two pages loaded: one request at a time", () => {
     type(tab, "10 GB");
     tab.$("allow-save").click();
     await tab.settle();
-    expect(names(tab)).toEqual(["solex", "mara", "bram", "tess", "rook"]);
+    expect(names(tab)).toEqual(["morgan", "mara", "bram", "tess", "rook"]);
     expect(rowOf(rows(tab)[1]).allowance).toBe("10 GB");
     expect(tab.doc.activeElement).toBe(more(rows(tab)[1]));
   });

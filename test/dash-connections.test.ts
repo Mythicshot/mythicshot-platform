@@ -242,7 +242,7 @@ describe("the Connections page", () => {
     expectNoForbiddenApis(CONNECTIONS_JS, "/dash/connections.js");
     // The mockups' lines, put together from the words.
     expect(TEXT.subBefore + "Cowfee Raid Tools" + TEXT.subAfter).toBe("The computers where Mythicshot can publish to Cowfee Raid Tools.");
-    expect("ALEX-DESKTOP" + TEXT.isConnected).toBe("ALEX-DESKTOP is connected. Mythicshot finishes signing in by itself within a few seconds.");
+    expect("ROBIN-DESKTOP" + TEXT.isConnected).toBe("ROBIN-DESKTOP is connected. Mythicshot finishes signing in by itself within a few seconds.");
     expect(TEXT.tooMany + "10" + TEXT.minutes).toBe("Too many codes that did not work. Try again in 10 minutes.");
     expect(TEXT.askBefore + "Work laptop" + TEXT.askAfter).toBe('Disconnect "Work laptop"?');
     expect(TEXT.signedIn + TEXT.dot + TEXT.connectedOn + "20 Nov 2026" + TEXT.dot + TEXT.lastUsed + TEXT.todayInLine).toBe("Signed in from Mythicshot · connected 20 Nov 2026 · last used today");
@@ -254,7 +254,7 @@ describe("the Connections page", () => {
     expect(TEXT.expires + "20 Feb 2027").toBe("Expires 20 Feb 2027");
     expect(TEXT.expired + "20 Feb 2027" + TEXT.signInAgain).toBe("Expired 20 Feb 2027. Sign in again from Mythicshot.");
     expect(TEXT.downloadBefore + TEXT.downloadLink + TEXT.downloadAfter).toBe(" Not installed yet? Get Mythicshot from the download page.");
-    expect(TEXT.askConnect + "ALEX-DESKTOP" + TEXT.toWorkspace + "Cowfee Raid Tools" + TEXT.askEnd + " " + TEXT.signedInAs + "solex@example.com" + TEXT.signedInAsEnd).toBe("Connect ALEX-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as solex@example.com.");
+    expect(TEXT.askConnect + "ROBIN-DESKTOP" + TEXT.toWorkspace + "Cowfee Raid Tools" + TEXT.askEnd + " " + TEXT.signedInAs + "morgan@example.com" + TEXT.signedInAsEnd).toBe("Connect ROBIN-DESKTOP to the workspace Cowfee Raid Tools? You are signed in as morgan@example.com.");
     // The question's heading and the line under it are filled by the script: empty in the page.
     for (const id of ["confirm-title", "confirm-who"]) expect([doc.getElementById(id)!.textContent, doc.getElementById(id)!.children.length], id).toEqual(["", 0]);
     expect(CONNECTIONS_JS).toContain('var link = Dash.downloadLink(TEXT.downloadLink, "");');

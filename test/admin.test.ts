@@ -43,7 +43,7 @@ describe("the first admin", () => {
 
     const before = calls();
     // The address and the name are stored in their one form, whatever case they were typed in.
-    const claim = await claimFirstAdmin(deps, { email: "  You@Example.com ", username: " Alex\n" });
+    const claim = await claimFirstAdmin(deps, { email: "  You@Example.com ", username: " Robin\n" });
     expect(claim).toEqual({ ok: true, userId: site.userId });
     // One read and one batch.
     expect(calls() - before).toBe(2);
@@ -53,7 +53,7 @@ describe("the first admin", () => {
       workspace_id: site.workspaceId,
       email: "you@example.com",
       created_at: NOW,
-      username: "alex",
+      username: "robin",
       status: "active",
       is_admin: 1,
     });
@@ -74,12 +74,12 @@ describe("the first admin", () => {
     const { deps } = await makeDeps();
     // The setup wizard took any text with one @ in it.
     const site = await setUpSite(deps, "owner@localhost");
-    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" })).toEqual({ ok: true, userId: site.userId });
+    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" })).toEqual({ ok: true, userId: site.userId });
     expect(await deps.db.first("SELECT email FROM user WHERE id = ?", [site.userId])).toEqual({ email: "you@example.com" });
     // The owner's own address, given again, is not somebody else's.
     const again = await makeDeps();
     const same = await setUpSite(again.deps, "you@example.com");
-    expect(await claimFirstAdmin(again.deps, { email: "You@example.com", username: "alex" })).toEqual({ ok: true, userId: same.userId });
+    expect(await claimFirstAdmin(again.deps, { email: "You@example.com", username: "robin" })).toEqual({ ok: true, userId: same.userId });
   });
 
   it("on a site that was rolled back and forward the owner is found by its own row and gets its membership and sign-in method", async () => {
@@ -98,8 +98,8 @@ describe("the first admin", () => {
     expect(await workspaceOf(deps, owner)).toBeNull();
     expect(await deps.db.all("SELECT * FROM signin_method")).toEqual([]);
 
-    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" })).toEqual({ ok: true, userId: owner });
-    expect(await deps.db.first("SELECT email, username, is_admin FROM user WHERE id = ?", [owner])).toEqual({ email: "you@example.com", username: "alex", is_admin: 1 });
+    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" })).toEqual({ ok: true, userId: owner });
+    expect(await deps.db.first("SELECT email, username, is_admin FROM user WHERE id = ?", [owner])).toEqual({ email: "you@example.com", username: "robin", is_admin: 1 });
     // The rows are dated as the account is, like the ones the migration wrote.
     expect(await deps.db.all("SELECT * FROM membership")).toEqual([{ workspace_id: ws, user_id: owner, role: "owner", created_at: 111 }]);
     expect(await deps.db.all("SELECT * FROM signin_method")).toEqual([{ user_id: owner, kind: "email_link", created_at: 111 }]);
@@ -119,14 +119,14 @@ describe("the first admin", () => {
       { sql: "INSERT INTO workspace (id, name, created_at) VALUES (?, 'Shared', 1)", params: [ws] },
       { sql: "INSERT INTO setup (id, workspace_id, completed_at) VALUES (1, ?, 1)", params: [ws] },
     ]);
-    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" })).toEqual({ ok: false, problem: "not_set_up" });
+    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" })).toEqual({ ok: false, problem: "not_set_up" });
     const older = "usr_" + "1".repeat(24);
     const newer = "usr_" + "2".repeat(24);
     await deps.db.batch([
       { sql: "INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, 'newer@example.com', 20)", params: [newer, ws] },
       { sql: "INSERT INTO user (id, workspace_id, email, created_at) VALUES (?, ?, 'older@example.com', 10)", params: [older, ws] },
     ]);
-    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" })).toEqual({ ok: true, userId: older });
+    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" })).toEqual({ ok: true, userId: older });
     expect(await deps.db.all("SELECT id FROM user WHERE is_admin = 1")).toEqual([{ id: older }]);
     expect(await deps.db.first("SELECT email FROM user WHERE id = ?", [newer])).toEqual({ email: "newer@example.com" });
   });
@@ -134,12 +134,12 @@ describe("the first admin", () => {
   it("it works once", async () => {
     const { deps, calls } = await makeDeps();
     const site = await setUpSite(deps);
-    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" })).toEqual({ ok: true, userId: site.userId });
+    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" })).toEqual({ ok: true, userId: site.userId });
     const after = await accountRows(deps);
 
     // The same claim again, and another one: both are told what is already true.
     const before = calls();
-    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" })).toEqual({ ok: false, problem: "has_admin" });
+    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" })).toEqual({ ok: false, problem: "has_admin" });
     // Refused by the one read: nothing is sent to be written.
     expect(calls() - before).toBe(1);
     expect(await claimFirstAdmin(deps, { email: "other@example.com", username: "sam" })).toEqual({ ok: false, problem: "has_admin" });
@@ -151,7 +151,7 @@ describe("the first admin", () => {
     const admin = await seedAccount(second.deps, { username: "sam", admin: true });
     await second.deps.db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [admin.userId]);
     const rows = await accountRows(second.deps);
-    expect(await claimFirstAdmin(second.deps, { email: "you@example.com", username: "alex" })).toEqual({ ok: false, problem: "has_admin" });
+    expect(await claimFirstAdmin(second.deps, { email: "you@example.com", username: "robin" })).toEqual({ ok: false, problem: "has_admin" });
     expect(await accountRows(second.deps)).toEqual(rows);
   });
 
@@ -194,10 +194,10 @@ describe("the first admin", () => {
   it("a site that was never set up has nobody to make admin", async () => {
     const { deps } = await makeDeps();
     // An empty database, and one with workspaces but no setup row.
-    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" })).toEqual({ ok: false, problem: "not_set_up" });
+    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" })).toEqual({ ok: false, problem: "not_set_up" });
     await seedWorkspace(deps, "No setup");
     const rows = await accountRows(deps);
-    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" })).toEqual({ ok: false, problem: "not_set_up" });
+    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" })).toEqual({ ok: false, problem: "not_set_up" });
     expect(await accountRows(deps)).toEqual(rows);
     expect(await hasAdmin(deps)).toBe(false);
   });
@@ -210,9 +210,9 @@ describe("the first admin", () => {
 
     const before = calls();
     for (const email of ["", "you", "you@localhost", "you@example.com\n", "a b@example.com", "<you@example.com>", 5 as unknown as string]) {
-      expect(await claimFirstAdmin(deps, { email, username: "alex" }), String(email)).toEqual({ ok: false, problem: "bad_email" });
+      expect(await claimFirstAdmin(deps, { email, username: "robin" }), String(email)).toEqual({ ok: false, problem: "bad_email" });
     }
-    for (const username of ["", "al", "1alex", "alex-", "al--ex", "al ex", "a".repeat(31), "álex", null as unknown as string]) {
+    for (const username of ["", "ro", "1robin", "robin-", "ro--bin", "ro bin", "a".repeat(31), "róbin", null as unknown as string]) {
       expect(await claimFirstAdmin(deps, { email: "you@example.com", username }), String(username)).toEqual({ ok: false, problem: "bad_username" });
     }
     for (const username of ["admin", "Admin", "ad-min", "root", "support", "mythicshot", "my-mythicshot-fan", "no-reply"]) {
@@ -221,7 +221,7 @@ describe("the first admin", () => {
     // None of these reached the database.
     expect(calls() - before).toBe(0);
 
-    expect(await claimFirstAdmin(deps, { email: other.email.toUpperCase(), username: "alex" })).toEqual({ ok: false, problem: "email_taken" });
+    expect(await claimFirstAdmin(deps, { email: other.email.toUpperCase(), username: "robin" })).toEqual({ ok: false, problem: "email_taken" });
     expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "SAM" })).toEqual({ ok: false, problem: "username_taken" });
     expect(await accountRows(deps)).toEqual(rows);
     expect(await hasAdmin(deps)).toBe(false);
@@ -232,11 +232,11 @@ describe("the first admin", () => {
     let step = 0;
     deps.db.batch = async (stmts) => {
       step += 1;
-      if (step === 1) await realBatch([{ sql: "UPDATE user SET username = 'alex' WHERE id = ?", params: [third.userId] }]);
+      if (step === 1) await realBatch([{ sql: "UPDATE user SET username = 'robin' WHERE id = ?", params: [third.userId] }]);
       if (step === 2) await realBatch([{ sql: "UPDATE user SET email = 'you@example.com' WHERE id = ?", params: [third.userId] }]);
       return realBatch(stmts);
     };
-    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" })).toEqual({ ok: false, problem: "username_taken" });
+    expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" })).toEqual({ ok: false, problem: "username_taken" });
     expect(await claimFirstAdmin(deps, { email: "you@example.com", username: "kim" })).toEqual({ ok: false, problem: "email_taken" });
     expect(await hasAdmin(deps)).toBe(false);
     expect(await deps.db.all("SELECT * FROM audit")).toEqual([]);
@@ -250,12 +250,12 @@ describe("the first admin", () => {
     expect((await claimFirstAdmin(deps, { email: "you@example.com", username: "admin" })).ok).toBe(false);
     expect(await deps.db.all("SELECT * FROM audit")).toEqual([]);
 
-    await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" });
+    await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" });
     const rows = await deps.db.all<Record<string, unknown>>("SELECT * FROM audit");
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual({ id: expect.stringMatching(/^aud_[0-9a-f]{24}$/), at: NOW, event: "first_admin", user_id: site.userId, workspace_id: site.workspaceId, subject: site.userId, detail: null });
     const text = JSON.stringify(rows);
-    for (const never of ["you@example.com", "example.com", "alex", "typed-at-setup", "@"]) expect(text, never).not.toContain(never);
+    for (const never of ["you@example.com", "example.com", "robin", "typed-at-setup", "@"]) expect(text, never).not.toContain(never);
   });
 });
 
@@ -264,7 +264,7 @@ describe("the printed sign-in link", () => {
     const { deps } = await makeDeps(TWO_ADDRESSES);
     deps.now = () => NOW;
     const site = await setUpSite(deps);
-    await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" });
+    await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" });
     const member = await seedAccount(deps);
 
     const made = await signInLinkFor(deps, " You@Example.com ");
@@ -312,14 +312,14 @@ describe("the printed sign-in link", () => {
     expect(await signInLinkFor(deps, member.email)).toEqual({ ok: false });
     expect(await accountRows(deps)).toEqual(rows);
 
-    await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" });
+    await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" });
     await deps.db.run("UPDATE user SET status = 'disabled' WHERE id = ?", [member.userId]);
     const noMethod = await seedAccount(deps);
     await deps.db.run("DELETE FROM signin_method WHERE user_id = ?", [noMethod.userId]);
     const noWorkspace = await seedAccount(deps);
     await deps.db.run("DELETE FROM membership WHERE user_id = ?", [noWorkspace.userId]);
     rows = await accountRows(deps);
-    for (const email of ["stranger@example.com", member.email, noMethod.email, noWorkspace.email, "not an address", "", "alex", 7 as unknown as string]) {
+    for (const email of ["stranger@example.com", member.email, noMethod.email, noWorkspace.email, "not an address", "", "robin", 7 as unknown as string]) {
       expect(await signInLinkFor(deps, email), String(email)).toEqual({ ok: false });
     }
     expect(await accountRows(deps)).toEqual(rows);
@@ -331,7 +331,7 @@ describe("the printed sign-in link", () => {
   it("without a configured address the link is a path, and it never comes from anything but the configuration", async () => {
     const { deps } = await makeDeps();
     await setUpSite(deps, "you@example.com");
-    await claimFirstAdmin(deps, { email: "you@example.com", username: "alex" });
+    await claimFirstAdmin(deps, { email: "you@example.com", username: "robin" });
     const path = await signInLinkFor(deps, "you@example.com");
     expect(path).toMatchObject({ ok: true, whole: false, link: expect.stringMatching(/^\/signin\/link#c=dpl_[0-9a-f]{40}$/) });
 

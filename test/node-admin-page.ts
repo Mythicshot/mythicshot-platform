@@ -163,10 +163,10 @@ export const STANDARD = 5 * GB;
 
 export const SIGNED_OUT: Answer = { status: 401, json: { error: "unauthorized" } };
 export const NOT_FOUND: Answer = { status: 404, json: { error: "not_found" } };
-/** The session answer: by default the admin `solex`, whose account is U1. */
-export const session = (admin: unknown, username = "solex", id: unknown = U1): Answer => ({
+/** The session answer: by default the admin `morgan`, whose account is U1. */
+export const session = (admin: unknown, username = "morgan", id: unknown = U1): Answer => ({
   status: 200,
-  json: { account: { id, username, email: "solex@example.com", admin }, workspace: { id: "ws_1", name: "Cowfee Raid Tools" }, session: { id: "ses_1", created_at: 1, expires_at: 2 }, csrf: CSRF },
+  json: { account: { id, username, email: "morgan@example.com", admin }, workspace: { id: "ws_1", name: "Cowfee Raid Tools" }, session: { id: "ses_1", created_at: 1, expires_at: 2 }, csrf: CSRF },
 });
 export const summary = (accounts: number, used: number, standard: number | null): Answer => ({ status: 200, json: { accounts, used_bytes: used, standard_allowance_bytes: standard } });
 
@@ -200,7 +200,7 @@ export function account(id: string, ws: string, over: Record<string, unknown>) {
 
 /** The three accounts of mockup 9. */
 export const MOCKUP = [
-  account(U1, W1, { username: "solex", email: "you@example.com", admin: true, workspace_name: "Cowfee Raid Tools", tours: 12, used_bytes: 1_288_490_189, created_at: Date.UTC(2026, 10, 17, 12) }),
+  account(U1, W1, { username: "morgan", email: "you@example.com", admin: true, workspace_name: "Cowfee Raid Tools", tours: 12, used_bytes: 1_288_490_189, created_at: Date.UTC(2026, 10, 17, 12) }),
   account(U2, W2, { username: "mara", email: "mara@example.com", workspace_name: "Harbor Studio", tours: 31, used_bytes: 5_690_831_667, created_at: Date.UTC(2026, 10, 18, 12) }),
   account(U3, W3, { username: "bram", email: "bram@example.com", workspace_name: "Bram's demos", tours: 2, used_bytes: 96 * MB, storage_allowance_bytes: 20 * GB, created_at: Date.UTC(2026, 10, 19, 12) }),
 ];

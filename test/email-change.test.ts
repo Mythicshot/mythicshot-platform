@@ -747,7 +747,7 @@ describe("the mail texts", () => {
     expect(maskEmail("new@example.com")).toBe("n…@example.com");
     expect(maskEmail("first.last+tag@sub.example.co.uk")).toBe("f…@sub.example.co.uk");
     // In the notice itself.
-    expect(emailChangedMail("old@example.com", "solex", "jo@example.com").text.split("\n")[0]).toBe('The email address of the Mythicshot account "solex" was changed to …@example.com.');
+    expect(emailChangedMail("old@example.com", "morgan", "jo@example.com").text.split("\n")[0]).toBe('The email address of the Mythicshot account "morgan" was changed to …@example.com.');
     expect(maskEmail("@example.com")).toBe("…");
     expect(maskEmail("no-at-sign")).toBe("…");
   });
@@ -755,7 +755,7 @@ describe("the mail texts", () => {
   it("an account without a username is called your account in the notice", () => {
     expect(emailChangedMail("old@example.com", null, "new@example.com").text.split("\n")[0]).toBe("The email address of your Mythicshot account was changed to n…@example.com.");
     expect(emailChangedMail("old@example.com", 'x"\nBcc: y', "new@example.com").text.split("\n")[0]).toBe("The email address of your Mythicshot account was changed to n…@example.com.");
-    expect(emailChangedMail("old@example.com", "solex", "new@example.com", "Harbor Tours").subject).toBe("Your Harbor Tours email address was changed");
+    expect(emailChangedMail("old@example.com", "morgan", "new@example.com", "Harbor Tours").subject).toBe("Your Harbor Tours email address was changed");
   });
 
   it("the link takes only an origin and a code, and puts the code after the #", () => {
