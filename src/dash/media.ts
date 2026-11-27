@@ -51,6 +51,22 @@
 // delete that worked whose list cannot be read again says so, as on the Tours page. The
 // list is read one request at a time: Show more does nothing while a read runs, and a read
 // waits for Show more, as on the Admin page.
+//
+// Deleting several (the approved multi-select mockup): each row starts with a checkbox named
+// "Select <title>" for a screen reader, and a checkbox above the table selects exactly the
+// items shown ("Select all <n> shown"; mixed while some are selected), never those still
+// behind Show more, which arrive unselected. While something is selected a bar above the list
+// says how many, with Clear and Delete selected; the count is also said politely in a line of
+// its own. The selection is kept only in this script, by the ids of the list's own items, and
+// is cleared by Clear, by a reload, and when the list is read again after a delete in More.
+// Delete selected asks first (Dash.question, its own box), with no title in its heading, then
+// deletes the items one after another through the same DELETE /api/v1/media/<id>, each as a
+// delete in More is decided (deleteOne); the first one refused, or failed for good, stops the
+// run. While it runs the box says "Deleting <i> of <n>…" politely and cannot start another.
+// However it ends, the list is read again, the items deleted leave the selection and the
+// others stay selected while the list has them, the box closes and one sentence says how many
+// were deleted (with the failure's sentence when one stopped the run). Every delete question
+// ends with the same red line with the warning sign: there are no backups.
 import { shareConstants, shareHelpers, shareHtml, shareListeners, shareMenu, shareQuestion, shareRepeatIds, shareScript, shareState, shareText, shareViewOf, type SharePage } from "./sharing.ts";
 import { dashHtml } from "./shell.ts";
 
@@ -77,7 +93,12 @@ type MediaPage = {
   text: Record<string, string>;
 };
 
-const QUESTION = "Its link stops working for everyone and it is removed. This cannot be undone. The copy on your computer is not touched.";
+/** The single delete's sentence, and the one of a delete of one selected item. */
+const QUESTION = "Its link stops working for everyone and it is removed. The copy on your computer is not touched.";
+/** The sentence of a delete of several selected items. */
+const QUESTION_SOME = "Their links stop working for everyone and they are removed. The copies on your computer are not touched.";
+/** Under the sentence of every delete question, in red with the warning sign. */
+const NO_BACKUPS = "There are no backups of this data, and its removal is permanent.";
 
 /** The words both scripts share; each page adds its own after them. */
 const SHARED_TEXT = {
@@ -99,6 +120,21 @@ const SHARED_TEXT = {
   cut: "…",
   more: "More",
   notReloaded: "The change was made, but the list could not be loaded again. Reload the page to see it.",
+  select: "Select ",
+  allBefore: "Select all ",
+  allAfter: " shown",
+  selected: " selected",
+  bulkBefore: "Delete ",
+  bulkAfter: "?",
+  askOne: QUESTION,
+  askSome: QUESTION_SOME,
+  keepIt: "Keep it",
+  keepThem: "Keep them",
+  progressBefore: "Deleting ",
+  progressOf: " of ",
+  progressAfter: "…",
+  deletedAfter: " deleted.",
+  restAfter: " deleted. The rest are still here.",
 };
 
 /** Who can view an item of the noun's kind: nothing moves (src/dash/sharing.ts). */
@@ -161,9 +197,16 @@ function mediaMain(p: MediaPage): string {
   <section id="media" aria-labelledby="h-page" hidden>
     <p class="sub"><span id="media-count"></span><span class="wide-only" id="media-in"></span><span id="media-used"></span></p>
     <p class="message" id="media-message" role="status" aria-live="polite" hidden></p>
+    <p class="vh" id="pick-said" role="status" aria-live="polite"></p>
+    <div class="pick-bar" id="pick-bar" hidden>
+      <span class="pick-count" id="pick-count" aria-hidden="true"></span>
+      <button type="button" class="btn quiet" id="pick-clear">Clear</button>
+      <button type="button" class="btn danger" id="pick-delete">Delete selected</button>
+    </div>
     <div class="card" id="media-list" hidden>
+      <label class="pick-all" for="media-all"><input type="checkbox" class="pick" id="media-all"><span id="media-all-text"></span></label>
       <table class="media">
-        <thead><tr><th scope="col" class="thumb-cell"><span class="vh">Preview</span></th><th scope="col">${p.column}</th><th scope="col">Who can view</th><th scope="col" class="n">Size</th><th scope="col" class="n">Shared</th><th scope="col"><span class="vh">Actions</span></th></tr></thead>
+        <thead><tr><td class="pick-cell"></td><th scope="col" class="thumb-cell"><span class="vh">Preview</span></th><th scope="col">${p.column}</th><th scope="col">Who can view</th><th scope="col" class="n">Size</th><th scope="col" class="n">Shared</th><th scope="col"><span class="vh">Actions</span></th></tr></thead>
         <tbody id="media-rows"></tbody>
       </table>
     </div>
@@ -179,13 +222,26 @@ function mediaMain(p: MediaPage): string {
   </section>
   </div>
   <div class="backdrop" id="delete-dialog" hidden>
-    <div class="dialog" id="delete-box" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-text">
+    <div class="dialog" id="delete-box" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-text delete-warn">
       <h2 id="delete-title" tabindex="-1"></h2>
       <p class="sub" id="delete-text">${QUESTION}</p>
+      <p class="danger-line" id="delete-warn">${NO_BACKUPS}</p>
       <p class="message" id="delete-message" role="status" aria-live="polite" hidden></p>
       <div class="two">
         <button type="button" class="btn quiet" id="delete-keep">Keep it</button>
         <button type="button" class="btn danger" id="delete-go">${p.deleteButton}</button>
+      </div>
+    </div>
+  </div>
+  <div class="backdrop" id="bulk-dialog" hidden>
+    <div class="dialog" id="bulk-box" role="alertdialog" aria-modal="true" aria-labelledby="bulk-title" aria-describedby="bulk-text bulk-warn">
+      <h2 id="bulk-title" tabindex="-1"></h2>
+      <p class="sub" id="bulk-text"></p>
+      <p class="danger-line" id="bulk-warn">${NO_BACKUPS}</p>
+      <p class="sub" id="bulk-progress" role="status" aria-live="polite" hidden></p>
+      <div class="two">
+        <button type="button" class="btn quiet" id="bulk-keep"></button>
+        <button type="button" class="btn danger" id="bulk-go"></button>
       </div>
     </div>
   </div>
@@ -230,6 +286,8 @@ ${shareConstants(p.sharing)}  // How long Copy link reads Copied.
   var BEHIND = ["dash-top", "media-page"];
   // The question before a delete (Dash.question, src/dash/script.ts).
   var question = Dash.question({ backdrop: "delete-dialog", box: "delete-box", role: "alertdialog", title: "delete-title", message: "delete-message", behind: BEHIND, buttons: ["delete-keep", "delete-go"] });
+  // The question before deleting the selected items, one after another.
+  var bulkQ = Dash.question({ backdrop: "bulk-dialog", box: "bulk-box", role: "alertdialog", title: "bulk-title", behind: BEHIND, buttons: ["bulk-keep", "bulk-go"] });
 ${shareQuestion(p.sharing)}
   var $ = function (id) { return document.getElementById(id); };
   var workspace = "";
@@ -249,8 +307,15 @@ ${shareQuestion(p.sharing)}
   // Each row's first control and its More, by item id, to give the focus back after the list is rebuilt.
   var firstOf = {};
   var moreOf = {};
-  // Every button of every row, menus included, to disable while a change runs.
+  // Every button and checkbox of every row, menus included, to disable while a change runs.
   var rowButtons = [];
+  // The items selected, by id: only ever ids of items in the list shown, so only ids this
+  // workspace's own list gave. Kept in this page alone, never in storage or the address.
+  var picked = Object.create(null);
+  // Each row's checkbox, by item id.
+  var pickOf = {};
+  // The ids the question before deleting the selected items is about, in the list's order, while it is open.
+  var bulk = null;
 ${shareState(p.sharing)}
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -259,18 +324,21 @@ ${shareState(p.sharing)}
     return e;
   }
 
-  // A message line is hidden while it has nothing to say.
-  function say(text) {
+  // A message line is hidden while it has nothing to say. A plain one (the outcome of
+  // deleting the selected items when every one was deleted) is in the text's colour.
+  function say(text, plain) {
     var line = $("media-message");
+    line.className = plain === true ? "message plain" : "message";
     line.textContent = text;
     line.hidden = text === "";
   }
 
   function rowsDisabled(on) {
     rowButtons.forEach(function (b) { b.disabled = on; });
+    ["media-all", "pick-clear", "pick-delete"].forEach(function (id) { $(id).disabled = on; });
   }
 
-${shareHelpers()}
+${shareHelpers(["bulkQ"])}
   function isCount(n) {
     return typeof n === "number" && isFinite(n) && n >= 0 && Math.floor(n) === n;
   }
@@ -354,6 +422,18 @@ ${shareViewOf(p.sharing)}
     var lead = details !== "" ? TEXT.dot : "";
     var view = viewOf(it);
 
+    // The checkbox, named for a screen reader with the item's title as text.
+    var pickCell = el("td", "pick-cell");
+    var box = el("input", "pick");
+    box.type = "checkbox";
+    box.setAttribute("aria-label", TEXT.select + titleOf(it));
+    box.checked = picked[it.id] === true;
+    box.addEventListener("change", function () { pick(it.id, box.checked); });
+    pickCell.appendChild(box);
+    tr.appendChild(pickCell);
+    rowButtons.push(box);
+    pickOf[it.id] = box;
+
     var thumb = el("td", "thumb-cell");
     thumb.setAttribute("aria-hidden", "true");
     thumb.appendChild(preview(it));
@@ -422,7 +502,12 @@ ${shareViewOf(p.sharing)}
     closeMenu(false);
     firstOf = {};
     moreOf = {};
+    pickOf = {};
     rowButtons = [];
+    // Only an item in the list stays selected.
+    var still = Object.create(null);
+    items.forEach(function (it) { if (picked[it.id] === true) still[it.id] = true; });
+    picked = still;
     var n = items.length;
     var all = next === null;
     var bytes = 0;
@@ -438,6 +523,7 @@ ${shareViewOf(p.sharing)}
     var rows = $("media-rows");
     rows.textContent = "";
     for (var i = 0; i < n; i++) rows.appendChild(row(items[i], i));
+    showPicks();
     rowsDisabled(working);
     $("media-list").hidden = n === 0;
     $("media-hint").hidden = n === 0;
@@ -447,6 +533,49 @@ ${shareViewOf(p.sharing)}
     $("media-more").hidden = all;
     $("dash-load").textContent = "";
     $("media").hidden = false;
+  }
+
+  // ---- Selecting items ----
+
+  // The ids of the items selected, in the list's order.
+  function pickedIds() {
+    return items.filter(function (it) { return picked[it.id] === true; }).map(function (it) { return it.id; });
+  }
+
+  // The header's checkbox and words, and the bar while something is selected; the count is
+  // said politely in a line of its own, which stays in the page while the bar comes and goes.
+  function showPicks() {
+    Object.keys(pickOf).forEach(function (id) { pickOf[id].checked = picked[id] === true; });
+    var n = items.length;
+    var k = pickedIds().length;
+    var all = $("media-all");
+    all.checked = n > 0 && k === n;
+    all.indeterminate = k > 0 && k < n;
+    $("media-all-text").textContent = TEXT.allBefore + n + TEXT.allAfter;
+    var count = k === 0 ? "" : k + TEXT.selected;
+    $("pick-count").textContent = count;
+    $("pick-bar").hidden = k === 0;
+    if ($("pick-said").textContent !== count) $("pick-said").textContent = count;
+  }
+
+  function pick(id, on) {
+    if (working || !ITEM_ID.test(id)) return;
+    if (on) picked[id] = true;
+    else delete picked[id];
+    showPicks();
+  }
+
+  // Select all: exactly the items shown, never those still behind Show more; or none.
+  function pickAll(on) {
+    if (working) return;
+    picked = Object.create(null);
+    if (on) items.forEach(function (it) { picked[it.id] = true; });
+    showPicks();
+  }
+
+  function clearPicks() {
+    picked = Object.create(null);
+    showPicks();
   }
 
   // ---- Reading the list ----
@@ -618,9 +747,107 @@ ${shareViewOf(p.sharing)}
     }, function () { return { gone: false, res: null }; });
   }
 
+  // One item deleted, the same way however the delete was asked for: sent again while it
+  // answers cleanup_pending (run), done on 204, 404 and cleanup_pending (done), and, when no
+  // answer came, decided by the item itself (itemGone). Resolves to { ok, res }: res is the
+  // answer that tells a failure (the delete's, or the item's when the delete got none). Null
+  // when the visitor was sent to sign in.
+  function deleteOne(id) {
+    return run(id).then(function (res) {
+      if (res.status === 401) { Dash.signedOut(); return null; }
+      return { ok: done(res), res: res };
+    }, function () {
+      return itemGone(id).then(function (g) {
+        if (g === null) return null;
+        return { ok: g.gone, res: g.res };
+      });
+    });
+  }
+
+  // ---- Deleting the selected items ----
+
+  // One of the page's items, or how many of them, as the line under the heading counts them.
+  function countOf(n) {
+    return n === 1 ? TEXT.oneItem : n + TEXT.items;
+  }
+
+  // Delete selected: the question, about the items selected now; no title of theirs is in it.
+  function askBulk() {
+    if (working || anyOpen()) return;
+    var ids = pickedIds();
+    if (ids.length === 0) return;
+    var one = ids.length === 1;
+    $("bulk-text").textContent = one ? TEXT.askOne : TEXT.askSome;
+    $("bulk-keep").textContent = one ? TEXT.keepIt : TEXT.keepThem;
+    $("bulk-go").textContent = TEXT.bulkBefore + countOf(ids.length);
+    showProgress("");
+    var opened = bulkQ.open({
+      title: TEXT.bulkBefore + countOf(ids.length) + TEXT.bulkAfter,
+      focus: "bulk-keep",
+      // Back to Delete selected while something is still selected, else to the page's heading.
+      back: function () { return pickedIds().length > 0 ? $("pick-delete") : null; },
+      fallback: "h-page",
+      onClose: function () { bulk = null; },
+    });
+    if (opened) bulk = { ids: ids };
+  }
+
+  function showProgress(text) {
+    var line = $("bulk-progress");
+    line.textContent = text;
+    line.hidden = text === "";
+  }
+
+  // The items one after another, never two at once, each as Delete in More deletes it; the
+  // first one refused, or failed for good, stops the run. However it ends, the list is read
+  // again before the page says anything: the items deleted are no longer selected, the others
+  // stay selected while the list still has them, and one sentence says how it went.
+  function runBulk() {
+    if (bulk === null || working) return;
+    var ids = bulk.ids.slice();
+    var n = ids.length;
+    var deleted = [];
+    // The answer of the item that stopped the run, or null when none did.
+    var stopped = null;
+    working = true;
+    say("");
+    bulkQ.busy(true, "bulk-go", TEXT.deleting);
+    rowsDisabled(true);
+    function next(i) {
+      if (i >= n) return Promise.resolve(true);
+      showProgress(TEXT.progressBefore + (i + 1) + TEXT.progressOf + n + TEXT.progressAfter);
+      return deleteOne(ids[i]).then(function (got) {
+        if (got === null) return null;
+        if (!got.ok) {
+          stopped = { res: got.res };
+          return true;
+        }
+        deleted.push(ids[i]);
+        return next(i + 1);
+      });
+    }
+    next(0).then(function (end) {
+      if (end === null) return;
+      deleted.forEach(function (id) { delete picked[id]; });
+      return read().then(function (r) {
+        if (r === false) return;
+        working = false;
+        bulkQ.busy(false, "bulk-go");
+        rowsDisabled(false);
+        showPicks();
+        var d = deleted.length;
+        var text = d === n ? countOf(d) + TEXT.deletedAfter : d + TEXT.progressOf + countOf(n) + TEXT.restAfter;
+        if (stopped !== null) text += " " + Dash.failure(stopped.res);
+        if (r !== true) text += " " + TEXT.notReloaded;
+        bulkQ.close(true);
+        say(text, stopped === null && r === true);
+      });
+    });
+  }
+
 ${shareScript(p.sharing)}
   function startPage() {
-${shareListeners(p.sharing)}    [${shareRepeatIds(p.sharing)}, "delete-keep", "delete-go"].forEach(function (id) { noRepeat($(id)); });
+${shareListeners(p.sharing)}    [${shareRepeatIds(p.sharing)}, "delete-keep", "delete-go", "pick-clear", "pick-delete", "bulk-keep", "bulk-go"].forEach(function (id) { noRepeat($(id)); });
     $("media-more").addEventListener("click", more);
     $("delete-keep").addEventListener("click", function () { question.dismiss(); });
     $("delete-go").addEventListener("click", function () {
@@ -631,35 +858,37 @@ ${shareListeners(p.sharing)}    [${shareRepeatIds(p.sharing)}, "delete-keep", "d
       say("");
       question.busy(true, "delete-go", TEXT.deleting);
       rowsDisabled(true);
-      // res: the delete's last answer, or null when none came; asked: what the item itself
-      // answered then (gone).
-      function settle(res, asked) {
-        if (res !== null && res.status === 401) { Dash.signedOut(); return; }
-        var ok = done(res) || (res === null && asked !== undefined && asked.gone);
-        if (ok) question.close(false);
+      deleteOne(it.id).then(function (got) {
+        if (got === null) return;
+        if (got.ok) question.close(false);
         // However the delete ended, the list is read again before the page says anything;
-        // the rows' buttons stay disabled until then.
+        // the rows' buttons stay disabled until then. The selection is cleared then.
         return read().then(function (r) {
           if (r === false) return;
           working = false;
           question.busy(false, "delete-go");
           rowsDisabled(false);
-          if (ok) {
+          clearPicks();
+          if (got.ok) {
             say(r === true ? "" : TEXT.notReloaded);
             $("h-page").focus();
             return;
           }
-          question.say(Dash.failure(res === null && asked !== undefined ? asked.res : res));
+          question.say(Dash.failure(got.res));
           $("delete-go").focus();
-        });
-      }
-      run(it.id).then(function (res) { return settle(res); }, function () {
-        return itemGone(it.id).then(function (g) {
-          if (g === null) return;
-          return settle(null, g);
         });
       });
     });
+    // Selecting, and deleting what is selected.
+    $("media-all").addEventListener("change", function () { pickAll($("media-all").checked); });
+    $("pick-clear").addEventListener("click", function () {
+      if (working) return;
+      clearPicks();
+      $("media-all").focus();
+    });
+    $("pick-delete").addEventListener("click", askBulk);
+    $("bulk-keep").addEventListener("click", function () { bulkQ.dismiss(); });
+    $("bulk-go").addEventListener("click", runBulk);
     // A click outside the open menu closes it.
     document.body.addEventListener("click", function (ev) {
       if (openMenu !== null && !openMenu.wrap.contains(ev.target)) closeMenu(false);

@@ -90,7 +90,8 @@ function openMedia(which: Which, respond: Responder): Tab {
 
 const rows = (tab: Tab) => tab.$("media-rows").children.filter((c): c is FakeElement => c instanceof FakeElement);
 const cells = (row: FakeElement) => row.children.filter((c): c is FakeElement => c instanceof FakeElement);
-const viewCell = (row: FakeElement) => cells(row)[2];
+// The "Who can view" cell (after the checkbox, the preview and the title).
+const viewCell = (row: FakeElement) => cells(row)[3];
 const byText = (row: FakeElement, text: string) => {
   const found = row.all().find((e) => (e.tagName === "button" || e.tagName === "a") && e.textContent === text && e.getAttribute("role") !== "menuitem");
   if (!found) throw new Error(`no "${text}" in the row`);

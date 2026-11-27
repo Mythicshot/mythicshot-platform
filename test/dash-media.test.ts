@@ -9,14 +9,14 @@ import { MANROPE_PATH } from "../src/brand-assets.ts";
 import { makeDeps, seedAccount } from "#harness";
 import { DASH_PAGES } from "../src/dash/routes.ts";
 import { GIFS_HTML, GIFS_JS, IMAGES_HTML, IMAGES_JS } from "../src/dash/media.ts";
-import { DASH_CSS } from "../src/dash/style.ts";
+import { CAUTION_ICON_CSS, DANGER_ICON_CSS, DASH_CSS } from "../src/dash/style.ts";
 import { UNDOCUMENTED_ROUTES } from "../src/docs/openapi.ts";
 import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { send, type Call } from "./bundle.ts";
 import { expectNoForbiddenApis, expectPageShape, isBrandMarkAlt, isBrandMark, withoutSourceLine } from "./dash-checks.ts";
-import { FakeDocument, textNodes } from "./pages-dom.ts";
+import { FakeDocument, FakeElement, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
 const THREE: Hosts = { ...HOSTS, img: "img.example.com" };
@@ -44,7 +44,10 @@ const JS = "text/javascript; charset=utf-8";
 
 const SHELL = ["Mythicshot", "Images", "GIFs", "Tours", "Storage", "Connections", "Account", "Admin", "This page needs JavaScript."];
 /** Proposed beside the mockups (not in them): the delete question's sentence, and the two empty states. */
-const QUESTION = "Its link stops working for everyone and it is removed. This cannot be undone. The copy on your computer is not touched.";
+const QUESTION = "Its link stops working for everyone and it is removed. The copy on your computer is not touched.";
+/** Approved with the multi-select mockup: the question before deleting several, and the red line under every delete question. */
+const QUESTION_SOME = "Their links stop working for everyone and they are removed. The copies on your computer are not touched.";
+const NO_BACKUPS = "There are no backups of this data, and its removal is permanent.";
 const NOT_RELOADED = "The change was made, but the list could not be loaded again. Reload the page to see it.";
 
 /** What the two scripts share in their words. */
@@ -67,6 +70,21 @@ const SHARED_TEXT: Record<string, string> = {
   cut: "…",
   more: "More",
   notReloaded: NOT_RELOADED,
+  select: "Select ",
+  allBefore: "Select all ",
+  allAfter: " shown",
+  selected: " selected",
+  bulkBefore: "Delete ",
+  bulkAfter: "?",
+  askOne: QUESTION,
+  askSome: QUESTION_SOME,
+  keepIt: "Keep it",
+  keepThem: "Keep them",
+  progressBefore: "Deleting ",
+  progressOf: " of ",
+  progressAfter: "…",
+  deletedAfter: " deleted.",
+  restAfter: " deleted. The rest are still here.",
 };
 
 /**
@@ -147,6 +165,9 @@ const PAGES: Page[] = [
     wording: [
       ...SHELL,
       "Images",
+      // Approved with the multi-select mockup: the bar's two buttons (the bar is shown only while something is selected).
+      "Clear",
+      "Delete selected",
       // Proposed: the names a screen reader gives the preview's column and the buttons' column; the eye does not see them.
       "Preview",
       "Image",
@@ -160,8 +181,11 @@ const PAGES: Page[] = [
       'Deleting an image stops its link for everyone. "More" holds: Sharing, Delete.',
       "Opening a restricted image asks you for your email address too: the dashboard's sign-in does not carry over to the image's address.",
       QUESTION,
+      NO_BACKUPS,
       "Keep it",
       "Delete image",
+      // The question before deleting the selected items: its other words are the script's.
+      NO_BACKUPS,
       ...shareWording("image"),
     ],
     text: { oneItem: "1 image", items: " images", untitled: "Untitled image", ...SHARED_TEXT, ...shareText("image") },
@@ -178,6 +202,8 @@ const PAGES: Page[] = [
     wording: [
       ...SHELL,
       "GIFs",
+      "Clear",
+      "Delete selected",
       "Preview",
       "GIF",
       "Who can view",
@@ -190,8 +216,10 @@ const PAGES: Page[] = [
       'Deleting a GIF stops its link for everyone. "More" holds: Sharing, Delete.',
       "Opening a restricted clip asks you for your email address too: the dashboard's sign-in does not carry over to the clip's address.",
       QUESTION,
+      NO_BACKUPS,
       "Keep it",
       "Delete GIF",
+      NO_BACKUPS,
       ...shareWording("clip"),
     ],
     text: { oneItem: "1 GIF", items: " GIFs", untitled: "Untitled GIF", ...SHARED_TEXT, ...shareText("clip") },
@@ -199,7 +227,7 @@ const PAGES: Page[] = [
 ];
 
 /** The strings with a space in the scripts that are not words for a person: class names and a link's rel. */
-const CLASS_NAMES = ["btn sm", "btn sm quiet", "btn sm danger", "thumb play", "n size", "n when", "noopener noreferrer", "tag warn"];
+const CLASS_NAMES = ["btn sm", "btn sm quiet", "btn sm danger", "thumb play", "n size", "n when", "noopener noreferrer", "tag warn", "message plain"];
 
 const seen = (c: Call) => ({ status: c.status, headers: [...c.headers.entries()].sort(), body: c.text });
 
@@ -477,10 +505,13 @@ describe("the Images and GIFs pages", () => {
       for (const id of ["share-moving", "share-progress", "share-resume", "share-resume-buttons", "share-make-public"]) expect(doc.getElementById(id), `${p.path} #${id}`).toBeNull();
       expect(p.js, p.path).not.toMatch(/Moving|pictures|pagehide|PAUSE_MS|showMoving|function keepRestricted|makePublicAgain|access_switching|switch_cancelled|republish_needed/);
       for (const h of all.filter((e) => e.tagName === "h1" || e.tagName === "h2")) expect(h.getAttribute("tabindex"), `${p.path} #${h.id}`).toBe("-1");
-      const dialog = all.find((e) => e.getAttribute("role") === "alertdialog")!;
-      expect([dialog.getAttribute("aria-modal"), dialog.getAttribute("aria-labelledby"), dialog.getAttribute("aria-describedby")]).toEqual(["true", "delete-title", "delete-text"]);
+      // The two delete questions: each read with its sentence and its red line.
+      expect(all.filter((e) => e.getAttribute("role") === "alertdialog").map((d) => [d.id, d.getAttribute("aria-modal"), d.getAttribute("aria-labelledby"), d.getAttribute("aria-describedby")])).toEqual([
+        ["delete-box", "true", "delete-title", "delete-text delete-warn"],
+        ["bulk-box", "true", "bulk-title", "bulk-text bulk-warn"],
+      ]);
       // The empty headers have names a screen reader reads and the eye does not see.
-      expect(all.filter((e) => e.tagName === "th").map((th) => [th.textContent, th.all().map((c) => c.className)]), p.path).toEqual([["Preview", ["vh"]], [p.wording[SHELL.length + 2], []], ["Who can view", []], ["Size", []], ["Shared", []], ["Actions", ["vh"]]]);
+      expect(all.filter((e) => e.tagName === "th").map((th) => [th.textContent, th.all().map((c) => c.className)]), p.path).toEqual([["Preview", ["vh"]], [p.wording[SHELL.length + 4], []], ["Who can view", []], ["Size", []], ["Shared", []], ["Actions", ["vh"]]]);
       // On a phone the workspace's name is left out of the line, as in mockup 11.
       expect(doc.getElementById("media-in")!.className).toBe("wide-only");
       // Every element the script looks up by id is on the page.
@@ -495,5 +526,65 @@ describe("the Images and GIFs pages", () => {
     // On a phone "Who can view" joins the details line (the script), and its column is hidden, as on the Tours page.
     expect(phone).toContain(".tours td.view, .media td.view { display: none; }");
     expect(DASH_CSS).not.toMatch(/overflow-x|100vw/);
+  });
+
+  it("have the approved multi-select markup: a checkbox column, the header's checkbox, the bar, the question for several and the red line", () => {
+    for (const p of PAGES) {
+      const doc = new FakeDocument(p.html);
+      const all = doc.root.all();
+      const $ = (id: string) => doc.getElementById(id)!;
+      // The header's checkbox: a real checkbox inside its own label, whose words the script writes ("Select all <n> shown"), above the table, in the list's card.
+      const header = $("media-all");
+      expect([header.tagName, header.getAttribute("type"), header.className], p.path).toEqual(["input", "checkbox", "pick"]);
+      const label = header.parent!;
+      expect([label.tagName, label.getAttribute("for"), label.className, label.all().map((e) => e.id)], p.path).toEqual(["label", "media-all", "pick-all", ["media-all", "media-all-text"]]);
+      expect($("media-list").contains(label) && !label.closest("table"), p.path).toBe(true);
+      // The table's first column is the rows' checkboxes: an empty cell in the head, so the headers a screen reader reads stay as they were.
+      const headRow = all.find((e) => e.tagName === "thead")!.all().find((e) => e.tagName === "tr")!;
+      const first = headRow.children.find((c) => c instanceof FakeElement) as FakeElement;
+      expect([first.tagName, first.className, first.textContent], p.path).toEqual(["td", "pick-cell", ""]);
+      // The bar: hidden until something is selected, above the list, with Clear and the red Delete selected; its count is said in a polite line of its own, which is always in the page.
+      const bar = $("pick-bar");
+      expect([bar.hidden, bar.className], p.path).toEqual([true, "pick-bar"]);
+      expect(bar.all().map((e) => [e.tagName, e.id, e.className, e.textContent, e.getAttribute("aria-hidden")]), p.path).toEqual([
+        ["span", "pick-count", "pick-count", "", "true"],
+        ["button", "pick-clear", "btn quiet", "Clear", null],
+        ["button", "pick-delete", "btn danger", "Delete selected", null],
+      ]);
+      const said = $("pick-said");
+      expect([said.tagName, said.className, said.getAttribute("role"), said.getAttribute("aria-live"), said.hidden, said.textContent], p.path).toEqual(["p", "vh", "status", "polite", false, ""]);
+      const section = $("media");
+      const order = section.all().map((e) => e.id).filter((id) => ["media-message", "pick-said", "pick-bar", "media-list"].includes(id));
+      expect(order, p.path).toEqual(["media-message", "pick-said", "pick-bar", "media-list"]);
+      // The question before deleting several: its own box outside the page behind it, its words written by the script, its progress said politely.
+      expect($("media-page").contains($("bulk-dialog")), p.path).toBe(false);
+      expect([$("bulk-dialog").hidden, $("bulk-title").textContent, $("bulk-text").textContent, $("bulk-keep").textContent, $("bulk-go").textContent], p.path).toEqual([true, "", "", "", ""]);
+      expect([$("bulk-keep").className, $("bulk-go").className], p.path).toEqual(["btn quiet", "btn danger"]);
+      const progress = $("bulk-progress");
+      expect([progress.getAttribute("role"), progress.getAttribute("aria-live"), progress.hidden, progress.className], p.path).toEqual(["status", "polite", true, "sub"]);
+      // The red line, word for word the same in both questions, right after each one's sentence.
+      for (const [text, warn] of [["delete-text", "delete-warn"], ["bulk-text", "bulk-warn"]]) {
+        expect([$(warn).tagName, $(warn).className, $(warn).textContent], `${p.path} #${warn}`).toEqual(["p", "danger-line", NO_BACKUPS]);
+        const siblings = $(text).parent!.children.filter((c): c is FakeElement => c instanceof FakeElement);
+        expect(siblings.indexOf($(warn)) - siblings.indexOf($(text)), `${p.path} #${warn}`).toBe(1);
+      }
+      // "This cannot be undone." is gone from the page: the red line says it.
+      expect(p.html, p.path).not.toContain("cannot be undone");
+      expect(p.js, p.path).not.toContain("cannot be undone");
+      // The selection is kept in the script alone: never in an attribute, in storage or in the address.
+      expect(p.js, p.path).not.toMatch(/setAttribute\("(?:value|data-[a-z-]+|name)"/);
+      expect(p.js, p.path).not.toMatch(/\.value\s*=\s*(?:it|id)\b|dataset/);
+      // One delete at a time: no request is started for several at once.
+      expect(p.js, p.path).not.toMatch(/Promise\.all\([^)]*ids|ids\.map\(/);
+    }
+    // The red line's sign is drawn by the stylesheet in the danger tokens, as the caution boxes' sign is: no picture and no icon font.
+    expect(DASH_CSS).toContain(`.danger-line::before { ${DANGER_ICON_CSS} }`);
+    expect(DANGER_ICON_CSS).toBe(CAUTION_ICON_CSS.replace("left: 12px; top: 11px;", "left: 0; top: 2px;").replace("var(--caution-border)", "var(--danger-fill)").replace("var(--surface)", "var(--on-primary)"));
+    expect(DASH_CSS).toMatch(/\.danger-line \{[^}]*color: var\(--danger-text\);/);
+    // The bar's buttons wrap at phone width; the outcome that is not a failure is in the text's colour.
+    expect(DASH_CSS).toMatch(/\.pick-bar \{[^}]*display: flex; flex-wrap: wrap;/);
+    expect(DASH_CSS).toContain(".message.plain { color: var(--text); }");
+    const phone = [...DASH_CSS.matchAll(/@media \(max-width: 720px\) \{\n([\s\S]*?)\n\}/g)].map((m) => m[1]).join("\n");
+    expect(phone).toContain(".media tr { display: grid; grid-template-columns: 18px 56px minmax(0, 1fr);");
   });
 });

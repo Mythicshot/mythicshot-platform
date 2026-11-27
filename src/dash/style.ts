@@ -12,6 +12,12 @@ import { PAGE_BASE_CSS, WORDMARK_CSS } from "../brand-css.ts";
  */
 export const CAUTION_ICON_CSS = `content: "!"; content: "!" / ""; position: absolute; left: 12px; top: 11px; width: 18px; height: 16px; padding-top: 3px; clip-path: polygon(50% 0, 100% 100%, 0 100%); background: var(--caution-border); color: var(--surface); font: 800 10px/13px var(--font-sans); text-align: center;`;
 
+/**
+ * The same sign in the danger colours, for a red line that says a removal is permanent (the
+ * Images and GIFs pages' delete questions): before the line's text, at its first line.
+ */
+export const DANGER_ICON_CSS = `content: "!"; content: "!" / ""; position: absolute; left: 0; top: 2px; width: 18px; height: 16px; padding-top: 3px; clip-path: polygon(50% 0, 100% 100%, 0 100%); background: var(--danger-fill); color: var(--on-primary); font: 800 10px/13px var(--font-sans); text-align: center;`;
+
 export const DASH_CSS = `${PAGE_BASE_CSS}*, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
@@ -106,6 +112,9 @@ h1 { font-size: 20px; line-height: 28px; font-weight: 700; margin: 0 0 4px; }
 /* A caution: an orange box with an edge and a warning sign. Gold is never a box. */
 .warn-box, .over-box { position: relative; padding: 10px 12px 10px 40px; border: 1px solid var(--caution-border); border-radius: var(--radius-md); background: var(--caution-tint); color: var(--caution-text); font-size: 14px; line-height: 20px; }
 .warn-box::before, .over-box::before { ${CAUTION_ICON_CSS} }
+/* A removal that is permanent: a red line of its own with the warning sign in red. */
+.danger-line { position: relative; margin: 0 0 8px; padding: 0 0 0 28px; color: var(--danger-text); font-size: 14px; line-height: 20px; font-weight: 600; }
+.danger-line::before { ${DANGER_ICON_CSS} }
 
 @media (prefers-reduced-motion: reduce) {
   .btn { transition: none; }
@@ -199,10 +208,19 @@ h1 { font-size: 20px; line-height: 28px; font-weight: 700; margin: 0 0 4px; }
 .thumb { position: relative; display: block; width: 56px; height: 36px; overflow: hidden; border-radius: var(--radius-sm); border: 1px solid var(--border); background: linear-gradient(135deg, var(--selection) 0 55%, var(--border) 55% 100%); }
 .thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .thumb.play::after { content: ""; position: absolute; left: 50%; top: 50%; transform: translate(-35%, -50%); border-left: 10px solid var(--text-muted); border-top: 6px solid transparent; border-bottom: 6px solid transparent; filter: drop-shadow(0 0 1px var(--surface)); }
+/* Selecting items: a checkbox at the start of each row, the one above the table, and the bar while something is selected. */
+.media .pick-cell { width: 34px; }
+.pick { display: block; flex: 0 0 auto; width: 18px; height: 18px; margin: 0; accent-color: var(--primary); cursor: pointer; }
+.pick:disabled { cursor: not-allowed; }
+.pick-all { display: inline-flex; align-items: center; gap: 16px; min-height: var(--control-dense); margin: 0 0 4px; font-size: 14px; font-weight: 600; cursor: pointer; }
+.pick-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 12px; padding: 10px 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface); }
+.pick-count { flex: 1 1 auto; font-weight: 600; }
+.message.plain { color: var(--text); }
 @media (max-width: 720px) {
   .media, .media tbody { display: block; }
   .media thead, .media td.size, .media td.when { display: none; }
-  .media tr { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 0 12px; align-items: start; padding: 12px 0; border-top: 1px solid var(--border); }
+  .media tr { display: grid; grid-template-columns: 18px 56px minmax(0, 1fr); gap: 0 12px; align-items: start; padding: 12px 0; border-top: 1px solid var(--border); }
+  .media td.pick-cell { width: auto; padding-top: 9px; }
   .media tr:first-child { border-top: 0; padding-top: 0; }
   .media tr:last-child { padding-bottom: 0; }
   .media td { display: block; padding: 0; border-top: 0; }
