@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the image, then checks it end to end against a local Docker engine, and removes
 # everything it created except the image:
-#   1. the image: user 1001, no setup code in its config or history, no dev dependencies
+#   1. the image: user 1001, no setup code in its config or history, no dev dependencies,
+#      the licence and the notices in /app as they are in the repository
 #   2. one app container on a new named volume: healthy, id 1001, migrations applied,
 #      the wizard claimed through its API
 #   3. SIGTERM: a clean exit within the grace period and an intact database file
@@ -128,6 +129,9 @@ check "no SETUP_CODE in the layer history" sh -c "! docker history --no-trunc --
 check "no .env, sqlite, test or source files in /app" sh -c "! docker run --rm --entrypoint sh '$IMAGE' -c 'find /app -path /app/node_modules -prune -o \( -name \".env*\" -o -name \"*.sqlite*\" -o -name \"*.ts\" -o -name test \) -print' | grep -q ."
 check "no npm, npx, bundled packages or C headers" docker run --rm --entrypoint sh "$IMAGE" -c '! command -v npm && ! command -v npx && [ ! -e /usr/local/lib/node_modules ] && [ ! -e /usr/local/include ]'
 check "only production dependencies" test "$(docker run --rm --entrypoint sh "$IMAGE" -c 'ls /app/node_modules | grep -v "^\." | tr "\n" " "')" = "@hono hono "
+for f in LICENSE THIRD-PARTY-NOTICES.md; do
+  check "$f is in /app beside package.json, unchanged" test "$(docker run --rm --entrypoint sh "$IMAGE" -c "sha256sum < /app/$f" | cut -c1-64)" = "$(sha256sum <"$f" | cut -c1-64)"
+done
 
 echo "== 2. one container on a named volume"
 docker volume create "$VOLUME" >/dev/null

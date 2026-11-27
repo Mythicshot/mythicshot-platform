@@ -34,7 +34,8 @@ RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
  && mkdir /data \
  && chown 1001:1001 /data
 
-# The runner holds only dist/, migrations/, package.json (for "type": "module") and the
+# The runner holds only dist/, migrations/, package.json (for "type": "module"), the
+# licence and the notices (LICENSE, THIRD-PARTY-NOTICES.md, unchanged) and the
 # production node_modules. The wizard's page and the player's script and stylesheet are
 # compiled into dist/ (src/player/assets.ts), so there is no static folder to copy.
 FROM scratch AS runner
@@ -47,7 +48,7 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
-COPY package.json ./
+COPY package.json LICENSE THIRD-PARTY-NOTICES.md ./
 COPY migrations ./migrations
 
 # /data is the only path the app writes to: db.sqlite, drafts/ and public/.
