@@ -12,6 +12,9 @@
 //   node dist/node/admin.js billing-sweep --clear-claim <workspace id>
 //   node dist/node/admin.js storage-sweep [--dry-run]
 //   node dist/node/admin.js storage-sweep --clear-claim <workspace id>
+//   node dist/node/admin.js r2-check
+//   node dist/node/admin.js files-copy --from disk --to r2 --app-is-stopped [--dry-run]
+//   node dist/node/admin.js files-copy --from r2 --to disk --app-is-stopped [--dry-run]
 //
 // Without a command, `--email` with `--username` is first-admin and `--email` alone is
 // signin-link, which is how `./cpanel.sh admin --email … --username …` reads.
@@ -44,7 +47,8 @@ import { listTerms, parseTerms, publishTerms, showTerms, TERMS_LIMITS } from "..
 import { parseUsername } from "../usernames.ts";
 import { configFromEnv, fileStoreFromEnv, mailFromEnv, NODE_SETTINGS } from "./config.ts";
 import { NodeDb } from "./db.ts";
-import { siteFileStores } from "./file-stores.ts";
+import { makeFileStores, siteFileStores, type FileStoreSettings } from "./file-stores.ts";
+import { mirror, r2Probe, type MirrorCounts } from "./file-tools.ts";
 import type { R2Options } from "./r2-files.ts";
 import { SmtpError, smtpMailer, type SmtpSettings } from "./smtp.ts";
 
@@ -172,6 +176,11 @@ const usage = (name: string): string[] => [
   "      Send the low storage mails that are due and were not sent when the storage filled up (mail was off, or the mail server refused), with or without billing. Prints counts. With --dry-run, says what it would send and changes nothing. Run it once a day.",
   "  storage-sweep --clear-claim <workspace id>",
   "      Clear a workspace's low storage mail whose sending was never confirmed, so the next check or sweep sends it again if it is still due.",
+  "  r2-check",
+  "      With the five R2 settings in the settings file, whatever FILE_STORE says: write one small probe file to each of the two buckets, read it back, compare it, delete it and check that it is gone. Prints one line per bucket and a verdict.",
+  "  files-copy --from disk --to r2 --app-is-stopped [--dry-run]",
+  "  files-copy --from r2 --to disk --app-is-stopped [--dry-run]",
+  "      Make the destination hold exactly the files of the source: the data folder's private files and the private bucket, its public files and the public bucket, never one into the other. Each file is copied with its type and cache control and read back to compare its size and SHA-256; one already the same is left alone, and one the source does not hold is removed, so it can be run again. Prints counts. Run it only with the app stopped or idle, and say so with --app-is-stopped: a copy while files are being written can leave a deleted file, or a picture of a tour just made restricted, behind at the destination. With --dry-run, counts what it would do and changes nothing.",
   "",
   "Without a command, --email with --username is first-admin, and --email alone is signin-link.",
 ];
@@ -290,7 +299,11 @@ type Parsed =
   | { kind: "billing-sweep"; dryRun: boolean }
   | { kind: "clear-claim"; workspaceId: string }
   | { kind: "storage-sweep"; dryRun: boolean }
-  | { kind: "storage-clear-claim"; workspaceId: string };
+  | { kind: "storage-clear-claim"; workspaceId: string }
+  | { kind: "r2-check" }
+  | FilesCopy;
+
+type FilesCopy = { kind: "files-copy"; from: "disk" | "r2"; to: "disk" | "r2"; dryRun: boolean; stopped: boolean };
 
 const COMMANDS = ["first-admin", "signin-link", "change-email", "mail-check", "audit"] as const;
 type Command = (typeof COMMANDS)[number];
@@ -320,6 +333,8 @@ function parseArgs(argv: readonly string[]): Parsed | null {
     if (argv.length === 3 && argv[1] === "--clear-claim" && /^ws_[0-9a-f]{24}$/.test(argv[2])) return { kind: "storage-clear-claim", workspaceId: argv[2] };
     return null;
   }
+  if (argv[0] === "r2-check") return argv.length === 1 ? { kind: "r2-check" } : null;
+  if (argv[0] === "files-copy") return parseFilesCopy(argv.slice(1));
   // The terms commands take words, not options: exactly these shapes and nothing more.
   if (argv[0] === "terms") {
     if (argv.length === 2 && argv[1] === "list") return { kind: "terms-list" };
@@ -374,6 +389,30 @@ function parseArgs(argv: readonly string[]): Parsed | null {
   }
 }
 
+/** files-copy's options: --from and --to, disk and r2 one each way, and the two flags, each at most once. */
+function parseFilesCopy(args: readonly string[]): FilesCopy | null {
+  const values = new Map<string, string>();
+  const flags = new Set<string>();
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--dry-run" || a === "--app-is-stopped") {
+      if (flags.has(a)) return null;
+      flags.add(a);
+      continue;
+    }
+    const eq = a.indexOf("=");
+    const name = eq > 0 ? a.slice(0, eq) : a;
+    if ((name !== "--from" && name !== "--to") || values.has(name)) return null;
+    const value = eq > 0 ? a.slice(eq + 1) : args[++i];
+    if (value !== "disk" && value !== "r2") return null;
+    values.set(name, value);
+  }
+  const from = values.get("--from") as "disk" | "r2" | undefined;
+  const to = values.get("--to") as "disk" | "r2" | undefined;
+  if (from === undefined || to === undefined || from === to) return null;
+  return { kind: "files-copy", from, to, dryRun: flags.has("--dry-run"), stopped: flags.has("--app-is-stopped") };
+}
+
 /** The file stores of these deps: nothing this command does reads or writes a file. */
 const NO_FILES: FileStore = {
   put: () => Promise.reject(new Error("the admin command stores no file")),
@@ -426,7 +465,7 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
     return parsed === null ? 2 : 0;
   }
 
-  if (parsed.kind !== "mail-check" && (typeof env.DATA_DIR !== "string" || env.DATA_DIR === "")) {
+  if (parsed.kind !== "mail-check" && parsed.kind !== "r2-check" && (typeof env.DATA_DIR !== "string" || env.DATA_DIR === "")) {
     out(SAID.noDataDir);
     return 1;
   }
@@ -437,6 +476,16 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
     // The app's own one line for a setting it would refuse to start with. It never holds a value.
     out(err instanceof Error ? err.message : SAID.failed);
     return 1;
+  }
+
+  if (parsed.kind === "r2-check" || parsed.kind === "files-copy") {
+    try {
+      return await filesCommand(parsed, env, out, opts);
+    } catch {
+      // Fixed lines only: an error's text is never shown.
+      out(SAID.failed);
+      return 1;
+    }
   }
 
   if (parsed.kind === "mail-check") {
@@ -644,6 +693,94 @@ async function storageSweepCommand(dryRun: boolean, db: NodeDb, config: Config, 
     ...(mail.mode === "smtp" ? { mail: mail.mailer } : {}),
   };
   for (const line of storageSweepLines(await storageSweep(deps, { dryRun }))) out(line);
+  return 0;
+}
+
+/** What the two file commands say: fixed lines, and functions for the lines with counts. Never a value of a setting. */
+export const FILES_SAID = {
+  notSetUp: (what: string) => `R2 is not set up: write the five R2 settings in the settings file first. Nothing was ${what}.`,
+  checking: (mode: "disk" | "r2") =>
+    mode === "r2" ? "The files are kept on R2 now (FILE_STORE=r2). Checking the two R2 buckets with the key in the settings file." : "The files are kept on disk now. Checking the two R2 buckets with the key in the settings file.",
+  probeOk: (bucket: string) => `${bucket} bucket: a probe file was written, read back the same and deleted.`,
+  probeFailed: (bucket: string, step: string, reason: string) => `${bucket} bucket: failed to ${step}: ${reason}.`,
+  checkPassed: "R2 check passed: both buckets can be written, read and deleted with this key.",
+  checkFailed: "R2 check failed: put the settings or the token right before setting FILE_STORE=r2.",
+  notStopped:
+    "files-copy runs only while the app is stopped or idle: a copy while files are being written can leave a deleted file, or a picture of a tour just made restricted, behind at the destination. Stop the app, then run it again with --app-is-stopped. Nothing was copied.",
+  toR2: "Copying the files from the data folder to R2: the private files to the private bucket, the public files to the public bucket.",
+  toDisk: "Copying the files from R2 to the data folder: the private bucket to the private files, the public bucket to the public files.",
+  dryRun: "Dry run: nothing is written or removed. ",
+  counts: (name: string, c: MirrorCounts, dryRun: boolean) =>
+    dryRun
+      ? `${name} files: ${c.copied} to copy, ${c.already} already there, ${c.removed} to remove, ${c.failed} failed.`
+      : `${name} files: ${c.copied} copied, ${c.already} already there, ${c.removed} removed, ${c.failed} failed.`,
+  notListed: (name: string, reason: string) => `${name} files: not copied, the files could not be listed: ${reason}.`,
+  dryDone: "Dry run: nothing was changed.",
+  done: "Done: every file at the destination is the source's, checked by size and SHA-256.",
+  someFailed: (n: number) => `Not done: ${n === 1 ? "1 file" : `${n} files`} failed. Run the command again, and do not change FILE_STORE until it ends with 0 failed.`,
+  unlisted: (names: string[]) => `Not done: the ${names.join(" and the ")} files could not be listed. Put that right and run the command again; do not change FILE_STORE until it ends with 0 failed.`,
+} as const;
+
+/**
+ * r2-check and files-copy (0.1.71, src/node/file-tools.ts). Both need the five R2 settings,
+ * whatever FILE_STORE says, and neither opens the database. files-copy pairs the private
+ * store with the private one and the public with the public, and nothing else: the two are
+ * never copied into each other.
+ */
+async function filesCommand(parsed: { kind: "r2-check" } | FilesCopy, env: NodeJS.ProcessEnv, out: (line: string) => void, opts: AdminOptions): Promise<number> {
+  // configFromEnv has checked the settings already.
+  const settings: FileStoreSettings = fileStoreFromEnv(env);
+  if (settings.r2 === null) {
+    out(FILES_SAID.notSetUp(parsed.kind === "r2-check" ? "checked" : "copied"));
+    return 1;
+  }
+  if (parsed.kind === "r2-check") {
+    out(FILES_SAID.checking(settings.mode));
+    const buckets = makeFileStores("r2", settings, "", opts.r2);
+    let ok = true;
+    for (const [name, store] of [["private", buckets.drafts], ["public", buckets.pub]] as const) {
+      const r = await r2Probe(store);
+      if (r.ok) {
+        out(FILES_SAID.probeOk(name));
+      } else {
+        ok = false;
+        out(FILES_SAID.probeFailed(name, r.step, r.reason));
+      }
+    }
+    out(ok ? FILES_SAID.checkPassed : FILES_SAID.checkFailed);
+    return ok ? 0 : 1;
+  }
+  if (!parsed.stopped && !parsed.dryRun) {
+    out(FILES_SAID.notStopped);
+    return 1;
+  }
+  const root = resolve(env.DATA_DIR as string);
+  const disk = makeFileStores("disk", settings, root);
+  const r2 = makeFileStores("r2", settings, root, opts.r2);
+  const [src, dst] = parsed.from === "disk" ? [disk, r2] : [r2, disk];
+  out((parsed.dryRun ? FILES_SAID.dryRun : "") + (parsed.to === "r2" ? FILES_SAID.toR2 : FILES_SAID.toDisk));
+  let failed = 0;
+  const unlisted: string[] = [];
+  // Private with private, public with public: the only two pairs there are.
+  for (const [name, from, to] of [["private", src.drafts, dst.drafts], ["public", src.pub, dst.pub]] as const) {
+    const c = await mirror(from, to, parsed.dryRun);
+    if (!c.listed) {
+      unlisted.push(name);
+      out(FILES_SAID.notListed(name, c.listReason ?? "an unexpected error"));
+      continue;
+    }
+    failed += c.failed;
+    out(FILES_SAID.counts(name, c, parsed.dryRun));
+  }
+  if (unlisted.length > 0) {
+    out(FILES_SAID.unlisted(unlisted));
+    return 1;
+  }
+  if (failed > 0) {
+    out(FILES_SAID.someFailed(failed));
+    return 1;
+  }
+  out(parsed.dryRun ? FILES_SAID.dryDone : FILES_SAID.done);
   return 0;
 }
 
