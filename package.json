@@ -3,6 +3,7 @@
   "version": "0.1.69",
   "private": true,
   "description": "Hosted platform for interactive product tours, on Cloudflare or in a container.",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "engines": {
     "node": ">=24"

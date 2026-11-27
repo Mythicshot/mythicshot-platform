@@ -8,6 +8,10 @@ Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on
 - New optional setting `SOURCE_URL` (both targets): the `https://` address the link leads to, the product's own repository when unset or empty. It must be a strict https address of at most 300 characters. Any other value stops the start on Node, and on Cloudflare answers 500 `misconfigured` on every path, with one line that names the setting and never the value. The tunnel stack passes it on, and `npm run setup:cloudflare -- update` keeps it; on a tunnel install set up before 0.1.69, run `sudo bash install.sh install` once before it takes effect.
 - The line adds no database or storage call. New tests: `test/source-link.test.ts` on both targets and `test/node-source-link.test.ts` (which writes static samples of the sign-in and Tours pages only with `SOURCE_LINK_SAMPLES=1`); the page tests that check a page names no other site read the page without this line.
 
+## 0.1.68 (2026-11-27)
+
+- The platform is now licensed under the GNU Affero General Public License, version 3 or later. The licence file holds the licence text and the README says so. No change to behaviour, the database or any route.
+
 ## 0.1.67 (2026-11-26)
 
 - The sample names in the tests and in the install scripts' tests are neutral, and the rate test uses another private address. No change to behaviour, the database or any route.
