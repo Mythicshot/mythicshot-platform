@@ -240,3 +240,22 @@ describe("the settings reach the app on every install path", () => {
     for (const name of ALL_SIX) expect(readme, name).toMatch(new RegExp(`^\\| \`${name}\` \\| Node \\| `, "m"));
   });
 });
+
+describe("install.sh and the file settings (0.1.71)", () => {
+  const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+
+  it("takes each of the six out of the caller's shell beside SOURCE_URL, so only .env supplies them, and deploy/test-install.sh holds that (it needs Docker's stand-ins and Bash, so it is not run here)", () => {
+    expect(read("../deploy/install.sh")).toContain("unset SOURCE_URL\n# The same for where the files are (0.1.71)");
+    for (const name of ALL_SIX) expect(read("../deploy/install.sh"), name).toContain(`\nunset ${name}\n`);
+    const tests = read("../deploy/test-install.sh");
+    expect(tests).toContain("test_file_settings_in_the_environment_do_not_reach_the_stack() {");
+    expect(tests).toContain("test_backup_and_status_say_when_the_files_may_be_on_r2() {");
+    expect(tests).toContain(`>>"$STUB_STATE/up-file-store"`);
+  });
+
+  it("reads FILE_STORE as cpanel.sh does: trimmed, a CR and one pair of quotes dropped, anything but empty or disk meaning the files may be on R2", () => {
+    const sh = read("../deploy/install.sh");
+    expect(sh).toContain(String.raw`value="${"$"}{value%$'\r'}"`);
+    expect(sh).toContain(`case "$value" in "" | [Dd][Ii][Ss][Kk]) FILES_ON_R2=0 ;; *) FILES_ON_R2=1 ;; esac`);
+  });
+});

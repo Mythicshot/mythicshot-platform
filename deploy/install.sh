@@ -157,6 +157,15 @@ unset DOMAIN
 unset IMG_HOST
 unset HOME_URL
 unset SOURCE_URL
+# The same for where the files are (0.1.71): FILE_STORE and the five R2 settings are passed on
+# from .env by the tunnel stack file, and one left in the caller's shell would win over .env,
+# so a backup or a start could act on other buckets than .env names.
+unset FILE_STORE
+unset R2_ACCOUNT_ID
+unset R2_ACCESS_KEY_ID
+unset R2_SECRET_ACCESS_KEY
+unset R2_PRIVATE_BUCKET
+unset R2_PUBLIC_BUCKET
 
 case "$0" in
   install.sh | */install.sh) SELF="$0" ;;
@@ -214,7 +223,7 @@ SKIP_IMG_CHECK=0  # 1 when status found that the Caddyfile does not answer for I
 ACME_EMAIL=""
 DATA_DIR=""   # the resolved path as the host sees it, without DP_ROOT; stored in .env
 DATA_PATH=""  # "$DP_ROOT$DATA_DIR", the path this script works on
-FILES_ON_R2=0 # 1 when .env says FILE_STORE=r2: the files are in two R2 buckets, not in the data folder
+FILES_ON_R2=0 # 1 when .env's FILE_STORE is anything but empty or disk: the files may be in two R2 buckets, not in the data folder
 IMAGE=""
 FIRST_RUN=0
 CODE_GENERATED=0
@@ -995,8 +1004,16 @@ read_env_file() {
       DEPLOY_MODE) mode="$value" ;;
       TUNNEL_TOKEN) TOKEN="$value" ;;
       TOURS_HOST | APP_HOST) host_lines=1 ;;
-      # Only whether it says r2, for what backup and status say; never printed.
-      FILE_STORE) case "$value" in [Rr]2 | \"[Rr]2\" | \'[Rr]2\') FILES_ON_R2=1 ;; *) FILES_ON_R2=0 ;; esac ;;
+      # Only whether it may say r2, for what backup and status say; never printed. The value is
+      # trimmed, a CR and one pair of quotes dropped; anything but empty or disk counts, as for
+      # cpanel.sh's "other": a value the app does not start with may still mean the files are on R2.
+      FILE_STORE)
+        value="${value%$'\r'}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        case "$value" in \"*\") value="${value#\"}"; value="${value%\"}" ;; \'*\') value="${value#\'}"; value="${value%\'}" ;; esac
+        case "$value" in "" | [Dd][Ii][Ss][Kk]) FILES_ON_R2=0 ;; *) FILES_ON_R2=1 ;; esac
+        ;;
     esac
   done <"$ENV_FILE"
   # The app's own two settings: the stack file sets both from DOMAIN and APP_DOMAIN, so
@@ -1951,7 +1968,7 @@ do_backup() {
   members=("$copy")
   if [ "$FILES_ON_R2" = 1 ]; then
     # The folders are not the site's files then: left out, and said.
-    info "the files are on R2 (FILE_STORE=r2 in .env), so they are not part of this backup: it holds the database only. Keep a copy of the two buckets yourself."
+    info "the files may be on R2 (.env's FILE_STORE is not disk), so they are not part of this backup: it holds the database only. Keep a copy of the two buckets yourself."
     say "Writing $archive (mode 600): the database copy"
   else
     [ ! -d "$DATA_PATH/drafts" ] || members+=(drafts)
@@ -2070,7 +2087,7 @@ cmd_status() {
   fi
   say "Data folder"
   if [ -d "$DATA_PATH" ]; then du -sh -- "$DATA_PATH" || true; else warn "$DATA_DIR is missing"; fi
-  [ "$FILES_ON_R2" = 0 ] || info "files: on R2 (FILE_STORE=r2 in .env), not in the data folder; a backup does not hold them"
+  [ "$FILES_ON_R2" = 0 ] || info "files: on R2 (.env's FILE_STORE is not disk), not in the data folder; a backup does not hold them"
   info "address: https://$DOMAIN"
   if [ -n "$APP_DOMAIN" ]; then
     info "app address: https://$APP_DOMAIN (the address above is the address of the tours)"
