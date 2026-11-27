@@ -1114,7 +1114,7 @@ describe("the Account page and the link page against the real app", () => {
       ["morgan.new@example.com", "Confirm your new Mythicshot email address"],
       [owner.email, "Your Mythicshot email address was changed"],
     ]);
-    expect(mail.sent[1].text).toContain('The email address of the Mythicshot account "morgan" was changed to s…@example.com.');
+    expect(mail.sent[1].text).toContain('The email address of the Mythicshot account "morgan" was changed to m…@example.com.');
 
     // Back on the account page, the new address; the same link again is a dead link.
     const back = me.account();
