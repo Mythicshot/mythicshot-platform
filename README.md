@@ -4,6 +4,8 @@ A self-hosted platform for interactive product tours. You record a click-through
 
 Copyright (c) 2026 Mythicshot, LLC. Licensed under the GNU Affero General Public License, version 3 or later: see [LICENSE](LICENSE).
 
+Every copy that is built to be installed carries the licence and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) unchanged: the container image holds both in `/app`, beside `package.json`, and the shared cPanel archive (`npm run package:cpanel`) holds both at its top level, from where `cpanel.sh` copies them into the app folder and the archive of the app files in each backup.
+
 ## Two ways to host it
 
 | | Docker on Debian | Cloudflare |

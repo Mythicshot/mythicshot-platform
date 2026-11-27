@@ -4,7 +4,7 @@
 > Partly verified. The steps this guide is built on were done by hand on one real shared cPanel account, at one provider. Of the script `cpanel.sh` that now does those steps, the `update` and `status` commands of an earlier version have run once on that account, from an archive unpacked there; `install`, `backup` as a command of its own, the commands to go back and the second address have only been tested on a development computer against stand-ins for the hosting's commands. [What has been run where](#what-has-been-run-where) lists both sides.
 
 > [!NOTE]
-> The software is not public yet: there is no published archive and no public repository. You need a copy of this repository from the owner, and a computer with Node.js 24 or later to build the archive from it.
+> There is no published archive yet. You need a copy of this repository, and a computer with Node.js 24 or later to build the archive from it.
 
 This guide puts the platform on shared hosting with cPanel: no server of your own, no root access and no Docker. It works only where the hosting's cPanel has **Setup Node.js App** (a CloudLinux feature) and gives you SSH access. It is written for any such provider; ask your hosting provider when a label in this guide does not match what you see.
 
@@ -35,14 +35,14 @@ Examples use `tours.example.com` for the platform's address and `you` for your c
 1. Shared hosting with cPanel whose **Software** section has **Setup Node.js App**, offering Node.js 24. Not every plan has it. If you cannot find it, ask your hosting provider before going on.
 2. SSH access to the hosting account. Many providers switch it on only when asked, and some use a port other than 22; your hosting provider's welcome email or help pages say which.
 3. A domain on that hosting account, so you can add a subdomain such as `tours.example.com` to it.
-4. A copy of this repository, from the owner.
+4. A copy of this repository.
 5. A computer with Node.js 24 or later and npm, to build the archive.
 
 Where things end up on the hosting, with the default settings:
 
 | Path | What it is |
 |---|---|
-| `/home/you/apps/tours` | The app: `dist`, `migrations`, `package.json`, `package-lock.json`, `app.cjs`, `cpanel.sh` and `VERSION` |
+| `/home/you/apps/tours` | The app: `dist`, `migrations`, `package.json`, `package-lock.json`, `app.cjs`, `cpanel.sh`, `VERSION`, and the licence `LICENSE` with the notices `THIRD-PARTY-NOTICES.md` |
 | `/home/you/apps/tours-data` | The data: `db.sqlite`, `drafts` and `public`. The install writes this path to the settings file as `DATA_DIR`, and every later command reads it from there |
 | `/home/you/apps/tours-config.env` | The settings file, holding the data folder and the setup code. Only your account can read it |
 | `/home/you/backups` | One folder per backup |
@@ -76,7 +76,7 @@ npm ci
 npm run package:cpanel
 ```
 
-It writes one file, `dist/cpanel/demo-platform-<version>-cpanel.tgz`, where `<version>` is the version in `package.json`. The archive holds the compiled app, the database migrations, `package.json` and `package-lock.json`, the startup file `app.cjs`, the script `cpanel.sh` and a `VERSION` file. It holds no source code, no tests, no settings and no installed packages.
+It writes one file, `dist/cpanel/demo-platform-<version>-cpanel.tgz`, where `<version>` is the version in `package.json`. The archive holds the compiled app, the database migrations, `package.json` and `package-lock.json`, the startup file `app.cjs`, the script `cpanel.sh`, a `VERSION` file, the licence `LICENSE` and the notices of the code it includes, `THIRD-PARTY-NOTICES.md`. It holds no source code, no tests, no settings and no installed packages.
 
 **How to tell it worked:** the last lines name the file it wrote and the number of files in it.
 
@@ -98,7 +98,7 @@ mkdir ~/tours-release
 tar -xzf ~/demo-platform-<version>-cpanel.tgz -C ~/tours-release
 ```
 
-**How to tell it worked:** this lists `VERSION`, `app.cjs`, `cpanel.sh`, `dist`, `migrations`, `package-lock.json` and `package.json`.
+**How to tell it worked:** this lists `LICENSE`, `THIRD-PARTY-NOTICES.md`, `VERSION`, `app.cjs`, `cpanel.sh`, `dist`, `migrations`, `package-lock.json` and `package.json`.
 
 ```sh
 ls ~/tours-release
@@ -327,7 +327,7 @@ It writes a new folder, `/home/you/backups/tours-<date>-<time>`, and prints its 
 |---|---|
 | `db.sqlite` | A consistent copy of the database, made by SQLite itself while the app keeps running and then checked for damage. The app's own Node.js makes it; the `sqlite3` tool is used only where that Node.js is not found |
 | `drafts` and `public` | The uploaded and the published images |
-| `app.tgz` | The app files as they are now, without the installed packages |
+| `app.tgz` | The app files as they are now, the licence and the notices included, without the installed packages |
 | `tours-config.env` | A copy of the settings file, with the setup code in it |
 
 The script finds the data folder through the `DATA_DIR` line of the settings file. If the settings file is missing, has no such line, or there is no database in that folder, the backup stops and writes nothing. The one exception is a platform that has never started, whose first install did not finish: it has no database yet, and the backup says that it holds none.
@@ -400,7 +400,7 @@ cd '/home/you/apps/tours' && [ -d migrations.old ] && rm -rf migrations && mv mi
 ```
 
 ```sh
-cd '/home/you/apps/tours' && tar -xzf '/home/you/backups/tours-<date>-<time>/app.tgz' package.json package-lock.json app.cjs cpanel.sh VERSION
+cd '/home/you/apps/tours' && tar -xzf '/home/you/backups/tours-<date>-<time>/app.tgz' package.json package-lock.json app.cjs cpanel.sh VERSION LICENSE THIRD-PARTY-NOTICES.md
 ```
 
 ```sh
@@ -411,7 +411,7 @@ cd '/home/you/apps/tours' && source '/home/you/nodevenv/apps/tours/24/bin/activa
 cd '/home/you/apps/tours' && rm -f .cpanel-update && touch tmp/restart.txt
 ```
 
-Use the commands the script printed, not the ones above: yours name the right backup folder. Before you roll back, read [step 13](#13-troubleshooting): a failed health check right after an update is often the certificate or a slow start, not the new version.
+Use the commands the script printed, not the ones above: yours name the right backup folder. After an update from a version that did not have `LICENSE` and `THIRD-PARTY-NOTICES.md` yet, the commands also remove those two files, and the restore line leaves them out. Before you roll back, read [step 13](#13-troubleshooting): a failed health check right after an update is often the certificate or a slow start, not the new version.
 
 > [!WARNING]
 > If the new version already changed the database, the previous version may not start on it. Then also restore `db.sqlite` from the backup the update made, as in [step 11](#11-restore-from-a-backup); what was created after that backup is lost.

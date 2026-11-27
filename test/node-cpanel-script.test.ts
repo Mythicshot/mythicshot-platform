@@ -115,6 +115,49 @@ describe("the cPanel script's backup with a real Node.js", () => {
   }, 300_000);
 });
 
+/**
+ * The tests of the licence and the notices in the app folder and its backups. They run
+ * here too: they need no Debian, and so are checked on every run of the suite.
+ */
+const NOTICE_TESTS = [
+  "test_install_and_update_carry_the_licence_and_the_notices",
+  "test_update_from_a_version_without_the_notices",
+  "test_a_resumed_update_with_an_earlier_marker_removes_the_notices_on_the_way_back",
+  "test_an_archive_without_the_notices_is_refused",
+];
+/** The container tests whose fixed lists of the app's files now name them; they run in the containers only. */
+const NOTICE_LIST_TESTS = [
+  "test_install_happy_path",
+  "test_update_backs_up_then_replaces",
+  "test_update_reports_a_failed_health_check_with_rollback_commands",
+  "test_rollback_of_a_hand_made_install_removes_what_it_never_had",
+  "test_rerun_after_an_interrupted_update_keeps_the_last_good_build",
+  "test_backup_contents",
+];
+
+describe("the licence and the notices in the installed copy", () => {
+  it("the Bash file has the tests, and the script copies both files and archives them in each backup", () => {
+    const harness = readFileSync(join(ROOT, HARNESS), "utf8");
+    for (const name of [...NOTICE_TESTS, ...NOTICE_LIST_TESTS]) expect(harness, name).toMatch(new RegExp(`^${name}\\(\\) \\{$`, "m"));
+    const script = readFileSync(join(ROOT, "deploy/cpanel/cpanel.sh"), "utf8");
+    // One list is what is checked in the archive, copied into the app folder, archived in a backup and restored on the way back.
+    expect(script).toMatch(/^readonly RELEASE_FILES="package\.json package-lock\.json app\.cjs cpanel\.sh VERSION LICENSE THIRD-PARTY-NOTICES\.md"$/m);
+    expect(script).toMatch(/^readonly ADDED_FILES="LICENSE THIRD-PARTY-NOTICES\.md"$/m);
+    // The stand-in archive of today's version has both files; for an older install the tests remove them.
+    expect(harness).toContain(`printf 'licence text, as shipped with %s\\n' "$v" >"$d/LICENSE"`);
+    expect(harness).toContain(`printf '# notices, as shipped with %s\\n' "$v" >"$d/THIRD-PARTY-NOTICES.md"`);
+  });
+
+  it.skipIf("reason" in found)(`install and update copy both, an update from a version without them and its way back work, an archive without them is refused${"reason" in found ? ` (skipped: ${found.reason})` : ""}`, () => {
+    const r = spawnSync((found as { bash: string }).bash, [HARNESS, "--inside", ...NOTICE_TESTS], { cwd: ROOT, encoding: "utf8", timeout: 560_000, windowsHide: true });
+    const output = `${r.stdout}\n${r.stderr}`;
+    for (const name of NOTICE_TESTS) expect(output, name).toContain(`PASS  ${name}`);
+    expect(output).toMatch(new RegExp(`^${NOTICE_TESTS.length} passed, 0 failed, 0 skipped$`, "m"));
+    expect(r.status, output).toBe(0);
+    // Each of them takes a minute or two under Git Bash on Windows; run side by side they fit the limit.
+  }, 600_000);
+});
+
 /** The test of the refusal to go back while a tour is restricted (stand-ins only; it runs here too, being one). */
 const RESTRICTED_TESTS = ["test_update_refuses_the_way_back_when_a_tour_is_restricted", "test_downgrade_below_access_is_refused_while_a_tour_is_restricted", "test_an_archive_before_access_is_checked_whatever_is_installed", "test_a_resumed_update_goes_back_to_the_version_before_the_first_try"];
 

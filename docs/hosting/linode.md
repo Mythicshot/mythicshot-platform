@@ -4,7 +4,7 @@
 > Draft: Not yet verified on a real account. This guide is written from Akamai Cloud's documentation and from the code in this repository, and has not yet been run on a real Akamai Cloud account. Where a label in the control panel could not be confirmed, the guide says what to achieve and that the label may differ.
 
 > [!NOTE]
-> The software is not public yet: there is no published image and no public repository. You need a copy of this repository from the owner, and a computer with Docker to build the image from it, as [step 4 of the Docker runbook](../runbook-docker.md#4-build-the-app-image-and-copy-it-to-the-server) describes.
+> There is no published image yet. You need a copy of this repository, and a computer with Docker to build the image from it, as [step 4 of the Docker runbook](../runbook-docker.md#4-build-the-app-image-and-copy-it-to-the-server) describes.
 
 This guide takes you from no hosting to a running platform on one Linode (Akamai Cloud's name for a rented server; Akamai bought Linode and still uses the name). The install itself is the [Docker runbook](../runbook-docker.md); this guide adds the Akamai Cloud steps around it.
 
@@ -28,7 +28,7 @@ Examples use `tours.example.com` for the platform's address, `203.0.113.10` for 
 
 1. A domain name, and a login at the company that runs its DNS. This is usually where you bought the domain.
 2. An Akamai Cloud (Linode) account with a payment method. You create it yourself; this guide does not cover sign-up.
-3. A copy of this repository, from the owner.
+3. A copy of this repository.
 4. A computer with Docker, to build the app image. [Get Docker](https://docs.docker.com/get-started/get-docker/) has the installers for Windows, macOS and Linux.
 5. A terminal with `ssh` and `scp`. Windows 10 and 11, macOS and Linux all have them.
 

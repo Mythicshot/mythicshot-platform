@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ARCHIVE_TOP_LEVEL, packageCpanel, tarGz, type PackageResult } from "../scripts/package-cpanel.ts";
@@ -20,6 +21,8 @@ const NO_STORE: FileStore = { put: async () => {}, get: async () => null, delete
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const read = (p: string) => readFileSync(join(ROOT, p));
+/** The licence's text as committed (test/docs.test.ts pins the same). */
+const LICENSE_SHA256 = "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0";
 const VERSION = (JSON.parse(read("package.json").toString("utf8")) as { version: string }).version;
 
 type Entry = { path: string; type: "file" | "dir"; mode: number; data: Buffer };
@@ -79,10 +82,10 @@ describe("the cPanel archive", () => {
   });
 
   it("holds exactly the listed top-level entries", () => {
-    expect([...ARCHIVE_TOP_LEVEL].sort()).toEqual(["VERSION", "app.cjs", "cpanel.sh", "dist", "migrations", "package-lock.json", "package.json"]);
+    expect([...ARCHIVE_TOP_LEVEL].sort()).toEqual(["LICENSE", "THIRD-PARTY-NOTICES.md", "VERSION", "app.cjs", "cpanel.sh", "dist", "migrations", "package-lock.json", "package.json"]);
     expect([...new Set(entries.map((e) => e.path.split("/")[0]))].sort()).toEqual([...ARCHIVE_TOP_LEVEL].sort());
     for (const top of ["dist", "migrations"]) expect(entries.find((e) => e.path === `${top}/`)?.type, top).toBe("dir");
-    for (const top of ["VERSION", "app.cjs", "cpanel.sh", "package-lock.json", "package.json"]) expect(files.some((e) => e.path === top), top).toBe(true);
+    for (const top of ["LICENSE", "THIRD-PARTY-NOTICES.md", "VERSION", "app.cjs", "cpanel.sh", "package-lock.json", "package.json"]) expect(files.some((e) => e.path === top), top).toBe(true);
     // No path is absolute, climbs out of the folder it is unpacked in, or is listed twice.
     for (const e of entries) expect(e.path, e.path).not.toMatch(/^\/|(^|\/)\.\.(\/|$)|\\/);
     expect(new Set(entries.map((e) => e.path)).size).toBe(entries.length);
@@ -95,6 +98,12 @@ describe("the cPanel archive", () => {
     expect(get("app.cjs")?.equals(read("deploy/cpanel/app.cjs"))).toBe(true);
     expect(get("cpanel.sh")?.equals(read("deploy/cpanel/cpanel.sh"))).toBe(true);
     expect(get("VERSION")?.toString("utf8")).toBe(`${VERSION}\n`);
+    // The licence and the notices travel with every copy, byte for byte, with LF line ends.
+    for (const notice of ["LICENSE", "THIRD-PARTY-NOTICES.md"]) {
+      expect(get(notice)?.equals(read(notice)), notice).toBe(true);
+      expect(get(notice)?.includes(13), notice).toBe(false);
+    }
+    expect(createHash("sha256").update(get("LICENSE") ?? Buffer.alloc(0)).digest("hex")).toBe(LICENSE_SHA256);
     const migrations = walk("migrations").sort();
     expect(files.filter((e) => e.path.startsWith("migrations/")).map((e) => e.path).sort()).toEqual(migrations);
     for (const m of migrations) expect(get(m)?.equals(read(m)), m).toBe(true);
