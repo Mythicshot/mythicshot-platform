@@ -484,10 +484,10 @@ test_email_validation() {
 test_data_dir_validation() {
   new_sandbox; load_functions
   local p
-  for p in /opt/demo-platform/data /srv/demo-platform /var/lib/demo-platform /mnt/disk1/dp /home/alex/demo-data /opt/new-dedicated; do
+  for p in /opt/demo-platform/data /srv/demo-platform /var/lib/demo-platform /mnt/disk1/dp /home/robin/demo-data /opt/new-dedicated; do
     valid_data_dir "$p" || die "refused good folder $p"
   done
-  for p in "" / relative/x /etc /etc/dp /usr/local/dp /tmp/dp /proc/x /opt /srv /data /home /home/alex /var /var/lib /var/log \
+  for p in "" / relative/x /etc /etc/dp /usr/local/dp /tmp/dp /proc/x /opt /srv /data /home /home/robin /var /var/lib /var/log \
            /var/dp /var/log/dp /var/cache/dp /root /root/dp /opt/demo-platform /opt/demo-platform/.env \
            /opt/demo-platform/docker-compose.yml /opt/demo-platform/backups /opt/demo-platform/other \
            /opt/demo-platform/caddy-data/x /opt/demo-platform/data/x /a/../etc "/a b" "/a;b" /var/lib/docker/volumes/x; do
@@ -713,18 +713,18 @@ worse
 
 test_existing_folders_refused_as_data() {
   new_sandbox
-  mkdir -p "$R/var/lib/dpkg" "$R/home/alex/docs" "$R/srv/full"
-  echo keep >"$R/home/alex/docs/thesis"; echo keep >"$R/srv/full/file"
+  mkdir -p "$R/var/lib/dpkg" "$R/home/robin/docs" "$R/srv/full"
+  echo keep >"$R/home/robin/docs/thesis"; echo keep >"$R/srv/full/file"
   install_sh "
 $DOMAIN
 $EMAIL
 /var/lib
-/home/alex
+/home/robin
 /srv/full
 " install --yes
   expect "three refused folders stop" test "$RC" = 1
   expect "nothing written" test ! -e "$R/opt"
-  expect "the folders are untouched" test "$(stat -c '%u' "$R/home/alex")" = 0
+  expect "the folders are untouched" test "$(stat -c '%u' "$R/home/robin")" = 0
   expect "no recursive chown advice" no_recursive_chown
   new_sandbox
   mkdir -p "$R/srv/empty"

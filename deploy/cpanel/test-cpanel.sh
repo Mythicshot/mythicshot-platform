@@ -2291,9 +2291,9 @@ test_admin_passes_its_arguments_unchanged() {
   admin_install
   # The script's own options go before the command's first argument; from there on every
   # argument is the command's, also one that looks like the script's own.
-  cpanel "" --app-root apps/tours admin --node 24 --email you@example.com --username alex
+  cpanel "" --app-root apps/tours admin --node 24 --email you@example.com --username robin
   expect "the approved form runs (stderr: $(cat "$ERR"))" test "$RC" = 0
-  expect "as typed" grep -qxF "node[venv=apps/tours/24 umask=0077 cwd=$APP] app.cjs admin --email you@example.com --username alex" "$LOG"
+  expect "as typed" grep -qxF "node[venv=apps/tours/24 umask=0077 cwd=$APP] app.cjs admin --email you@example.com --username robin" "$LOG"
   # shellcheck disable=SC2016 # the literal $(id) and * are the input
   cpanel "" admin first-admin --email=' you@example.com' --username 'a b' '' '$(id)' '*' --dry-run --app-root x install
   expect "exit code 0 (stderr: $(cat "$ERR"))" test "$RC" = 0
@@ -2305,7 +2305,7 @@ test_admin_passes_its_arguments_unchanged() {
 test_admin_needs_an_install() {
   new_sandbox
   local before; before="$(snapshot)"
-  cpanel "" admin first-admin --email you@example.com --username alex
+  cpanel "" admin first-admin --email you@example.com --username robin
   expect "nothing installed: refused" test "$RC" = 1
   expect "nothing installed: says so" has "$ERR" "nothing is installed at $APP"
   cpanel "" admin
