@@ -769,7 +769,7 @@ SOURCE_URL=<your copy's source code address>
 touch ~/apps/tours/tmp/restart.txt
 ```
 
-**How to tell it worked:** "Source code" at the foot of the sign-in page opens your address. A value that is not a usable https address keeps the app from starting, and the app's log has the line `source code: SOURCE_URL is not a usable https address. Write the address of this copy's source code, or leave it out for the default.`. Fix the line and restart. To go back to the default, remove the line and restart.
+**How to tell it worked:** "Source code" at the foot of the sign-in page opens your address. A value that is not a usable https address keeps the app from starting (`cpanel.sh admin` still runs, so the recovery commands stay open), and the app's log has the line `source code: SOURCE_URL is not a usable https address. Write the address of this copy's source code, or leave it out for the default.`. Fix the line and restart. To go back to the default, remove the line and restart.
 
 ### Change how long sign-ins last
 

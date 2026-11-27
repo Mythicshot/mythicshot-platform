@@ -67,7 +67,9 @@ export const NODE_SETTINGS: readonly string[] = [
  * src/https-address.ts). Unset, empty or the default, the config has no such key and the line
  * links to the default. A value that is not a strict https address throws its own fixed line:
  * the link is how the copy's users are offered its source, so a mistyped one stops the start
- * rather than pointing somewhere else.
+ * rather than pointing somewhere else. With `forCommands` (the admin command, src/node/admin.ts,
+ * which shows no page) such a value is the default instead, so it never closes the recovery
+ * commands.
  *
  * SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and CONNECTION_MAX_DAYS are the sign-in lifetimes
  * (lifetimesSetting, src/lifetimes.ts): unset or empty is the default (the config then has no
@@ -75,7 +77,7 @@ export const NODE_SETTINGS: readonly string[] = [
  * 0 or off switches one off, and a value that cannot be used is the default; it never stops
  * the start, and the entry writes the one line for each such value.
  */
-export function configFromEnv(env: NodeJS.ProcessEnv): Config {
+export function configFromEnv(env: NodeJS.ProcessEnv, opts: { forCommands?: boolean } = {}): Config {
   // The settings by name, so the list in NODE_SETTINGS is checked against them:
   // env.TOURS_HOST, env.APP_HOST, env.IMG_HOST.
   const hosts = resolveHosts(hostSettingsFrom<string>(env));
@@ -87,9 +89,12 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   // env.STRIPE_WEBHOOK_SECRET, env.STRIPE_PRICE_ID, env.STRIPE_PUBLISHABLE_KEY.
   const billing = billingFromSettings({ STRIPE_API_KEY: env.STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET: env.STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID: env.STRIPE_PRICE_ID, STRIPE_PUBLISHABLE_KEY: env.STRIPE_PUBLISHABLE_KEY });
   if (!billing.ok) throw new Error(billing.problem);
-  // The address of this copy's source code: a value that cannot be used stops the start, with a line that never holds it.
-  const source = sourceUrlSetting(env.SOURCE_URL);
-  if (!source.ok) throw new Error(source.problem);
+  // The address of this copy's source code: a value that cannot be used stops the start, with a
+  // line that never holds it. The admin command shows no page, so for it (`forCommands`) such a
+  // value is the default and never closes the recovery commands.
+  const read = sourceUrlSetting(env.SOURCE_URL);
+  if (!read.ok && opts.forCommands !== true) throw new Error(read.problem);
+  const source = read.ok ? read : { ok: true as const, url: SOURCE_URL_DEFAULT };
   const siteHost = hosts.hosts === null && typeof env.SITE_HOST === "string" ? normaliseHost(env.SITE_HOST) : null;
   // Who to ask for an invite: passed on as written, checked by the sign-in page, never a reason to stop.
   const inviteContact = typeof env.INVITE_CONTACT === "string" ? env.INVITE_CONTACT.trim() : "";

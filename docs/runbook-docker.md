@@ -1246,7 +1246,7 @@ SOURCE_URL=https://code.example.com/our-copy
 
 A tunnel install set up before 0.1.69 runs `sudo bash install.sh install` once before `SOURCE_URL` takes effect: `update` does not rewrite the stack file, and `install` does (it keeps the old one as a `.bak` copy).
 
-**How to tell it worked:** "Source code" at the foot of the sign-in page opens your address. A value that is not a usable `https://` address keeps the app from starting: `docker compose logs app` has the line `source code: SOURCE_URL is not a usable https address. Write the address of this copy's source code, or leave it out for the default.`. Fix the line and recreate the container. To go back to the default, remove the line and recreate the container.
+**How to tell it worked:** "Source code" at the foot of the sign-in page opens your address. A value that is not a usable `https://` address keeps the app from starting (the admin command still runs, so the recovery commands stay open): `docker compose logs app` has the line `source code: SOURCE_URL is not a usable https address. Write the address of this copy's source code, or leave it out for the default.`. Fix the line and recreate the container. To go back to the default, remove the line and recreate the container.
 
 ### Change how long sign-ins last
 
