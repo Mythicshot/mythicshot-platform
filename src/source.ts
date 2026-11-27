@@ -13,7 +13,8 @@
 // The address is the SOURCE_URL setting (sourceUrlSetting, src/https-address.ts), the product's
 // own repository by default. Every page is built with the default's footer, SOURCE_FOOTER, and
 // the routes serve it through withSource, which puts another address in when the setting names
-// one. A plain link: no script, nothing the pages' policy has to allow, no database or storage
+// one. A plain link (rel "noopener noreferrer", as every link to another site): no script,
+// nothing the pages' policy has to allow, no database or storage
 // call. Its look is the pages' own stylesheets' (".source", src/signin/page.ts and
 // src/dash/style.ts).
 import { SOURCE_URL_DEFAULT } from "./https-address.ts";
@@ -22,12 +23,18 @@ import { VERSION } from "./version.ts";
 
 /** The line for `url`: the software's name and version, then the link. The address is escaped. */
 export function sourceLineHtml(url: string): string {
-  return `Mythicshot ${escapeHtml(VERSION)} · <a href="${escapeHtml(url)}" rel="noopener">Source code</a>`;
+  return `Mythicshot ${escapeHtml(VERSION)} · <a href="${escapeHtml(url)}" rel="noopener noreferrer">Source code</a>`;
 }
+
+/**
+ * The id of the footer: a dashboard page's questions make it inert and hidden from screen readers
+ * while they are open, as they do the bar and the page (Dash.question, src/dash/script.ts).
+ */
+export const SOURCE_LINE_ID = "source-line";
 
 /** The footer of the sign-in and dashboard pages for `url`: the line, and nothing else. */
 export function sourceFooterHtml(url: string): string {
-  return `<footer class="source"><p>${sourceLineHtml(url)}</p></footer>`;
+  return `<footer class="source" id="${SOURCE_LINE_ID}"><p>${sourceLineHtml(url)}</p></footer>`;
 }
 
 /** The footer as every page is built with it: the default address. */

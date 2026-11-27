@@ -1028,7 +1028,7 @@ describe("the house rules", () => {
     const tab = openTours(standard({ [`GET ${path(T2)}`]: access() }));
     await tab.settle();
     await openSharing(tab, 1);
-    for (const id of ["dash-top", "tours-page"]) expect([tab.$(id).getAttribute("inert"), tab.$(id).getAttribute("aria-hidden")], id).toEqual(["", "true"]);
+    for (const id of ["dash-top", "tours-page", "source-line"]) expect([tab.$(id).getAttribute("inert"), tab.$(id).getAttribute("aria-hidden")], id).toEqual(["", "true"]);
     // A menu entry pressed now (as only a script could) opens nothing more.
     entry(rows(tab)[0], "Sharing…").click();
     entry(rows(tab)[1], "Delete").click();
@@ -1036,7 +1036,7 @@ describe("the house rules", () => {
     expect(tab.$("delete-dialog").hidden).toBe(true);
     expect(tab.fetched.filter((f) => f.path.endsWith("/access"))).toHaveLength(1);
     tab.$("share-cancel").click();
-    for (const id of ["dash-top", "tours-page"]) expect(tab.$(id).hasAttribute("inert"), id).toBe(false);
+    for (const id of ["dash-top", "tours-page", "source-line"]) expect(tab.$(id).hasAttribute("inert"), id).toBe(false);
   });
 
   it("when who can view cannot be read, the page says so and the list is read again", async () => {

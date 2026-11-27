@@ -17,21 +17,22 @@ import { SHARE_NOT_FOUND_HTML } from "../src/media-page.ts";
 import { NOT_FOUND_HTML } from "../src/page.ts";
 import { INVITE_HTML } from "../src/signin/accept.ts";
 import { LINK_HTML, SIGNIN_CARD_CSS, SIGNIN_CSS, SIGNIN_HTML } from "../src/signin/page.ts";
-import { SOURCE_FOOTER, sourceFooterHtml, sourceLineHtml, withSource } from "../src/source.ts";
+import { SOURCE_FOOTER, SOURCE_LINE_ID, sourceFooterHtml, sourceLineHtml, withSource } from "../src/source.ts";
 import { VERSION } from "../src/version.ts";
 import { VIEW_CSS, VIEW_DENIED_HTML, VIEW_GATE_HTML, VIEW_LINK_HTML, VIEW_SIGNOUT_HTML } from "../src/view-page.ts";
 import { clone, fixtures, send, uploadTour, type Json } from "./bundle.ts";
 import { withBilling } from "./fake-stripe.ts";
-import { FakeDocument } from "./pages-dom.ts";
+import { FakeDocument, expectSourceUrl, inSourceLine, markupOf, sourceLineOf, textNodes, visibleText } from "./pages-dom.ts";
+import { DASH_JS } from "../src/dash/script.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
 const APP = "https://app.example.com";
 const CUSTOM = "https://code.example.com/our-copy";
 
 /** The line as the owner approved it, with the default address: only "Source code" is the link. */
-const LINE = `Mythicshot ${VERSION} · <a href="https://github.com/Mythicshot/mythicshot-platform" rel="noopener">Source code</a>`;
+const LINE = `Mythicshot ${VERSION} · <a href="https://github.com/Mythicshot/mythicshot-platform" rel="noopener noreferrer">Source code</a>`;
 /** The footer of the sign-in and dashboard pages, exactly. */
-const FOOTER = `<footer class="source"><p>${LINE}</p></footer>`;
+const FOOTER = `<footer class="source" id="source-line"><p>${LINE}</p></footer>`;
 
 /** Every page on the app address that carries the footer, as served without the setting. */
 const FOOTED: { path: string; body: string }[] = [
@@ -111,7 +112,7 @@ describe("the line's markup", () => {
     expect(VERSION).toMatch(/^\d+\.\d+\.\d+$/);
     const doc = new FakeDocument(`<!doctype html><html lang="en"><head><title>x</title></head><body>${FOOTER}</body></html>`);
     const links = doc.root.all().filter((e) => e.tagName === "a");
-    expect(links.map((a) => [a.getAttribute("href"), a.getAttribute("rel"), a.textContent])).toEqual([[SOURCE_URL_DEFAULT, "noopener", "Source code"]]);
+    expect(links.map((a) => [a.getAttribute("href"), a.getAttribute("rel"), a.textContent])).toEqual([[SOURCE_URL_DEFAULT, "noopener noreferrer", "Source code"]]);
     // No target, no handler, no style: a plain link that needs no script.
     expect([...links[0].attrs].map(([n]) => n).sort()).toEqual(["href", "rel"]);
   });
@@ -119,7 +120,7 @@ describe("the line's markup", () => {
   it("escapes the address it is handed, whatever it holds", () => {
     const hostile = `https://x.example/"><script>alert('x')</script>&`;
     const html = sourceLineHtml(hostile);
-    expect(html).toBe(`Mythicshot ${VERSION} · <a href="https://x.example/&quot;&gt;&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;&amp;" rel="noopener">Source code</a>`);
+    expect(html).toBe(`Mythicshot ${VERSION} · <a href="https://x.example/&quot;&gt;&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;&amp;" rel="noopener noreferrer">Source code</a>`);
     expect(html).not.toContain("<script");
     // An apostrophe is a character the strict rule keeps in a path; in the attribute it is escaped.
     expect(sourceUrlSetting("https://code.example.com/a'b")).toEqual({ ok: true, url: "https://code.example.com/a'b" });
@@ -144,6 +145,8 @@ describe("the pages that carry the line", () => {
       expect(p.body.split(FOOTER).length - 1, p.path).toBe(1);
       expect(p.body, p.path).toContain(`</main>\n${FOOTER}\n</body>`);
       expect(p.body.split("Source code").length - 1, p.path).toBe(1);
+      expect(p.body.split('class="source"').length - 1, p.path).toBe(1);
+      expect(p.body.split('id="source-line"').length - 1, p.path).toBe(1);
     }
   });
 
@@ -165,7 +168,7 @@ describe("the pages that carry the line", () => {
       const before = await send(plain.deps, "GET", p.path, { origin: APP });
       const r = await send(deps, "GET", p.path, { origin: APP });
       expect([r.status, r.calls], p.path).toEqual([200, 0]);
-      expect(r.text, p.path).toBe(p.body.replace(FOOTER, `<footer class="source"><p>Mythicshot ${VERSION} · <a href="${CUSTOM}" rel="noopener">Source code</a></p></footer>`));
+      expect(r.text, p.path).toBe(p.body.replace(FOOTER, `<footer class="source" id="source-line"><p>Mythicshot ${VERSION} · <a href="${CUSTOM}" rel="noopener noreferrer">Source code</a></p></footer>`));
       expect(r.text, p.path).not.toContain(SOURCE_URL_DEFAULT);
       expect([...r.headers.entries()], p.path).toEqual([...before.headers.entries()]);
     }
@@ -229,36 +232,101 @@ describe("the pages viewers of other people's content see", () => {
   });
 
   it("served, a published tour, a missing tour, the gates and the shared pages' fronts are the same bytes with SOURCE_URL as without it, and carry no link to the source", async () => {
-    const answers = async (sourceUrl?: string) => {
-      const { deps } = await makeDeps(sourceUrl === undefined ? {} : { sourceUrl });
-      const a = await seedAccount(deps, { username: "pub" });
-      const m = clone(fixtures.v2 as Json);
-      m.steps = [{ ...clone(m.steps[1]), image: "step-001.png", width: 64, height: 64, bytes: 120 }];
-      const t = await uploadTour(deps, a.token, m);
-      let r = await send(deps, "POST", `/api/v1/tours/${t.tour_id}/publish`, { token: a.token });
-      while (r.status === 202) r = await send(deps, "POST", `/api/v1/tours/${t.tour_id}/publish`, { token: a.token, body: JSON.stringify({ publish_id: r.json.publish_id }), headers: { "content-type": "application/json" } });
-      expect(r.status).toBe(200);
-      const slug = (await deps.db.first<{ slug: string }>("SELECT slug FROM tour WHERE id = ?", [t.tour_id]))!.slug;
-      const out: { path: string; status: number; text: string }[] = [];
-      for (const path of [`/t/${slug}`, "/t/no-such-tour", "/view?t=nosuchtour", "/view/signout/nosuchtour", "/s/view", "/i/aaaaaaaaaaaaaaaaaaaa"]) {
-        const page = await send(deps, "GET", path);
-        // The tour's own address differs from one world to the other; nothing else may.
-        out.push({ path: path.startsWith(`/t/${slug}`) ? "/t/<slug>" : path, status: page.status, text: page.text.split(slug).join("<slug>") });
-      }
-      return out;
-    };
-    const without = await answers();
-    const withIt = await answers(CUSTOM);
-    expect(withIt.map((a) => [a.path, a.status])).toEqual(without.map((a) => [a.path, a.status]));
-    expect(without[0].status).toBe(200);
-    for (const [i, a] of withIt.entries()) {
-      expect(a.text === without[i].text || a.path === "/t/<slug>", a.path).toBe(true);
-      for (const page of [a, without[i]]) {
-        expect(page.text, page.path).not.toContain("Source code");
-        expect(page.text, page.path).not.toContain(SOURCE_URL_DEFAULT);
-        expect(page.text, page.path).not.toContain(CUSTOM);
+    // One site, its data and its clock, served twice: once as it is, once with SOURCE_URL. Only
+    // the configuration differs, so any difference in a page is the setting's.
+    const { deps } = await makeDeps();
+    const a = await seedAccount(deps, { username: "pub" });
+    const m = clone(fixtures.v2 as Json);
+    m.steps = [{ ...clone(m.steps[1]), image: "step-001.png", width: 64, height: 64, bytes: 120 }];
+    const t = await uploadTour(deps, a.token, m);
+    let r = await send(deps, "POST", `/api/v1/tours/${t.tour_id}/publish`, { token: a.token });
+    while (r.status === 202) r = await send(deps, "POST", `/api/v1/tours/${t.tour_id}/publish`, { token: a.token, body: JSON.stringify({ publish_id: r.json.publish_id }), headers: { "content-type": "application/json" } });
+    expect(r.status).toBe(200);
+    const slug = (await deps.db.first<{ slug: string }>("SELECT slug FROM tour WHERE id = ?", [t.tour_id]))!.slug;
+    const at = deps.now();
+    const fixed = { ...deps, now: () => at };
+    const custom = { ...fixed, config: { ...deps.config, sourceUrl: CUSTOM } };
+    expect(fixed.config.sourceUrl).toBeUndefined();
+    for (const path of [`/t/${slug}`, "/t/no-such-tour", "/view?t=nosuchtour", "/view/signout/nosuchtour", "/s/view", "/i/aaaaaaaaaaaaaaaaaaaa"]) {
+      const without = await send(fixed, "GET", path);
+      const withIt = await send(custom, "GET", path);
+      expect([withIt.status, withIt.text], path).toEqual([without.status, without.text]);
+      expect([...withIt.headers.entries()], path).toEqual([...without.headers.entries()]);
+      for (const page of [without, withIt]) {
+        expect(page.text, path).not.toContain("Source code");
+        expect(page.text, path).not.toContain(SOURCE_URL_DEFAULT);
+        expect(page.text, path).not.toContain(CUSTOM);
+        expect(page.text, path).not.toContain('class="source"');
       }
     }
+    expect((await send(fixed, "GET", `/t/${slug}`)).status).toBe(200);
+    // And the same site's own pages do change with it: the setting reached the app.
+    expect((await send(custom, "GET", "/signin")).text).toContain(CUSTOM);
+  });
+});
+
+describe("the source line behind a dashboard question", () => {
+  it("every question makes the footer inert and hidden from screen readers with what the page names, by its id", () => {
+    expect(SOURCE_LINE_ID).toBe("source-line");
+    expect(FOOTER).toContain(`id="${SOURCE_LINE_ID}"`);
+    // Dash.question, the one way a dashboard page asks a question, adds the footer to every page's list.
+    expect(DASH_JS).toContain(`each((o.behind || []).concat(["${SOURCE_LINE_ID}"]), function (e) {`);
+    expect(DASH_JS.split("o.behind").length - 1).toBe(1);
+  });
+});
+
+describe("the test helpers' guard on the source line (test/pages-dom.ts)", () => {
+  const page = (foot: string) => `<!doctype html><html lang="en"><head><title>x</title></head><body><main><p>Words</p></main>${foot}</body></html>`;
+
+  afterEach(() => expectSourceUrl());
+
+  it("leaves out exactly the expected footer, and nothing of the page", () => {
+    const doc = new FakeDocument(page(FOOTER));
+    expect(textNodes(doc.body)).toEqual(["Words"]);
+    expect(visibleText(doc)).toEqual(["Words"]);
+    expect(inSourceLine(doc.root.all().find((e) => e.tagName === "a")!)).toBe(true);
+    expect(markupOf(sourceLineOf(doc.root)!)).toBe(FOOTER);
+    // A page without one is a stand-in a test built by hand: nothing to leave out.
+    expect(textNodes(new FakeDocument(page("")).body)).toEqual(["Words"]);
+    // While a question is open: the footer's inert and aria-hidden, after its own attributes.
+    const behind = FOOTER.replace('id="source-line">', 'id="source-line" inert="" aria-hidden="true">');
+    expect(textNodes(new FakeDocument(page(behind)).body)).toEqual(["Words"]);
+  });
+
+  it("takes a custom address only when the test said so", () => {
+    const custom = page(sourceFooterHtml(CUSTOM));
+    expect(() => textNodes(new FakeDocument(custom).body)).toThrow();
+    expectSourceUrl(CUSTOM);
+    expect(textNodes(new FakeDocument(custom).body)).toEqual(["Words"]);
+    expect(() => textNodes(new FakeDocument(page(FOOTER)).body)).toThrow();
+  });
+
+  it("throws for two footers, a footer with an extra link, altered text, or anything else in or on it", () => {
+    const bad: [string, string][] = [
+      ["two footers", FOOTER + FOOTER],
+      ["a second element of the class", `${FOOTER}<p class="source">x</p>`],
+      ["an extra link", FOOTER.replace("</p></footer>", ' <a href="https://evil.example.net/">More</a></p></footer>')],
+      ["altered text", FOOTER.replace("Source code", "Source")],
+      ["an altered version", FOOTER.replace(`Mythicshot ${VERSION}`, "Mythicshot 9.9.9")],
+      ["a username in it", FOOTER.replace("</p></footer>", "</p><p>morgan</p></footer>")],
+      ["another address", FOOTER.replace(SOURCE_URL_DEFAULT, "https://evil.example.net/")],
+      ["another attribute", FOOTER.replace('<footer class="source"', '<footer class="source" title="x"')],
+      ["a target on the link", FOOTER.replace('rel="noopener noreferrer"', 'rel="noopener noreferrer" target="_blank"')],
+    ];
+    for (const [what, foot] of bad) {
+      const doc = new FakeDocument(page(foot));
+      expect(() => textNodes(doc.body), what).toThrow();
+      expect(() => visibleText(doc), what).toThrow();
+      expect(() => inSourceLine(doc.root.all().find((e) => e.tagName === "p")!), what).toThrow();
+    }
+  });
+
+  it("throws for a node a script put into the footer after the page was built", () => {
+    const doc = new FakeDocument(page(FOOTER));
+    const footer = doc.getElementById("source-line")!;
+    footer.appendChild(doc.createTextNode(" morgan"));
+    expect(() => textNodes(doc.body)).toThrow();
+    expect(() => visibleText(doc)).toThrow();
   });
 });
 

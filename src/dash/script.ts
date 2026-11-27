@@ -191,7 +191,8 @@ export const DASH_JS = `var Dash = (function () {
   // id: backdrop (the dimmed area holding it), box (the question itself, given o.role:
   // "alertdialog" or "dialog"), title (its heading, which takes the focus while a request
   // runs), message (its message line, optional), behind (what is made inert and hidden from
-  // screen readers while it is open; a part no longer in the page is left out), fields and
+  // screen readers while it is open, besides the source line at the page's foot, which always is;
+  // a part no longer in the page is left out), fields and
   // buttons (its controls, in Tab order), and lock ("readonly" or "disabled": what a field
   // becomes while a request runs). Two optional functions serve a question whose controls
   // change while it is open (the Tours page's Sharing box): order() gives the controls to go
@@ -229,8 +230,9 @@ export const DASH_JS = `var Dash = (function () {
       });
     }
 
+    // What the page names, and always the source line at its foot (SOURCE_LINE_ID, src/source.ts).
     function setBehind(on) {
-      each(o.behind || [], function (e) {
+      each((o.behind || []).concat(["source-line"]), function (e) {
         if (on) {
           e.setAttribute("inert", "");
           e.setAttribute("aria-hidden", "true");

@@ -216,9 +216,9 @@ function account(more: Record<string, Answer | Answer[]> = {}, base: { session?:
 }
 
 const sessionRows = (tab: Tab) => tab.$("sessions").all().filter((e) => e.tagName === "li");
-/** Whether the bar and the page behind a dialog are inert and hidden from screen readers (both or neither). */
+/** Whether the bar, the page and the source line behind a dialog are inert and hidden from screen readers (both or neither). */
 const inert = (tab: Tab) =>
-  [tab.$("dash-top"), tab.$("account-page")].map((e) => {
+  [tab.$("dash-top"), tab.$("account-page"), tab.$("source-line")].map((e) => {
     expect(e.hasAttribute("inert"), `#${e.id}`).toBe(e.getAttribute("aria-hidden") === "true");
     return e.hasAttribute("inert");
   });
@@ -638,12 +638,12 @@ describe("changing the email address from the Account page", () => {
     await tab.settle();
     const change = tab.$("email-change");
     const dialog = tab.$("change-dialog");
-    expect(inert(tab)).toEqual([false, false]);
+    expect(inert(tab)).toEqual([false, false, false]);
     change.click();
     expect(dialog.shown).toBe(true);
     expect(tab.shows().slice(-5)).toEqual(["Change your email address", "New email address", HINT, "Cancel", "Send the link"]);
     expect(tab.doc.activeElement).toBe(tab.$("change-email"));
-    expect(inert(tab)).toEqual([true, true]);
+    expect(inert(tab)).toEqual([true, true, true]);
     // Tab and Shift+Tab go round the field and the two buttons, handled for the whole document.
     expect(tab.key("Tab")).toBe(true);
     expect(tab.doc.activeElement).toBe(tab.$("change-cancel"));
@@ -660,7 +660,7 @@ describe("changing the email address from the Account page", () => {
     tab.doc.activeElement = tab.doc.body;
     expect(tab.key("Escape")).toBe(true);
     expect(dialog.shown).toBe(false);
-    expect(inert(tab)).toEqual([false, false]);
+    expect(inert(tab)).toEqual([false, false, false]);
     expect(tab.doc.activeElement).toBe(change);
     // Closed, the page's keys are its own again.
     expect(tab.key("Tab")).toBe(false);
@@ -676,7 +676,7 @@ describe("changing the email address from the Account page", () => {
     expect(dialog.shown).toBe(true);
     dialog.click();
     expect([dialog.shown, tab.doc.activeElement]).toEqual([false, change]);
-    expect(inert(tab)).toEqual([false, false]);
+    expect(inert(tab)).toEqual([false, false, false]);
     expect(tab.fetched.filter((f) => f.method !== "GET")).toEqual([]);
   });
 
@@ -729,7 +729,7 @@ describe("changing the email address from the Account page", () => {
     // The second box names the address as the server stores it: trimmed and lower-case.
     expect(tab.shows().slice(-3)).toEqual(["Check new@example.com", "Open the link we sent there to finish. It works once and for 15 minutes. Until then you keep signing in with you@example.com.", "Done"]);
     expect(tab.doc.activeElement).toBe(tab.$("sent-done"));
-    expect(inert(tab)).toEqual([true, true]);
+    expect(inert(tab)).toEqual([true, true, true]);
     // Tab stays on Done.
     expect(tab.key("Tab")).toBe(true);
     expect(tab.doc.activeElement).toBe(tab.$("sent-done"));
@@ -738,7 +738,7 @@ describe("changing the email address from the Account page", () => {
     // Done closes it; nothing on the page has changed: the address changes only when the link is opened.
     tab.$("sent-done").click();
     expect([tab.$("sent-dialog").shown, tab.doc.activeElement]).toEqual([false, tab.$("email-change")]);
-    expect(inert(tab)).toEqual([false, false]);
+    expect(inert(tab)).toEqual([false, false, false]);
     expect(tab.$("account-email").textContent).toBe("you@example.com");
     expect([tab.$("change-send").textContent, tab.$("change-send").disabled, tab.$("change-email").disabled]).toEqual(["Send the link", false, false]);
     // Escape and the backdrop close the second box too.
@@ -792,7 +792,7 @@ describe("changing the email address from the Account page", () => {
       expect([tab.$("change-send").textContent, tab.$("change-send").disabled, tab.$("change-cancel").disabled, tab.$("change-email").disabled], what).toEqual(["Send the link", false, false, false]);
       expect(tab.$("change-email").getAttribute("aria-invalid"), what).toBe(field ? "true" : null);
       expect(tab.doc.activeElement?.id, what).toBe(field ? "change-email" : "change-send");
-      expect(inert(tab), what).toEqual([true, true]);
+      expect(inert(tab), what).toEqual([true, true, true]);
     }
     const out = account({ "POST /api/v1/account/email": SIGNED_OUT });
     await out.settle();

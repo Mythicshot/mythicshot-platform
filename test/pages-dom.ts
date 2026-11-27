@@ -4,6 +4,9 @@
 // text, a doctype and void elements. No page script, style or entity beyond the five
 // basic ones. It is not a browser: layout, focus rules and CSS are not modelled.
 
+import { SOURCE_URL_DEFAULT } from "../src/https-address.ts";
+import { SOURCE_LINE_ID, sourceFooterHtml } from "../src/source.ts";
+
 const VOID = new Set(["meta", "link", "input", "br", "img", "hr", "source"]);
 const ENTITIES: Record<string, string> = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" };
 
@@ -285,22 +288,69 @@ function parseInto(doc: FakeDocument, html: string): void {
   if (stack.length !== 1) throw new Error(`<${stack[stack.length - 1].tagName}> is never closed`);
 }
 
-/** The text of every text node under `el`, trimmed, with runs of white space as one space, empty ones left out. */
+/** The source address the next source line check expects (expectSourceUrl). */
+let expectedSourceUrl = SOURCE_URL_DEFAULT;
+
 /**
- * Whether `e` is in the source line at the foot of a page (footer class "source", src/source.ts):
- * the same on every page, pinned by test/source-link.test.ts, and left out of the checks of a
- * page's own words and links.
+ * Sets the address the source line of the documents checked from now on must link to: a test
+ * that serves its pages with a SOURCE_URL of its own sets it, and sets it back (no argument) when
+ * it is done. Without a call it is the default, SOURCE_URL_DEFAULT.
  */
-export function inSourceLine(e: FakeElement): boolean {
-  const footer = e.closest("footer");
-  return footer !== null && footer.className === "source";
+export function expectSourceUrl(url: string = SOURCE_URL_DEFAULT): void {
+  expectedSourceUrl = url;
 }
 
-/** The text nodes under `el`, in order, trimmed; the source line's are left out (inSourceLine). */
+const MARKUP_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+const escapeMarkup = (text: string) => text.replace(/[&<>"']/g, (ch) => MARKUP_ESCAPES[ch]);
+
+/** An element written back as markup, as it stands now: its attributes in order, its children, every text escaped. */
+export function markupOf(node: FakeElement | FakeText): string {
+  if (node instanceof FakeText) return escapeMarkup(node.text);
+  const attrs = [...node.attrs].map(([n, v]) => ` ${n}="${escapeMarkup(v)}"`).join("");
+  if (VOID.has(node.tagName)) return `<${node.tagName}${attrs}>`;
+  return `<${node.tagName}${attrs}>${node.children.map(markupOf).join("")}</${node.tagName}>`;
+}
+
+/**
+ * The source line of the document `el` is in (src/source.ts), or null when the document has
+ * none (a stand-in page a test built by hand). Strict: a document with more than one element of
+ * class "source", or a source line whose markup, as it stands now, is not exactly the footer for
+ * the expected address (expectSourceUrl), throws. So nothing else can hide in it: a second link,
+ * a name, a node a script put there. The one change allowed is the one a dashboard question
+ * makes while it is open: `inert` and `aria-hidden="true"` on the footer, after its own
+ * attributes (Dash.question, src/dash/script.ts). The helpers below leave only that line out.
+ */
+export function sourceLineOf(el: FakeElement): FakeElement | null {
+  const found = el.doc.root.all().filter((e) => e.className.split(/\s+/).includes("source"));
+  if (found.length === 0) return null;
+  if (found.length > 1) throw new Error(`a page holds the source line once, not ${found.length} times`);
+  const want = sourceFooterHtml(expectedSourceUrl);
+  const behindQuestion = want.replace(`id="${SOURCE_LINE_ID}">`, `id="${SOURCE_LINE_ID}" inert="" aria-hidden="true">`);
+  const got = markupOf(found[0]);
+  if (got !== want && got !== behindQuestion) throw new Error(`the source line is not the expected one: ${got}`);
+  return found[0];
+}
+
+/**
+ * Whether `e` is in the source line at the foot of a page (sourceLineOf, which throws for a line
+ * that is not exactly the expected one): the same on every page, pinned by
+ * test/source-link.test.ts, and left out of the checks of a page's own words and links.
+ */
+export function inSourceLine(e: FakeElement): boolean {
+  const footer = sourceLineOf(e);
+  return footer !== null && footer.contains(e);
+}
+
+/**
+ * The text of every text node under `el`, trimmed, with runs of white space as one space, empty
+ * ones left out. The source line is left out (sourceLineOf, which throws for a line that is not
+ * exactly the expected one).
+ */
 export function textNodes(el: FakeElement, filter: (parent: FakeElement) => boolean = () => true): string[] {
   const out: string[] = [];
+  const footer = sourceLineOf(el);
   const walk = (node: FakeElement) => {
-    if (inSourceLine(node)) return;
+    if (node === footer) return;
     for (const c of node.children) {
       if (c instanceof FakeText) {
         const t = c.text.replace(/\s+/g, " ").trim();
@@ -324,15 +374,17 @@ function seenText(el: FakeElement): string {
 
 /**
  * What a person sees in the body now: the text of every shown element, block by block, as one
- * line each. The source line at the foot of the page (footer class "source", src/source.ts) is
- * left out: it is the same on every page, and test/source-link.test.ts pins it.
+ * line each. The source line at the foot of the page (src/source.ts) is left out: it is the same
+ * on every page, and test/source-link.test.ts pins it. sourceLineOf throws for a line that is not
+ * exactly the expected one.
  */
 export function visibleText(doc: FakeDocument): string[] {
   const BLOCKS = new Set(["p", "h1", "h2", "label", "button", "li"]);
   const out: string[] = [];
+  const footer = sourceLineOf(doc.root);
   for (const el of doc.body.all()) {
     if (!el.shown || !BLOCKS.has(el.tagName)) continue;
-    if (inSourceLine(el)) continue;
+    if (footer !== null && footer.contains(el)) continue;
     // A row of a list: its parts in order, a button in it left to its own line.
     const t = el.tagName === "li" ? textNodes(el, (p) => p.closest("button") === null).join(" | ") : seenText(el).replace(/\s+/g, " ").trim();
     if (t !== "") out.push(t);
