@@ -223,7 +223,7 @@ SKIP_IMG_CHECK=0  # 1 when status found that the Caddyfile does not answer for I
 ACME_EMAIL=""
 DATA_DIR=""   # the resolved path as the host sees it, without DP_ROOT; stored in .env
 DATA_PATH=""  # "$DP_ROOT$DATA_DIR", the path this script works on
-FILES_ON_R2=0 # 1 when .env's FILE_STORE is anything but empty or disk: the files may be in two R2 buckets, not in the data folder
+FILES_STATE=disk # from .env's FILE_STORE: disk, r2, or unsure (anything else, or more than one line)
 IMAGE=""
 FIRST_RUN=0
 CODE_GENERATED=0
@@ -989,7 +989,34 @@ read_env_file() {
   TOKEN=""
   APP_DOMAIN=""
   IMG_HOST=""
+  local fs_key fs_value fs_lines=0
+  FILES_STATE=disk
   while IFS= read -r line || [ -n "$line" ]; do
+    # FILE_STORE, only for what backup and status say, and never printed, read as Compose reads a
+    # line of .env as this script's author understands Compose's documented rules (not checked
+    # here against Compose itself): spaces before the name, an `export ` before it and spaces
+    # around the = are allowed; a quoted value is taken inside its quotes; an unquoted value ends
+    # at a # that follows a space, and is trimmed. Anything but plainly disk or r2 is unsure.
+    fs_key="${line%$'\r'}"
+    fs_key="${fs_key#"${fs_key%%[![:space:]]*}"}"
+    case "$fs_key" in export[[:space:]]*) fs_key="${fs_key#export}"; fs_key="${fs_key#"${fs_key%%[![:space:]]*}"}" ;; esac
+    case "$fs_key" in
+      FILE_STORE=* | FILE_STORE[[:space:]]*=*)
+        fs_lines=$((fs_lines + 1))
+        fs_value="${fs_key#*=}"
+        fs_value="${fs_value#"${fs_value%%[![:space:]]*}"}"
+        case "$fs_value" in
+          \"*) fs_value="${fs_value#\"}"; fs_value="${fs_value%%\"*}" ;;
+          \'*) fs_value="${fs_value#\'}"; fs_value="${fs_value%%\'*}" ;;
+          *) fs_value="${fs_value%%[[:space:]]#*}"; fs_value="${fs_value%"${fs_value##*[![:space:]]}"}" ;;
+        esac
+        case "$fs_value" in
+          "" | [Dd][Ii][Ss][Kk]) FILES_STATE=disk ;;
+          [Rr]2) FILES_STATE=r2 ;;
+          *) FILES_STATE=unsure ;;
+        esac
+        ;;
+    esac
     case "$line" in "" | "#"*) continue ;; esac
     key="${line%%=*}"
     value="${line#*=}"
@@ -1004,18 +1031,10 @@ read_env_file() {
       DEPLOY_MODE) mode="$value" ;;
       TUNNEL_TOKEN) TOKEN="$value" ;;
       TOURS_HOST | APP_HOST) host_lines=1 ;;
-      # Only whether it may say r2, for what backup and status say; never printed. The value is
-      # trimmed, a CR and one pair of quotes dropped; anything but empty or disk counts, as for
-      # cpanel.sh's "other": a value the app does not start with may still mean the files are on R2.
-      FILE_STORE)
-        value="${value%$'\r'}"
-        value="${value#"${value%%[![:space:]]*}"}"
-        value="${value%"${value##*[![:space:]]}"}"
-        case "$value" in \"*\") value="${value#\"}"; value="${value%\"}" ;; \'*\') value="${value#\'}"; value="${value%\'}" ;; esac
-        case "$value" in "" | [Dd][Ii][Ss][Kk]) FILES_ON_R2=0 ;; *) FILES_ON_R2=1 ;; esac
-        ;;
     esac
   done <"$ENV_FILE"
+  # Two FILE_STORE lines: which one counts is not this script's to guess.
+  [ "$fs_lines" -le 1 ] || FILES_STATE=unsure
   # The app's own two settings: the stack file sets both from DOMAIN and APP_DOMAIN, so
   # a line for either in .env changes nothing. Said once, without the values.
   if [ "$host_lines" = 1 ]; then
@@ -1966,11 +1985,13 @@ do_backup() {
   run "${DC[@]}" exec -T app node dist/node/backup.js "/data/$copy" \
     || die "the database copy failed; is the platform running? Check with: sudo bash $SELF status"
   members=("$copy")
-  if [ "$FILES_ON_R2" = 1 ]; then
+  if [ "$FILES_STATE" = r2 ]; then
     # The folders are not the site's files then: left out, and said.
-    info "the files may be on R2 (.env's FILE_STORE is not disk), so they are not part of this backup: it holds the database only. Keep a copy of the two buckets yourself."
+    info "the files are on R2 (FILE_STORE=r2 in .env), so they are not part of this backup: it holds the database only. Keep a copy of the two buckets yourself."
     say "Writing $archive (mode 600): the database copy"
   else
+    # Unsure: the folders go in all the same, as cpanel.sh's "other" does: a backup holds more, never less.
+    [ "$FILES_STATE" != unsure ] || info "the files may be on R2 (.env's FILE_STORE is not plainly disk or r2): this backup holds the drafts and public folders all the same, but files on R2 are not part of it."
     [ ! -d "$DATA_PATH/drafts" ] || members+=(drafts)
     [ ! -d "$DATA_PATH/public" ] || members+=(public)
     say "Writing $archive (mode 600): the database copy and the drafts and public folders"
@@ -2087,7 +2108,10 @@ cmd_status() {
   fi
   say "Data folder"
   if [ -d "$DATA_PATH" ]; then du -sh -- "$DATA_PATH" || true; else warn "$DATA_DIR is missing"; fi
-  [ "$FILES_ON_R2" = 0 ] || info "files: on R2 (.env's FILE_STORE is not disk), not in the data folder; a backup does not hold them"
+  case "$FILES_STATE" in
+    r2) info "files: on R2 (FILE_STORE=r2 in .env), not in the data folder; a backup does not hold them" ;;
+    unsure) info "files: may be on R2 (.env's FILE_STORE is not plainly disk or r2); a backup holds the data folder's drafts and public folders all the same" ;;
+  esac
   info "address: https://$DOMAIN"
   if [ -n "$APP_DOMAIN" ]; then
     info "app address: https://$APP_DOMAIN (the address above is the address of the tours)"

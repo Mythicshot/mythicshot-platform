@@ -302,9 +302,34 @@ describe("install.sh and the file settings (0.1.71)", () => {
     expect(tests).toContain(`>>"$STUB_STATE/up-file-store"`);
   });
 
-  it("reads FILE_STORE as cpanel.sh does: trimmed, a CR and one pair of quotes dropped, anything but empty or disk meaning the files may be on R2", () => {
+  it("reads FILE_STORE as Compose reads .env (an export, spaces, quotes, an inline comment), and when unsure keeps the folders in the backup", async () => {
     const sh = read("../deploy/install.sh");
-    expect(sh).toContain(String.raw`value="${"$"}{value%$'\r'}"`);
-    expect(sh).toContain(`case "$value" in "" | [Dd][Ii][Ss][Kk]) FILES_ON_R2=0 ;; *) FILES_ON_R2=1 ;; esac`);
+    expect(sh).toContain("case \"$fs_key\" in export[[:space:]]*)");
+    expect(sh).toContain("      FILE_STORE=* | FILE_STORE[[:space:]]*=*)");
+    expect(sh).toContain("[ \"$fs_lines\" -le 1 ] || FILES_STATE=unsure");
+    expect(sh).toContain("[ \"$FILES_STATE\" != unsure ] || info \"the files may be on R2 (.env's FILE_STORE is not plainly disk or r2): this backup holds the drafts and public folders all the same, but files on R2 are not part of it.\"");
+    // The parsing itself, run with this computer's Bash where there is one (deploy/test-install.sh, which needs Docker's stand-ins, is not run here).
+    const { spawnSync } = await import("node:child_process");
+    const lines = sh.split("\n");
+    const from = lines.findIndex((l) => l === "  local fs_key fs_value fs_lines=0");
+    const to = lines.findIndex((l, i) => i > from && l === '    case "$line" in "" | "#"*) continue ;; esac');
+    expect(from).toBeGreaterThan(0);
+    expect(to).toBeGreaterThan(from);
+    const script = ["parse() {", ...lines.slice(from, to), '  done <"$1"; [ "$fs_lines" -le 1 ] || FILES_STATE=unsure; printf "%s" "$FILES_STATE"; }', 'parse "$1"'].join("\n");
+    const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+    if (spawnSync(bash, ["-c", "echo ok"], { encoding: "utf8", windowsHide: true }).stdout?.trim() !== "ok") return;
+    const dir = mkdtempSync(join(tmpdir(), "dp-env-parse-"));
+    const cases: [string, string][] = [
+      ["FILE_STORE=r2", "r2"], ["FILE_STORE='r2'", "r2"], ['FILE_STORE="R2"', "r2"], ["FILE_STORE=r2\r", "r2"], ["export FILE_STORE=r2", "r2"], ["  FILE_STORE=r2", "r2"],
+      ["FILE_STORE = r2", "r2"], ["FILE_STORE=r2 # moved to R2", "r2"], ["FILE_STORE=disk", "disk"], ["FILE_STORE=", "disk"], ["# FILE_STORE=r2", "disk"],
+      ["FILE_STORE=bucket", "unsure"], ["FILE_STORE=r2 r2", "unsure"], ["FILE_STORE=r2\nFILE_STORE=disk", "unsure"],
+    ];
+    for (const [text, want] of cases) {
+      const { writeFileSync } = await import("node:fs");
+      writeFileSync(join(dir, "env"), `${text}\n`);
+      writeFileSync(join(dir, "parse.sh"), script);
+      const r = spawnSync(bash, [join(dir, "parse.sh"), join(dir, "env")], { encoding: "utf8", windowsHide: true });
+      expect(r.stdout, JSON.stringify(text)).toBe(want);
+    }
   });
 });

@@ -3145,23 +3145,45 @@ test_file_settings_in_the_environment_do_not_reach_the_stack() {
   expect "no value from the environment appears anywhere" test "$(cat "$OUT" "$ERR" "$LOG" | grep -c 'made-up-shell')" = 0
 }
 
-# FILE_STORE in .env, read as cpanel.sh reads it: trimmed, a CR and one pair of quotes dropped,
-# and anything but empty or disk counts as "the files may be on R2" for backup and status.
+# FILE_STORE in .env, read as Compose reads it (as understood here): an export, spaces around
+# the name and the =, quotes, an inline comment. Plainly r2: status says the files are on R2 and
+# a backup leaves the folders out; anything not plainly disk or r2, or two lines: unsure, said,
+# and the folders stay in the backup.
 test_backup_and_status_say_when_the_files_may_be_on_r2() {
-  local line
-  for line in 'FILE_STORE=r2' "FILE_STORE='r2'" $'FILE_STORE=r2\r' 'FILE_STORE= R2 ' 'FILE_STORE=bucket'; do
+  local line want
+  while IFS='|' read -r line want; do
+    [ -n "$line" ] || continue
     new_sandbox
     STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes
     expect "install succeeds" test "$RC" = 0
-    printf '%s\n' "$line" >>"$INST/.env"
+    # shellcheck disable=SC2059 # the table's formats are the test's own
+    printf "$line\n" >>"$INST/.env"
     install_sh "" status
-    expect "$line: status says so" has "$OUT" "files: on R2 (.env's FILE_STORE is not disk), not in the data folder; a backup does not hold them"
-  done
-  new_sandbox
-  STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes
-  printf 'FILE_STORE=disk\n' >>"$INST/.env"
-  install_sh "" status
-  expect "disk: status says nothing of R2" hasnt "$OUT" "files: on R2"
+    case "$want" in
+      r2) expect "$line: status says r2" has "$OUT" "files: on R2 (FILE_STORE=r2 in .env), not in the data folder; a backup does not hold them" ;;
+      unsure) expect "$line: status says unsure" has "$OUT" "files: may be on R2 (.env's FILE_STORE is not plainly disk or r2); a backup holds the data folder's drafts and public folders all the same" ;;
+      disk) expect "$line: status says nothing of R2" hasnt "$OUT" "files: " ;;
+    esac
+    install_sh "" backup
+    case "$want" in
+      r2) expect "$line: the backup leaves the folders out" has "$OUT" "the database copy$" ;;
+      *) expect "$line: the backup keeps the folders" has "$OUT" "the database copy and the drafts and public folders" ;;
+    esac
+  done <<'CASES'
+FILE_STORE=r2|r2
+FILE_STORE='r2'|r2
+FILE_STORE="R2"|r2
+FILE_STORE=r2\r|r2
+export FILE_STORE=r2|r2
+  FILE_STORE=r2|r2
+FILE_STORE = r2|r2
+FILE_STORE=r2 # moved to R2|r2
+FILE_STORE=disk|disk
+FILE_STORE=|disk
+FILE_STORE=bucket|unsure
+FILE_STORE=r2 r2|unsure
+FILE_STORE=r2\nFILE_STORE=disk|unsure
+CASES
 }
 
 # The sentence a run stops with when Compose gives the app another IMG_HOST than the
