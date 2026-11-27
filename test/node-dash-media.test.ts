@@ -323,6 +323,9 @@ describe("the Images page", () => {
       "morgan",
       "Images",
       "3 images in Cowfee Raid Tools · 2.1 MB used",
+      // The bar's place, kept while nothing is selected: invisible and inert (the test document has no stylesheet; see "selecting items").
+      "Clear",
+      "Delete selected",
       "Select all 3 shown",
       "Copy link",
       "More",
@@ -848,9 +851,22 @@ const picked = (tab: Tab) => ({
   header: tab.$("media-all-text").textContent,
   checked: tab.$("media-all").checked,
   mixed: tab.$("media-all").indeterminate,
-  bar: tab.$("pick-bar").shown ? tab.$("pick-count").textContent : null,
+  bar: barState(tab) === "active" ? tab.$("pick-count").textContent : null,
   said: tab.$("pick-said").textContent,
 });
+/**
+ * The bar: "active" (seen and usable), "idle" (in the layout, keeping its place above the list, but
+ * invisible through the stylesheet's .pick-bar.idle, inert and unread), or "gone" (not in the layout:
+ * there is no list). Anything else fails the test.
+ */
+function barState(tab: Tab): "active" | "idle" | "gone" {
+  const bar = tab.$("pick-bar");
+  const state = [bar.hidden, bar.className, bar.getAttribute("inert"), bar.getAttribute("aria-hidden")];
+  if (JSON.stringify(state) === JSON.stringify([false, "pick-bar", null, null])) return "active";
+  if (JSON.stringify(state) === JSON.stringify([false, "pick-bar idle", "", "true"])) return "idle";
+  if (bar.hidden && bar.className === "pick-bar idle") return "gone";
+  throw new Error(`the bar is in no known state: ${JSON.stringify(state)}`);
+}
 const titled = (tab: Tab) => rows(tab).map((row) => titleOf(row).textContent);
 /** Runs every pause the script set, until nothing more happens. */
 async function drain(tab: Tab): Promise<void> {
@@ -917,6 +933,39 @@ describe("selecting items", () => {
     await again.settle();
     expect(picks(again)).toEqual([false, false, false, false, false]);
     expect(picked(again).bar).toBeNull();
+  });
+
+  it("keeps the bar's place above the list whatever is selected, so a tick never moves the rows", async () => {
+    const tab = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: list(FIVE) }));
+    await tab.settle();
+    const bar = tab.$("pick-bar");
+    const section = tab.$("media");
+    // The section's blocks in order, each with whether it is out of the layout: the same however much is selected.
+    const layout = () => JSON.stringify(section.children.filter((c): c is FakeElement => c instanceof FakeElement).map((e) => [e.id, e.hidden]));
+    const before = layout();
+    expect(barState(tab)).toBe("idle");
+    // Idle: kept in the layout (no hidden), not seen (the stylesheet's .pick-bar.idle is visibility: hidden, which keeps its size), inert and unread.
+    expect([bar.hidden, bar.getAttribute("inert"), bar.getAttribute("aria-hidden")]).toEqual([false, "", "true"]);
+    select(tab, 1);
+    expect(barState(tab)).toBe("active");
+    expect(layout()).toBe(before);
+    expect(tab.$("pick-bar")).toBe(bar);
+    select(tab, 3);
+    expect(layout()).toBe(before);
+    tab.$("pick-clear").click();
+    expect(barState(tab)).toBe("idle");
+    expect(layout()).toBe(before);
+    tab.$("media-all").click();
+    expect(layout()).toBe(before);
+    tab.$("media-all").click();
+    expect([barState(tab), layout()]).toEqual(["idle", before]);
+    // Its Delete selected does nothing while it is idle (it is inert in a browser; here it is pressed anyway).
+    tab.$("pick-delete").click();
+    expect(tab.$("bulk-dialog").hidden).toBe(true);
+    // An empty list has no bar at all, and no space for one.
+    const none = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: list([]) }));
+    await none.settle();
+    expect(barState(none)).toBe("gone");
   });
 
   it("Select all selects only the items shown; Show more adds items unselected and the header's count and state follow", async () => {
@@ -1071,6 +1120,7 @@ describe("deleting the selected items", () => {
     expect(deletes(tab)).toHaveLength(1);
     const progress = tab.$("bulk-progress");
     expect([progress.textContent, progress.hidden, progress.getAttribute("role"), progress.getAttribute("aria-live")]).toEqual(["Deleting 1 of 3…", false, "status", "polite"]);
+    expect(progress.shown).toBe(true);
     expect([go.textContent, go.disabled, go.getAttribute("aria-busy"), tab.$("bulk-keep").disabled]).toEqual(["Deleting…", true, "true", true]);
     // Escape, the backdrop and the page behind do nothing meanwhile.
     key(tab.doc.body, "Escape");
@@ -1106,18 +1156,19 @@ describe("deleting the selected items", () => {
     // The next question starts without the last run's progress.
     select(tab, 0);
     tab.$("pick-delete").click();
-    expect([progress.hidden, progress.textContent]).toEqual([true, ""]);
+    // Already in the open question, empty, so the first progress is announced as it is set.
+    expect([progress.shown, progress.textContent]).toEqual([true, ""]);
   });
 
   it("stops at the first refusal or failure that lasts, on the first or a later item; the rest stay listed and selected, with the sentence", async () => {
     const STILL = (it: Record<string, unknown>): Answer => ({ status: 200, json: { ...it, state: "online" } });
     const cases: { name: string; table: Record<string, Answer | Answer[]>; sent: string[]; after: unknown[]; text: string }[] = [
-      { name: "403 on the first", table: { [DELETE(M1)]: { status: 403, json: { error: "read_only" } } }, sent: [M1], after: FIVE.slice(0, 3), text: `0 of 3 images deleted. The rest are still here. ${FAILED}` },
+      { name: "403 on the first", table: { [DELETE(M1)]: { status: 403, json: { error: "read_only" } } }, sent: [M1], after: FIVE.slice(0, 3), text: `No images were deleted. ${FAILED}` },
       { name: "403 on the third", table: { [DELETE(M1)]: { status: 204 }, [DELETE(M2)]: { status: 204 }, [DELETE(M3)]: { status: 403, json: { error: "read_only" } } }, sent: [M1, M2, M3], after: [FIVE[2]], text: `2 of 3 images deleted. The rest are still here. ${FAILED}` },
       { name: "500 on the second", table: { [DELETE(M1)]: { status: 204 }, [DELETE(M2)]: { status: 500, json: { error: "internal" } } }, sent: [M1, M2], after: FIVE.slice(1, 3), text: `1 of 3 images deleted. The rest are still here. ${FAILED}` },
       { name: "429 on the second", table: { [DELETE(M1)]: { status: 204 }, [DELETE(M2)]: { status: 429, json: { error: "rate_limited" } } }, sent: [M1, M2], after: FIVE.slice(1, 3), text: `1 of 3 images deleted. The rest are still here. ${TOO_MANY}` },
       { name: "network, the item still there", table: { [DELETE(M1)]: { status: 204 }, [DELETE(M2)]: "network", [`GET /api/v1/media/${M2}`]: STILL(FIVE[1]) }, sent: [M1, M2], after: FIVE.slice(1, 3), text: `1 of 3 images deleted. The rest are still here. ${FAILED}` },
-      { name: "network, the item not answering", table: { [DELETE(M1)]: "network", [`GET /api/v1/media/${M1}`]: "network" }, sent: [M1], after: FIVE.slice(0, 3), text: `0 of 3 images deleted. The rest are still here. ${FAILED}` },
+      { name: "network, the item not answering", table: { [DELETE(M1)]: "network", [`GET /api/v1/media/${M1}`]: "network" }, sent: [M1], after: FIVE.slice(0, 3), text: `No images were deleted. ${FAILED}` },
     ];
     for (const c of cases) {
       const tab = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: [list(FIVE), list([...c.after, ...FIVE.slice(3)])], ...c.table }));
@@ -1178,15 +1229,119 @@ describe("deleting the selected items", () => {
     expect(titled(tab)).toHaveLength(4);
     expect(picks(tab)).toEqual([false, false, false, false]);
     expect(picked(tab)).toEqual({ header: "Select all 4 shown", checked: false, mixed: false, bar: null, said: "" });
-    // A failed delete in More is read again too, and clears it as well.
+    // A failed delete in More is read again too, but leaves the selection the person made.
     const failed = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: list(FIVE), [DELETE(M1)]: { status: 500, json: { error: "internal" } } }));
     await failed.settle();
-    select(failed, 1);
+    select(failed, 1, 4);
     pressDelete(rows(failed)[0]);
     failed.$("delete-go").click();
     await failed.settle();
     expect(failed.$("delete-message").textContent).toBe(FAILED);
-    expect(picked(failed).bar).toBeNull();
+    expect(lists(failed)).toHaveLength(2);
+    expect(picks(failed)).toEqual([false, true, false, false, true]);
+    expect(picked(failed).bar).toBe("2 selected");
+    // A delete that worked but whose list cannot be read again leaves it too: the page cannot show what is true yet.
+    const unread = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: [list(FIVE), { status: 500, json: { error: "internal" } }], [DELETE(M1)]: { status: 204 } }));
+    await unread.settle();
+    select(unread, 2);
+    pressDelete(rows(unread)[0]);
+    unread.$("delete-go").click();
+    await unread.settle();
+    expect(unread.$("media-message").textContent).toBe(NOT_RELOADED);
+    expect(picked(unread).bar).toBe("1 selected");
+  });
+
+  it("says plainly when nothing was deleted: one item, several, on both pages; and claims no change when the server stopped answering before the first delete", async () => {
+    const refusal: Answer = { status: 500, json: { error: "internal" } };
+    for (const [which, at, text] of [
+      ["images", [0], `The image was not deleted. ${FAILED}`],
+      ["images", [0, 1, 2], `No images were deleted. ${FAILED}`],
+      ["gifs", [1], `The GIF was not deleted. ${FAILED}`],
+      ["gifs", [0, 2], `No GIFs were deleted. ${FAILED}`],
+    ] as const) {
+      const items = which === "images" ? MOCKUP_IMAGES : MOCKUP_GIFS;
+      const tab = openPage(which, standard(which, { [`GET ${which === "images" ? IMAGES_LIST : GIFS_LIST}`]: list(items), [DELETE(items[at[0]].id as string)]: refusal }));
+      await tab.settle();
+      select(tab, ...at);
+      tab.$("pick-delete").click();
+      tab.$("bulk-go").click();
+      await drain(tab);
+      expect(deletes(tab), text).toHaveLength(1);
+      expect([tab.$("media-message").textContent, tab.$("media-message").className], text).toEqual([text, "message"]);
+      expect(picked(tab).bar, text).toBe(`${at.length} selected`);
+    }
+    // The server stops answering before the first delete: the delete gets no answer, nor does the item, nor the list read again.
+    for (const at of [[0, 1, 2], [1]]) {
+      const tab = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: [list(FIVE), "network"], [DELETE(FIVE[at[0]].id)]: "network", [`GET /api/v1/media/${FIVE[at[0]].id}`]: "network" }));
+      await tab.settle();
+      select(tab, ...at);
+      tab.$("pick-delete").click();
+      tab.$("bulk-go").click();
+      await drain(tab);
+      const said = tab.$("media-message").textContent;
+      expect(said).toBe(at.length === 1 ? `The image was not deleted. ${FAILED}` : `No images were deleted. ${FAILED}`);
+      expect(said).not.toContain("The change was made");
+      // The list as last shown, which is what is true: nothing went, and the selection stands.
+      expect(rows(tab)).toHaveLength(5);
+      expect(picked(tab).bar).toBe(`${at.length} selected`);
+    }
+  });
+
+  it("counts only the route's own 404 not_found as gone: any other 404 stops the run, and fails the single delete", async () => {
+    for (const other of [{ status: 404, json: { error: "gone" } }, { status: 404, json: null }, { status: 404 }] as Answer[]) {
+      const what = JSON.stringify(other);
+      const tab = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: [list(FIVE), list(FIVE.slice(1))], [DELETE(M1)]: { status: 204 }, [DELETE(M2)]: other }));
+      await tab.settle();
+      select(tab, 0, 1, 2);
+      tab.$("pick-delete").click();
+      tab.$("bulk-go").click();
+      await drain(tab);
+      expect(deletes(tab).map((f) => f.path.slice("/api/v1/media/".length)), what).toEqual([M1, M2]);
+      expect(tab.$("media-message").textContent, what).toBe(`1 of 3 images deleted. The rest are still here. ${FAILED}`);
+      expect(picks(tab), what).toEqual([true, true, false, false]);
+
+      // The single delete: the question stays open with the failure, and the list is read again.
+      const one = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: list(FIVE), [DELETE(M1)]: other }));
+      await one.settle();
+      pressDelete(rows(one)[0]);
+      one.$("delete-go").click();
+      await one.settle();
+      expect([one.$("delete-dialog").hidden, one.$("delete-message").textContent], what).toEqual([false, FAILED]);
+      expect(lists(one), what).toHaveLength(2);
+      expect(one.doc.activeElement, what).toBe(one.$("delete-go"));
+    }
+    // The route's own not_found is still an item already gone.
+    const gone = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: [list(FIVE), list(FIVE.slice(1))], [DELETE(M1)]: NOT_FOUND_ANSWER }));
+    await gone.settle();
+    pressDelete(rows(gone)[0]);
+    gone.$("delete-go").click();
+    await gone.settle();
+    expect(gone.$("delete-dialog").hidden).toBe(true);
+    expect(rows(gone)).toHaveLength(4);
+  });
+
+  it("lists an id once when the list repeats it, on the first page and after Show more, and deletes it once", async () => {
+    const CURSOR = "MTc2MzU1MzYwMDAwMC5tZWRfMjIy";
+    const tab = openPage("images", standard("images", {
+      [`GET ${IMAGES_LIST}`]: [list([FIVE[0], FIVE[1], { ...FIVE[0], title: "Same id again" }], CURSOR), list([])],
+      [`GET ${IMAGES_LIST}&cursor=${CURSOR}`]: list([FIVE[1], FIVE[2], FIVE[2]]),
+      [DELETE(M1)]: { status: 204 },
+      [DELETE(M2)]: { status: 204 },
+      [DELETE(M3)]: { status: 204 },
+    }));
+    await tab.settle();
+    expect(titled(tab)).toEqual(["Loot window, settings tab", "Timeline, boss two"]);
+    expect(picked(tab).header).toBe("Select all 2 shown");
+    tab.$("media-more").click();
+    await tab.settle();
+    expect(titled(tab)).toEqual(["Loot window, settings tab", "Timeline, boss two", "Untitled image"]);
+    tab.$("media-all").click();
+    expect(picked(tab)).toEqual({ header: "Select all 3 shown", checked: true, mixed: false, bar: "3 selected", said: "3 selected" });
+    tab.$("pick-delete").click();
+    expect(tab.$("bulk-title").textContent).toBe("Delete 3 images?");
+    tab.$("bulk-go").click();
+    await drain(tab);
+    expect(deletes(tab).map((f) => f.path.slice("/api/v1/media/".length))).toEqual([M1, M2, M3]);
   });
 
   it("sends only ids of the workspace's own list: an id written into the page's checkbox is never sent, and an item whose id is not the API's has no checkbox", async () => {
@@ -1471,9 +1626,10 @@ describe("the Images and GIFs pages against the real app", () => {
 
 // ---- Static samples for a person to look at ----
 //
-// With MULTI_DELETE_SAMPLES=1 in the environment, this writes two static copies of the Images
+// With MULTI_DELETE_SAMPLES=1 in the environment, this writes three static copies of the Images
 // page as its script left it, in the light colours, into <temp>/demo-platform-multi-delete-samples/:
-// three of five images selected, and the question for those three open. The stylesheet, the
+// three of five images selected, the question for those three open, and nothing selected
+// (the bar's place kept, invisible). The stylesheet, the
 // mark, the wordmark and the font are beside them. The page's own scripts are left out; one line
 // of script sets the header's mixed state, which no attribute can say. Without it nothing is written.
 describe("static samples of selecting and deleting several", () => {
@@ -1522,6 +1678,11 @@ describe("static samples of selecting and deleting several", () => {
     asking.$("pick-delete").click();
     expect(asking.$("bulk-title").textContent).toBe("Delete 3 images?");
     write(asking, "sample-images-question.html");
-    console.log(`samples: ${join(out, "sample-images-selected.html")} and ${join(out, "sample-images-question.html")}`);
+    // Nothing selected: the bar's place is kept, invisible, so the rows sit where they do with three selected.
+    const idle = openPage("images", standard("images", { [`GET ${IMAGES_LIST}`]: list(shown) }));
+    await idle.settle();
+    expect(picked(idle).bar).toBeNull();
+    write(idle, "sample-images-none.html");
+    console.log(`samples: ${["sample-images-selected.html", "sample-images-question.html", "sample-images-none.html"].map((n) => join(out, n)).join(", ")}`);
   });
 });

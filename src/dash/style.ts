@@ -210,11 +210,17 @@ h1 { font-size: 20px; line-height: 28px; font-weight: 700; margin: 0 0 4px; }
 .thumb.play::after { content: ""; position: absolute; left: 50%; top: 50%; transform: translate(-35%, -50%); border-left: 10px solid var(--text-muted); border-top: 6px solid transparent; border-bottom: 6px solid transparent; filter: drop-shadow(0 0 1px var(--surface)); }
 /* Selecting items: a checkbox at the start of each row, the one above the table, and the bar while something is selected. */
 .media .pick-cell { width: 34px; }
+/* The head's checkbox column is an empty cell beside the headers: their padding, and no line of its own. */
+.media thead td { padding: 0 10px 8px 0; border-top: 0; }
 .pick { display: block; flex: 0 0 auto; width: 18px; height: 18px; margin: 0; accent-color: var(--primary); cursor: pointer; }
 .pick:disabled { cursor: not-allowed; }
 .pick-all { display: inline-flex; align-items: center; gap: 16px; min-height: var(--control-dense); margin: 0 0 4px; font-size: 14px; font-weight: 600; cursor: pointer; }
 .pick-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 12px; padding: 10px 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface); }
-.pick-count { flex: 1 1 auto; font-weight: 600; }
+.pick-count { flex: 1 1 auto; min-width: 6em; font-weight: 600; }
+/* While nothing is selected the bar keeps its place, so the rows never move, but is not seen (the page also makes it inert); the count keeps its room, so the buttons wrap alike with and without it. */
+.pick-bar.idle { visibility: hidden; }
+/* The question's progress line is in it from the start, empty, so its first words are announced. */
+#bulk-progress:empty { margin: 0; }
 .message.plain { color: var(--text); }
 @media (max-width: 720px) {
   .media, .media tbody { display: block; }

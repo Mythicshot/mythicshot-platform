@@ -58,7 +58,9 @@
 // behind Show more, which arrive unselected. While something is selected a bar above the list
 // says how many, with Clear and Delete selected; the count is also said politely in a line of
 // its own. The selection is kept only in this script, by the ids of the list's own items, and
-// is cleared by Clear, by a reload, and when the list is read again after a delete in More.
+// is cleared by Clear, by a reload, and when the list is read again after a delete in More
+// that worked. The bar keeps its place while the list is shown (invisible and inert while
+// nothing is selected), so ticking a row never moves the rows.
 // Delete selected asks first (Dash.question, its own box), with no title in its heading, then
 // deletes the items one after another through the same DELETE /api/v1/media/<id>, each as a
 // delete in More is decided (deleteOne); the first one refused, or failed for good, stops the
@@ -170,7 +172,7 @@ const IMAGES: MediaPage = {
   gate: "Opening a restricted image asks you for your email address too: the dashboard's sign-in does not carry over to the image's address.",
   deleteButton: "Delete image",
   sharing: itemSharing("image"),
-  text: { oneItem: "1 image", items: " images", untitled: "Untitled image", ...SHARED_TEXT },
+  text: { oneItem: "1 image", items: " images", untitled: "Untitled image", oneNot: "The image was not deleted.", noneDeleted: "No images were deleted.", ...SHARED_TEXT },
 };
 
 const GIFS: MediaPage = {
@@ -187,7 +189,7 @@ const GIFS: MediaPage = {
   gate: "Opening a restricted clip asks you for your email address too: the dashboard's sign-in does not carry over to the clip's address.",
   deleteButton: "Delete GIF",
   sharing: itemSharing("clip"),
-  text: { oneItem: "1 GIF", items: " GIFs", untitled: "Untitled GIF", ...SHARED_TEXT },
+  text: { oneItem: "1 GIF", items: " GIFs", untitled: "Untitled GIF", oneNot: "The GIF was not deleted.", noneDeleted: "No GIFs were deleted.", ...SHARED_TEXT },
 };
 
 /** The page's body: fixed text only. */
@@ -198,7 +200,7 @@ function mediaMain(p: MediaPage): string {
     <p class="sub"><span id="media-count"></span><span class="wide-only" id="media-in"></span><span id="media-used"></span></p>
     <p class="message" id="media-message" role="status" aria-live="polite" hidden></p>
     <p class="vh" id="pick-said" role="status" aria-live="polite"></p>
-    <div class="pick-bar" id="pick-bar" hidden>
+    <div class="pick-bar idle" id="pick-bar" inert aria-hidden="true" hidden>
       <span class="pick-count" id="pick-count" aria-hidden="true"></span>
       <button type="button" class="btn quiet" id="pick-clear">Clear</button>
       <button type="button" class="btn danger" id="pick-delete">Delete selected</button>
@@ -238,7 +240,7 @@ function mediaMain(p: MediaPage): string {
       <h2 id="bulk-title" tabindex="-1"></h2>
       <p class="sub" id="bulk-text"></p>
       <p class="danger-line" id="bulk-warn">${NO_BACKUPS}</p>
-      <p class="sub" id="bulk-progress" role="status" aria-live="polite" hidden></p>
+      <p class="sub" id="bulk-progress" role="status" aria-live="polite"></p>
       <div class="two">
         <button type="button" class="btn quiet" id="bulk-keep"></button>
         <button type="button" class="btn danger" id="bulk-go"></button>
@@ -537,13 +539,20 @@ ${shareViewOf(p.sharing)}
 
   // ---- Selecting items ----
 
-  // The ids of the items selected, in the list's order.
+  // The ids of the items selected, in the list's order, each once.
   function pickedIds() {
-    return items.filter(function (it) { return picked[it.id] === true; }).map(function (it) { return it.id; });
+    return items.filter(function (it, i) { return picked[it.id] === true && indexOfId(it.id) === i; }).map(function (it) { return it.id; });
   }
 
-  // The header's checkbox and words, and the bar while something is selected; the count is
-  // said politely in a line of its own, which stays in the page while the bar comes and goes.
+  function indexOfId(id) {
+    for (var i = 0; i < items.length; i++) if (items[i].id === id) return i;
+    return -1;
+  }
+
+  // The header's checkbox and words, and the bar; the count is said politely in a line of its
+  // own. The bar keeps its place above the list whenever the list is shown, so a tick never
+  // moves the rows: while nothing is selected it is invisible (the stylesheet's idle) and inert,
+  // out of the Tab order, unread and not clickable. Without a list it is not in the layout.
   function showPicks() {
     Object.keys(pickOf).forEach(function (id) { pickOf[id].checked = picked[id] === true; });
     var n = items.length;
@@ -554,7 +563,16 @@ ${shareViewOf(p.sharing)}
     $("media-all-text").textContent = TEXT.allBefore + n + TEXT.allAfter;
     var count = k === 0 ? "" : k + TEXT.selected;
     $("pick-count").textContent = count;
-    $("pick-bar").hidden = k === 0;
+    var bar = $("pick-bar");
+    bar.hidden = n === 0;
+    bar.className = k === 0 ? "pick-bar idle" : "pick-bar";
+    if (k === 0) {
+      bar.setAttribute("inert", "");
+      bar.setAttribute("aria-hidden", "true");
+    } else {
+      bar.removeAttribute("inert");
+      bar.removeAttribute("aria-hidden");
+    }
     if ($("pick-said").textContent !== count) $("pick-said").textContent = count;
   }
 
@@ -591,6 +609,13 @@ ${shareViewOf(p.sharing)}
   // Only an item of this page's kind, with an id of the API's shape and a size, is shown.
   function usable(list) {
     return list.filter(function (it) { return it !== null && typeof it === "object" && typeof it.id === "string" && ITEM_ID.test(it.id) && it.kind === KIND && isCount(it.bytes); });
+  }
+
+  // The items of a page after those before it: an id already listed is never listed twice.
+  function joined(before, page) {
+    var seen = Object.create(null);
+    before.forEach(function (it) { seen[it.id] = true; });
+    return before.concat(usable(page).filter(function (it) { return seen[it.id] === true ? false : (seen[it.id] = true); }));
   }
 
   function pageOf(after) {
@@ -640,7 +665,7 @@ ${shareViewOf(p.sharing)}
     function step(after) {
       return pageOf(after).then(function (res) {
         if (!listed(res)) return res;
-        got = got.concat(usable(res.data.items));
+        got = joined(got, res.data.items);
         count++;
         cursor = cursorOf(res.data.next);
         return cursor !== null && count < want ? step(cursor) : true;
@@ -684,7 +709,7 @@ ${shareViewOf(p.sharing)}
     track(pageOf(next).then(function (res) {
       if (res.status === 401) { Dash.signedOut(); return; }
       if (!listed(res)) { say(Dash.failure(res)); return; }
-      items = items.concat(usable(res.data.items));
+      items = joined(items, res.data.items);
       pages++;
       next = cursorOf(res.data.next);
       render();
@@ -730,9 +755,10 @@ ${shareViewOf(p.sharing)}
   }
 
   // Whether the item is gone (null: no answer came): deleted now (with or without files
-  // left to remove), or already gone. The Tours page counts the same answers as done.
+  // left to remove), or already gone, which only the API's own 404 not_found says (as for
+  // itemGone); a 404 from something in between is a failure.
   function done(res) {
-    return res !== null && (res.status === 204 || res.status === 404 || cleaning(res));
+    return res !== null && (res.status === 204 || (res.status === 404 && Dash.errorOf(res) === "not_found") || cleaning(res));
   }
 
   // No answer came to a delete: the item itself decides, not the list (newer items can push a
@@ -792,10 +818,9 @@ ${shareViewOf(p.sharing)}
     if (opened) bulk = { ids: ids };
   }
 
+  // The progress line is always in the open question, empty until the run starts, so its first words are announced.
   function showProgress(text) {
-    var line = $("bulk-progress");
-    line.textContent = text;
-    line.hidden = text === "";
+    $("bulk-progress").textContent = text;
   }
 
   // The items one after another, never two at once, each as Delete in More deletes it; the
@@ -836,9 +861,10 @@ ${shareViewOf(p.sharing)}
         rowsDisabled(false);
         showPicks();
         var d = deleted.length;
-        var text = d === n ? countOf(d) + TEXT.deletedAfter : d + TEXT.progressOf + countOf(n) + TEXT.restAfter;
+        var text = d === n ? countOf(d) + TEXT.deletedAfter : d === 0 ? (n === 1 ? TEXT.oneNot : TEXT.noneDeleted) : d + TEXT.progressOf + countOf(n) + TEXT.restAfter;
         if (stopped !== null) text += " " + Dash.failure(stopped.res);
-        if (r !== true) text += " " + TEXT.notReloaded;
+        // Only a run that deleted something made a change the page could not show.
+        if (r !== true && d > 0) text += " " + TEXT.notReloaded;
         bulkQ.close(true);
         say(text, stopped === null && r === true);
       });
@@ -862,13 +888,14 @@ ${shareListeners(p.sharing)}    [${shareRepeatIds(p.sharing)}, "delete-keep", "d
         if (got === null) return;
         if (got.ok) question.close(false);
         // However the delete ended, the list is read again before the page says anything;
-        // the rows' buttons stay disabled until then. The selection is cleared then.
+        // the rows' buttons stay disabled until then. A delete that worked clears the selection
+        // once the list is read again; one that failed leaves it as the person made it.
         return read().then(function (r) {
           if (r === false) return;
           working = false;
           question.busy(false, "delete-go");
           rowsDisabled(false);
-          clearPicks();
+          if (got.ok && r === true) clearPicks();
           if (got.ok) {
             say(r === true ? "" : TEXT.notReloaded);
             $("h-page").focus();

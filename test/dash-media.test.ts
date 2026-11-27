@@ -188,7 +188,7 @@ const PAGES: Page[] = [
       NO_BACKUPS,
       ...shareWording("image"),
     ],
-    text: { oneItem: "1 image", items: " images", untitled: "Untitled image", ...SHARED_TEXT, ...shareText("image") },
+    text: { oneItem: "1 image", items: " images", untitled: "Untitled image", oneNot: "The image was not deleted.", noneDeleted: "No images were deleted.", ...SHARED_TEXT, ...shareText("image") },
   },
   {
     name: "GIFs",
@@ -222,12 +222,12 @@ const PAGES: Page[] = [
       NO_BACKUPS,
       ...shareWording("clip"),
     ],
-    text: { oneItem: "1 GIF", items: " GIFs", untitled: "Untitled GIF", ...SHARED_TEXT, ...shareText("clip") },
+    text: { oneItem: "1 GIF", items: " GIFs", untitled: "Untitled GIF", oneNot: "The GIF was not deleted.", noneDeleted: "No GIFs were deleted.", ...SHARED_TEXT, ...shareText("clip") },
   },
 ];
 
 /** The strings with a space in the scripts that are not words for a person: class names and a link's rel. */
-const CLASS_NAMES = ["btn sm", "btn sm quiet", "btn sm danger", "thumb play", "n size", "n when", "noopener noreferrer", "tag warn", "message plain"];
+const CLASS_NAMES = ["btn sm", "btn sm quiet", "btn sm danger", "thumb play", "n size", "n when", "noopener noreferrer", "tag warn", "message plain", "pick-bar idle"];
 
 const seen = (c: Call) => ({ status: c.status, headers: [...c.headers.entries()].sort(), body: c.text });
 
@@ -543,9 +543,10 @@ describe("the Images and GIFs pages", () => {
       const headRow = all.find((e) => e.tagName === "thead")!.all().find((e) => e.tagName === "tr")!;
       const first = headRow.children.find((c) => c instanceof FakeElement) as FakeElement;
       expect([first.tagName, first.className, first.textContent], p.path).toEqual(["td", "pick-cell", ""]);
-      // The bar: hidden until something is selected, above the list, with Clear and the red Delete selected; its count is said in a polite line of its own, which is always in the page.
+      // The bar: above the list, with Clear and the red Delete selected; its count is said in a polite line of its own, which is always in the page.
+      // Before the list is read it is out of the layout; once the list is shown it keeps its place, idle (invisible, inert and unread) until something is selected.
       const bar = $("pick-bar");
-      expect([bar.hidden, bar.className], p.path).toEqual([true, "pick-bar"]);
+      expect([bar.hidden, bar.className, bar.getAttribute("inert"), bar.getAttribute("aria-hidden")], p.path).toEqual([true, "pick-bar idle", "", "true"]);
       expect(bar.all().map((e) => [e.tagName, e.id, e.className, e.textContent, e.getAttribute("aria-hidden")]), p.path).toEqual([
         ["span", "pick-count", "pick-count", "", "true"],
         ["button", "pick-clear", "btn quiet", "Clear", null],
@@ -561,7 +562,8 @@ describe("the Images and GIFs pages", () => {
       expect([$("bulk-dialog").hidden, $("bulk-title").textContent, $("bulk-text").textContent, $("bulk-keep").textContent, $("bulk-go").textContent], p.path).toEqual([true, "", "", "", ""]);
       expect([$("bulk-keep").className, $("bulk-go").className], p.path).toEqual(["btn quiet", "btn danger"]);
       const progress = $("bulk-progress");
-      expect([progress.getAttribute("role"), progress.getAttribute("aria-live"), progress.hidden, progress.className], p.path).toEqual(["status", "polite", true, "sub"]);
+      // Always in the question and empty until the run starts, so its first words are announced.
+      expect([progress.getAttribute("role"), progress.getAttribute("aria-live"), progress.hidden, progress.className, progress.textContent], p.path).toEqual(["status", "polite", false, "sub", ""]);
       // The red line, word for word the same in both questions, right after each one's sentence.
       for (const [text, warn] of [["delete-text", "delete-warn"], ["bulk-text", "bulk-warn"]]) {
         expect([$(warn).tagName, $(warn).className, $(warn).textContent], `${p.path} #${warn}`).toEqual(["p", "danger-line", NO_BACKUPS]);
@@ -584,6 +586,14 @@ describe("the Images and GIFs pages", () => {
     // The bar's buttons wrap at phone width; the outcome that is not a failure is in the text's colour.
     expect(DASH_CSS).toMatch(/\.pick-bar \{[^}]*display: flex; flex-wrap: wrap;/);
     expect(DASH_CSS).toContain(".message.plain { color: var(--text); }");
+    // The idle bar keeps its size (visibility, never display), and the count keeps its room, so the rows never move.
+    expect(DASH_CSS).toContain(".pick-bar.idle { visibility: hidden; }");
+    expect(DASH_CSS).not.toMatch(/\.pick-bar[^{]*\{[^}]*display: none/);
+    expect(DASH_CSS).toMatch(/\.pick-count \{[^}]*min-width: 6em;/);
+    // The head's empty first cell: the headers' padding and no line of its own.
+    expect(DASH_CSS).toContain(".media thead td { padding: 0 10px 8px 0; border-top: 0; }");
+    expect(DASH_CSS).toMatch(/\.media th \{[^}]*padding: 0 10px 8px 0;/);
+    expect(DASH_CSS).toContain("#bulk-progress:empty { margin: 0; }");
     const phone = [...DASH_CSS.matchAll(/@media \(max-width: 720px\) \{\n([\s\S]*?)\n\}/g)].map((m) => m[1]).join("\n");
     expect(phone).toContain(".media tr { display: grid; grid-template-columns: 18px 56px minmax(0, 1fr);");
   });
