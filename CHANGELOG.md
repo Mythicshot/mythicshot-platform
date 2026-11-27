@@ -2,6 +2,12 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.71 (2026-11-27)
+
+- The Node site can keep its files in two Cloudflare R2 buckets instead of the data folder, with `FILE_STORE=r2` and five settings, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_PRIVATE_BUCKET` and `R2_PUBLIC_BUCKET`. The store talks to R2's S3 API with requests the site signs itself, with no new package. Drafts, shared images and clips and restricted tours' pictures go to the private bucket; only public tours' pictures go to the public one, and the site refuses one bucket for both. Without `FILE_STORE`, or with `disk`, nothing changes. A half-filled set or a value of the wrong shape stops the start with one line that names the setting and never its value. The secret is never logged, answered or written to a file.
+- Two new admin commands: `r2-check` writes, reads back and deletes one probe file in each bucket; `files-copy --from disk --to r2` and the reverse copy every file with its type and cache line, check each copy by size and SHA-256, remove what the source does not hold, and print counts only. `files-copy` runs only with `--app-is-stopped`, or as a dry run.
+- With `FILE_STORE=r2`, `cpanel.sh backup`, the backup of `update` and `status` say that the files are on R2 and not in the backup, and `update` refuses a version before 0.1.71; `install.sh backup` and `status` say the same. No change to the database, to any route, to any page or to the Cloudflare version.
+
 ## 0.1.70 (2026-11-27)
 
 - The licence (LICENSE) and the notices (THIRD-PARTY-NOTICES.md) go with every package, unchanged: the cPanel archive holds both, `cpanel.sh` copies them into the app folder on install and update and keeps them in each backup, and the container image holds both in `/app`. An archive without them is refused; an update from an earlier version that lacks them, and its way back, keep working. The licence test pins LICENSE by its hash instead of allowing its publisher's hosts.
