@@ -3,7 +3,19 @@
 // email-change link opens, which is served apart in DASH_LINK_PAGES), so the lists cannot
 // drift apart.
 import { expect } from "vitest";
+import { SOURCE_FOOTER } from "../src/source.ts";
 import { FakeDocument, FakeElement, textNodes } from "./pages-dom.ts";
+
+/**
+ * A page without its source line (src/source.ts, SOURCE_FOOTER), the one fixed link of a page to
+ * another site, which test/source-link.test.ts pins: the checks that a page names no other site
+ * and links only to its own paths read the page without it, which is the page as it was before
+ * the line. The page must hold the line once.
+ */
+export function withoutSourceLine(html: string): string {
+  expect(html.split(`${SOURCE_FOOTER}\n`).length - 1, "the source line, once").toBe(1);
+  return html.replace(`${SOURCE_FOOTER}\n`, "");
+}
 
 /**
  * What no page script may use: anything that parses markup, a browser dialog, or the

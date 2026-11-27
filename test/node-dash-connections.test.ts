@@ -19,7 +19,7 @@ import { RETURN_KEY, RETURN_MAX_CHARS } from "../src/dash/connect-return.ts";
 import { DASH_JS } from "../src/dash/script.ts";
 import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
-import { FakeDocument, FakeElement, FakeStorage, visibleText } from "./pages-dom.ts";
+import { FakeDocument, FakeElement, FakeStorage, visibleText, inSourceLine } from "./pages-dom.ts";
 
 const CSRF = "c".repeat(64);
 /** "Now" for the page: 20 November 2026, noon UTC. */
@@ -365,7 +365,8 @@ describe("the Connections page: the welcome of a new account (invite mockup 7)",
   it("with a usable download_url the welcome ends with one sentence whose words the download page are the link; without it the welcome reads as before", async () => {
     const PAGE = "https://downloads.example.com/mythicshot/";
     const withUrl = (url: unknown): Answer => ({ status: 200, json: { ...(session as { json: Record<string, unknown> }).json, download_url: url } });
-    const outside = (tab: Tab) => tab.doc.root.all().filter((e) => e.tagName === "a" && !(e.getAttribute("href") ?? "").startsWith("/"));
+    // The source line at the foot of every page is left out (test/source-link.test.ts).
+    const outside = (tab: Tab) => tab.doc.root.all().filter((e) => e.tagName === "a" && !(e.getAttribute("href") ?? "").startsWith("/") && !inSourceLine(e));
     const tab = openPage(answers({ "GET /api/v1/session": withUrl(PAGE), "GET /api/v1/tokens": list([]), "GET /api/v1/usage": usage() }));
     await tab.settle();
     const welcome = tab.$("connections-welcome");

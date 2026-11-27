@@ -154,6 +154,13 @@ export type Config = {
    */
   homeUrl?: string | null;
   /**
+   * The address of this copy's source code, from the SOURCE_URL setting, as sourceUrlSetting
+   * (src/https-address.ts) keeps it: a strict https address. "Source code" at the foot of the
+   * sign-in pages, the dashboard and the API documentation links to it (src/source.ts). Absent
+   * or null: the default, SOURCE_URL_DEFAULT; a value that cannot be used never gets here.
+   */
+  sourceUrl?: string | null;
+  /**
    * The sign-in lifetimes in whole days, from SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and
    * CONNECTION_MAX_DAYS (lifetimesSetting, src/lifetimes.ts). A key that is absent is its
    * default (90, 90 and off); null is off. Read it through lifetimesOf.

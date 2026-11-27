@@ -30,6 +30,13 @@ a:hover { text-decoration-thickness: 2px; }
 a:focus-visible { border-radius: var(--radius-sm); }
 h1:focus, h2:focus { outline: none; }
 
+/* The page: the bar, the page's own part, then the source line at the bottom (src/source.ts). */
+body { display: flex; flex-direction: column; }
+.page, .terms-page { width: 100%; flex: 1 0 auto; }
+.source { margin: 0; padding: 8px 18px 24px; text-align: center; color: var(--text-muted); font-size: 13px; line-height: 18px; }
+.source p { margin: 0; }
+.source a { color: inherit; white-space: nowrap; }
+
 /* The bar across the top. */
 .top { display: flex; align-items: center; gap: 6px 18px; flex-wrap: wrap; padding: 12px 18px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .brand { display: flex; align-items: center; gap: 8px; margin: 0 8px 0 0; font-weight: 700; }

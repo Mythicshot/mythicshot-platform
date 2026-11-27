@@ -31,7 +31,10 @@
 // invite, shown on the sign-in page), DOWNLOAD_URL (the https address of the public
 // page the desktop app is downloaded from, linked on the dashboard), HOME_URL (the site's
 // home page, which the logo and name at the top of the dashboard link to; a value the app
-// cannot use leaves the logo without a link, with one line in the log), and the three sign-in
+// cannot use leaves the logo without a link, with one line in the log), SOURCE_URL (the https
+// address of this copy's source code, which the line at the foot of the dashboard, the sign-in
+// pages and the API documentation links to; empty is the product's own repository, and the app
+// refuses a value that is not such an address), and the three sign-in
 // lifetimes in whole days, SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and CONNECTION_MAX_DAYS
 // (0 or off switches one off; a value the app cannot use is its default, with one line in
 // the log), MAIL_FOOTER (the operator's line at the foot of a designed mail, such as a

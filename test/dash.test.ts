@@ -18,7 +18,7 @@ import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { send, type Call } from "./bundle.ts";
-import { expectNoForbiddenApis, expectPageShape, isBrandMarkAlt } from "./dash-checks.ts";
+import { expectNoForbiddenApis, expectPageShape, isBrandMarkAlt, withoutSourceLine } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -464,7 +464,7 @@ describe("the dashboard's pages and files", () => {
 
   it("the pages load nothing from another origin and carry no inline script, style or handler", () => {
     for (const s of PAGES) {
-      const doc = new FakeDocument(s.body);
+      const doc = new FakeDocument(withoutSourceLine(s.body));
       const all = doc.root.all();
       expect(all.filter((e) => e.tagName === "script").map((e) => [e.getAttribute("src"), e.hasAttribute("defer"), e.textContent]), s.path).toEqual([
         ["/dash/dash.js", true, ""],
@@ -478,7 +478,7 @@ describe("the dashboard's pages and files", () => {
           if (["src", "href", "action", "formaction", "srcset", "poster", "data"].includes(name)) expect(value, `${s.path} ${name}`).toMatch(/^\/(?!\/)/);
         }
       }
-      expect(s.body, s.path).not.toMatch(/https?:|\/\//i);
+      expect(withoutSourceLine(s.body), s.path).not.toMatch(/https?:|\/\//i);
       expect(all.some((e) => e.tagName === "meta" && e.getAttribute("name") === "referrer" && e.getAttribute("content") === "no-referrer"), s.path).toBe(true);
       expect(all.filter((e) => e.tagName === "form"), s.path).toEqual([]);
     }
@@ -588,7 +588,7 @@ describe("the dashboard's pages and files", () => {
 
   it("the pages are usable with the keyboard and a screen reader, at phone width and in both colour schemes", () => {
     for (const s of PAGES) {
-      const doc = new FakeDocument(s.body);
+      const doc = new FakeDocument(withoutSourceLine(s.body));
       const all = doc.root.all();
       // English, the phone viewport, and no div, span, p, li or td as a control (test/dash-checks.ts).
       expectPageShape(s.body, s.path, s.path === "/admin" ? ["Accounts"] : []);

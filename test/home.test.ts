@@ -7,6 +7,7 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { makeDeps } from "#harness";
 import { BRAND_PLAIN, MARK_PATH, brandHtml, withHome } from "../src/brand.ts";
+import { SOURCE_URL_DEFAULT } from "../src/https-address.ts";
 import { MARK_SMALL_SVG } from "../src/brand-assets.ts";
 import { DASH_LINK_PAGES, DASH_PAGES, TERMS_PAGE } from "../src/dash/routes.ts";
 import { DASH_CSS } from "../src/dash/style.ts";
@@ -22,7 +23,7 @@ import { inviteContactFrom } from "../src/signin/invite.ts";
 import { LINK_HTML, SIGNIN_CSS, SIGNIN_HTML, signinHtml } from "../src/signin/page.ts";
 import { VIEW_DENIED_HTML, VIEW_GATE_HTML, VIEW_LINK_HTML, VIEW_SIGNOUT_HTML } from "../src/view-page.ts";
 import { send } from "./bundle.ts";
-import { isBrandMark, isBrandMarkAlt } from "./dash-checks.ts";
+import { isBrandMark, isBrandMarkAlt, withoutSourceLine } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -243,7 +244,8 @@ describe("the pages with and without HOME_URL", () => {
       const r = await send(deps, "GET", p.path, { origin: APP });
       expect([r.status, r.text, r.calls], p.path).toEqual([200, p.body, 0]);
       expect(r.text, p.path).toContain(PLAIN);
-      expect(r.text, p.path).not.toMatch(/https?:|\/\//i);
+      // No other site but the source line's (src/source.ts, test/source-link.test.ts).
+      expect(withoutSourceLine(r.text), p.path).not.toMatch(/https?:|\/\//i);
     }
   });
 
@@ -255,8 +257,8 @@ describe("the pages with and without HOME_URL", () => {
         expect([r.status, r.calls], p.path).toEqual([200, 0]);
         expect(r.text, p.path).toBe(p.body.replace(PLAIN, LINKED));
         expect(Object.fromEntries(r.headers.entries()), p.path).toEqual({ ...SECURITY, "content-type": HTML });
-        // The one address of another site in the page is the home page's, in the link.
-        expect(r.text.match(/https?:\/\/[^"\s<]*/g), p.path).toEqual([HOME]);
+        // The addresses of other sites in the page are the home page's, in the link, and the source line's.
+        expect(r.text.match(/https?:\/\/[^"\s<]*/g), p.path).toEqual([HOME, SOURCE_URL_DEFAULT]);
       }
     }
     expect(ACCOUNT_PAGE_HEADERS["content-security-policy"]).toBe(POLICY);

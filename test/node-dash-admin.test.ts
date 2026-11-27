@@ -364,7 +364,7 @@ describe("setting an allowance", () => {
     expect(tab.doc.activeElement).toBe(tab.$("allow-input"));
     // The page behind is inert and hidden from screen readers while it is open: the bar and the admin screen.
     const behind = tab.doc.body.all().filter((e) => e.hasAttribute("inert"));
-    expect(behind.map((e) => e.id)).toEqual(["dash-top", "admin"]);
+    expect(behind.map((e) => e.id)).toEqual(["dash-top", "admin", "source-line"]);
     for (const e of behind) expect(e.getAttribute("aria-hidden"), e.id).toBe("true");
     expect(tab.$("allow-dialog").hasAttribute("inert")).toBe(false);
     type(tab, "10 GB");

@@ -19,7 +19,8 @@ import { PART_BYTES } from "../src/media.ts";
 import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
 import { gif, png, send } from "./bundle.ts";
-import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
+import { FakeDocument, FakeElement, markupOf, visibleText } from "./pages-dom.ts";
+import { SOURCE_FOOTER } from "../src/source.ts";
 
 const APP = "https://app.example.com";
 const CSRF = "c".repeat(64);
@@ -565,7 +566,8 @@ describe("deleting an item", () => {
       const untitled = which === "images" ? "Untitled image" : "Untitled GIF";
       expect(tab.shows().slice(-4)).toEqual([`Delete "${untitled}"?`, QUESTION, "Keep it", which === "images" ? "Delete image" : "Delete GIF"]);
       expect(tab.doc.activeElement).toBe(tab.$("delete-keep"));
-      for (const id of ["dash-top", "media-page"]) expect([tab.$(id).getAttribute("inert"), tab.$(id).getAttribute("aria-hidden")], id).toEqual(["", "true"]);
+      // The source line at the foot goes inert with the bar and the page.
+      for (const id of ["dash-top", "media-page", "source-line"]) expect([tab.$(id).getAttribute("inert"), tab.$(id).getAttribute("aria-hidden")], id).toEqual(["", "true"]);
       expect(key(tab.$("delete-keep"), "Tab").defaultPrevented).toBe(true);
       expect(tab.doc.activeElement).toBe(tab.$("delete-go"));
       tab.$("delete-keep").click();
@@ -578,7 +580,9 @@ describe("deleting an item", () => {
       tab.$("delete-dialog").click();
       expect(tab.$("delete-dialog").hidden).toBe(true);
       expect(tab.doc.activeElement).toBe(more);
-      for (const id of ["dash-top", "media-page"]) expect(tab.$(id).hasAttribute("inert"), id).toBe(false);
+      for (const id of ["dash-top", "media-page", "source-line"]) expect([tab.$(id).hasAttribute("inert"), tab.$(id).hasAttribute("aria-hidden")], id).toEqual([false, false]);
+      // After the page's script ran and the question came and went, the source line is exactly as built.
+      expect(markupOf(tab.$("source-line"))).toBe(SOURCE_FOOTER);
       expect(tab.fetched.filter((f) => f.method !== "GET")).toEqual([]);
     }
   });

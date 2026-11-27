@@ -1254,6 +1254,18 @@ A tunnel install set up before 0.1.52 runs `sudo bash install.sh install` once b
 
 **How to tell it worked:** clicking the mark or the name at the top of the dashboard opens your home page in the same tab. A value the app cannot use never stops the app: the mark and the name are then no link, and `docker compose logs app` has the line `home page: off, because HOME_URL is not a usable address. The site runs; the logo is not a link.` To take the link away, remove the line and recreate the container.
 
+### Point the source code link at your copy
+
+Every sign-in page, every dashboard page and the API documentation end with the line "Mythicshot <version> · Source code", whose link leads to the product's own repository unless `SOURCE_URL` names another address (see [Settings](../README.md#settings) in the README). If the site runs a changed copy, add a line to `.env` with the `https://` address where that copy's code can be had, then recreate the container as above. Both routes hand it on: the direct stack passes the whole `.env`, and the tunnel stack names `SOURCE_URL` among the settings it passes.
+
+```text
+SOURCE_URL=https://code.example.com/our-copy
+```
+
+A tunnel install set up before 0.1.70 runs `sudo bash install.sh install` once before `SOURCE_URL` takes effect: `update` does not rewrite the stack file, and `install` does (it keeps the old one as a `.bak` copy).
+
+**How to tell it worked:** "Source code" at the foot of the sign-in page opens your address. A value that is not a usable `https://` address keeps the app from starting (the admin command still runs, so the recovery commands stay open): `docker compose logs app` has the line `source code: SOURCE_URL is not a usable https address. Write the address of this copy's source code, or leave it out for the default.`. Fix the line and recreate the container. To go back to the default, remove the line and recreate the container.
+
 ### Change how long sign-ins last
 
 A browser session ends 90 days after its sign-in however active it is, and a computer connected by signing in from Mythicshot stops working after 90 days without use; each then signs in again, and nothing is lost. A third limit, off unless set, ends a connection a number of days after it was made. Add a line to `.env` for each limit to change, a whole number of days from 1 to 3650 or `off`, then recreate the container as above. Both routes hand them on: the direct stack passes the whole `.env`, and the tunnel stack names `SESSION_MAX_DAYS`, `CONNECTION_IDLE_DAYS` and `CONNECTION_MAX_DAYS` among the settings it passes. What each means is in [Settings](../README.md#settings) in the README.

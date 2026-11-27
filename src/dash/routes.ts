@@ -5,7 +5,8 @@
 // invite pages show too. Every page and file
 // answers its fixed text or bytes with the sign-in pages' headers (ACCOUNT_PAGE_HEADERS): no
 // database or storage call, no credential read, nothing about anyone. A page's brand links
-// to the site's home page when the HOME_URL setting names one (withHome, src/brand.ts).
+// to the site's home page when the HOME_URL setting names one (withHome, src/brand.ts), and its
+// source line to the SOURCE_URL setting's address (withSource, src/source.ts).
 //
 // GET / decides from the request alone whether a session cookie was sent, without looking
 // the session up: with one it sends the browser to /tours, without one to /signin. A cookie
@@ -16,6 +17,7 @@ import type { Hono } from "hono";
 import { MARK_SMALL_SVG, WORDMARK_DARK_PNG, WORDMARK_LIGHT_PNG } from "../brand-assets.ts";
 import { PICTURE_CSP } from "../brand-routes.ts";
 import { MARK_PATH, WORDMARK_DARK_PATH, WORDMARK_LIGHT_PATH, withHome } from "../brand.ts";
+import { withSource } from "../source.ts";
 import { ACCOUNT_PAGE_HEADERS } from "../pages.ts";
 import type { Config } from "../ports.ts";
 import { sessionCookiePresent } from "../sessions.ts";
@@ -97,11 +99,15 @@ function sendTo(path: "/tours" | "/signin"): Response {
   return new Response(null, { status: 302, headers: { ...ACCOUNT_PAGE_HEADERS, location: path } });
 }
 
-/** `config.homeUrl` is the HOME_URL setting as checked at the start: the pages' brand links to it. */
-export function dashRoutes(app: Hono, config: Pick<Config, "homeUrl" | "billing">): void {
+/**
+ * `config.homeUrl` is the HOME_URL setting as checked at the start: the pages' brand links to it.
+ * `config.sourceUrl` is the SOURCE_URL setting: the pages' source line links to it.
+ */
+export function dashRoutes(app: Hono, config: Pick<Config, "homeUrl" | "sourceUrl" | "billing">): void {
   const serve = (body: string, type: string) => () => new Response(body, { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": type } });
   // A page is made when it is asked for, so a request makes only its own.
-  const page = (html: string) => () => new Response(withHome(html, config.homeUrl), { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": HTML } });
+  const dressed = (html: string) => withHome(withSource(html, config.sourceUrl), config.homeUrl);
+  const page = (html: string) => () => new Response(dressed(html), { status: 200, headers: { ...ACCOUNT_PAGE_HEADERS, "content-type": HTML } });
   app.get("/", (c) => sendTo(sessionCookiePresent(c.req.raw) ? "/tours" : "/signin"));
   for (const p of [...DASH_PAGES, ...DASH_LINK_PAGES]) {
     app.get(p.path, page(p.html));
@@ -116,7 +122,7 @@ export function dashRoutes(app: Hono, config: Pick<Config, "homeUrl" | "billing"
   if (billingConfigured(config)) {
     for (const p of BILLING_PAGES) {
       const headers = p.path === SUBSCRIBE_PATH ? { ...ACCOUNT_PAGE_HEADERS, "content-security-policy": SUBSCRIBE_CSP, "content-type": HTML } : { ...ACCOUNT_PAGE_HEADERS, "content-type": HTML };
-      app.get(p.path, () => new Response(withHome(p.html, config.homeUrl), { status: 200, headers }));
+      app.get(p.path, () => new Response(dressed(p.html), { status: 200, headers }));
       app.get(p.script.path, serve(p.script.body, JS));
     }
     app.get(BILLING_SCRIPT_PATH, serve(BILLING_JS, JS));

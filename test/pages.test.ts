@@ -15,7 +15,7 @@ import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../
 import { inviteContactFrom } from "../src/signin/invite.ts";
 import { LINK_HTML, SIGNIN_CSS, SIGNIN_HTML, SIGNIN_JS, signinHtml } from "../src/signin/page.ts";
 import { send, type Call } from "./bundle.ts";
-import { isBrandMarkAlt } from "./dash-checks.ts";
+import { isBrandMarkAlt, withoutSourceLine } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -279,7 +279,7 @@ describe("the sign-in pages", () => {
 
   it("the pages load nothing from another origin and carry no inline script or style", () => {
     for (const s of PAGES) {
-      const doc = new FakeDocument(s.body);
+      const doc = new FakeDocument(withoutSourceLine(s.body));
       const all = doc.root.all();
       const scripts = all.filter((e) => e.tagName === "script");
       expect(scripts.map((e) => [e.getAttribute("src"), e.textContent]), s.path).toEqual([["/signin/signin.js", ""]]);
@@ -291,7 +291,7 @@ describe("the sign-in pages", () => {
           if (["src", "href", "action", "formaction", "srcset", "poster", "data"].includes(name)) expect(value, `${s.path} ${name}`).toMatch(/^\/(?!\/)/);
         }
       }
-      expect(s.body, s.path).not.toMatch(/https?:|\/\//i);
+      expect(withoutSourceLine(s.body), s.path).not.toMatch(/https?:|\/\//i);
       // The referrer is withheld by the page as well as by the header.
       expect(all.some((e) => e.tagName === "meta" && e.getAttribute("name") === "referrer" && e.getAttribute("content") === "no-referrer"), s.path).toBe(true);
       // The forms post nowhere: without the script they cannot put an address in a URL.
@@ -316,7 +316,7 @@ describe("the sign-in pages", () => {
 
   it("the pages are usable with the keyboard and a screen reader, at phone width and in both colour schemes", () => {
     for (const s of PAGES) {
-      const doc = new FakeDocument(s.body);
+      const doc = new FakeDocument(withoutSourceLine(s.body));
       const all = doc.root.all();
       expect(doc.root.all().find((e) => e.tagName === "html")?.getAttribute("lang"), s.path).toBe("en");
       // Every field has a label tied to it.

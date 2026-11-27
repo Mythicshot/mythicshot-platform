@@ -15,6 +15,11 @@ import type { Hosts } from "../src/hosts.ts";
 import { contentSecurityPolicy } from "../src/page.ts";
 import { MANROPE_FACE, PAGE_BASE_CSS } from "../src/brand-css.ts";
 import { VERSION } from "../src/version.ts";
+import { SOURCE_URL_DEFAULT } from "../src/https-address.ts";
+import { sourceLineHtml } from "../src/source.ts";
+
+/** The footer's source line (src/source.ts), the page's one link to another site: test/source-link.test.ts pins it. */
+const SOURCE_LINE = `<p>${sourceLineHtml(SOURCE_URL_DEFAULT)}</p>`;
 import { send, type Call } from "./bundle.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -93,9 +98,10 @@ describe("the documentation page", () => {
     expect(docsHtml()).toBe(docsHtml());
     expect((await send(deps, "GET", "/docs?x=1", { origin: "http://localhost:8787" })).text).toBe(r.text);
     const linked = [...r.text.matchAll(/(?:src|href)="([^"]*)"/g)].map((m) => m[1]).filter((l) => !l.startsWith("#"));
-    expect(linked.sort()).toEqual([...FILES.map((f) => f.path), "/docs/licences.txt", "/api/v1/openapi.json", "/api/v1/openapi.yaml", "/favicon.ico", "/favicon.svg"].sort());
-    // The only address in it is the examples' placeholder, which is no host at all.
-    expect(r.text.split(GUIDE_ORIGIN).join("")).not.toMatch(/:\/\/|example\.|localhost/);
+    expect(linked.sort()).toEqual([...FILES.map((f) => f.path), "/docs/licences.txt", "/api/v1/openapi.json", "/api/v1/openapi.yaml", "/favicon.ico", "/favicon.svg", SOURCE_URL_DEFAULT].sort());
+    // The only address in it but the source line's is the examples' placeholder, which is no host at all.
+    expect(r.text.split(SOURCE_LINE).length - 1).toBe(1);
+    expect(r.text.replace(SOURCE_LINE, "").split(GUIDE_ORIGIN).join("")).not.toMatch(/:\/\/|example\.|localhost/);
     expect(r.text).not.toMatch(/<style|style=|\son[a-z]+=|<script(?![^>]*\ssrc=)/i);
     expect(r.text).toContain("<title>Mythicshot API documentation</title>");
     expect(r.text).toContain("The reference needs JavaScript. Everything it shows is also in the description, as JSON and YAML above.");
@@ -484,9 +490,9 @@ describe("the documentation page's parts", () => {
       expect(r.text === html).toBe(true);
       expect(r.headers.get("etag")).toBe(answers[0].headers.get("etag"));
     }
-    // Every address in the page is the placeholder, in a command; the script puts the real one in.
+    // Every address in the page is the placeholder, in a command, but the source line's; the script puts the real one in.
     expect(GUIDE_ORIGIN).toBe("https://YOUR-SITE");
-    const addresses = html.match(/[a-z][a-z0-9+.-]*:\/\/[^\s"'<&]*/g) ?? [];
+    const addresses = html.replace(SOURCE_LINE, "").match(/[a-z][a-z0-9+.-]*:\/\/[^\s"'<&]*/g) ?? [];
     expect(addresses.length).toBeGreaterThan(10);
     for (const address of addresses) expect(address.startsWith(`${GUIDE_ORIGIN}/api/v1/`), address).toBe(true);
     for (const host of ["example.com", "example.net", "localhost", "mythicshot.com"]) expect(html, host).not.toContain(host);
@@ -511,7 +517,7 @@ describe("the documentation page's parts", () => {
       `script src="${DOCS_JS_PATH}"`,
     ]);
     // Every src and href is one of the four hashed files, a place on this page, a description file or the notices.
-    const allowed = new Set([VIEWER_CSS_PATH, DOCS_CSS_PATH, VIEWER_JS_PATH, DOCS_JS_PATH, "/api/v1/openapi.json", "/api/v1/openapi.yaml", "/docs/licences.txt", "/favicon.ico", "/favicon.svg"]);
+    const allowed = new Set([VIEWER_CSS_PATH, DOCS_CSS_PATH, VIEWER_JS_PATH, DOCS_JS_PATH, "/api/v1/openapi.json", "/api/v1/openapi.yaml", "/docs/licences.txt", "/favicon.ico", "/favicon.svg", SOURCE_URL_DEFAULT]);
     for (const m of html.matchAll(/\s(?:src|href|action|formaction|poster|srcset|data|ping|background)="([^"]*)"/g)) {
       expect(m[1].startsWith("#guide-") || allowed.has(m[1]), m[1]).toBe(true);
     }
