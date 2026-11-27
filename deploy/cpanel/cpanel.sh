@@ -13,9 +13,10 @@
 #
 # Where things go, for the default --app-root apps/tours (always relative to $HOME):
 #   ~/apps/tours             the app: dist/, migrations/, package.json, package-lock.json,
-#                            app.cjs, cpanel.sh, VERSION, and .cpanel-install (the
-#                            domain, the app's own domain when there is one, the Node
-#                            version and whether the install finished; nothing secret)
+#                            app.cjs, cpanel.sh, VERSION, LICENSE, THIRD-PARTY-NOTICES.md,
+#                            and .cpanel-install (the domain, the app's own domain when
+#                            there is one, the Node version and whether the install
+#                            finished; nothing secret)
 #   ~/apps/tours-data        db.sqlite, drafts/, public/ (install writes this path to
 #                            the settings file; later commands read it from there)
 #   ~/apps/tours-config.env  the settings, DATA_DIR and SETUP_CODE, mode 600. It sits
@@ -67,6 +68,12 @@
 #   is also asked for /api/v1/me without a token, and only the status code is looked at:
 #   421 means the app refuses that host name for everything but its health check (the
 #   settings file names other addresses), which is a failure. 401 is the usual answer.
+# - The licence (LICENSE) and the notices (THIRD-PARTY-NOTICES.md) are files of the
+#   archive like package.json: an archive without them is not whole and is refused, and
+#   install and update copy them into the app folder, so a backup's app.tgz holds them.
+#   An app folder of a version from before they were shipped lacks them: a backup then
+#   archives what is there, and the way back from an update removes them again, also
+#   when the update resumes one an earlier version of this script began.
 # - --dry-run prints what would be done and runs nothing. Steps that replace files ask
 #   first unless --yes is given.
 #
@@ -123,7 +130,10 @@ readonly STATE_NAME=.cpanel-install
 readonly MARKER_NAME=.cpanel-update
 # What the archive holds, and so what the app folder is made of.
 readonly RELEASE_DIRS="dist migrations"
-readonly RELEASE_FILES="package.json package-lock.json app.cjs cpanel.sh VERSION"
+readonly RELEASE_FILES="package.json package-lock.json app.cjs cpanel.sh VERSION LICENSE THIRD-PARTY-NOTICES.md"
+# Of those, the ones added after the first versions of this script: a marker an earlier
+# version wrote names them neither to restore nor to remove (see read_marker).
+readonly ADDED_FILES="LICENSE THIRD-PARTY-NOTICES.md"
 
 # How to run this script again, as it was started: hints the script prints can be typed
 # as they are, from the folder the person is in.
@@ -1186,13 +1196,25 @@ known_files() {
 
 # What the interrupted update recorded about the way back.
 read_marker() {
-  local b
+  local b f
   b="$(value_in "$MARKER" BACKUP)"
   case "$b" in
     "$BACKUP_ROOT"/?*) if [ -f "$b/app.tgz" ]; then ROLLBACK_BACKUP="$b"; fi ;;
   esac
   ROLLBACK_RESTORE="$(known_files "$(value_in "$MARKER" RESTORE)")"
   ROLLBACK_REMOVE="$(known_files "$(value_in "$MARKER" REMOVE)")"
+  # A marker from an earlier version of this script lists the files of its own archive
+  # only. A file added since that it names neither way was not in the app folder before
+  # that update (its backup does not hold it either), so the way back removes it. A
+  # marker without the lists is not read as one that names nothing.
+  if grep -q '^RESTORE=' "$MARKER"; then
+    for f in $ADDED_FILES; do
+      case " $ROLLBACK_RESTORE $ROLLBACK_REMOVE " in
+        *" $f "*) ;;
+        *) ROLLBACK_REMOVE="${ROLLBACK_REMOVE:+$ROLLBACK_REMOVE }$f" ;;
+      esac
+    done
+  fi
 }
 
 # Puts a staged folder in place. The folder it replaces becomes <name>.old, unless an
