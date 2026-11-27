@@ -165,6 +165,40 @@ export class NodeFileStore implements FileStore {
     }
     return out.sort();
   }
+
+  /**
+   * Every stored key, as keys() reads them, without stopping at an object file that cannot be
+   * one (0.1.71, for the admin command's files-copy): a file that is not an object file, whose
+   * header cannot be read, whose key fails checkKey, or whose key is not the one its name is
+   * made from, is named in `bad` by its path below the root (`<2 hex>/<64 hex>`), never by
+   * anything read from it. `exists` is false when the folder itself is not there.
+   */
+  async scan(): Promise<{ keys: string[]; bad: string[]; exists: boolean }> {
+    const keys: string[] = [];
+    const bad: string[] = [];
+    let shards: string[];
+    try {
+      shards = await readdir(this.root);
+    } catch (err) {
+      if (errCode(err) === "ENOENT") return { keys, bad, exists: false };
+      throw err;
+    }
+    for (const shard of shards.filter((s) => SHARD.test(s)).sort()) {
+      for (const name of (await readdir(join(this.root, shard))).sort()) {
+        if (!NAME.test(name)) continue;
+        try {
+          const { header } = decode(await readFile(join(this.root, shard, name)));
+          if (typeof header?.key !== "string") throw new Error("corrupt object file");
+          checkKey(header.key);
+          if (objectPath(this.root, header.key) !== join(this.root, shard, name)) throw new Error("corrupt object file");
+          keys.push(header.key);
+        } catch {
+          bad.push(`${shard}/${name}`);
+        }
+      }
+    }
+    return { keys: keys.sort(), bad, exists: true };
+  }
 }
 
 /** Makes a rename durable on POSIX systems. Windows cannot open a folder for this. */

@@ -1,16 +1,21 @@
-// The admin command's two file tools (0.1.71), for the move of the files between the data
-// folder and R2 (src/node/admin.ts runs them):
+// The admin command's file tools (0.1.71), for the move of the files between the data folder
+// and R2 (src/node/admin.ts runs them):
 // - r2Probe: write one small file to a bucket under a key no real file can have, read it
 //   back, compare bytes and metadata, delete it and check that it is gone.
-// - mirror: make one store hold exactly what another holds, every file with its content
-//   type and cache control, each copy read back and compared by size and SHA-256; a file
-//   already the same at the destination is left alone, and a file the source does not hold
-//   is removed from the destination, so running it again changes nothing. Counts only.
+// - The role markers: one small object per bucket, ROLE_MARKER_KEY, whose text names the
+//   bucket's role, so a bucket named in the wrong setting is found before anything is copied
+//   or served (r2-check writes them; files-copy and the app's start check them).
+// - listFor and mirror: make one store hold every file another holds, each with its content
+//   type and cache control and each copy read back and compared by size and SHA-256; a file
+//   already the same is left alone. A file at the destination that the source does not hold
+//   is left in place and counted, and removed only when asked. An object file that can never
+//   be copied is named, not a reason to stop the rest. Counts only.
 // They take stores, never settings, and say nothing themselves: the command prints fixed
 // lines from what they return. Nothing here ever holds a key's secret.
 import { createHash, randomBytes } from "node:crypto";
 import { checkKey, type FileStore, type StoredFile } from "../ports.ts";
 import type { ListableStore } from "./file-stores.ts";
+import { NodeFileStore } from "./files.ts";
 import { R2Error, REASONS } from "./r2-files.ts";
 
 /** The words for why a step failed: the R2 store's fixed reason, else a fixed line. Never an error's own text. */
@@ -26,8 +31,16 @@ async function bytesOf(file: StoredFile): Promise<Uint8Array> {
 
 const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
 
-/** The prefix of the probe's key: no file the app stores starts with it (its keys start u/, v/, m/ or p/). */
+/** The prefix of r2-check's own objects: no file the app stores starts with it (its keys start u/, v/, m/ or p/). */
 export const PROBE_PREFIX = "r2-check/";
+
+/** The key of a bucket's role marker. */
+export const ROLE_MARKER_KEY = `${PROBE_PREFIX}role.txt`;
+
+/** The text of the role marker of a bucket of this role. */
+export function markerText(role: "private" | "public"): string {
+  return `demo-platform bucket role: ${role}\n`;
+}
 
 export type ProbeStep = "write" | "read back" | "compare" | "delete" | "check it is gone";
 export type ProbeResult = { ok: true } | { ok: false; step: ProbeStep; reason: string };
@@ -67,31 +80,102 @@ async function failedAfter(store: FileStore, key: string, written: boolean, step
   return { ok: false, step, reason };
 }
 
-export type MirrorCounts = { copied: number; already: number; removed: number; failed: number; listed: boolean; listReason: string | null };
+/** What a bucket's marker says: absent, one of the two roles, or something r2-check never writes. Throws what the store throws. */
+export async function readMarker(store: FileStore): Promise<"absent" | "private" | "public" | "unknown"> {
+  const got = await store.get(ROLE_MARKER_KEY);
+  if (got === null) return "absent";
+  if (got.size > 256) {
+    await got.body.cancel().catch(() => {});
+    return "unknown";
+  }
+  const text = new TextDecoder().decode(await bytesOf(got));
+  if (text === markerText("private")) return "private";
+  if (text === markerText("public")) return "public";
+  return "unknown";
+}
+
+export async function writeMarker(store: FileStore, role: "private" | "public"): Promise<void> {
+  await store.put(ROLE_MARKER_KEY, new TextEncoder().encode(markerText(role)), { contentType: "text/plain", cacheControl: "no-store" });
+}
+
+/** Whether a bucket of `role` holds a file of the other kind: a public picture in the private one, anything else in the public one. */
+export function holdsOtherKind(role: "private" | "public", keys: readonly string[]): boolean {
+  const own = keys.filter((k) => !k.startsWith(PROBE_PREFIX));
+  return role === "private" ? own.some((k) => k.startsWith("p/")) : own.some((k) => !k.startsWith("p/"));
+}
+
+export type MarkerCheck =
+  | { ok: true }
+  | { ok: false; problem: "missing" | "wrong" | "unknown"; role: "private" | "public" }
+  | { ok: false; problem: "unreadable"; reason: string };
+
+/** Both markers, as files-copy and the app's start check them: the first problem, or ok. */
+export async function checkMarkers(stores: { drafts: FileStore; pub: FileStore }): Promise<MarkerCheck> {
+  for (const [role, store] of [["private", stores.drafts], ["public", stores.pub]] as const) {
+    let found: Awaited<ReturnType<typeof readMarker>>;
+    try {
+      found = await readMarker(store);
+    } catch (err) {
+      return { ok: false, problem: "unreadable", reason: reasonWords(err) };
+    }
+    if (found === "absent") return { ok: false, problem: "missing", role };
+    if (found === "unknown") return { ok: false, problem: "unknown", role };
+    if (found !== role) return { ok: false, problem: "wrong", role };
+  }
+  return { ok: true };
+}
+
+/** One store's contents for files-copy: its keys, the object files that can never be copied, and whether it is there at all. */
+export type Listing = { keys: string[]; bad: string[]; missing: boolean };
+
+/** A key from a bucket made safe to print: no control or direction characters, at most 200 characters. */
+function printable(key: string): string {
+  const safe = key.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, "\ufffd");
+  return safe.length > 200 ? `${safe.slice(0, 200)}...` : safe;
+}
+
+/**
+ * Lists a store for files-copy. A folder store names each object file that cannot be read as
+ * `<folder>/<2 hex>/<64 hex>`; a bucket names each key that fails the key check as `key <key>`.
+ * r2-check's own objects are left out: they are never copied. Throws what the store throws.
+ */
+export async function listFor(store: ListableStore, folder: string): Promise<Listing> {
+  if (store instanceof NodeFileStore) {
+    const s = await store.scan();
+    return { keys: s.keys.filter((k) => !k.startsWith(PROBE_PREFIX)), bad: s.bad.map((b) => `${folder}/${b}`), missing: !s.exists };
+  }
+  const keys: string[] = [];
+  const bad: string[] = [];
+  for (const k of await store.keys()) {
+    if (k.startsWith(PROBE_PREFIX)) continue;
+    try {
+      checkKey(k);
+      keys.push(k);
+    } catch {
+      bad.push(`key ${printable(k)}`);
+    }
+  }
+  return { keys, bad, missing: false };
+}
+
+export type MirrorCounts = { copied: number; already: number; failed: number; extra: number; removed: number };
 
 /** How many keys one delete call is given while removing what the source does not hold. */
 const REMOVE_BATCH = 1000;
 
 /**
- * Makes `to` hold exactly what `from` holds. With `dryRun` nothing is written or removed, and
- * `copied` and `removed` count what would be. A file that cannot be read, copied, checked or
- * removed counts as failed and the run goes on; a store that cannot be listed stops this pair
- * with `listed` false and nothing changed.
+ * Copies to `to` every file of `from` that it does not hold the same. With `removeExtra` it
+ * also removes from `to` every file the source does not hold; without, those are counted in
+ * `extra` and left in place. With `dryRun` nothing is written or removed, and the counts are of
+ * what would be. A file that cannot be read, copied, checked or removed counts as failed and
+ * the run goes on.
  */
-export async function mirror(from: ListableStore, to: ListableStore, dryRun: boolean): Promise<MirrorCounts> {
-  const counts: MirrorCounts = { copied: 0, already: 0, removed: 0, failed: 0, listed: true, listReason: null };
-  let sourceKeys: string[];
-  let destKeys: Set<string>;
-  try {
-    sourceKeys = await from.keys();
-    destKeys = new Set(await to.keys());
-  } catch (err) {
-    return { ...counts, listed: false, listReason: reasonWords(err) };
-  }
-  const held = new Set(sourceKeys);
-  for (const key of sourceKeys) {
+export async function mirror(from: ListableStore, to: ListableStore, source: Listing, dest: Listing, opts: { dryRun: boolean; removeExtra: boolean }): Promise<MirrorCounts> {
+  const counts: MirrorCounts = { copied: 0, already: 0, failed: 0, extra: 0, removed: 0 };
+  const there = new Set(dest.keys);
+  const held = new Set(source.keys);
+  for (const key of source.keys) {
     try {
-      checkKey(key);
       const src = await from.get(key);
       if (src === null) {
         counts.failed++;
@@ -103,17 +187,17 @@ export async function mirror(from: ListableStore, to: ListableStore, dryRun: boo
         continue;
       }
       const digest = sha256(bytes);
-      if (destKeys.has(key)) {
+      if (there.has(key)) {
         const dst = await to.get(key);
         if (dst !== null) {
-          const there = await bytesOf(dst);
-          if (dst.size === src.size && there.byteLength === src.size && sha256(there) === digest && dst.contentType === src.contentType && dst.cacheControl === src.cacheControl) {
+          const was = await bytesOf(dst);
+          if (dst.size === src.size && was.byteLength === src.size && sha256(was) === digest && dst.contentType === src.contentType && dst.cacheControl === src.cacheControl) {
             counts.already++;
             continue;
           }
         }
       }
-      if (dryRun) {
+      if (opts.dryRun) {
         counts.copied++;
         continue;
       }
@@ -129,11 +213,9 @@ export async function mirror(from: ListableStore, to: ListableStore, dryRun: boo
       counts.failed++;
     }
   }
-  const extra = [...destKeys].filter((k) => !held.has(k));
-  if (dryRun) {
-    counts.removed += extra.length;
-    return counts;
-  }
+  const extra = dest.keys.filter((k) => !held.has(k));
+  counts.extra = extra.length;
+  if (!opts.removeExtra || opts.dryRun) return counts;
   for (let i = 0; i < extra.length; i += REMOVE_BATCH) {
     const batch = extra.slice(i, i + REMOVE_BATCH);
     try {
@@ -152,4 +234,36 @@ export async function mirror(from: ListableStore, to: ListableStore, dryRun: boo
     }
   }
   return counts;
+}
+
+/** Keys counted by their first part (`p/`, `u/`, …), sorted, for the line that shows what a store holds. */
+export function byPrefix(keys: readonly string[]): string {
+  const counts = new Map<string, number>();
+  for (const k of keys) {
+    const slash = k.indexOf("/");
+    const prefix = slash < 0 ? "(no prefix)" : k.slice(0, slash + 1);
+    counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+  }
+  if (counts.size === 0) return "none";
+  return [...counts.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([p, n]) => `${printable(p)} ${n}`)
+    .join(", ");
+}
+
+/**
+ * The app's check of the two markers at its start, with FILE_STORE=r2: `stop` for a marker that
+ * is missing, wrong or not r2-check's (the start stops with that line), `warn` when R2 could
+ * not be asked (the start goes on with that line: a short outage must not keep the site down
+ * at a restart), null when both are right. Fixed lines, never a value.
+ */
+export async function startMarkerCheck(stores: { drafts: FileStore; pub: FileStore }): Promise<{ stop: string } | { warn: string } | null> {
+  const m = await checkMarkers(stores);
+  if (m.ok) return null;
+  if (m.problem === "unreadable") return { warn: `files: the role markers of the two R2 buckets could not be checked at the start (${m.reason}). The site starts; run the admin command r2-check.` };
+  if (m.problem === "missing") return { stop: `files: the ${m.role} bucket has no role marker. Run the admin command r2-check before setting FILE_STORE=r2.` };
+  if (m.problem === "wrong") {
+    return { stop: m.role === "private" ? "files: the private bucket is marked as the public one: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET are swapped." : "files: the public bucket is marked as the private one: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET are swapped." };
+  }
+  return { stop: `files: the ${m.role} bucket's role marker holds something r2-check never writes. Run the admin command r2-check.` };
 }

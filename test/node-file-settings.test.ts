@@ -176,7 +176,12 @@ describe("the one factory", () => {
 
   it("entry.ts and every admin command that touches a file make their stores with it, and nothing else in src/node makes a store", () => {
     const read = (f: string) => readFileSync(fileURLToPath(new URL(f, import.meta.url)), "utf8");
-    expect(read("../src/node/entry.ts")).toContain("const files = siteFileStores(fileStoreFromEnv(process.env), root);");
+    const entry = read("../src/node/entry.ts");
+    expect(entry).toContain("const fileSettings = fileStoreFromEnv(process.env);
+  const files = siteFileStores(fileSettings, root);");
+    // With FILE_STORE=r2 the start checks both role markers: a missing or wrong one stops it, R2 not answering does not.
+    expect(entry).toContain("if (marks !== null && \"stop\" in marks) throw new Error(marks.stop);
+    if (marks !== null) console.error(marks.warn);");
     const admin = read("../src/node/admin.ts");
     expect(admin.match(/const fileSettings = fileSettingsOrSay\(env, out\);\n\s+if \(fileSettings === null\) return 1;\n\s+const files = siteFileStores\(fileSettings, root, opts\.r2\);/g)?.length).toBe(2);
     for (const f of ["../src/node/entry.ts", "../src/node/admin.ts", "../src/node/config.ts"]) {

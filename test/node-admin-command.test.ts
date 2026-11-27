@@ -746,7 +746,7 @@ describe("the server command", () => {
       ["first-admin", "--email", "--username", "robin"],
       ["first-admin", "--email", "you@example.com", "--username", "robin", "--admin"],
       ["first-admin", "--email", "you@example.com", "--email", "other@example.com", "--username", "robin"],
-      ["first-admin", "--email", "you@example.com", "--username", "robin", "extra"],
+      ["first-admin", "--email", "you@example.com", "--username", "robin", "stray-word"],
       ["signin-link"],
       ["signin-link", "--email", "you@example.com", "--username", "robin"],
       ["--username", "robin"],
@@ -758,7 +758,7 @@ describe("the server command", () => {
       expect(r.code, argv.join(" ")).toBe(2);
       expect(r.lines.join("\n"), argv.join(" ")).toContain("first-admin --email <address> --username <name>");
       // What was typed is not repeated.
-      for (const typed of ["you@example.com", "other@example.com", "make-admin", "extra"]) expect(r.lines.join("\n")).not.toContain(typed);
+      for (const typed of ["you@example.com", "other@example.com", "make-admin", "stray-word"]) expect(r.lines.join("\n")).not.toContain(typed);
     }
     const help = await run({}, ["--help"]);
     expect(help.code).toBe(0);

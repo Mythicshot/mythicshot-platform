@@ -13,8 +13,8 @@
 //   node dist/node/admin.js storage-sweep [--dry-run]
 //   node dist/node/admin.js storage-sweep --clear-claim <workspace id>
 //   node dist/node/admin.js r2-check
-//   node dist/node/admin.js files-copy --from disk --to r2 --app-is-stopped [--dry-run]
-//   node dist/node/admin.js files-copy --from r2 --to disk --app-is-stopped [--dry-run]
+//   node dist/node/admin.js files-copy --from disk --to r2 --app-is-stopped [--dry-run] [--remove-extra]
+//   node dist/node/admin.js files-copy --from r2 --to disk --app-is-stopped [--dry-run] [--remove-extra]
 //
 // Without a command, `--email` with `--username` is first-admin and `--email` alone is
 // signin-link, which is how `./cpanel.sh admin --email … --username …` reads.
@@ -47,8 +47,8 @@ import { listTerms, parseTerms, publishTerms, showTerms, TERMS_LIMITS } from "..
 import { parseUsername } from "../usernames.ts";
 import { configFromEnv, fileStoreFromEnv, mailFromEnv, NODE_SETTINGS } from "./config.ts";
 import { NodeDb } from "./db.ts";
-import { makeFileStores, siteFileStores, type FileStoreSettings } from "./file-stores.ts";
-import { mirror, r2Probe, type MirrorCounts } from "./file-tools.ts";
+import { makeFileStores, siteFileStores, type FileStoreSettings, type ListableStore } from "./file-stores.ts";
+import { byPrefix, checkMarkers, holdsOtherKind, listFor, mirror, r2Probe, readMarker, reasonWords, writeMarker, type Listing, type MarkerCheck, type MirrorCounts } from "./file-tools.ts";
 import type { R2Options } from "./r2-files.ts";
 import { SmtpError, smtpMailer, type SmtpSettings } from "./smtp.ts";
 
@@ -177,10 +177,11 @@ const usage = (name: string): string[] => [
   "  storage-sweep --clear-claim <workspace id>",
   "      Clear a workspace's low storage mail whose sending was never confirmed, so the next check or sweep sends it again if it is still due.",
   "  r2-check",
-  "      With the five R2 settings in the settings file, whatever FILE_STORE says: write one small probe file to each of the two buckets, read it back, compare it, delete it and check that it is gone. Prints one line per bucket and a verdict.",
-  "  files-copy --from disk --to r2 --app-is-stopped [--dry-run]",
-  "  files-copy --from r2 --to disk --app-is-stopped [--dry-run]",
-  "      Make the destination hold exactly the files of the source: the data folder's private files and the private bucket, its public files and the public bucket, never one into the other. Each file is copied with its type and cache control and read back to compare its size and SHA-256; one already the same is left alone, and one the source does not hold is removed, so it can be run again. Prints counts. Run it only with the app stopped or idle, and say so with --app-is-stopped: a copy while files are being written can leave a deleted file, or a picture of a tour just made restricted, behind at the destination. With --dry-run, counts what it would do and changes nothing.",
+  "      With the five R2 settings in the settings file, whatever FILE_STORE says: mark each bucket with its role the first time (r2-check/role.txt) and check that mark every time after, so two swapped bucket names are found; then write one small probe file to each bucket, read it back, compare it, delete it and check that it is gone. Prints one line per bucket and a verdict.",
+  "  files-copy --from disk --to r2 --app-is-stopped [--dry-run] [--remove-extra]",
+  "  files-copy --from r2 --to disk --app-is-stopped [--dry-run] [--remove-extra]",
+  "      Copy the files to the side the site does not serve from now: the data folder's private files and the private bucket, its public files and the public bucket, never one into the other. Each file is copied with its type and cache control and read back to compare its size and SHA-256; one already the same is left alone, so it can be run again. A file at the destination that the source does not hold is counted and left in place. Prints counts. It refuses to write to the side FILE_STORE names, and to run before r2-check has marked both buckets. Run it only with the app stopped, and say so with --app-is-stopped: a copy while files are being written can leave a deleted file, or a picture of a tour just made restricted, behind at the destination. With --dry-run, counts what it would do and changes nothing.",
+  "      --remove-extra also deletes every file at the destination that the source does not hold, so the destination ends holding exactly the source's files. R2 has no bin: a file deleted there cannot be brought back. It refuses when a source is empty while its destination is not, or when the data folder has no drafts or public folder to copy from.",
   "",
   "Without a command, --email with --username is first-admin, and --email alone is signin-link.",
 ];
@@ -303,7 +304,7 @@ type Parsed =
   | { kind: "r2-check" }
   | FilesCopy;
 
-type FilesCopy = { kind: "files-copy"; from: "disk" | "r2"; to: "disk" | "r2"; dryRun: boolean; stopped: boolean };
+type FilesCopy = { kind: "files-copy"; from: "disk" | "r2"; to: "disk" | "r2"; dryRun: boolean; stopped: boolean; removeExtra: boolean };
 
 const COMMANDS = ["first-admin", "signin-link", "change-email", "mail-check", "audit"] as const;
 type Command = (typeof COMMANDS)[number];
@@ -389,13 +390,13 @@ function parseArgs(argv: readonly string[]): Parsed | null {
   }
 }
 
-/** files-copy's options: --from and --to, disk and r2 one each way, and the two flags, each at most once. */
+/** files-copy's options: --from and --to, disk and r2 one each way, and the three flags, each at most once. */
 function parseFilesCopy(args: readonly string[]): FilesCopy | null {
   const values = new Map<string, string>();
   const flags = new Set<string>();
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === "--dry-run" || a === "--app-is-stopped") {
+    if (a === "--dry-run" || a === "--app-is-stopped" || a === "--remove-extra") {
       if (flags.has(a)) return null;
       flags.add(a);
       continue;
@@ -410,7 +411,7 @@ function parseFilesCopy(args: readonly string[]): FilesCopy | null {
   const from = values.get("--from") as "disk" | "r2" | undefined;
   const to = values.get("--to") as "disk" | "r2" | undefined;
   if (from === undefined || to === undefined || from === to) return null;
-  return { kind: "files-copy", from, to, dryRun: flags.has("--dry-run"), stopped: flags.has("--app-is-stopped") };
+  return { kind: "files-copy", from, to, dryRun: flags.has("--dry-run"), stopped: flags.has("--app-is-stopped"), removeExtra: flags.has("--remove-extra") };
 }
 
 /** The file stores of these deps: nothing this command does reads or writes a file. */
@@ -720,25 +721,86 @@ export const FILES_SAID = {
   notSetUp: (what: string) => `R2 is not set up: write the five R2 settings in the settings file first. Nothing was ${what}.`,
   checking: (mode: "disk" | "r2") =>
     mode === "r2" ? "The files are kept on R2 now (FILE_STORE=r2). Checking the two R2 buckets with the key in the settings file." : "The files are kept on disk now. Checking the two R2 buckets with the key in the settings file.",
+  markWritten: (b: string) => `${b} bucket: marked as the ${b} bucket (r2-check/role.txt).`,
+  markOk: (b: string) => `${b} bucket: its marker says ${b}, as it should.`,
+  markWrong: (b: "private" | "public") =>
+    b === "private" ? "the private bucket is marked as the public one: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET are swapped." : "the public bucket is marked as the private one: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET are swapped.",
+  markUnknown: (b: string) => `${b} bucket: its marker r2-check/role.txt holds something r2-check never writes. Nothing was changed; look at that bucket before going on.`,
+  otherKind: (b: "private" | "public") =>
+    b === "private"
+      ? "private bucket: it holds public pictures (p/), so it may be the public bucket: check that R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET are not swapped. No marker was written."
+      : "public bucket: it holds files that are not public pictures, so it may be the private bucket: check that R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET are not swapped. No marker was written.",
+  markUnreadable: (b: string, reason: string) => `${b} bucket: its marker could not be read: ${reason}.`,
   probeOk: (bucket: string) => `${bucket} bucket: a probe file was written, read back the same and deleted.`,
   probeFailed: (bucket: string, step: string, reason: string) => `${bucket} bucket: failed to ${step}: ${reason}.`,
-  checkPassed: "R2 check passed: both buckets can be written, read and deleted with this key.",
+  checkPassed: "R2 check passed: both buckets are marked with their roles and can be written, read and deleted with this key.",
   checkFailed: "R2 check failed: put the settings or the token right before setting FILE_STORE=r2.",
+  servedSide: (mode: "disk" | "r2") =>
+    `files-copy does not write to the files the site serves from now: FILE_STORE says ${mode === "r2" ? "r2, so the two buckets" : "disk, so the data folder"}. Copy to the other side first, and change FILE_STORE only after the copy. Nothing was copied.`,
   notStopped:
-    "files-copy runs only while the app is stopped or idle: a copy while files are being written can leave a deleted file, or a picture of a tour just made restricted, behind at the destination. Stop the app, then run it again with --app-is-stopped. Nothing was copied.",
+    "files-copy runs only while the app is stopped: a copy while files are being written can leave a deleted file, or a picture of a tour just made restricted, behind at the destination. Stop the app, then run it again with --app-is-stopped. Nothing was copied.",
+  markerProblem: (m: Exclude<MarkerCheck, { ok: true }>) => {
+    if (m.problem === "unreadable") return `The role markers of the two buckets could not be read: ${m.reason}. Nothing was copied.`;
+    if (m.problem === "missing") return `files-copy needs both buckets marked first: the ${m.role} bucket has no role marker. Run r2-check first. Nothing was copied.`;
+    if (m.problem === "wrong") return `${FILES_SAID.markWrong(m.role)} Nothing was copied.`;
+    return `${m.role} bucket: its marker r2-check/role.txt holds something r2-check never writes. Nothing was copied.`;
+  },
   toR2: "Copying the files from the data folder to R2: the private files to the private bucket, the public files to the public bucket.",
   toDisk: "Copying the files from R2 to the data folder: the private bucket to the private files, the public bucket to the public files.",
   dryRun: "Dry run: nothing is written or removed. ",
-  counts: (name: string, c: MirrorCounts, dryRun: boolean) =>
-    dryRun
-      ? `${name} files: ${c.copied} to copy, ${c.already} already there, ${c.removed} to remove, ${c.failed} failed.`
-      : `${name} files: ${c.copied} copied, ${c.already} already there, ${c.removed} removed, ${c.failed} failed.`,
+  emptySource: (name: string, n: number) => `files-copy --remove-extra stops: the ${name} files at the source are empty while the destination holds ${n}. Nothing was copied or removed.`,
+  missingFolder: (folder: string) => `files-copy --remove-extra stops: the data folder has no ${folder} folder, so DATA_DIR may name the wrong folder. Nothing was copied or removed.`,
+  noFolder: (folder: string) => `the data folder has no ${folder} folder: there is nothing to copy from it.`,
+  counts: (name: string, c: MirrorCounts, bad: number, dryRun: boolean, removeExtra: boolean) => {
+    const extra = dryRun ? (removeExtra ? "to be removed" : "to be left in place") : removeExtra ? "removed" : "left in place";
+    return `${name} files: ${c.copied} ${dryRun ? "to copy" : "copied"}, ${c.already} already there, ${c.failed} failed, ${bad} that can never be copied; extra at the destination: ${c.extra}, ${extra}.`;
+  },
+  cannotCopy: (name: string, what: string) => `${name} files: can never be copied: ${what}.`,
+  prefixes: (name: string, list: string) => `${name} files at the destination, by key prefix: ${list}.`,
   notListed: (name: string, reason: string) => `${name} files: not copied, the files could not be listed: ${reason}.`,
   dryDone: "Dry run: nothing was changed.",
-  done: "Done: every file at the destination is the source's, checked by size and SHA-256.",
+  done: "Done: every file of the source is at the destination, checked by size and SHA-256.",
   someFailed: (n: number) => `Not done: ${n === 1 ? "1 file" : `${n} files`} failed. Run the command again, and do not change FILE_STORE until it ends with 0 failed.`,
+  someBad: (n: number) =>
+    `Not done: ${n === 1 ? "1 file" : `${n} files`} can never be copied (named above): a damaged object file in the data folder, or a key the app never writes in a bucket. Restore each from a backup or remove it by hand, then run the command again.`,
   unlisted: (names: string[]) => `Not done: the ${names.join(" and the ")} files could not be listed. Put that right and run the command again; do not change FILE_STORE until it ends with 0 failed.`,
 } as const;
+
+/** r2-check's marker step for one bucket: true when the bucket is marked with its own role (now or before). */
+async function markBucket(role: "private" | "public", store: ListableStore, out: (line: string) => void): Promise<boolean> {
+  let found: Awaited<ReturnType<typeof readMarker>>;
+  try {
+    found = await readMarker(store);
+  } catch (err) {
+    out(FILES_SAID.markUnreadable(role, reasonWords(err)));
+    return false;
+  }
+  if (found === role) {
+    out(FILES_SAID.markOk(role));
+    return true;
+  }
+  if (found === "unknown") {
+    out(FILES_SAID.markUnknown(role));
+    return false;
+  }
+  if (found !== "absent") {
+    out(FILES_SAID.markWrong(role));
+    return false;
+  }
+  // Not marked yet: only a bucket that holds nothing of the other kind is marked.
+  try {
+    if (holdsOtherKind(role, await store.keys())) {
+      out(FILES_SAID.otherKind(role));
+      return false;
+    }
+    await writeMarker(store, role);
+  } catch (err) {
+    out(FILES_SAID.probeFailed(role, "write the marker", reasonWords(err)));
+    return false;
+  }
+  out(FILES_SAID.markWritten(role));
+  return true;
+}
 
 /**
  * r2-check and files-copy (0.1.71, src/node/file-tools.ts). Both need the five R2 settings,
@@ -758,6 +820,10 @@ async function filesCommand(parsed: { kind: "r2-check" } | FilesCopy, env: NodeJ
     const buckets = makeFileStores("r2", settings, "", opts.r2);
     let ok = true;
     for (const [name, store] of [["private", buckets.drafts], ["public", buckets.pub]] as const) {
+      if (!(await markBucket(name, store, out))) {
+        ok = false;
+        continue;
+      }
       const r = await r2Probe(store);
       if (r.ok) {
         out(FILES_SAID.probeOk(name));
@@ -769,6 +835,12 @@ async function filesCommand(parsed: { kind: "r2-check" } | FilesCopy, env: NodeJ
     out(ok ? FILES_SAID.checkPassed : FILES_SAID.checkFailed);
     return ok ? 0 : 1;
   }
+  // Never into the files the site serves from: the changeover copies to R2 while FILE_STORE is
+  // disk, and the way back copies to disk while it is still r2.
+  if (parsed.to === settings.mode) {
+    out(FILES_SAID.servedSide(settings.mode));
+    return 1;
+  }
   if (!parsed.stopped && !parsed.dryRun) {
     out(FILES_SAID.notStopped);
     return 1;
@@ -776,29 +848,76 @@ async function filesCommand(parsed: { kind: "r2-check" } | FilesCopy, env: NodeJ
   const root = resolve(env.DATA_DIR as string);
   const disk = makeFileStores("disk", settings, root);
   const r2 = makeFileStores("r2", settings, root, opts.r2);
+  // Both buckets must carry their own role before anything is read or written in either direction.
+  const marks = await checkMarkers(r2);
+  if (!marks.ok) {
+    out(FILES_SAID.markerProblem(marks));
+    return 1;
+  }
   const [src, dst] = parsed.from === "disk" ? [disk, r2] : [r2, disk];
-  out((parsed.dryRun ? FILES_SAID.dryRun : "") + (parsed.to === "r2" ? FILES_SAID.toR2 : FILES_SAID.toDisk));
-  let failed = 0;
+  const pairs = [
+    { name: "private", folder: "drafts", from: src.drafts, to: dst.drafts },
+    { name: "public", folder: "public", from: src.pub, to: dst.pub },
+  ] as const;
+  // Everything is listed before anything changes, so a refusal changes nothing.
+  const listed: { source: Listing; dest: Listing }[] = [];
   const unlisted: string[] = [];
-  // Private with private, public with public: the only two pairs there are.
-  for (const [name, from, to] of [["private", src.drafts, dst.drafts], ["public", src.pub, dst.pub]] as const) {
-    const c = await mirror(from, to, parsed.dryRun);
-    if (!c.listed) {
-      unlisted.push(name);
-      out(FILES_SAID.notListed(name, c.listReason ?? "an unexpected error"));
-      continue;
+  for (const pair of pairs) {
+    try {
+      listed.push({ source: await listFor(pair.from, pair.folder), dest: await listFor(pair.to, pair.folder) });
+    } catch (err) {
+      listed.push({ source: { keys: [], bad: [], missing: false }, dest: { keys: [], bad: [], missing: false } });
+      unlisted.push(pair.name);
+      out(FILES_SAID.notListed(pair.name, reasonWords(err)));
     }
-    failed += c.failed;
-    out(FILES_SAID.counts(name, c, parsed.dryRun));
   }
   if (unlisted.length > 0) {
     out(FILES_SAID.unlisted(unlisted));
     return 1;
   }
-  if (failed > 0) {
-    out(FILES_SAID.someFailed(failed));
-    return 1;
+  if (parsed.removeExtra) {
+    for (const [i, pair] of pairs.entries()) {
+      const { source, dest } = listed[i];
+      if (parsed.from === "disk" && source.missing) {
+        out(FILES_SAID.missingFolder(pair.folder));
+        return 1;
+      }
+      if (source.keys.length === 0 && source.bad.length === 0 && dest.keys.length > 0) {
+        out(FILES_SAID.emptySource(pair.name, dest.keys.length));
+        return 1;
+      }
+    }
   }
+  out((parsed.dryRun ? FILES_SAID.dryRun : "") + (parsed.to === "r2" ? FILES_SAID.toR2 : FILES_SAID.toDisk));
+  let failed = 0;
+  let bad = 0;
+  for (const [i, pair] of pairs.entries()) {
+    const { source, dest } = listed[i];
+    if (parsed.from === "disk" && source.missing) out(FILES_SAID.noFolder(pair.folder));
+    const c = await mirror(pair.from, pair.to, source, dest, { dryRun: parsed.dryRun, removeExtra: parsed.removeExtra });
+    const never = [...source.bad, ...dest.bad];
+    failed += c.failed;
+    bad += never.length;
+    out(FILES_SAID.counts(pair.name, c, never.length, parsed.dryRun, parsed.removeExtra));
+    for (const what of never) out(FILES_SAID.cannotCopy(pair.name, what));
+    // What the destination holds now (or would), by key prefix, so a public bucket holding
+    // anything but public pictures shows without listing it by hand.
+    let after: string[];
+    if (parsed.dryRun) {
+      const held = new Set(source.keys);
+      after = [...source.keys, ...(parsed.removeExtra ? [] : dest.keys.filter((k) => !held.has(k)))];
+    } else {
+      try {
+        after = (await listFor(pair.to, pair.folder)).keys;
+      } catch {
+        after = [];
+      }
+    }
+    out(FILES_SAID.prefixes(pair.name, byPrefix(after)));
+  }
+  if (failed > 0) out(FILES_SAID.someFailed(failed));
+  if (bad > 0) out(FILES_SAID.someBad(bad));
+  if (failed > 0 || bad > 0) return 1;
   out(parsed.dryRun ? FILES_SAID.dryDone : FILES_SAID.done);
   return 0;
 }
