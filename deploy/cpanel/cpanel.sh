@@ -505,15 +505,19 @@ read_data_dir() {
 }
 
 # Where the files are, from the FILE_STORE line of the settings file and no other line,
-# taken as app.cjs takes it (the first such line; spaces around it and one pair of quotes
-# dropped) and as the app reads it (in any case). Sets FILE_STORE_STATE: disk (no line,
-# an empty one, or disk), r2, other (a value the app does not start with), or unknown (the
-# file cannot be read). Only the state is kept; the value is never printed.
+# taken as app.cjs takes it (spaces around it and one pair of quotes dropped) and as the
+# app reads it (in any case). Sets FILE_STORE_STATE: disk (no line, an empty one, or disk),
+# r2, other (a value the app does not start with, or more than one FILE_STORE line, which
+# app.cjs refuses), or unknown (the file cannot be read). Only the state is kept; the value is never printed.
 read_file_store() {
   local v
   FILE_STORE_STATE=unknown
   [ -f "$SETTINGS" ] && [ -r "$SETTINGS" ] || return 0
-  v="$(sed -n 's/^[[:space:]]*FILE_STORE=//p' "$SETTINGS" | head -n 1 | tr -d '\r')"
+  # As app.cjs reads the file: a byte-order mark at its start is no part of the first line, and
+  # a no-break space is space like any other (JavaScript's trim removes both).
+  v="$(sed -n -e '1s/^\xEF\xBB\xBF//' -e 's/\xC2\xA0/ /g' -e 's/^[[:space:]]*FILE_STORE=//p' "$SETTINGS" | tr -d '\r')"
+  # More than one FILE_STORE line: app.cjs refuses to start, and nothing here may guess which one counts.
+  if [ "$(printf '%s\n' "$v" | grep -c '')" -gt 1 ]; then FILE_STORE_STATE=other; return 0; fi
   v="${v%"${v##*[![:space:]]}"}"
   case "$v" in
     \"*\") v="${v#\"}"; v="${v%\"}" ;;
@@ -530,7 +534,7 @@ read_file_store() {
 
 # The lines backup and status say about the files when they may not be on disk.
 FILES_ON_R2_LINE="the files are on R2 (FILE_STORE=r2 in the settings file), so they are not part of this backup: it holds the database, the app files and the settings file only. Keep a copy of the two buckets yourself."
-FILES_UNKNOWN_LINE="the FILE_STORE line of the settings file is neither disk nor r2, and the app does not start with it; if the files are on R2, they are not part of this backup."
+FILES_UNKNOWN_LINE="the FILE_STORE line of the settings file is neither disk nor r2, or is there more than once, and the app does not start with it; if the files are on R2, they are not part of this backup."
 
 # The data folder of an existing install, with its database. Stops otherwise: a backup
 # or an update that cannot find the data must not go on as if there were none.
@@ -1483,7 +1487,7 @@ cmd_status() {
     read_file_store
     case "$FILE_STORE_STATE" in
       r2) info "files:          on R2 (FILE_STORE=r2), not in the data folder; a backup does not hold them" ;;
-      other) info "files:          the FILE_STORE line of the settings file is neither disk nor r2; the app does not start with it" ;;
+      other) info "files:          the FILE_STORE line of the settings file is neither disk nor r2, or is there more than once; the app does not start with it" ;;
     esac
     [ -f "$DATA_DIR/db.sqlite" ] || info "database:       none at $DATA_DIR/db.sqlite yet; the app writes it the first time it starts"
   else

@@ -240,3 +240,35 @@ describe("the cPanel startup file run as the admin command", () => {
     expect(missing.stdout + missing.stderr).not.toContain("/data/tours");
   });
 });
+
+describe("the cPanel startup file and the file settings (0.1.71)", () => {
+  const ONCE = ["FILE_STORE", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_PRIVATE_BUCKET", "R2_PUBLIC_BUCKET"];
+  /** A stand-in admin command that says it ran. */
+  const withAdmin = (l: { app: string }) =>
+    writeFileSync(join(l.app, "dist", "node", "admin.js"), ['export const ADMIN_SETTINGS = ["DATA_DIR"];', "export function isRecoveryOn() { return false; }", 'export async function main() { console.log("ADMIN RAN"); }', ""].join("\n"));
+
+  it.each(ONCE)("refuses a settings file that holds %s twice, for the app and for the admin command, with one line and no value", (name) => {
+    const l = layout();
+    withAdmin(l);
+    // The two lines disagree, as when the app would see one and the command the other.
+    writeFileSync(l.settings, `DATA_DIR=/data/tours\nSETUP_CODE=${SECRET}\n${name}=made-up-first-value\n# a comment\n  ${name}="made-up-second-value"\n`);
+    for (const args of [[], ["admin", "audit"]]) {
+      const r = start(l.app, {}, args);
+      expect(r.status, args.join(" ")).toBe(1);
+      expect(r.started).toBeNull();
+      expect(r.stdout).not.toContain("ADMIN RAN");
+      expect(r.stderr.trim()).toBe(`demo-platform: the settings file ${l.settings} holds ${name} more than once. Keep one ${name} line and start again.`);
+      expect(r.stdout + r.stderr).not.toContain("made-up");
+      expect(r.stdout + r.stderr).not.toContain(SECRET);
+    }
+  });
+
+  it("one line of each is taken as before, a byte-order mark at the start of the file included, and other settings' duplicates still behave as before", () => {
+    const l = layout();
+    writeFileSync(l.settings, `\uFEFFFILE_STORE=disk\nDATA_DIR=/data/first\nDATA_DIR=/data/second\nSETUP_CODE=${SECRET}\nR2_PUBLIC_BUCKET=one-bucket\n`);
+    const r = start(l.app);
+    expect(r.status).toBe(0);
+    // The app keeps the first of a duplicated other setting, as it always did.
+    expect(r.started).toMatchObject({ DATA_DIR: "/data/first" });
+  });
+});

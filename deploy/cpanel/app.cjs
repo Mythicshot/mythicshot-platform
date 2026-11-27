@@ -85,6 +85,19 @@ function settingsLines() {
   return out;
 }
 
+// Where the files are must be read the same way by the app, the admin command and cpanel.sh.
+// For a duplicate line the app takes the first and the admin command the last, so a settings
+// file that holds FILE_STORE or one of the five R2 settings more than once is refused for
+// both, with one line that names the setting and never a value. Every other setting's
+// duplicates behave as before.
+const ONCE_ONLY = ["FILE_STORE", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_PRIVATE_BUCKET", "R2_PUBLIC_BUCKET"];
+for (const name of ONCE_ONLY) {
+  if (settingsLines().filter(([n]) => n === name).length > 1) {
+    console.error(`demo-platform: the settings file ${settingsFile} holds ${name} more than once. Keep one ${name} line and start again.`);
+    process.exit(1);
+  }
+}
+
 // `node app.cjs admin <arguments>` runs the site's admin command (dist/node/admin.js)
 // instead of the app: that is how `cpanel.sh admin` runs it. The guard is the first
 // argument: whatever loads this file to start the app (Passenger, through a loader of its

@@ -1103,6 +1103,43 @@ test_update_refuses_the_way_back_while_the_files_are_on_r2() {
   expect "no R2 value is shown" r2_values_not_shown
 }
 
+test_file_store_is_read_as_app_cjs_reads_it() {
+  local case_ line
+  # A byte-order mark before the line, and a no-break space around the value: app.cjs sees r2,
+  # so this script must too.
+  for case_ in bom nbsp; do
+    new_sandbox
+    fresh_install
+    app_has_run
+    make_release "$T/new" 0.2.0
+    cpanel_in "$T/new" "" update --yes
+    if [ "$case_" = bom ]; then
+      { printf '\357\273\277FILE_STORE=r2\n'; cat "$SETTINGS"; } >"$SETTINGS.new" && mv -- "$SETTINGS.new" "$SETTINGS"
+    else
+      printf 'FILE_STORE=\302\240r2\302\240\n' >>"$SETTINGS"
+    fi
+    make_release "$T/older" 0.1.70
+    cpanel_in "$T/older" "" update --yes --allow-downgrade
+    expect "$case_: read as r2, so refused" test "$RC" != 0
+    expect "$case_: says why" has "$OUT" "The settings file says FILE_STORE=r2"
+  done
+  # Two FILE_STORE lines, one of each: app.cjs refuses the file, so this script fails closed.
+  for line in 'FILE_STORE=disk' 'FILE_STORE=r2'; do
+    new_sandbox
+    fresh_install
+    app_has_run
+    make_release "$T/new" 0.2.0
+    cpanel_in "$T/new" "" update --yes
+    printf 'FILE_STORE=disk\n%s\n' "$line" >>"$SETTINGS"
+    make_release "$T/older" 0.1.70
+    cpanel_in "$T/older" "" update --yes --allow-downgrade
+    expect "two lines ($line): refused" test "$RC" != 0
+    expect "two lines ($line): says it may be on R2" has "$OUT" "could not be read as disk, so the files may be in the two R2 buckets"
+    cpanel "" backup
+    expect "two lines ($line): backup says so" has "$OUT" "the FILE_STORE line of the settings file is neither disk nor r2"
+  done
+}
+
 test_an_archive_before_access_is_checked_whatever_is_installed() {
   # The installed version cannot be read: an archive before 0.1.38 is still checked.
   new_sandbox
