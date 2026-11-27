@@ -12,6 +12,7 @@ import { makeDeps, seedWorkspace } from "#harness";
 import { createApp } from "../src/app.ts";
 import { openapi, routeKeys } from "../src/docs/openapi.ts";
 import { resolveHosts } from "../src/hosts.ts";
+import { SOURCE_URL_DEFAULT } from "../src/https-address.ts";
 import { DOCS_CSS_PATH, DOCS_JS_PATH } from "../src/docs/site-assets.ts";
 import { VIEWER_CSS_PATH, VIEWER_JS_PATH, VIEWER_VERSION } from "../src/docs/viewer-assets.ts";
 import type { Deps } from "../src/ports.ts";
@@ -348,8 +349,11 @@ describe("the docs", () => {
 
   it("no doc names a hostname other than the placeholders and the vendor pages", () => {
     const problems: string[] = [];
-    // The licence is left out of this scan only; its text is pinned by hash above.
-    for (const [p, text] of Object.entries(docs).filter(([p]) => p !== "LICENSE")) {
+    // The licence is left out of this scan only; its text is pinned by hash above. The one other
+    // exception is the exact default address of SOURCE_URL, the product's own repository
+    // (README, "Settings"): its host is allowed nowhere else.
+    for (const [p, written] of Object.entries(docs).filter(([p]) => p !== "LICENSE")) {
+      const text = written.split(SOURCE_URL_DEFAULT).join("");
       for (const m of text.matchAll(/\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+([a-z]{2,63})\b/g)) {
         const host = m[0];
         const at = m.index ?? 0;
@@ -372,6 +376,13 @@ describe("the docs", () => {
         expect(m[0].toLowerCase(), p).toMatch(/^2001:db8:/);
       }
     }
+  });
+
+  it("the host of SOURCE_URL's default is named only as that exact address, and the README names it", () => {
+    expect(new URL(SOURCE_URL_DEFAULT).hostname).toBe("github.com");
+    expect(docs[README]).toContain(`\`${SOURCE_URL_DEFAULT}\``);
+    for (const [p, text] of Object.entries(docs)) expect(text.split(SOURCE_URL_DEFAULT).join(""), p).not.toMatch(/github/i);
+    expect(ALLOWED_HOSTS.has("github.com")).toBe(false);
   });
 
   it("the docs never name the owner's hostname or any real token or setup code", () => {

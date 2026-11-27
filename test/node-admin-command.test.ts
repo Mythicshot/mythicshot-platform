@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { auditStatement } from "../src/audit.ts";
 import { requireAuth } from "../src/auth.ts";
 import { ADMIN_SETTINGS, isMainModule, isRecoveryOn, mainDecision, recoveryFromProcessOne, runAdmin, type AdminOptions } from "../src/node/admin.ts";
-import { NODE_SETTINGS } from "../src/node/config.ts";
+import { NODE_SETTINGS, configFromEnv } from "../src/node/config.ts";
 import { NodeDb } from "../src/node/db.ts";
 import { migrate } from "../src/node/migrate.ts";
 import type { Deps } from "../src/ports.ts";
@@ -122,6 +122,31 @@ describe("the server command", () => {
     expect(r.code).toBe(0);
     expect(r.lines.slice(0, 4)).toEqual(CREATED("robin"));
     expect(r.lines.join("\n")).not.toContain("made-up");
+  });
+
+  it("works with a SOURCE_URL the server refuses: the commands show no page, so the recovery and sweep commands still run", async () => {
+    const s = await site();
+    const bad = { ...s.env, SOURCE_URL: "http://made-up.example.com/" };
+    const made = await run(bad, ["first-admin", "--email", "You@Example.com", "--username", "Robin"]);
+    expect(made.code).toBe(0);
+    expect(made.lines.slice(0, 4)).toEqual(CREATED("robin"));
+    const link = await run({ ...bad, ...ON }, ["signin-link", "--email", "you@example.com"]);
+    expect(link.code).toBe(0);
+    expect(link.lines[1]).toMatch(LINK);
+    for (const r of [made, link]) {
+      expect(r.lines.join("\n")).not.toContain("made-up");
+      expect(r.lines.join("\n")).not.toContain("SOURCE_URL");
+    }
+    // The two sweeps answer as they do without the setting.
+    for (const argv of [["billing-sweep", "--dry-run"], ["storage-sweep", "--dry-run"]]) {
+      const plain = await run(s.env, argv);
+      const withBad = await run(bad, argv);
+      expect([withBad.code, withBad.lines.join("\n").includes("SOURCE_URL")], argv[0]).toEqual([plain.code, false]);
+      expect(withBad.lines.length, argv[0]).toBe(plain.lines.length);
+    }
+    // The server itself still refuses the value at its start (test/node-source-link.test.ts).
+    expect(() => configFromEnv(bad)).toThrow();
+    expect(() => configFromEnv(bad, { forCommands: true })).not.toThrow();
   });
 
   it("first-admin prints the planned sentence and exits 0", async () => {

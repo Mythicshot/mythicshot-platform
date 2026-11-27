@@ -9,7 +9,7 @@ import { hasNetwork } from "../rate.ts";
 import { parseEmail } from "../accounts.ts";
 import { misdirected } from "../host-gate.ts";
 import { hostSettingsFrom, normaliseHost, resolveHosts, type Hosts } from "../hosts.ts";
-import { downloadUrlSetting, homeUrlSetting } from "../https-address.ts";
+import { SOURCE_URL_DEFAULT, downloadUrlSetting, homeUrlSetting, sourceUrlSetting } from "../https-address.ts";
 import { DEFAULT_LIFETIMES, lifetimesSetting, sameLifetimes } from "../lifetimes.ts";
 import { linkOrigin, NO_MAIL, type Mailer } from "../mail.ts";
 import type { Config } from "../ports.ts";
@@ -28,6 +28,7 @@ export const NODE_SETTINGS: readonly string[] = [
   "SITE_HOST", "SMTP_HOST", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_USER", "STORAGE_ALLOWANCE_BYTES", "TOURS_HOST",
   "INVITE_CONTACT", "IMG_HOST", "DOWNLOAD_URL", "SESSION_MAX_DAYS", "CONNECTION_IDLE_DAYS", "CONNECTION_MAX_DAYS",
   "HOME_URL", "STRIPE_API_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_ID", "STRIPE_PUBLISHABLE_KEY", "MAIL_FOOTER",
+  "SOURCE_URL",
 ];
 
 /**
@@ -61,13 +62,22 @@ export const NODE_SETTINGS: readonly string[] = [
  * left out the same way; it never stops the start (the link is cosmetic), and the entry
  * writes the one line for it, as for DOWNLOAD_URL.
  *
+ * SOURCE_URL is the address of this copy's source code, where "Source code" at the foot of the
+ * sign-in pages, the dashboard and the API documentation leads (sourceUrlSetting,
+ * src/https-address.ts). Unset, empty or the default, the config has no such key and the line
+ * links to the default. A value that is not a strict https address throws its own fixed line:
+ * the link is how the copy's users are offered its source, so a mistyped one stops the start
+ * rather than pointing somewhere else. With `forCommands` (the admin command, src/node/admin.ts,
+ * which shows no page) such a value is the default instead, so it never closes the recovery
+ * commands.
+ *
  * SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and CONNECTION_MAX_DAYS are the sign-in lifetimes
  * (lifetimesSetting, src/lifetimes.ts): unset or empty is the default (the config then has no
  * such key, as before the settings existed),
  * 0 or off switches one off, and a value that cannot be used is the default; it never stops
  * the start, and the entry writes the one line for each such value.
  */
-export function configFromEnv(env: NodeJS.ProcessEnv): Config {
+export function configFromEnv(env: NodeJS.ProcessEnv, opts: { forCommands?: boolean } = {}): Config {
   // The settings by name, so the list in NODE_SETTINGS is checked against them:
   // env.TOURS_HOST, env.APP_HOST, env.IMG_HOST.
   const hosts = resolveHosts(hostSettingsFrom<string>(env));
@@ -79,6 +89,12 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
   // env.STRIPE_WEBHOOK_SECRET, env.STRIPE_PRICE_ID, env.STRIPE_PUBLISHABLE_KEY.
   const billing = billingFromSettings({ STRIPE_API_KEY: env.STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET: env.STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID: env.STRIPE_PRICE_ID, STRIPE_PUBLISHABLE_KEY: env.STRIPE_PUBLISHABLE_KEY });
   if (!billing.ok) throw new Error(billing.problem);
+  // The address of this copy's source code: a value that cannot be used stops the start, with a
+  // line that never holds it. The admin command shows no page, so for it (`forCommands`) such a
+  // value is the default and never closes the recovery commands.
+  const read = sourceUrlSetting(env.SOURCE_URL);
+  if (!read.ok && opts.forCommands !== true) throw new Error(read.problem);
+  const source = read.ok ? read : { ok: true as const, url: SOURCE_URL_DEFAULT };
   const siteHost = hosts.hosts === null && typeof env.SITE_HOST === "string" ? normaliseHost(env.SITE_HOST) : null;
   // Who to ask for an invite: passed on as written, checked by the sign-in page, never a reason to stop.
   const inviteContact = typeof env.INVITE_CONTACT === "string" ? env.INVITE_CONTACT.trim() : "";
@@ -102,6 +118,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Config {
     ...(mailFooter === "" ? {} : { mailFooter }),
     ...(downloadUrl === null ? {} : { downloadUrl }),
     ...(homeUrl === null ? {} : { homeUrl }),
+    ...(source.url === SOURCE_URL_DEFAULT ? {} : { sourceUrl: source.url }),
     ...(sameLifetimes(lifetimes, DEFAULT_LIFETIMES) ? {} : { lifetimes }),
     ...(billing.billing === null ? {} : { billing: billing.billing }),
   };

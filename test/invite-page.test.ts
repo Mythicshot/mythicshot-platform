@@ -17,7 +17,7 @@ import { INVITE_HTML, INVITE_JS } from "../src/signin/accept.ts";
 import { SIGNIN_CSS, SIGNIN_JS } from "../src/signin/page.ts";
 import { RESERVED } from "../src/usernames.ts";
 import { send, type Call } from "./bundle.ts";
-import { isBrandMarkAlt } from "./dash-checks.ts";
+import { isBrandMarkAlt, withoutSourceLine } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -262,7 +262,7 @@ describe("the invite page", () => {
   });
 
   it("loads nothing from another origin, carries no inline script or style, and is usable with the keyboard and a screen reader", () => {
-    const doc = new FakeDocument(INVITE_HTML);
+    const doc = new FakeDocument(withoutSourceLine(INVITE_HTML));
     const all = doc.root.all();
     expect(all.filter((e) => e.tagName === "script").map((e) => [e.getAttribute("src"), e.getAttribute("defer"), e.textContent])).toEqual([["/invite/invite.js", "", ""]]);
     expect(all.filter((e) => e.tagName === "link").map((e) => [e.getAttribute("rel"), e.getAttribute("href")])).toEqual([["icon", "/favicon.ico"], ["icon", "/favicon.svg"], ["stylesheet", "/signin/signin.css"]]);
@@ -273,7 +273,7 @@ describe("the invite page", () => {
         if (["src", "href", "action", "formaction", "srcset", "poster", "data"].includes(name)) expect(value, name).toMatch(/^\/(?!\/)/);
       }
     }
-    expect(INVITE_HTML).not.toMatch(/https?:|\/\//i);
+    expect(withoutSourceLine(INVITE_HTML)).not.toMatch(/https?:|\/\//i);
     expect(all.some((e) => e.tagName === "meta" && e.getAttribute("name") === "referrer" && e.getAttribute("content") === "no-referrer")).toBe(true);
     expect(all.find((e) => e.tagName === "html")?.getAttribute("lang")).toBe("en");
     expect(all.some((e) => e.tagName === "meta" && e.getAttribute("name") === "viewport" && e.getAttribute("content") === "width=device-width, initial-scale=1")).toBe(true);

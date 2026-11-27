@@ -8,7 +8,7 @@ import { withBudget } from "../budget.ts";
 import { sweepWithinBudget, type SweepSummary } from "../billing-sweep.ts";
 import { storageSweepWithinBudget, type StorageSweepSummary } from "../storage-alert.ts";
 import { setClientAddress } from "../client.ts";
-import { downloadUrlSetting, homeUrlSetting } from "../https-address.ts";
+import { SOURCE_URL_DEFAULT, downloadUrlSetting, homeUrlSetting, sourceUrlSetting } from "../https-address.ts";
 import { DEFAULT_LIFETIMES, LIFETIME_SETTINGS, lifetimesSetting, sameLifetimes, type LifetimeSetting } from "../lifetimes.ts";
 import { HOST_ROLES, hostSettingsFrom, normaliseHost, resolveHosts, settingOf, type Hosts, type HostsResult } from "../hosts.ts";
 import { DEFER_FAILED, type Deps } from "../ports.ts";
@@ -24,12 +24,13 @@ import { R2FileStore } from "./files.ts";
  * IMG_HOST, the optional third address an install with two addresses may add, or
  * DOWNLOAD_URL, the address of the desktop app's download page an install may add, or
  * HOME_URL, the site's home page the brand links to, which an install may add, or
+ * SOURCE_URL, the address of the copy's source code the pages' source line links to, or
  * the three sign-in lifetimes, SESSION_MAX_DAYS, CONNECTION_IDLE_DAYS and
  * CONNECTION_MAX_DAYS (src/lifetimes.ts), which an install may add to change a default, nor
  * the four billing settings (src/billing-rules.ts): STRIPE_API_KEY and STRIPE_WEBHOOK_SECRET
  * as secrets, STRIPE_PRICE_ID and STRIPE_PUBLISHABLE_KEY as vars, only on an install that bills.
  */
-type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown; IMG_HOST?: unknown; DOWNLOAD_URL?: unknown; HOME_URL?: unknown; STRIPE_API_KEY?: unknown; STRIPE_WEBHOOK_SECRET?: unknown; STRIPE_PRICE_ID?: unknown; STRIPE_PUBLISHABLE_KEY?: unknown } & Partial<Record<LifetimeSetting, unknown>>;
+type WorkerEnv = Env & { SETUP_CODE?: string; STORAGE_ALLOWANCE_BYTES?: unknown; SITE_HOST?: unknown; INVITE_CONTACT?: unknown; IMG_HOST?: unknown; DOWNLOAD_URL?: unknown; HOME_URL?: unknown; SOURCE_URL?: unknown; STRIPE_API_KEY?: unknown; STRIPE_WEBHOOK_SECRET?: unknown; STRIPE_PRICE_ID?: unknown; STRIPE_PUBLISHABLE_KEY?: unknown } & Partial<Record<LifetimeSetting, unknown>>;
 
 /**
  * Who to ask for an invite, from the Worker's var INVITE_CONTACT, trimmed, or null when it
@@ -109,6 +110,10 @@ export function depsFromEnv(
   const downloadUrl = downloadUrlSetting(env.DOWNLOAD_URL).url;
   // The site's home page: a var that is not text, or not a usable address, is left out (homeUrlSetting).
   const homeUrl = homeUrlSetting(env.HOME_URL).url;
+  // The source line's address: the default unless the var names another usable one. The fetch
+  // handler has refused a var that cannot be used before it gets here (sourceUrlFromWorkerEnv).
+  const source = sourceUrlFromWorkerEnv(env);
+  const sourceUrl = source.ok && source.url !== SOURCE_URL_DEFAULT ? source.url : null;
   // The sign-in lifetimes: a var that cannot be used is its default (lifetimesSetting).
   const { lifetimes } = lifetimesSetting(lifetimeVars(env));
   return {
@@ -129,6 +134,7 @@ export function depsFromEnv(
       ...(inviteContact === null ? {} : { inviteContact }),
       ...(downloadUrl === null ? {} : { downloadUrl }),
       ...(homeUrl === null ? {} : { homeUrl }),
+      ...(sourceUrl === null ? {} : { sourceUrl }),
       ...(sameLifetimes(lifetimes, DEFAULT_LIFETIMES) ? {} : { lifetimes }),
       ...(billing === null ? {} : { billing }),
     },
@@ -143,6 +149,16 @@ export function depsFromEnv(
           },
         }),
   };
+}
+
+/**
+ * The address of this copy's source code from the Worker's var SOURCE_URL (sourceUrlSetting):
+ * unset or empty is the default, a strict https address is kept, and anything else, a var that
+ * is not text included, gives the one fixed line. The fetch handler then closes every path, as
+ * it does for the other settings Node refuses at the start.
+ */
+export function sourceUrlFromWorkerEnv(env: { SOURCE_URL?: unknown }): ReturnType<typeof sourceUrlSetting> {
+  return sourceUrlSetting(env.SOURCE_URL);
 }
 
 /** The billing settings from the Worker's secrets and vars (billingFromSettings): all four, or billing is off. */
@@ -247,6 +263,13 @@ export default {
     const billing = billingFromWorkerEnv(env);
     if (!billing.ok) {
       console.error(billing.problem);
+      return misconfigured();
+    }
+    // The same for an address of the source code that cannot be used: the pages' source line
+    // must lead to this copy's source, never quietly elsewhere. The line never holds the value.
+    const source = sourceUrlFromWorkerEnv(env);
+    if (!source.ok) {
+      console.error(source.problem);
       return misconfigured();
     }
     // The client address, for rate limits only: the connecting address as Cloudflare gives

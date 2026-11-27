@@ -211,6 +211,8 @@ case "$args" in
     printf '%s\n' "${IMG_HOST-unset}" >>"$STUB_STATE/up-img-names"
     # up-home-url: the same for the site's home page.
     printf '%s\n' "${HOME_URL-unset}" >>"$STUB_STATE/up-home-url"
+    # up-source-url: the same for the address of the copy's source code.
+    printf '%s\n' "${SOURCE_URL-unset}" >>"$STUB_STATE/up-source-url"
     # STUB_UP_SIGNAL: the run gets that signal during the starts listed in STUB_UP_SIGNAL_ON
     # (default: the first). The first start is cut short by it; a later one finishes.
     if [ -n "${STUB_UP_SIGNAL:-}" ] && [[ " ${STUB_UP_SIGNAL_ON:-1} " == *" $n "* ]]; then
@@ -3095,6 +3097,28 @@ test_home_url_in_the_environment_does_not_reach_the_stack() {
   HOME_URL=https://other-home.example.net/ install_sh "" update
   expect "tunnel: update succeeds" test "$RC" = 0
   expect "tunnel: neither run handed it to a start" test "$(sort -u "$STATE/up-home-url")" = unset
+  expect "the address from the environment appears nowhere" test "$(cat "$OUT" "$ERR" "$LOG" | grep -c 'example\.net')" = 0
+}
+
+# The same for SOURCE_URL, the address of the copy's source code, which the tunnel stack file
+# passes on from .env: one left in the caller's shell must not reach the stack.
+test_source_url_in_the_environment_does_not_reach_the_stack() {
+  new_sandbox
+  SOURCE_URL=https://other-source.example.net/copy STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes
+  expect "direct: a first install succeeds" test "$RC" = 0
+  expect "direct: no source address is taken from the environment" test "$(grep -c SOURCE_URL "$INST/.env")" = 0
+  expect "direct: the start was not handed it" test "$(sort -u "$STATE/up-source-url")" = unset
+  new_sandbox
+  SOURCE_URL=https://other-source.example.net/copy install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
+  expect "tunnel: a first install succeeds" test "$RC" = 0
+  expect "tunnel: no source address is taken from the environment" test "$(grep -c SOURCE_URL "$INST/.env")" = 0
+  expect "tunnel: the start was not handed it" test "$(sort -u "$STATE/up-source-url")" = unset
+  rm -f "$STATE/up-source-url"
+  SOURCE_URL=https://other-source.example.net/copy install_sh "" install
+  expect "tunnel: a later install succeeds" test "$RC" = 0
+  SOURCE_URL=https://other-source.example.net/copy install_sh "" update
+  expect "tunnel: update succeeds" test "$RC" = 0
+  expect "tunnel: neither run handed it to a start" test "$(sort -u "$STATE/up-source-url")" = unset
   expect "the address from the environment appears nowhere" test "$(cat "$OUT" "$ERR" "$LOG" | grep -c 'example\.net')" = 0
 }
 

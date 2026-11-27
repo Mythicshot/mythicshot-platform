@@ -34,6 +34,7 @@
 //   that would act on the account that is signed in.
 
 import { BRAND_PLAIN, FAVICON_LINKS } from "../brand.ts";
+import { SOURCE_FOOTER } from "../source.ts";
 
 export const INVITE_HTML = `<!doctype html>
 <html lang="en">
@@ -84,6 +85,7 @@ ${FAVICON_LINKS}
     <button type="button" class="primary wide" id="here-button">Go to the dashboard</button>
   </section>
 </main>
+${SOURCE_FOOTER}
 </body>
 </html>
 `;

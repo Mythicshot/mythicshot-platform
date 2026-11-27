@@ -429,7 +429,8 @@ export async function runAdmin(argv: string[], env: NodeJS.ProcessEnv, out: (lin
   }
   let config;
   try {
-    config = configFromEnv(env);
+    // A SOURCE_URL the server would refuse is no reason to close these commands: they show no page.
+    config = configFromEnv(env, { forCommands: true });
   } catch (err) {
     // The app's own one line for a setting it would refuse to start with. It never holds a value.
     out(err instanceof Error ? err.message : SAID.failed);

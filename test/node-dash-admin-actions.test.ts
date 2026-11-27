@@ -396,7 +396,7 @@ describe("the invites: Resend and Cancel", () => {
     expect(tab.$("cancel-dialog").shown).toBe(true);
     expect(tab.shows().slice(-4)).toEqual(["Cancel the invite to mara@example.com?", "The link in the mail stops working. You can invite the same address again later.", "Keep it", "Cancel invite"]);
     expect(tab.doc.activeElement).toBe(tab.$("cancel-keep"));
-    expect(tab.doc.body.all().filter((e) => e.hasAttribute("inert")).map((e) => e.id)).toEqual(["dash-top", "admin"]);
+    expect(tab.doc.body.all().filter((e) => e.hasAttribute("inert")).map((e) => e.id)).toEqual(["dash-top", "admin", "source-line"]);
     tab.$("cancel-keep").click();
     expect([tab.$("cancel-dialog").hidden, tab.doc.activeElement]).toEqual([true, drop]);
     drop.click();

@@ -21,7 +21,8 @@ import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../
 import { INVITE_HTML, INVITE_JS } from "../src/signin/accept.ts";
 import { parseUsername } from "../src/usernames.ts";
 import { send } from "./bundle.ts";
-import { FakeDocument, FakeElement, FakeStorage, visibleText } from "./pages-dom.ts";
+import { FakeDocument, FakeElement, FakeStorage, markupOf, visibleText } from "./pages-dom.ts";
+import { SOURCE_FOOTER } from "../src/source.ts";
 
 const APP = "https://app.example.com";
 const CODE = "dpi_" + "0123456789abcdef0123456789abcdef01234567";
@@ -259,6 +260,8 @@ describe("the invite page: opening the link", () => {
       expect([to.tagName, to.children.length, to.all(), to.textContent], email).toEqual(["strong", 1, [], email]);
       expect(tab.shows()[2], email).toBe(CHOOSE_LEAD(email));
       expect(tab.doc.root.all().filter((e) => e.tagName === "img" && !isBrandMark(e)), email).toEqual([]);
+      // After the page's script ran, the source line is exactly as built: nothing of the invite went into it.
+      expect(markupOf(tab.$("source-line")), email).toBe(SOURCE_FOOTER);
     }
   });
 

@@ -17,8 +17,8 @@ import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { send, type Call } from "./bundle.ts";
-import { isBrandMarkAlt } from "./dash-checks.ts";
-import { FakeDocument, textNodes } from "./pages-dom.ts";
+import { isBrandMarkAlt, withoutSourceLine } from "./dash-checks.ts";
+import { FakeDocument, textNodes, inSourceLine } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
 const TOURS = "https://tours.example.com";
@@ -372,7 +372,7 @@ describe("the Admin page and its script", () => {
   });
 
   it("the page loads nothing from another origin and carries no inline script, style or handler", () => {
-    const doc = new FakeDocument(ADMIN_HTML);
+    const doc = new FakeDocument(withoutSourceLine(ADMIN_HTML));
     const all = doc.root.all();
     expect(all.filter((e) => e.tagName === "script").map((e) => [e.getAttribute("src"), e.hasAttribute("defer"), e.textContent])).toEqual([
       ["/dash/dash.js", true, ""],
@@ -386,7 +386,7 @@ describe("the Admin page and its script", () => {
         if (["src", "href", "action", "formaction", "srcset", "poster", "data"].includes(name)) expect(value, name).toMatch(/^\/(?!\/)/);
       }
     }
-    expect(ADMIN_HTML).not.toMatch(/https?:|\/\//i);
+    expect(withoutSourceLine(ADMIN_HTML)).not.toMatch(/https?:|\/\//i);
     expect(all.filter((e) => e.tagName === "form")).toEqual([]);
     // The script sets no style or handler attribute; the one style it touches is a bar's width, through the CSSOM.
     expect(ADMIN_JS).not.toMatch(/setAttribute\("(?:style|on[a-z]+|src|srcdoc|href)"/);
@@ -472,8 +472,8 @@ describe("the Admin page and its script", () => {
       expect(p.script.body, p.path).not.toContain("admin.js");
     }
     expect(DASH_JS).not.toContain("admin.js");
-    // The one link in the page leads back to Tours.
-    const links = new FakeDocument(ADMIN_HTML).body.all().filter((e) => e.tagName === "a" && e.parent?.tagName !== "nav");
+    // The one link in the page leads back to Tours (the source line at its foot is the same on every page).
+    const links = new FakeDocument(ADMIN_HTML).body.all().filter((e) => e.tagName === "a" && e.parent?.tagName !== "nav" && !inSourceLine(e));
     expect(links.map((a) => [a.getAttribute("href"), a.textContent])).toEqual([["/tours", "Back to Tours"]]);
   });
 
