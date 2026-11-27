@@ -2316,6 +2316,10 @@ services:
       # The site's home page, which the logo and name at the top of the dashboard link to:
       # an https address. A value the app cannot use leaves the logo without a link.
       HOME_URL: ${HOME_URL:-}
+      # The address of this copy's source code, which the line at the foot of the sign-in pages,
+      # the dashboard and the API documentation links to: an https address. Empty: the product's
+      # own repository. A value that is not an https address keeps the app from starting.
+      SOURCE_URL: ${SOURCE_URL:-}
       # Billing (optional, all four or none): a Stripe restricted key, the listener's signing
       # secret, the plan's price and the publishable key. Without all four there is no billing.
       STRIPE_API_KEY: ${STRIPE_API_KEY:-}

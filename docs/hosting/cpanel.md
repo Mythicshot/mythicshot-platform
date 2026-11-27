@@ -749,6 +749,28 @@ touch ~/apps/tours/tmp/restart.txt
 
 **How to tell it worked:** clicking the mark or the name at the top of the dashboard opens your home page in the same tab. A value the app cannot use never stops the app: the mark and the name are then no link, and the app's log has the line `home page: off, because HOME_URL is not a usable address. The site runs; the logo is not a link.` Fix the line and restart. To take the link away, remove the line and restart.
 
+### Point the source code link at your copy
+
+Every sign-in page, every dashboard page and the API documentation end with the line "Mythicshot <version> · Source code", whose link leads to the product's own repository (see [Settings](../../README.md#settings) in the README). If the site runs a changed copy, point the link at the place where that copy's code can be had. Without the line the default is used.
+
+1. Add a line with that full address, the one beginning with https, to the settings file in place of the part in angle brackets, and save.
+
+```sh
+nano ~/apps/tours-config.env
+```
+
+```text
+SOURCE_URL=<your copy's source code address>
+```
+
+2. Restart the app, so that it reads the new line.
+
+```sh
+touch ~/apps/tours/tmp/restart.txt
+```
+
+**How to tell it worked:** "Source code" at the foot of the sign-in page opens your address. A value that is not a usable https address keeps the app from starting, and the app's log has the line `source code: SOURCE_URL is not a usable https address. Write the address of this copy's source code, or leave it out for the default.`. Fix the line and restart. To go back to the default, remove the line and restart.
+
 ### Change how long sign-ins last
 
 A browser session ends 90 days after its sign-in however active it is, and a computer connected by signing in from Mythicshot stops working after 90 days without use; each then signs in again, and nothing is lost. A third limit, off unless set, ends a connection a number of days after it was made. What each setting means is in [Settings](../../README.md#settings) in the README.

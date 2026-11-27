@@ -15,7 +15,7 @@ import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { send, type Call } from "./bundle.ts";
-import { expectNoForbiddenApis, expectPageShape, isBrandMarkAlt, isBrandMark } from "./dash-checks.ts";
+import { expectNoForbiddenApis, expectPageShape, isBrandMarkAlt, isBrandMark, withoutSourceLine } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -367,7 +367,7 @@ describe("the Images and GIFs pages", () => {
 
   it("load nothing from another origin, carry no inline script, style or handler, and touch no style", () => {
     for (const p of PAGES) {
-      const doc = new FakeDocument(p.html);
+      const doc = new FakeDocument(withoutSourceLine(p.html));
       const all = doc.root.all();
       expect(all.filter((e) => e.tagName === "script").map((e) => [e.getAttribute("src"), e.hasAttribute("defer"), e.textContent]), p.path).toEqual([
         ["/dash/dash.js", true, ""],
@@ -380,7 +380,7 @@ describe("the Images and GIFs pages", () => {
           if (["src", "href", "action", "formaction", "srcset", "poster", "data"].includes(name)) expect(value, name).toMatch(/^\/(?!\/)/);
         }
       }
-      expect(p.html, p.path).not.toMatch(/https?:|\/\//i);
+      expect(withoutSourceLine(p.html), p.path).not.toMatch(/https?:|\/\//i);
       expect(p.js, p.path).not.toMatch(/setAttribute\("(?:style|on[a-z]+|src|srcdoc|srcset)"/);
       expect(p.js, p.path).not.toMatch(/\.on[a-z]+\s*=/);
       expect(p.js, p.path).not.toMatch(/\.style\b|cssText|setProperty\(|innerText|\.outerText/);

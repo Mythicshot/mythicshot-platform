@@ -20,6 +20,7 @@
 // honour it: it goes to /tours as before and removes the record.
 import { PAGE_BASE_CSS, WORDMARK_CSS } from "../brand-css.ts";
 import { BRAND_PLAIN, FAVICON_LINKS } from "../brand.ts";
+import { SOURCE_FOOTER } from "../source.ts";
 import { RETURN_SHARED_JS } from "../dash/connect-return.ts";
 import { escapeHtml, type InviteContact } from "./invite.ts";
 
@@ -60,6 +61,7 @@ ${FAVICON_LINKS}
     <p class="small">Nothing after a few minutes? Look in your spam folder, or <a href="/signin" id="again">try another address</a>.</p>
   </section>
 </main>
+${SOURCE_FOOTER}
 </body>
 </html>
 `;
@@ -95,6 +97,7 @@ ${FAVICON_LINKS}
     <button type="button" class="primary wide" id="dead-button">Send me a new link</button>
   </section>
 </main>
+${SOURCE_FOOTER}
 </body>
 </html>
 `;
@@ -187,8 +190,25 @@ a:focus-visible { border-radius: var(--radius-sm); }
 }
 `;
 
-/** The sign-in pages' stylesheet: the card, then the wordmark's rules for the name beside the mark. */
-export const SIGNIN_CSS = `${SIGNIN_CARD_CSS}${WORDMARK_CSS}`;
+/**
+ * The source line below the card (src/source.ts), on the sign-in and invite pages only: the page
+ * stacks the card and the line, the card in the middle of the space left and the line at the
+ * bottom, small and muted, centred, wrapping as one sentence at phone width. Kept out of
+ * SIGNIN_CARD_CSS, which the gate pages viewers see share.
+ */
+const SOURCE_LINE_CSS = `body { flex-direction: column; }
+.card { margin-block: auto; }
+.source { margin: 24px 0 0; text-align: center; color: var(--text-muted); font-size: 13px; line-height: 18px; }
+.source p { margin: 0; }
+.source a { color: inherit; white-space: nowrap; }
+@media (max-width: 480px) {
+  body { align-items: center; }
+  .card { margin-top: 0; }
+}
+`;
+
+/** The sign-in pages' stylesheet: the card, then the wordmark's rules for the name beside the mark, then the source line. */
+export const SIGNIN_CSS = `${SIGNIN_CARD_CSS}${WORDMARK_CSS}${SOURCE_LINE_CSS}`;
 
 export const SIGNIN_JS = `(function () {
   "use strict";

@@ -84,6 +84,8 @@ const ALLOWED_HOSTS = new Set([
   "www.debian.org",
   "r2.dev",
   "workers.dev",
+  // The product's own repository, the default of SOURCE_URL (README, "Settings").
+  "github.com",
   // Stripe, the billing integration (README, "Billing (optional)"): its hosts the Subscribe page's policy names.
   "js.stripe.com",
   "checkout.stripe.com",

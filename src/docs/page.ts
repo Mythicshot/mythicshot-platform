@@ -10,12 +10,15 @@
 //
 // The page is server-rendered and reads without JavaScript: the header, "Get connected",
 // the links to the guides, the mount the viewer fills, the three guides (src/docs/guides.ts)
-// and the footer. Its script (src/docs/client/main.ts) adds the token box, the copy
+// and the footer, whose second line is the software's version and the link to its source
+// (src/source.ts, from the SOURCE_URL setting). Its script (src/docs/client/main.ts) adds the token box, the copy
 // buttons and the viewer.
 import type { Hono } from "hono";
 import { FAVICON_LINKS } from "../brand.ts";
+import { SOURCE_URL_DEFAULT } from "../https-address.ts";
 import { matchesEtag, PLAYER_FILE_IMMUTABLE } from "../page.ts";
 import type { Deps } from "../ports.ts";
+import { sourceLineHtml } from "../source.ts";
 import { VERSION } from "../version.ts";
 import { CODE_MEANINGS, errorCodes, GUIDES, HISTORY_NOTE, limitLines, type Guide, type GuideStep } from "./guides.ts";
 import { GET_STARTED, openapi } from "./openapi.ts";
@@ -96,20 +99,23 @@ ${guide.id === "errors-and-limits" ? tables() + "\n" : ""}${(guide.closing ?? []
 </section>`;
 }
 
-/** The page, built once: it is fixed text. */
-let page: string | null = null;
+/** The page for each source address asked for, built once: it is fixed text. */
+const pages = new Map<string, string>();
 
 /**
- * The page. Byte-for-byte the same on both targets and for every host: it names no
- * address but its own files' and, in the examples, the placeholder GUIDE_ORIGIN, which
- * the page script replaces with the address the page was opened on.
+ * The page, with the source line for `sourceUrl` (the SOURCE_URL setting; the default when
+ * left out). Byte-for-byte the same on both targets and for every host: it names no address
+ * but its own files', the source line's and, in the examples, the placeholder GUIDE_ORIGIN,
+ * which the page script replaces with the address the page was opened on.
  *
  * It reads without JavaScript: the header, "Get connected", the guides and the footer
  * are plain HTML. The token box and the copy buttons are hidden until the page script
  * shows them, since they do nothing without it; the viewer fills #reference.
  */
-export function docsHtml(): string {
-  page ??= `<!doctype html>
+export function docsHtml(sourceUrl: string = SOURCE_URL_DEFAULT): string {
+  const held = pages.get(sourceUrl);
+  if (held !== undefined) return held;
+  const page = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -154,28 +160,33 @@ ${GUIDES.map(guideHtml).join("\n")}
 </main>
 <footer class="own page-footer">
 <p>The reference is shown with Swagger UI, used under the Apache License 2.0. <a href="/docs/licences.txt">Licence notices</a></p>
+<p>${sourceLineHtml(sourceUrl)}</p>
 </footer>
 <script src="${VIEWER_JS_PATH}"></script>
 <script src="${DOCS_JS_PATH}"></script>
 </body>
 </html>
 `;
+  pages.set(sourceUrl, page);
   return page;
 }
 
-/** The page's ETag: the first 32 hex digits of its SHA-256, worked out once and kept. */
-let pageEtag: Promise<string> | null = null;
-function docsEtag(): Promise<string> {
-  pageEtag ??= crypto.subtle.digest("SHA-256", new TextEncoder().encode(docsHtml())).then((buffer) => {
+/** The page's ETag: the first 32 hex digits of its SHA-256, worked out once per source address and kept. */
+const pageEtags = new Map<string, Promise<string>>();
+function docsEtag(sourceUrl: string): Promise<string> {
+  const held = pageEtags.get(sourceUrl);
+  if (held !== undefined) return held;
+  const etag = crypto.subtle.digest("SHA-256", new TextEncoder().encode(docsHtml(sourceUrl))).then((buffer) => {
     let hex = "";
     for (const b of new Uint8Array(buffer).subarray(0, 16)) hex += b.toString(16).padStart(2, "0");
     return `"${hex}"`;
   });
-  return pageEtag;
+  pageEtags.set(sourceUrl, etag);
+  return etag;
 }
 
-async function docsPage(ifNoneMatch: string | null): Promise<Response> {
-  const etag = await docsEtag();
+async function docsPage(ifNoneMatch: string | null, sourceUrl: string): Promise<Response> {
+  const etag = await docsEtag(sourceUrl);
   const headers = {
     "content-type": "text/html; charset=utf-8",
     "content-security-policy": DOCS_CSP,
@@ -186,7 +197,7 @@ async function docsPage(ifNoneMatch: string | null): Promise<Response> {
     etag,
   };
   if (matchesEtag(ifNoneMatch, etag)) return new Response(null, { status: 304, headers });
-  return new Response(docsHtml(), { status: 200, headers });
+  return new Response(docsHtml(sourceUrl), { status: 200, headers });
 }
 
 type Asset = { text: string; type: string; etag: string; path: string };
@@ -237,9 +248,10 @@ function description(text: string, type: string, etag: string, ifNoneMatch: stri
   return new Response(text, { status: 200, headers });
 }
 
-/** The routes. `deps` is taken as every route group takes it, and not used: nothing here reaches data. */
-export function docsRoutes(app: Hono, _deps: Deps): void {
-  app.get("/docs", (c) => docsPage(c.req.header("if-none-match") ?? null));
+/** The routes. Of `deps` only the SOURCE_URL setting is read, for the page's source line: nothing here reaches data. */
+export function docsRoutes(app: Hono, deps: Deps): void {
+  const sourceUrl = deps.config.sourceUrl ?? SOURCE_URL_DEFAULT;
+  app.get("/docs", (c) => docsPage(c.req.header("if-none-match") ?? null, sourceUrl));
   app.get("/docs/:file{(?:viewer|docs)\\.[0-9a-f]{16}\\.(?:js|css)}", (c) => docsFile(c.req.path, c.req.header("if-none-match")) ?? c.notFound());
   app.get("/docs/licences.txt", () => new Response(VIEWER_LICENCES, { status: 200, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": LICENCES_CACHE, "x-content-type-options": "nosniff" } }));
   app.get("/api/v1/openapi.json", (c) => description(OPENAPI_JSON, "application/json; charset=utf-8", OPENAPI_JSON_ETAG, c.req.header("if-none-match") ?? null));

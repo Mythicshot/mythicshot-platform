@@ -22,7 +22,7 @@ import { ACCOUNT_HTML, ACCOUNT_JS } from "../src/dash/account.ts";
 import { DASH_JS } from "../src/dash/script.ts";
 import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
-import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
+import { FakeDocument, FakeElement, visibleText, inSourceLine } from "./pages-dom.ts";
 
 const APP = "https://app.example.com";
 const CSRF = "c".repeat(64);
@@ -556,7 +556,8 @@ const HOSTILE: unknown[] = [
 ];
 
 describe("the Account page's download card", () => {
-  const anchors = (tab: Tab) => tab.doc.root.all().filter((e) => e.tagName === "a" && !(e.getAttribute("href") ?? "").startsWith("/"));
+  // The links to other sites, but the source line at the foot of every page (test/source-link.test.ts).
+  const anchors = (tab: Tab) => tab.doc.root.all().filter((e) => e.tagName === "a" && !(e.getAttribute("href") ?? "").startsWith("/") && !inSourceLine(e));
 
   it("with a usable download_url: the card above Where you are signed in, its sentence, and a button-styled link that opens a new tab with no opener or referrer", async () => {
     const tab = account({}, { session: sessionAnswer({ downloadUrl: DOWNLOAD_PAGE }) });
@@ -614,7 +615,7 @@ describe("the Account page's download card", () => {
       await tab.settle();
       expect(tab.$("download-card").shown, JSON.stringify(bad)).toBe(false);
       expect(anchors(tab), JSON.stringify(bad)).toEqual([]);
-      for (const e of tab.doc.root.all()) expect(e.getAttribute("href") ?? "/", JSON.stringify(bad)).toMatch(/^\/(?!\/)/);
+      for (const e of tab.doc.root.all().filter((x) => !inSourceLine(x))) expect(e.getAttribute("href") ?? "/", JSON.stringify(bad)).toMatch(/^\/(?!\/)/);
       // The rest of the page is shown as usual.
       expect(tab.$("account").hidden, JSON.stringify(bad)).toBe(false);
     }

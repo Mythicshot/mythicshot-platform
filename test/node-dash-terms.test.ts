@@ -18,7 +18,7 @@ import { TOURS_HTML, TOURS_JS } from "../src/dash/tours.ts";
 import type { Deps } from "../src/ports.ts";
 import { SESSION_COOKIE, createSignInCode, redeemSignInCode } from "../src/sessions.ts";
 import { parseTerms, publishTerms } from "../src/terms.ts";
-import { FakeDocument, FakeElement, visibleText } from "./pages-dom.ts";
+import { FakeDocument, FakeElement, inSourceLine, visibleText } from "./pages-dom.ts";
 import { isBrandMark } from "./dash-checks.ts";
 
 const APP = "https://app.example.com";
@@ -172,7 +172,7 @@ describe("the terms screen", () => {
     // The one image is the brand's mark (src/brand.ts); nothing the terms held became an element.
     expect(tab.doc.root.all().some((e) => (e.tagName === "img" && !isBrandMark(e)) || (e.tagName === "script" && e.parent?.tagName !== "head"))).toBe(false);
     expect(tab.$("terms-links").shown).toBe(false);
-    expect(tab.doc.root.all().filter((e) => e.hasAttribute("href")).map((e) => e.getAttribute("href"))).toEqual(["/favicon.ico", "/favicon.svg", "/dash/dash.css", "/account"]);
+    expect(tab.doc.root.all().filter((e) => e.hasAttribute("href") && !inSourceLine(e)).map((e) => e.getAttribute("href"))).toEqual(["/favicon.ico", "/favicon.svg", "/dash/dash.css", "/account"]);
   });
 
   it("I agree sends the version shown with the anti-forgery header, then goes back to the dashboard page that sent the person, a tab only", async () => {

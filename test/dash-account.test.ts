@@ -20,7 +20,7 @@ import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { SIGNIN_JS } from "../src/signin/page.ts";
 import { send, type Call } from "./bundle.ts";
-import { expectNoForbiddenApis, expectPageShape, isBrandMarkAlt } from "./dash-checks.ts";
+import { expectNoForbiddenApis, expectPageShape, isBrandMarkAlt, withoutSourceLine } from "./dash-checks.ts";
 import { FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
@@ -405,7 +405,7 @@ describe("the Account page and the page an email-change link opens", () => {
     expectPageShape(ACCOUNT_EMAIL_HTML, "/account/email");
     expectNoForbiddenApis(ACCOUNT_JS, "/dash/account.js");
     for (const p of PAGES) {
-      const doc = new FakeDocument(p.html);
+      const doc = new FakeDocument(withoutSourceLine(p.html));
       const all = doc.root.all();
       expect(all.filter((e) => e.tagName === "script").map((e) => [e.getAttribute("src"), e.hasAttribute("defer"), e.textContent]), p.path).toEqual([
         ["/dash/dash.js", true, ""],
@@ -419,7 +419,7 @@ describe("the Account page and the page an email-change link opens", () => {
           if (["src", "href", "action", "formaction", "srcset", "poster", "data"].includes(name)) expect(value, `${p.path} ${name}`).toMatch(/^\/(?!\/)/);
         }
       }
-      expect(p.html, p.path).not.toMatch(/https?:|\/\//i);
+      expect(withoutSourceLine(p.html), p.path).not.toMatch(/https?:|\/\//i);
       expect(p.js, p.path).not.toMatch(/https?:|\/\/[a-z]/i);
       expect(p.js, p.path).not.toMatch(/setAttribute\(\s*["'](?:style|on[a-z]+|src|srcdoc|href)["']/);
       expect(p.js, p.path).not.toMatch(/\.style\b|cssText|setProperty\(|\.on[a-z]+\s*=/);

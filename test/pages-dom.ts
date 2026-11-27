@@ -286,9 +286,21 @@ function parseInto(doc: FakeDocument, html: string): void {
 }
 
 /** The text of every text node under `el`, trimmed, with runs of white space as one space, empty ones left out. */
+/**
+ * Whether `e` is in the source line at the foot of a page (footer class "source", src/source.ts):
+ * the same on every page, pinned by test/source-link.test.ts, and left out of the checks of a
+ * page's own words and links.
+ */
+export function inSourceLine(e: FakeElement): boolean {
+  const footer = e.closest("footer");
+  return footer !== null && footer.className === "source";
+}
+
+/** The text nodes under `el`, in order, trimmed; the source line's are left out (inSourceLine). */
 export function textNodes(el: FakeElement, filter: (parent: FakeElement) => boolean = () => true): string[] {
   const out: string[] = [];
   const walk = (node: FakeElement) => {
+    if (inSourceLine(node)) return;
     for (const c of node.children) {
       if (c instanceof FakeText) {
         const t = c.text.replace(/\s+/g, " ").trim();
@@ -310,12 +322,17 @@ function seenText(el: FakeElement): string {
   return el.children.map((c) => (c instanceof FakeText ? c.text : c.tagName === "img" ? c.getAttribute("alt") ?? "" : seenText(c))).join("");
 }
 
-/** What a person sees in the body now: the text of every shown element, block by block, as one line each. */
+/**
+ * What a person sees in the body now: the text of every shown element, block by block, as one
+ * line each. The source line at the foot of the page (footer class "source", src/source.ts) is
+ * left out: it is the same on every page, and test/source-link.test.ts pins it.
+ */
 export function visibleText(doc: FakeDocument): string[] {
   const BLOCKS = new Set(["p", "h1", "h2", "label", "button", "li"]);
   const out: string[] = [];
   for (const el of doc.body.all()) {
     if (!el.shown || !BLOCKS.has(el.tagName)) continue;
+    if (inSourceLine(el)) continue;
     // A row of a list: its parts in order, a button in it left to its own line.
     const t = el.tagName === "li" ? textNodes(el, (p) => p.closest("button") === null).join(" | ") : seenText(el).replace(/\s+/g, " ").trim();
     if (t !== "") out.push(t);

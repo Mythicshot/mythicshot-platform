@@ -17,8 +17,8 @@ import { HOST_RULES } from "../src/host-gate.ts";
 import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { send, type Call } from "./bundle.ts";
-import { isBrandMarkAlt } from "./dash-checks.ts";
-import { FakeDocument, textNodes } from "./pages-dom.ts";
+import { isBrandMarkAlt, withoutSourceLine } from "./dash-checks.ts";
+import { inSourceLine, FakeDocument, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
 const TOURS = "https://tours.example.com";
@@ -244,12 +244,12 @@ describe("the Storage page", () => {
     const navEnd = STORAGE_HTML.indexOf("</nav>");
     expect(navEnd).toBeGreaterThanOrEqual(0);
     for (const path of ["/images", "/gifs"]) for (const text of [STORAGE_HTML.slice(navEnd), STORAGE_JS]) expect(text, path).not.toContain(path);
-    expect(doc.body.all().filter((e) => e.tagName === "a").map((a) => a.getAttribute("href"))).toEqual(["/images", "/gifs", "/tours", "/storage", "/connections", "/account", "/admin"]);
+    expect(doc.body.all().filter((e) => e.tagName === "a" && !inSourceLine(e)).map((a) => a.getAttribute("href"))).toEqual(["/images", "/gifs", "/tours", "/storage", "/connections", "/account", "/admin"]);
     for (const api of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "createContextualFragment", "DOMParser", "srcdoc", "confirm(", "alert(", "prompt("]) expect(STORAGE_JS, api).not.toContain(api);
   });
 
   it("loads nothing from another origin and carries no inline script, style or handler; the bars are sized through the CSSOM only", () => {
-    const doc = new FakeDocument(STORAGE_HTML);
+    const doc = new FakeDocument(withoutSourceLine(STORAGE_HTML));
     const all = doc.root.all();
     expect(all.filter((e) => e.tagName === "script").map((e) => [e.getAttribute("src"), e.hasAttribute("defer"), e.textContent])).toEqual([
       ["/dash/dash.js", true, ""],
@@ -263,7 +263,7 @@ describe("the Storage page", () => {
         if (["src", "href", "action", "formaction", "srcset", "poster", "data"].includes(name)) expect(value, name).toMatch(/^\/(?!\/)/);
       }
     }
-    expect(STORAGE_HTML).not.toMatch(/https?:|\/\//i);
+    expect(withoutSourceLine(STORAGE_HTML)).not.toMatch(/https?:|\/\//i);
     expect(STORAGE_JS).not.toMatch(/setAttribute\("(?:style|on[a-z]+|src|srcdoc|href)"/);
     expect(STORAGE_JS).not.toMatch(/\.on[a-z]+\s*=/);
     expect(STORAGE_JS).not.toMatch(/cssText|setProperty\(|\[\s*["']style["']\s*\]/);

@@ -1,5 +1,6 @@
 // The dashboard's shell: the one document every dashboard page is, with the top bar
-// (the brand, which is the mark and the name (src/brand.ts), the tabs and the username) and the page's own body. The shared stylesheet
+// (the brand, which is the mark and the name (src/brand.ts), the tabs and the username), the page's own body
+// and, after it, the line with the software's version and the link to its source (src/source.ts). The shared stylesheet
 // and script are src/dash/style.ts and src/dash/script.ts; src/dash/routes.ts serves them.
 //
 // How a page joins the dashboard (Images, GIFs, Tours, Storage, Connections, Account and Admin are built this way):
@@ -20,7 +21,8 @@
 //    email address, this session's id, whether the site can change the address
 //    (email_change), the account's own id, and whether the session named a usable address of
 //    the app's download page (download_url), which Dash.downloadLink(text, cls) then links to
-//    (the dashboard's one link to another site, made in the shared script only).
+//    (the dashboard's one link to another site made by a script, in the shared script only;
+//    the others are fixed markup, the brand's home page and the source line, put in by the routes).
 //    Inside it, Dash.api(method, path, body) sends every request (the session cookie, and
 //    the X-Csrf-Token header on every change; its answer carries the retry-after header as
 //    retryAfter), Dash.formatBytes and Dash.dateOf write sizes and dates as every page does
@@ -41,6 +43,7 @@
 // an admin. Nothing about anyone is in the document: the username, too, is filled in by
 // the shared script through textContent.
 import { BRAND_PLAIN, FAVICON_LINKS } from "../brand.ts";
+import { SOURCE_FOOTER } from "../source.ts";
 import { escapeHtml } from "../signin/invite.ts";
 
 /** The tabs of this version, in order: what each is called and where it leads. */
@@ -97,6 +100,7 @@ ${FAVICON_LINKS}
   <p class="load" id="dash-load" role="status" aria-live="polite"></p>
 ${opts.main}
 </main>
+${SOURCE_FOOTER}
 </body>
 </html>
 `;
