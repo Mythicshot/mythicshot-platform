@@ -2,7 +2,7 @@
 
 A self-hosted platform for interactive product tours. You record a click-through tour in Mythicshot, it uploads the tour here as a private draft with an API token, and once the tour is published a visitor clicks through it at `https://tours.example.com/t/<slug>`.
 
-All rights reserved: see [LICENSE](LICENSE). The repository is private and no licence to use it is granted yet.
+Copyright (c) 2026 Mythicshot, LLC. Licensed under the GNU Affero General Public License, version 3 or later: see [LICENSE](LICENSE).
 
 ## Two ways to host it
 

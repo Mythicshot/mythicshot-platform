@@ -2,6 +2,10 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.68 (2026-11-27)
+
+- The platform is now licensed under the GNU Affero General Public License, version 3 or later. The licence file holds the licence text and the README says so. No change to behaviour, the database or any route.
+
 ## 0.1.67 (2026-11-26)
 
 - The sample names in the tests and in the install scripts' tests are neutral, and the rate test uses another private address. No change to behaviour, the database or any route.
