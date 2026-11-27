@@ -36,6 +36,7 @@
     "test/harness.node.ts",
     "test/node-admin-page.ts",
     "test/node-tours-page.ts",
+    "test/node-r2-standin.ts",
     "node_modules",
     "dist"
   ]
