@@ -2,6 +2,11 @@
 
 Every merged fix or update gets the next version number (0.1.1, 0.1.2, and so on) and one entry here, newest first.
 
+## 0.1.70 (2026-11-27)
+
+- The licence (LICENSE) and the notices (THIRD-PARTY-NOTICES.md) go with every package, unchanged: the cPanel archive holds both, `cpanel.sh` copies them into the app folder on install and update and keeps them in each backup, and the container image holds both in `/app`. An archive without them is refused; an update from an earlier version that lacks them, and its way back, keep working. The licence test pins LICENSE by its hash instead of allowing its publisher's hosts.
+- The hosting guides no longer say the software is not public: they say there is no published image or archive yet and that you need a copy of this repository. No change to behaviour, the database or any route.
+
 ## 0.1.68 (2026-11-27)
 
 - The platform is now licensed under the GNU Affero General Public License, version 3 or later. The licence file holds the licence text and the README says so. No change to behaviour, the database or any route.
