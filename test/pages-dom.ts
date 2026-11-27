@@ -50,6 +50,8 @@ export class FakeElement {
   private currentChecked: boolean | null = null;
   /** A progress bar's `max`, as the script sets the property. */
   max = 1;
+  /** A checkbox's mixed state, as the script sets the property (never an attribute); a click clears it, as in a browser. */
+  indeterminate = false;
 
   constructor(
     public readonly tagName: string,
@@ -169,13 +171,22 @@ export class FakeElement {
     this.doc.focusLog.push(this.id || this.tagName);
   }
   select(): void {}
-  /** What a person's click does: nothing on a disabled control; a radio button is checked (then "change"); a submit button submits its form. */
+  /**
+   * What a person's click does: nothing on a disabled control; a radio button is checked (then
+   * "change"); a checkbox is turned over and leaves its mixed state (then "change"), as Space on
+   * it does in a browser; a submit button submits its form.
+   */
   click(): FakeEvent | null {
     if (this.disabled) return null;
     const turnsOn = this.tagName === "input" && this.type === "radio" && !this.checked;
     if (turnsOn) this.checked = true;
+    const flips = this.tagName === "input" && this.type === "checkbox";
+    if (flips) {
+      this.indeterminate = false;
+      this.checked = !this.checked;
+    }
     const event = this.dispatch("click");
-    if (turnsOn) this.dispatch("change");
+    if (turnsOn || flips) this.dispatch("change");
     if (!event.defaultPrevented && this.tagName === "button" && this.type === "submit") {
       const form = this.closest("form");
       if (form) form.dispatch("submit");
