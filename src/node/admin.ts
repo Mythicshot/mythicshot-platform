@@ -178,10 +178,10 @@ const usage = (name: string): string[] => [
   "      Clear a workspace's low storage mail whose sending was never confirmed, so the next check or sweep sends it again if it is still due.",
   "  r2-check",
   "      With the five R2 settings in the settings file, whatever FILE_STORE says: mark each bucket with its role the first time (r2-check/role.txt) and check that mark every time after, so two swapped bucket names are found; then write one small probe file to each bucket, read it back, compare it, delete it and check that it is gone. Prints one line per bucket and a verdict.",
-  "  files-copy --from disk --to r2 --app-is-stopped [--dry-run] [--remove-extra]",
-  "  files-copy --from r2 --to disk --app-is-stopped [--dry-run] [--remove-extra]",
+  "  files-copy --from disk --to r2 --app-is-stopped [--dry-run] [--remove-extra --expect-extra <n>]",
+  "  files-copy --from r2 --to disk --app-is-stopped [--dry-run] [--remove-extra --expect-extra <n>]",
   "      Copy the files to the side the site does not serve from now: the data folder's private files and the private bucket, its public files and the public bucket, never one into the other. Each file is copied with its type and cache control and read back to compare its size and SHA-256; one already the same is left alone, so it can be run again. A file at the destination that the source does not hold is counted and left in place. Prints counts. It refuses to write to the side FILE_STORE names, and to run before r2-check has marked both buckets. Run it only with the app stopped, and say so with --app-is-stopped: a copy while files are being written can leave a deleted file, or a picture of a tour just made restricted, behind at the destination. With --dry-run, counts what it would do and changes nothing.",
-  "      --remove-extra also deletes every file at the destination that the source does not hold, so the destination ends holding exactly the source's files. R2 has no bin: a file deleted there cannot be brought back. It refuses when a source is empty while its destination is not, or when the data folder has no drafts or public folder to copy from.",
+  "      --remove-extra also deletes every file at the destination that the source does not hold, so the destination ends holding exactly the source's files. R2 has no bin: a file deleted there cannot be brought back. It needs --expect-extra <n>, the number of extra files a run with --dry-run --remove-extra shows, and refuses when that is not the number it finds, when a source is empty while its destination is not, or when the data folder has no drafts or public folder to copy from. A copy to R2 that leaves extra files in the public bucket ends with Not done: remove them before FILE_STORE is set to r2.",
   "",
   "Without a command, --email with --username is first-admin, and --email alone is signin-link.",
 ];
@@ -304,7 +304,7 @@ type Parsed =
   | { kind: "r2-check" }
   | FilesCopy;
 
-type FilesCopy = { kind: "files-copy"; from: "disk" | "r2"; to: "disk" | "r2"; dryRun: boolean; stopped: boolean; removeExtra: boolean };
+type FilesCopy = { kind: "files-copy"; from: "disk" | "r2"; to: "disk" | "r2"; dryRun: boolean; stopped: boolean; removeExtra: boolean; expectExtra: number | null };
 
 const COMMANDS = ["first-admin", "signin-link", "change-email", "mail-check", "audit"] as const;
 type Command = (typeof COMMANDS)[number];
@@ -403,15 +403,18 @@ function parseFilesCopy(args: readonly string[]): FilesCopy | null {
     }
     const eq = a.indexOf("=");
     const name = eq > 0 ? a.slice(0, eq) : a;
-    if ((name !== "--from" && name !== "--to") || values.has(name)) return null;
+    if ((name !== "--from" && name !== "--to" && name !== "--expect-extra") || values.has(name)) return null;
     const value = eq > 0 ? a.slice(eq + 1) : args[++i];
-    if (value !== "disk" && value !== "r2") return null;
+    if (name === "--expect-extra" ? value === undefined || !/^(0|[1-9][0-9]{0,8})$/.test(value) : value !== "disk" && value !== "r2") return null;
     values.set(name, value);
   }
+  // The count goes only with --remove-extra, which it confirms.
+  if (values.has("--expect-extra") && !flags.has("--remove-extra")) return null;
   const from = values.get("--from") as "disk" | "r2" | undefined;
   const to = values.get("--to") as "disk" | "r2" | undefined;
   if (from === undefined || to === undefined || from === to) return null;
-  return { kind: "files-copy", from, to, dryRun: flags.has("--dry-run"), stopped: flags.has("--app-is-stopped"), removeExtra: flags.has("--remove-extra") };
+  const expect = values.get("--expect-extra");
+  return { kind: "files-copy", from, to, dryRun: flags.has("--dry-run"), stopped: flags.has("--app-is-stopped"), removeExtra: flags.has("--remove-extra"), expectExtra: expect === undefined ? null : Number(expect) };
 }
 
 /** The file stores of these deps: nothing this command does reads or writes a file. */
@@ -753,8 +756,14 @@ export const FILES_SAID = {
   noFolder: (folder: string) => `the data folder has no ${folder} folder: there is nothing to copy from it.`,
   counts: (name: string, c: MirrorCounts, bad: number, dryRun: boolean, removeExtra: boolean) => {
     const extra = dryRun ? (removeExtra ? "to be removed" : "to be left in place") : removeExtra ? "removed" : "left in place";
-    return `${name} files: ${c.copied} ${dryRun ? "to copy" : "copied"}, ${c.already} already there, ${c.failed} failed, ${bad} that can never be copied; extra at the destination: ${c.extra}, ${extra}.`;
+    return `${name} files: ${c.copied} ${dryRun ? "to copy" : "copied"}, ${c.replaced} ${dryRun ? "to replace" : "replaced"}, ${c.already} already there, ${c.failed} failed, ${bad} that can never be copied; extra at the destination: ${c.extra}, ${extra}.`;
   },
+  extraTotal: (n: number) => `Extra files at the destination, both pairs together: ${n}. To remove them, run the same command again without --dry-run, with --remove-extra --expect-extra ${n}.`,
+  expectMissing: (n: number) => `files-copy --remove-extra needs --expect-extra <n>, the number of extra files a run with --dry-run --remove-extra shows. This run finds ${n}. Nothing was copied or removed.`,
+  expectWrong: (said: number, n: number) => `files-copy --remove-extra stops: --expect-extra says ${said}, but this run finds ${n} extra files at the destination. Nothing was copied or removed.`,
+  missingFolders: (folders: string[]) => `Not done: the data folder has no ${folders.join(" and no ")} folder, so DATA_DIR may name the wrong folder. Check DATA_DIR in the settings file, then run the command again.`,
+  publicExtra: (n: number) =>
+    `Not done: the public bucket holds ${n === 1 ? "1 file" : `${n} files`} that the data folder does not hold, such as pictures of tours made restricted or deleted since an earlier copy. See them with --dry-run --remove-extra, then remove them with --remove-extra --expect-extra, before FILE_STORE is set to r2.`,
   cannotCopy: (name: string, what: string) => `${name} files: can never be copied: ${what}.`,
   prefixes: (name: string, list: string) => `${name} files at the destination, by key prefix: ${list}.`,
   notListed: (name: string, reason: string) => `${name} files: not copied, the files could not be listed: ${reason}.`,
@@ -869,9 +878,9 @@ async function filesCommand(parsed: { kind: "r2-check" } | FilesCopy, env: NodeJ
   const unlisted: string[] = [];
   for (const pair of pairs) {
     try {
-      listed.push({ source: await listFor(pair.from, pair.folder), dest: await listFor(pair.to, pair.folder) });
+      listed.push({ source: await listFor(pair.from, pair.folder, pair.name), dest: await listFor(pair.to, pair.folder, pair.name) });
     } catch (err) {
-      listed.push({ source: { keys: [], bad: [], missing: false }, dest: { keys: [], bad: [], missing: false } });
+      listed.push({ source: { keys: [], bad: [], missing: false, all: [] }, dest: { keys: [], bad: [], missing: false, all: [] } });
       unlisted.push(pair.name);
       out(FILES_SAID.notListed(pair.name, reasonWords(err)));
     }
@@ -893,6 +902,21 @@ async function filesCommand(parsed: { kind: "r2-check" } | FilesCopy, env: NodeJ
       }
     }
   }
+  const extras = listed.map(({ source, dest }) => {
+    const held = new Set(source.keys);
+    return dest.keys.filter((k) => !held.has(k)).length;
+  });
+  const totalExtra = extras[0] + extras[1];
+  if (parsed.removeExtra && !parsed.dryRun) {
+    if (parsed.expectExtra === null) {
+      out(FILES_SAID.expectMissing(totalExtra));
+      return 1;
+    }
+    if (parsed.expectExtra !== totalExtra) {
+      out(FILES_SAID.expectWrong(parsed.expectExtra, totalExtra));
+      return 1;
+    }
+  }
   out((parsed.dryRun ? FILES_SAID.dryRun : "") + (parsed.to === "r2" ? FILES_SAID.toR2 : FILES_SAID.toDisk));
   let failed = 0;
   let bad = 0;
@@ -910,19 +934,27 @@ async function filesCommand(parsed: { kind: "r2-check" } | FilesCopy, env: NodeJ
     let after: string[];
     if (parsed.dryRun) {
       const held = new Set(source.keys);
-      after = [...source.keys, ...(parsed.removeExtra ? [] : dest.keys.filter((k) => !held.has(k)))];
+      const valid = new Set(dest.keys);
+      after = [...source.keys, ...dest.all.filter((k) => !held.has(k) && !(parsed.removeExtra && valid.has(k)))];
     } else {
       try {
-        after = (await listFor(pair.to, pair.folder)).keys;
+        after = (await listFor(pair.to, pair.folder, pair.name)).all;
       } catch {
         after = [];
       }
     }
     out(FILES_SAID.prefixes(pair.name, byPrefix(after)));
   }
+  if (parsed.dryRun) out(FILES_SAID.extraTotal(totalExtra));
+  // A missing folder on the disk side is never a finished copy: DATA_DIR may name the wrong folder.
+  const missingFolders = parsed.from === "disk" ? pairs.filter((_, i) => listed[i].source.missing).map((p) => p.folder) : [];
+  // Toward R2, a public picture the data folder no longer holds must not stay in the public bucket.
+  const publicLeft = parsed.to === "r2" && !parsed.removeExtra ? extras[1] : 0;
   if (failed > 0) out(FILES_SAID.someFailed(failed));
   if (bad > 0) out(FILES_SAID.someBad(bad));
-  if (failed > 0 || bad > 0) return 1;
+  if (missingFolders.length > 0) out(FILES_SAID.missingFolders(missingFolders));
+  if (publicLeft > 0) out(FILES_SAID.publicExtra(publicLeft));
+  if (failed > 0 || bad > 0 || missingFolders.length > 0 || publicLeft > 0) return 1;
   out(parsed.dryRun ? FILES_SAID.dryDone : FILES_SAID.done);
   return 0;
 }

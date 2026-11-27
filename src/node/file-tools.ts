@@ -126,7 +126,7 @@ export async function checkMarkers(stores: { drafts: FileStore; pub: FileStore }
 }
 
 /** One store's contents for files-copy: its keys, the object files that can never be copied, and whether it is there at all. */
-export type Listing = { keys: string[]; bad: string[]; missing: boolean };
+export type Listing = { keys: string[]; bad: string[]; missing: boolean; all: string[] };
 
 /** A key from a bucket made safe to print: no control or direction characters, at most 200 characters. */
 function printable(key: string): string {
@@ -134,31 +134,55 @@ function printable(key: string): string {
   return safe.length > 200 ? `${safe.slice(0, 200)}...` : safe;
 }
 
+/** Whether a key belongs on the side of `role`: public pictures (p/) on the public side only, everything else on the private side. */
+function ofRole(role: "private" | "public", key: string): boolean {
+  return role === "public" ? key.startsWith("p/") : !key.startsWith("p/");
+}
+
 /**
  * Lists a store for files-copy. A folder store names each object file that cannot be read as
  * `<folder>/<2 hex>/<64 hex>`; a bucket names each key that fails the key check as `key <key>`.
- * r2-check's own objects are left out: they are never copied. Throws what the store throws.
+ * A key that is not of the side's role (a public picture among the private files, anything else
+ * among the public ones), which the role guard of the site's R2 stores refuses, is named the same
+ * way, as `key <key>, which the <role> side never holds`: it can never be copied nor removed, so it
+ * is reported once instead of failing every run. r2-check's own objects are left out: they are
+ * never copied. Throws what the store throws.
  */
-export async function listFor(store: ListableStore, folder: string): Promise<Listing> {
+export async function listFor(store: ListableStore, folder: string, role: "private" | "public"): Promise<Listing> {
+  let found: string[];
+  const bad: string[] = [];
+  let missing = false;
   if (store instanceof NodeFileStore) {
     const s = await store.scan();
-    return { keys: s.keys.filter((k) => !k.startsWith(PROBE_PREFIX)), bad: s.bad.map((b) => `${folder}/${b}`), missing: !s.exists };
+    found = s.keys;
+    bad.push(...s.bad.map((b) => `${folder}/${b}`));
+    missing = !s.exists;
+  } else {
+    found = await store.keys();
   }
   const keys: string[] = [];
-  const bad: string[] = [];
-  for (const k of await store.keys()) {
+  // Every key but r2-check's own, of whatever side: what the line by key prefix shows.
+  const all: string[] = [];
+  for (const k of found) {
     if (k.startsWith(PROBE_PREFIX)) continue;
+    all.push(k);
     try {
       checkKey(k);
-      keys.push(k);
     } catch {
       bad.push(`key ${printable(k)}`);
+      continue;
     }
+    if (!ofRole(role, k)) {
+      bad.push(`key ${printable(k)}, which the ${role} side never holds`);
+      continue;
+    }
+    keys.push(k);
   }
-  return { keys, bad, missing: false };
+  return { keys, bad, missing, all };
 }
 
-export type MirrorCounts = { copied: number; already: number; failed: number; extra: number; removed: number };
+/** copied: new at the destination; replaced: there before with other bytes or metadata. */
+export type MirrorCounts = { copied: number; replaced: number; already: number; failed: number; extra: number; removed: number };
 
 /** How many keys one delete call is given while removing what the source does not hold. */
 const REMOVE_BATCH = 1000;
@@ -171,7 +195,7 @@ const REMOVE_BATCH = 1000;
  * the run goes on.
  */
 export async function mirror(from: ListableStore, to: ListableStore, source: Listing, dest: Listing, opts: { dryRun: boolean; removeExtra: boolean }): Promise<MirrorCounts> {
-  const counts: MirrorCounts = { copied: 0, already: 0, failed: 0, extra: 0, removed: 0 };
+  const counts: MirrorCounts = { copied: 0, replaced: 0, already: 0, failed: 0, extra: 0, removed: 0 };
   const there = new Set(dest.keys);
   const held = new Set(source.keys);
   for (const key of source.keys) {
@@ -197,8 +221,10 @@ export async function mirror(from: ListableStore, to: ListableStore, source: Lis
           }
         }
       }
+      const replacing = there.has(key);
       if (opts.dryRun) {
-        counts.copied++;
+        if (replacing) counts.replaced++;
+        else counts.copied++;
         continue;
       }
       await to.put(key, bytes, src.cacheControl === null ? { contentType: src.contentType } : { contentType: src.contentType, cacheControl: src.cacheControl });
@@ -208,7 +234,8 @@ export async function mirror(from: ListableStore, to: ListableStore, source: Lis
         counts.failed++;
         continue;
       }
-      counts.copied++;
+      if (replacing) counts.replaced++;
+      else counts.copied++;
     } catch {
       counts.failed++;
     }

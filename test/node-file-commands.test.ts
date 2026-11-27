@@ -78,9 +78,9 @@ const FAILED = "R2 check failed: put the settings or the token right before sett
 const DONE = "Done: every file of the source is at the destination, checked by size and SHA-256.";
 
 type Extra = "left in place" | "removed" | "to be left in place" | "to be removed";
-/** The counts line of one pair: copied, already there, failed, never copyable, extra. */
-const counts = (name: string, c: [number, number, number, number, number], extra: Extra = "left in place") =>
-  `${name} files: ${c[0]} ${extra.startsWith("to be") ? "to copy" : "copied"}, ${c[1]} already there, ${c[2]} failed, ${c[3]} that can never be copied; extra at the destination: ${c[4]}, ${extra}.`;
+/** The counts line of one pair: copied, already there, failed, never copyable, extra; and how many were replaced. */
+const counts = (name: string, c: [number, number, number, number, number], extra: Extra = "left in place", replaced = 0) =>
+  `${name} files: ${c[0]} ${extra.startsWith("to be") ? "to copy" : "copied"}, ${replaced} ${extra.startsWith("to be") ? "to replace" : "replaced"}, ${c[1]} already there, ${c[2]} failed, ${c[3]} that can never be copied; extra at the destination: ${c[4]}, ${extra}.`;
 
 describe("r2-check", () => {
   it("marks each bucket with its role the first time, checks the marks after, and probes both, with FILE_STORE disk or r2, and without a data folder", async () => {
@@ -211,6 +211,9 @@ describe("files-copy", () => {
     expect((await run(s.env, ["r2-check"])).code).toBe(0);
     return s;
   }
+  const PUBLIC_LEFT = (n: number) =>
+    `Not done: the public bucket holds ${n === 1 ? "1 file" : `${n} files`} that the data folder does not hold, such as pictures of tours made restricted or deleted since an earlier copy. See them with --dry-run --remove-extra, then remove them with --remove-extra --expect-extra, before FILE_STORE is set to r2.`;
+  const TOTAL = (n: number) => `Extra files at the destination, both pairs together: ${n}. To remove them, run the same command again without --dry-run, with --remove-extra --expect-extra ${n}.`;
 
   it("refuses without --app-is-stopped, and changes nothing", async () => {
     const s = await filled();
@@ -256,7 +259,7 @@ describe("files-copy", () => {
     expect(await s.drafts.keys()).toEqual(["u/a.png"]);
   });
 
-  it("takes exactly --from and --to, disk and r2 one each way, with --dry-run, --app-is-stopped and --remove-extra", async () => {
+  it("takes exactly --from and --to, disk and r2 one each way, with --dry-run, --app-is-stopped, --remove-extra and its --expect-extra", async () => {
     const env = site().env;
     for (const argv of [
       ["files-copy"],
@@ -268,6 +271,11 @@ describe("files-copy", () => {
       ["files-copy", "--from", "disk", "--to", "r2", "--remove-extra", "--remove-extra"],
       ["files-copy", "--from", "disk", "--to", "r2", "--now"],
       ["files-copy", "--from", "disk", "--from", "r2", "--to", "r2"],
+      ["files-copy", "--from", "disk", "--to", "r2", "--app-is-stopped", "--expect-extra", "1"],
+      ["files-copy", "--from", "disk", "--to", "r2", "--app-is-stopped", "--remove-extra", "--expect-extra"],
+      ["files-copy", "--from", "disk", "--to", "r2", "--app-is-stopped", "--remove-extra", "--expect-extra", "-1"],
+      ["files-copy", "--from", "disk", "--to", "r2", "--app-is-stopped", "--remove-extra", "--expect-extra", "01"],
+      ["files-copy", "--from", "disk", "--to", "r2", "--app-is-stopped", "--remove-extra", "--expect-extra", "1", "--expect-extra", "1"],
     ]) {
       expect((await run(env, argv)).code, argv.join(" ")).toBe(2);
     }
@@ -310,43 +318,97 @@ describe("files-copy", () => {
     expect(st.requests.filter((q) => q.method !== "GET")).toEqual([]);
   });
 
-  it("by default nothing is removed: a file the source does not hold is counted and left in place; a changed one is copied again", async () => {
+  it("by default nothing is removed: a private file the source does not hold is counted and left in place, and does not keep the run from ending Done; a changed file is counted as replaced", async () => {
     const s = await filled();
     await run(s.env, COPY);
     await s.drafts.delete(["u/up1/step-001.png"]);
     await s.pub.put("p/fedcba9876543210fedcba9876543210.png", enc("public picture"), { contentType: "image/png" });
     st.requests.length = 0;
     const r = await run(s.env, COPY);
-    expect([r.lines[1], r.lines[3]]).toEqual([counts("private", [0, 2, 0, 0, 1]), counts("public", [1, 0, 0, 0, 0])]);
+    expect([r.lines[1], r.lines[3]]).toEqual([counts("private", [0, 2, 0, 0, 1]), counts("public", [0, 0, 0, 0, 0], "left in place", 1)]);
+    expect(r.lines.at(-1)).toBe(DONE);
     expect(r.code).toBe(0);
     expect(s.priv().has("u/up1/step-001.png")).toBe(true);
     expect(st.requests.filter((q) => q.method === "POST")).toEqual([]);
     expect(s.publ().get("p/fedcba9876543210fedcba9876543210.png")!.cacheControl).toBeNull();
   });
 
-  it("after the disk copies were deleted, a copy without --remove-extra leaves the buckets whole", async () => {
+  it("a stale public picture never passes as Done toward R2: copy, serve from R2, back to disk, a tour made restricted there, copy again", async () => {
+    const s = await filled();
+    // A second public tour, which stays public throughout.
+    await s.pub.put("p/22222222222222222222222222222222.png", enc("still public"), { contentType: "image/png" });
+    await run(s.env, COPY);
+    // Served from R2, then the way back to disk, completed.
+    expect((await run({ ...s.env, FILE_STORE: "r2" }, BACK)).code).toBe(0);
+    // On disk, the tour is made restricted: its public picture leaves the public folder.
+    await s.pub.delete(["p/fedcba9876543210fedcba9876543210.png"]);
+    await s.drafts.put("v/fedcba9876543210fedcba9876543210.png", enc("now restricted"), { contentType: "image/png" });
+    const again = await run(s.env, COPY);
+    expect(again.lines.slice(1)).toEqual([
+      counts("private", [1, 3, 0, 0, 0]),
+      "private files at the destination, by key prefix: m/ 1, u/ 1, v/ 2.",
+      counts("public", [0, 1, 0, 0, 1]),
+      "public files at the destination, by key prefix: p/ 2.",
+      PUBLIC_LEFT(1),
+    ]);
+    expect(again.code).toBe(1);
+    // The way out the line names: see them, then remove them with the count.
+    const dry = await run(s.env, [...COPY, "--dry-run", "--remove-extra"]);
+    expect(dry.lines.slice(-2)).toEqual([TOTAL(1), "Dry run: nothing was changed."]);
+    expect(dry.code).toBe(0);
+    const removed = await run(s.env, [...COPY, "--remove-extra", "--expect-extra", "1"]);
+    expect(removed.lines[3]).toBe(counts("public", [0, 1, 0, 0, 1], "removed"));
+    expect(removed.lines.at(-1)).toBe(DONE);
+    expect(s.publKeys()).toEqual(["p/22222222222222222222222222222222.png"]);
+    // Had that been the only public tour, the public folder would be empty: --remove-extra then
+    // refuses (an empty source facing a full destination), and the picture must be removed by hand.
+  });
+
+  it("after the disk copies were deleted, a copy without --remove-extra leaves the buckets whole, and says the public bucket is not right", async () => {
     const s = await filled();
     await run(s.env, COPY);
     await s.drafts.delete(await s.drafts.keys());
     await s.pub.delete(await s.pub.keys());
     const r = await run(s.env, COPY);
-    expect([r.lines[1], r.lines[3]]).toEqual([counts("private", [0, 0, 0, 0, 3]), counts("public", [0, 0, 0, 0, 1])]);
-    expect(r.code).toBe(0);
+    expect([r.lines[1], r.lines[3], r.lines.at(-1)]).toEqual([counts("private", [0, 0, 0, 0, 3]), counts("public", [0, 0, 0, 0, 1]), PUBLIC_LEFT(1)]);
+    expect(r.code).toBe(1);
     expect(s.privKeys()).toHaveLength(3);
     expect(s.publKeys()).toHaveLength(1);
   });
 
-  it("with --remove-extra, a file the source does not hold is removed; the marker is never removed nor copied", async () => {
+  it("--remove-extra needs --expect-extra with the number this run finds: missing or wrong, nothing changes; right, they go", async () => {
     const s = await filled();
     await run(s.env, COPY);
     await s.drafts.delete(["u/up1/step-001.png"]);
-    const r = await run(s.env, [...COPY, "--remove-extra"]);
-    expect(r.lines[1]).toBe(counts("private", [0, 2, 0, 0, 1], "removed"));
+    st.requests.length = 0;
+    const missing = await run(s.env, [...COPY, "--remove-extra"]);
+    expect(missing).toEqual({ code: 1, lines: ["files-copy --remove-extra needs --expect-extra <n>, the number of extra files a run with --dry-run --remove-extra shows. This run finds 1. Nothing was copied or removed."] });
+    const wrong = await run(s.env, [...COPY, "--remove-extra", "--expect-extra", "2"]);
+    expect(wrong).toEqual({ code: 1, lines: ["files-copy --remove-extra stops: --expect-extra says 2, but this run finds 1 extra files at the destination. Nothing was copied or removed."] });
+    expect(st.requests.filter((q) => q.method !== "GET")).toEqual([]);
+    const right = await run(s.env, [...COPY, "--remove-extra", "--expect-extra", "1"]);
+    expect(right.lines[1]).toBe(counts("private", [0, 2, 0, 0, 1], "removed"));
+    expect(right.code).toBe(0);
     expect(s.priv().has("u/up1/step-001.png")).toBe(false);
+    // The markers are never removed nor copied.
     expect(s.priv().has(MARKER) && s.publ().has(MARKER)).toBe(true);
-    const back = await run({ ...s.env, FILE_STORE: "r2" }, [...BACK, "--remove-extra"]);
+    const back = await run({ ...s.env, FILE_STORE: "r2" }, [...BACK, "--remove-extra", "--expect-extra", "0"]);
     expect(back.code).toBe(0);
     expect((await s.drafts.keys()).some((k) => k.startsWith("r2-check/"))).toBe(false);
+  });
+
+  it("served from R2, FILE_STORE set back to disk by hand without the way back, then disk to R2 with --remove-extra: the operator sees the count before anything is deleted", async () => {
+    const s = await filled();
+    await run(s.env, COPY);
+    // Uploads made while the site served from R2: on R2 only.
+    s.priv().set("u/new/step-001.png", { body: Buffer.from("new"), contentType: "image/png", cacheControl: null, etag: '"n"' });
+    s.priv().set("u/new/step-002.png", { body: Buffer.from("new"), contentType: "image/png", cacheControl: null, etag: '"n"' });
+    s.publ().set("p/00000000000000000000000000000001.png", { body: Buffer.from("new"), contentType: "image/png", cacheControl: null, etag: '"n"' });
+    st.requests.length = 0;
+    const r = await run(s.env, [...COPY, "--remove-extra"]);
+    expect(r).toEqual({ code: 1, lines: ["files-copy --remove-extra needs --expect-extra <n>, the number of extra files a run with --dry-run --remove-extra shows. This run finds 3. Nothing was copied or removed."] });
+    expect(st.requests.filter((q) => q.method !== "GET")).toEqual([]);
+    expect(s.privKeys()).toContain("u/new/step-001.png");
   });
 
   it("with --remove-extra, refuses a source that is empty while its destination is not, and a data folder without its folders; nothing changes", async () => {
@@ -354,18 +416,17 @@ describe("files-copy", () => {
     await run(s.env, COPY);
     await s.drafts.delete(await s.drafts.keys());
     st.requests.length = 0;
-    const empty = await run(s.env, [...COPY, "--remove-extra"]);
+    const empty = await run(s.env, [...COPY, "--remove-extra", "--expect-extra", "3"]);
     expect(empty).toEqual({ code: 1, lines: ["files-copy --remove-extra stops: the private files at the source are empty while the destination holds 3. Nothing was copied or removed."] });
     expect(st.requests.filter((q) => q.method !== "GET")).toEqual([]);
-    // DATA_DIR pointing at a fresh folder: no drafts or public folder at all.
     const fresh = mkdtempSync(join(tmpdir(), "dp-file-commands-fresh-"));
-    const wrong = await run({ ...s.env, DATA_DIR: fresh }, [...COPY, "--remove-extra"]);
+    const wrong = await run({ ...s.env, DATA_DIR: fresh }, [...COPY, "--remove-extra", "--expect-extra", "4"]);
     expect(wrong).toEqual({ code: 1, lines: ["files-copy --remove-extra stops: the data folder has no drafts folder, so DATA_DIR may name the wrong folder. Nothing was copied or removed."] });
     expect(s.privKeys()).toHaveLength(3);
     expect(s.publKeys()).toHaveLength(1);
   });
 
-  it("DATA_DIR pointing at a fresh folder, without --remove-extra: says there is nothing to copy, and leaves the buckets as they are", async () => {
+  it("DATA_DIR pointing at a fresh folder, without --remove-extra: never Done, it names the missing folders, and leaves the buckets as they are", async () => {
     const s = await filled();
     await run(s.env, COPY);
     const fresh = mkdtempSync(join(tmpdir(), "dp-file-commands-fresh-"));
@@ -377,9 +438,17 @@ describe("files-copy", () => {
       "the data folder has no public folder: there is nothing to copy from it.",
       counts("public", [0, 0, 0, 0, 1]),
       "public files at the destination, by key prefix: p/ 1.",
-      DONE,
+      "Not done: the data folder has no drafts and no public folder, so DATA_DIR may name the wrong folder. Check DATA_DIR in the settings file, then run the command again.",
+      PUBLIC_LEFT(1),
     ]);
+    expect(r.code).toBe(1);
     expect(s.privKeys()).toHaveLength(3);
+    // One folder missing is never Done either.
+    mkdirSync(join(fresh, "public"));
+    await new NodeFileStore(join(fresh, "public")).put("p/fedcba9876543210fedcba9876543210.png", enc("public picture"), { contentType: "image/png", cacheControl: "public, max-age=31536000, immutable" });
+    const one = await run({ ...s.env, DATA_DIR: fresh }, COPY);
+    expect(one.lines.at(-1)).toBe("Not done: the data folder has no drafts folder, so DATA_DIR may name the wrong folder. Check DATA_DIR in the settings file, then run the command again.");
+    expect(one.code).toBe(1);
   });
 
   it("a rerun after the switch is refused: FILE_STORE=r2 serves from the buckets", async () => {
@@ -390,9 +459,9 @@ describe("files-copy", () => {
     expect(r.lines[0]).toContain("FILE_STORE says r2, so the two buckets");
   });
 
-  it("a dry run counts what it would do and changes nothing, without the flag too", async () => {
+  it("a dry run counts what it would do and changes nothing, without the flag too, and gives the total of extra files", async () => {
     const s = await filled();
-    s.publ().set("p/old.png", { body: Buffer.from("x"), contentType: "image/png", cacheControl: null, etag: '"x"' });
+    s.publ().set("p/0123456789abcdef0123456789abcdef.png", { body: Buffer.from("x"), contentType: "image/png", cacheControl: null, etag: '"x"' });
     st.requests.length = 0;
     const r = await run(s.env, ["files-copy", "--from", "disk", "--to", "r2", "--dry-run"]);
     expect(r.lines).toEqual([
@@ -401,22 +470,41 @@ describe("files-copy", () => {
       "private files at the destination, by key prefix: m/ 1, u/ 1, v/ 1.",
       counts("public", [1, 0, 0, 0, 1], "to be left in place"),
       "public files at the destination, by key prefix: p/ 2.",
-      "Dry run: nothing was changed.",
+      TOTAL(1),
+      PUBLIC_LEFT(1),
     ]);
-    expect(r.code).toBe(0);
+    expect(r.code).toBe(1);
     expect(st.requests.filter((q) => q.method !== "GET")).toEqual([]);
     expect(s.privKeys()).toEqual([]);
     const removing = await run(s.env, ["files-copy", "--from", "disk", "--to", "r2", "--dry-run", "--remove-extra"]);
-    expect(removing.lines[3]).toBe(counts("public", [1, 0, 0, 0, 1], "to be removed"));
-    expect(removing.lines[4]).toBe("public files at the destination, by key prefix: p/ 1.");
+    expect(removing.lines.slice(3)).toEqual([counts("public", [1, 0, 0, 0, 1], "to be removed"), "public files at the destination, by key prefix: p/ 1.", TOTAL(1), "Dry run: nothing was changed."]);
+    expect(removing.code).toBe(0);
   });
 
-  it("the prefix line shows what does not belong in the public bucket", async () => {
+  it("a key that is not of its side's kind is named once as never copyable, shows in the prefix line, and is never counted as failed nor in a delete batch", async () => {
     const s = await filled();
     await run(s.env, COPY);
     s.publ().set("u/stray/step-001.png", { body: Buffer.from("x"), contentType: "image/png", cacheControl: null, etag: '"x"' });
-    const r = await run(s.env, COPY);
-    expect(r.lines[4]).toBe("public files at the destination, by key prefix: p/ 1, u/ 1.");
+    s.priv().set("p/11111111111111111111111111111111.png", { body: Buffer.from("x"), contentType: "image/png", cacheControl: null, etag: '"x"' });
+    await s.drafts.delete(["u/up1/step-001.png"]);
+    for (let i = 0; i < 2; i++) {
+      const r = await run(s.env, COPY);
+      expect(r.lines.slice(1)).toEqual([
+        counts("private", [0, 2, 0, 1, 1]),
+        "private files: can never be copied: key p/11111111111111111111111111111111.png, which the private side never holds.",
+        "private files at the destination, by key prefix: m/ 1, p/ 1, u/ 1, v/ 1.",
+        counts("public", [0, 1, 0, 1, 0]),
+        "public files: can never be copied: key u/stray/step-001.png, which the public side never holds.",
+        "public files at the destination, by key prefix: p/ 1, u/ 1.",
+        "Not done: 2 files can never be copied (named above): a damaged object file in the data folder, or a key the app never writes in a bucket. Restore each from a backup or remove it by hand, then run the command again.",
+      ]);
+      expect(r.code).toBe(1);
+    }
+    // With --remove-extra the one real extra still goes: the stray keys are not in the batch.
+    const removed = await run(s.env, [...COPY, "--remove-extra", "--expect-extra", "1"]);
+    expect(removed.lines[1]).toBe(counts("private", [0, 2, 0, 1, 1], "removed"));
+    expect(s.priv().has("u/up1/step-001.png")).toBe(false);
+    expect(s.priv().has("p/11111111111111111111111111111111.png") && s.publ().has("u/stray/step-001.png")).toBe(true);
   });
 
   it("R2 to disk: the way back, while FILE_STORE is still r2, into the data folder's two folders, each from its own bucket", async () => {
@@ -483,7 +571,7 @@ describe("files-copy", () => {
       "private files at the destination, by key prefix: m/ 1, u/ 1, v/ 1.",
       counts("public", [1, 0, 0, 1, 0]),
       "public files: can never be copied: key p/Bad Key.png.",
-      "public files at the destination, by key prefix: p/ 1.",
+      "public files at the destination, by key prefix: p/ 2.",
       "Not done: 3 files can never be copied (named above): a damaged object file in the data folder, or a key the app never writes in a bucket. Restore each from a backup or remove it by hand, then run the command again.",
     ]);
     expect(s.privKeys()).toEqual(["m/med1/part-000.claim", "u/up1/step-001.png", "v/0123456789abcdef0123456789abcdef.jpg"]);
@@ -516,10 +604,11 @@ describe("files-copy", () => {
     const help = await run({}, ["--help"]);
     const text = help.lines.join("\n");
     expect(text).toContain("  r2-check");
-    expect(text).toContain("  files-copy --from disk --to r2 --app-is-stopped [--dry-run] [--remove-extra]");
-    expect(text).toContain("  files-copy --from r2 --to disk --app-is-stopped [--dry-run] [--remove-extra]");
+    expect(text).toContain("  files-copy --from disk --to r2 --app-is-stopped [--dry-run] [--remove-extra --expect-extra <n>]");
+    expect(text).toContain("  files-copy --from r2 --to disk --app-is-stopped [--dry-run] [--remove-extra --expect-extra <n>]");
     expect(text).toContain("Run it only with the app stopped");
     expect(text).toContain("R2 has no bin: a file deleted there cannot be brought back.");
+    expect(text).toContain("It needs --expect-extra <n>");
   });
 });
 
