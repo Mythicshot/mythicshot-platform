@@ -18,7 +18,7 @@ import type { Hosts } from "../src/hosts.ts";
 import { SESSION_COOKIE, createSignInCode, csrfFor, redeemSignInCode } from "../src/sessions.ts";
 import { send, type Call } from "./bundle.ts";
 import { isBrandMarkAlt, withoutSourceLine } from "./dash-checks.ts";
-import { inSourceLine, FakeDocument, textNodes } from "./pages-dom.ts";
+import { inSourceLine, FakeDocument, FakeElement, textNodes } from "./pages-dom.ts";
 
 const HOSTS: Hosts = { tours: "tours.example.com", app: "app.example.com" };
 const TOURS = "https://tours.example.com";
@@ -88,6 +88,8 @@ const STORAGE_WORDING = [
   "Actions",
   "Everything else is on the Images, GIFs and Tours pages.",
   "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.",
+  // The Images and GIFs pages' red line, shown only in the question about an image or a GIF.
+  "There are no backups of this data, and its removal is permanent.",
   "Keep it",
   "Delete tour",
 ];
@@ -113,7 +115,7 @@ const STORAGE_TEXT: Record<string, string> = {
   askAfter: '"?',
   askTour: "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.",
   // Proposed: the question for an image or a GIF, in the tour question's words.
-  askItem: "Its link stops working for everyone and it is removed. This cannot be undone. The copy on your computer is not touched.",
+  askItem: "Its link stops working for everyone and it is removed. The copy on your computer is not touched.",
   goTour: "Delete tour",
   goImage: "Delete image",
   goGif: "Delete GIF",
@@ -123,7 +125,7 @@ const STORAGE_TEXT: Record<string, string> = {
 };
 
 /** The strings with a space in the script that are not words for a person: class names. */
-const CLASS_NAMES = ["btn sm danger", "meter over", "n size", "mini-cell"];
+const CLASS_NAMES = ["btn sm danger", "meter over", "n size", "mini-cell", "delete-text delete-warn"];
 
 /** A script's TEXT object, read from the script's own text. */
 function scriptText(js: string): Record<string, string> {
@@ -310,6 +312,10 @@ describe("the Storage page", () => {
     expect(doc.getElementById("delete-title")!.getAttribute("tabindex")).toBe("-1");
     const dialog = all.find((e) => e.getAttribute("role") === "alertdialog")!;
     expect([dialog.getAttribute("aria-modal"), dialog.getAttribute("aria-labelledby"), dialog.getAttribute("aria-describedby")]).toEqual(["true", "delete-title", "delete-text"]);
+    // The red line of an image's or a GIF's question: the Images and GIFs pages' own, the same class (and so the same sign), hidden until such a question opens, right after the sentence.
+    const warn = doc.getElementById("delete-warn")!;
+    expect([warn.tagName, warn.className, warn.textContent, warn.hidden]).toEqual(["p", "danger-line", "There are no backups of this data, and its removal is permanent.", true]);
+    expect(doc.getElementById("delete-text")!.parent!.children.filter((c) => c instanceof FakeElement).map((c) => (c as FakeElement).id).slice(1, 3)).toEqual(["delete-text", "delete-warn"]);
     // The question is outside the part of the page made inert while it is open.
     expect(doc.getElementById("storage-page")!.contains(doc.getElementById("delete-dialog"))).toBe(false);
     // The bars are drawings: their numbers are in the text beside them.

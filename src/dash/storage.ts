@@ -15,7 +15,8 @@
 //
 // Delete asks a question through the dashboard's one question helper (Dash.question,
 // src/dash/script.ts): for a tour the Tours page's question with its sentences, for an image
-// or a GIF the same question in the item's words. While it is open the bar and the page are
+// or a GIF the same question in the item's words, ending with the Images and GIFs pages' red
+// line ("There are no backups of this data, and its removal is permanent."). While it is open the bar and the page are
 // inert and hidden from screen readers, Escape and Tab are handled for the whole document, a
 // click on the backdrop is Keep it, and its buttons are disabled while the request runs.
 // Every row's Delete is disabled while a delete runs and while the numbers are read again
@@ -72,6 +73,7 @@ const STORAGE_MAIN = `  <div id="storage-page">
     <div class="dialog" id="delete-box" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-text">
       <h2 id="delete-title" tabindex="-1"></h2>
       <p class="sub" id="delete-text">Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.</p>
+      <p class="danger-line" id="delete-warn" hidden>There are no backups of this data, and its removal is permanent.</p>
       <p class="message" id="delete-message" role="status" aria-live="polite" hidden></p>
       <div class="two">
         <button type="button" class="btn quiet" id="delete-keep">Keep it</button>
@@ -104,7 +106,7 @@ export const STORAGE_JS = `(function () {
     askBefore: 'Delete "',
     askAfter: '"?',
     askTour: "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.",
-    askItem: "Its link stops working for everyone and it is removed. This cannot be undone. The copy on your computer is not touched.",
+    askItem: "Its link stops working for everyone and it is removed. The copy on your computer is not touched.",
     goTour: "Delete tour",
     goImage: "Delete image",
     goGif: "Delete GIF",
@@ -289,6 +291,10 @@ export const STORAGE_JS = `(function () {
     var k = KINDS[e.kind];
     // The question's words for this kind; the dialog is closed, so its button has no saved label.
     $("delete-text").textContent = k.ask;
+    // An image's or a GIF's question ends with the red line the Images and GIFs pages' questions have; a tour's does not.
+    var warned = e.kind !== "tour";
+    $("delete-warn").hidden = !warned;
+    $("delete-box").setAttribute("aria-describedby", warned ? "delete-text delete-warn" : "delete-text");
     $("delete-go").textContent = k.go;
     var opened = question.open({
       title: TEXT.askBefore + nameOf(e) + TEXT.askAfter,

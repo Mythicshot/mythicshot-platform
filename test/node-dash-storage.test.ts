@@ -30,7 +30,8 @@ const OVER = "You are over your storage allowance. New uploads are refused until
 const ONLINE = "Tours that are already online are not affected.";
 const COUNTS = "Images, GIFs and tours all count. Deleting one frees its space within a few minutes.";
 const QUESTION = "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.";
-const QUESTION_ITEM = "Its link stops working for everyone and it is removed. This cannot be undone. The copy on your computer is not touched.";
+const QUESTION_ITEM = "Its link stops working for everyone and it is removed. The copy on your computer is not touched.";
+const NO_BACKUPS = "There are no backups of this data, and its removal is permanent.";
 const EVERYTHING_ELSE = "Everything else is on the Images, GIFs and Tours pages.";
 
 const KB = 1024;
@@ -637,14 +638,15 @@ describe("deleting an image or a GIF from the Storage page", () => {
     await tab.settle();
     deleteOf(rows(tab)[GIF_ROW]).click();
     expect(tab.$("delete-dialog").shown).toBe(true);
-    expect(tab.shows().slice(-4)).toEqual(['Delete "Loot council vote, full round"?', QUESTION_ITEM, "Keep it", "Delete GIF"]);
+    expect(tab.shows().slice(-5)).toEqual(['Delete "Loot council vote, full round"?', QUESTION_ITEM, NO_BACKUPS, "Keep it", "Delete GIF"]);
+    expect([tab.$("delete-warn").className, tab.$("delete-box").getAttribute("aria-describedby")]).toEqual(["danger-line", "delete-text delete-warn"]);
     expect(tab.doc.activeElement).toBe(tab.$("delete-keep"));
     expect(inert(tab)).toEqual([true, true]);
     tab.$("delete-keep").click();
     expect(tab.doc.activeElement).toBe(deleteOf(rows(tab)[GIF_ROW]));
     // An untitled image is asked about by its kind.
     deleteOf(rows(tab)[3]).click();
-    expect(tab.shows().slice(-4)).toEqual(['Delete "Untitled image"?', QUESTION_ITEM, "Keep it", "Delete image"]);
+    expect(tab.shows().slice(-5)).toEqual(['Delete "Untitled image"?', QUESTION_ITEM, NO_BACKUPS, "Keep it", "Delete image"]);
     tab.pressOnPage("Escape");
     // A title holding markup is text in the question too.
     deleteOf(rows(tab)[4]).click();
@@ -655,6 +657,8 @@ describe("deleting an image or a GIF from the Storage page", () => {
     // A tour's question has the Tours page's words again.
     deleteOf(rows(tab)[0]).click();
     expect(tab.shows().slice(-4)).toEqual(['Delete "Full onboarding, long cut"?', QUESTION, "Keep it", "Delete tour"]);
+    // A tour's question has no red line, and is described by its sentence alone.
+    expect([tab.$("delete-warn").hidden, tab.$("delete-box").getAttribute("aria-describedby")]).toEqual([true, "delete-text"]);
     expect(tab.fetched.filter((f) => f.method !== "GET")).toEqual([]);
   });
 
