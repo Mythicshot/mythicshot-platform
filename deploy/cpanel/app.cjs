@@ -38,7 +38,12 @@
 // company's name and town; a value the mail cannot use is left out), and billing's four, which go together or not at all: STRIPE_API_KEY (a Stripe
 // restricted key), STRIPE_WEBHOOK_SECRET (the listener's signing secret), STRIPE_PRICE_ID
 // and STRIPE_PUBLISHABLE_KEY (the app refuses a setting of the wrong shape, with a line that
-// names it and never its value). PORT and PUBLIC_IMAGE_BASE are read by the app too
+// names it and never its value). Where the files are kept is passed on the same way:
+// FILE_STORE (disk, the default, or r2) and the five R2 settings, all five or none:
+// R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_PRIVATE_BUCKET and
+// R2_PUBLIC_BUCKET. R2_SECRET_ACCESS_KEY is a secret like SETUP_CODE; the app refuses a
+// half-filled set or a value of the wrong shape, with a line that names the setting and never
+// its value. PORT and PUBLIC_IMAGE_BASE are read by the app too
 // and passed on like any other line; the install writes neither.
 //
 // RECOVERY_LINKS is read only for the admin command below, and never put in the

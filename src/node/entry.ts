@@ -9,10 +9,10 @@ import { setClientAddress } from "../client.ts";
 import { downloadUrlSetting, homeUrlSetting } from "../https-address.ts";
 import { lifetimesSetting } from "../lifetimes.ts";
 import { DEFER_FAILED, deferTracker, type Deps } from "../ports.ts";
-import { clientAddressReader, configFromEnv, guardTarget, mailFromEnv, proxyHint, type Incoming } from "./config.ts";
+import { clientAddressReader, configFromEnv, fileStoreFromEnv, guardTarget, mailFromEnv, proxyHint, type Incoming } from "./config.ts";
 import { APP_UID, prepareDataDir } from "./datadir.ts";
 import { NodeDb } from "./db.ts";
-import { NodeFileStore } from "./files.ts";
+import { siteFileStores } from "./file-stores.ts";
 import type { ClosableMailer } from "./mail-thread.ts";
 import { migrate } from "./migrate.ts";
 import { mediaLimitsProblem } from "../limits.ts";
@@ -82,10 +82,14 @@ async function main(): Promise<void> {
   }
   await migrate(db, MIGRATIONS_DIR);
 
+  // The files: the data folder's drafts and public folders, or the two R2 buckets with
+  // FILE_STORE=r2 (the settings were checked by configFromEnv above). The one factory every
+  // command uses, so nothing falls back to the folders by itself.
+  const files = siteFileStores(fileStoreFromEnv(process.env), root);
   const deps: Deps = {
     db,
-    drafts: new NodeFileStore(join(root, "drafts")),
-    pub: new NodeFileStore(join(root, "public")),
+    drafts: files.drafts,
+    pub: files.pub,
     // "Download all my data" streams every file from disk here: no per-request limit on reads (src/export.ts).
     config: { ...config, exportFileReads: null },
     now: () => Date.now(),

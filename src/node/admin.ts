@@ -42,9 +42,10 @@ import { removalSwitchedOn } from "../removal-rules.ts";
 import { stripeOverFetch, type Stripe } from "../stripe.ts";
 import { listTerms, parseTerms, publishTerms, showTerms, TERMS_LIMITS } from "../terms.ts";
 import { parseUsername } from "../usernames.ts";
-import { configFromEnv, mailFromEnv, NODE_SETTINGS } from "./config.ts";
+import { configFromEnv, fileStoreFromEnv, mailFromEnv, NODE_SETTINGS } from "./config.ts";
 import { NodeDb } from "./db.ts";
-import { NodeFileStore } from "./files.ts";
+import { siteFileStores } from "./file-stores.ts";
+import type { R2Options } from "./r2-files.ts";
 import { SmtpError, smtpMailer, type SmtpSettings } from "./smtp.ts";
 
 /**
@@ -58,6 +59,8 @@ export type AdminOptions = {
   readStdin?: () => Promise<Uint8Array | "too_large">;
   /** Replaces how the Stripe client is made from the key (tests: a fake that reaches no network). */
   makeStripe?: (apiKey: string) => Stripe;
+  /** How the R2 stores reach R2 (tests: the stand-in on 127.0.0.1). Never read from a setting. */
+  r2?: R2Options;
 };
 
 /** The name of the recovery setting. Only this file and the startup file use it. */
@@ -608,10 +611,11 @@ async function sweepCommand(dryRun: boolean, db: NodeDb, config: Config, env: No
   const root = resolve(env.DATA_DIR as string);
   const mail = mailFromEnv(env, config, opts.makeMailer ?? smtpMailer);
   const billing = config.billing ?? null;
+  const files = siteFileStores(fileStoreFromEnv(env), root, opts.r2);
   const deps: Deps = {
     db,
-    drafts: new NodeFileStore(join(root, "drafts")),
-    pub: new NodeFileStore(join(root, "public")),
+    drafts: files.drafts,
+    pub: files.pub,
     config,
     now: () => Date.now(),
     ...(mail.mode === "smtp" ? { mail: mail.mailer } : {}),
@@ -630,10 +634,11 @@ async function sweepCommand(dryRun: boolean, db: NodeDb, config: Config, env: No
 async function storageSweepCommand(dryRun: boolean, db: NodeDb, config: Config, env: NodeJS.ProcessEnv, out: (line: string) => void, opts: AdminOptions): Promise<number> {
   const root = resolve(env.DATA_DIR as string);
   const mail = mailFromEnv(env, config, opts.makeMailer ?? smtpMailer);
+  const files = siteFileStores(fileStoreFromEnv(env), root, opts.r2);
   const deps: Deps = {
     db,
-    drafts: new NodeFileStore(join(root, "drafts")),
-    pub: new NodeFileStore(join(root, "public")),
+    drafts: files.drafts,
+    pub: files.pub,
     config,
     now: () => Date.now(),
     ...(mail.mode === "smtp" ? { mail: mail.mailer } : {}),
