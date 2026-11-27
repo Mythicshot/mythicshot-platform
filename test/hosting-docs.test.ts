@@ -894,9 +894,11 @@ describe("the shared cPanel hosting guide", () => {
     }
     // Of the settings file the script still reads the DATA_DIR line and (0.1.71) the FILE_STORE line, and no other.
     const reads = cpanelSh.split("\n").filter((l) => /^\s*[^#\s]/.test(l) && /\b(sed|grep|awk|cat|head|tail|source)\s[^\n]*"\$SETTINGS"/.test(l));
-    expect(reads).toHaveLength(2);
+    // The FILE_STORE line is read three ways (counted strictly, counted loosely, then its value), all in read_file_store.
+    expect(reads).toHaveLength(4);
     expect(reads[0]).toContain("DATA_DIR=");
-    expect(reads[1]).toContain("s/^[[:space:]]*FILE_STORE=//p");
+    for (const r of reads.slice(1)) expect(r).toContain("FILE_STORE");
+    expect(reads[3]).toContain("s/^[[:space:]]*FILE_STORE=//p");
     // And it writes the file in one place only: the new file of a first install.
     const writes = cpanelSh.split("\n").filter((l) => /^\s*[^#\s]/.test(l) && /(>>?\s*"\$SETTINGS"|mv[^\n]*"\$SETTINGS"$|tee[^\n]*\$SETTINGS)/.test(l));
     expect(writes).toEqual(['      mv -- "$tmp" "$SETTINGS"']);

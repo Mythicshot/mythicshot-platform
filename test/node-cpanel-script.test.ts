@@ -222,6 +222,7 @@ const R2_TESTS = [
   "test_downgrade_below_r2_is_refused_while_the_files_are_on_r2",
   "test_update_refuses_the_way_back_while_the_files_are_on_r2",
   "test_file_store_is_read_as_app_cjs_reads_it",
+  "test_file_store_lines_are_counted_and_odd_ones_fail_closed",
 ];
 
 describe("files on R2 in the cPanel script", () => {

@@ -1140,6 +1140,40 @@ test_file_store_is_read_as_app_cjs_reads_it() {
   done
 }
 
+test_file_store_lines_are_counted_and_odd_ones_fail_closed() {
+  new_sandbox
+  fresh_install
+  app_has_run
+  cp -- "$SETTINGS" "$T/settings.base"
+  local name lines want
+  # name|the lines added (printf format)|what status says: other, r2 or disk.
+  while IFS='|' read -r name lines want; do
+    [ -n "$name" ] || continue
+    cp -- "$T/settings.base" "$SETTINGS"
+    # shellcheck disable=SC2059 # the table's formats are the test's own
+    printf "$lines" >>"$SETTINGS"
+    cpanel "" status
+    expect "$name: status runs" test "$RC" = 0
+    case "$want" in
+      other) expect "$name: read as other" has "$OUT" "the FILE_STORE line of the settings file is neither disk nor r2, or is there more than once" ;;
+      r2) expect "$name: read as r2" has "$OUT" "files:          on R2 (FILE_STORE=r2)" ;;
+      disk) expect "$name: read as disk" hasnt "$OUT" "files:" ;;
+    esac
+  done <<'CASES'
+r2 then empty|FILE_STORE=r2\nFILE_STORE=\n|other
+empty twice|FILE_STORE=\nFILE_STORE=\n|other
+empty then r2|FILE_STORE=\nFILE_STORE=r2\n|other
+U+3000 before the name|\343\200\200FILE_STORE=disk\n|other
+a byte-order mark on line 2|SITE_HOST=tours.example.com\n\357\273\277FILE_STORE=disk\n|other
+one empty line|FILE_STORE=\n|disk
+one r2 line, commented duplicate|# FILE_STORE=disk\nFILE_STORE=r2\n|r2
+CASES
+  # A byte-order mark at the start of the file is read past, as app.cjs does.
+  { printf '\357\273\277FILE_STORE=r2\n'; cat "$T/settings.base"; } >"$SETTINGS"
+  cpanel "" status
+  expect "a byte-order mark on line 1: read as r2" has "$OUT" "files:          on R2 (FILE_STORE=r2)"
+}
+
 test_an_archive_before_access_is_checked_whatever_is_installed() {
   # The installed version cannot be read: an archive before 0.1.38 is still checked.
   new_sandbox

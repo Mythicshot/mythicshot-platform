@@ -510,14 +510,20 @@ read_data_dir() {
 # r2, other (a value the app does not start with, or more than one FILE_STORE line, which
 # app.cjs refuses), or unknown (the file cannot be read). Only the state is kept; the value is never printed.
 read_file_store() {
-  local v
+  local v strict loose
   FILE_STORE_STATE=unknown
   [ -f "$SETTINGS" ] && [ -r "$SETTINGS" ] || return 0
   # As app.cjs reads the file: a byte-order mark at its start is no part of the first line, and
-  # a no-break space is space like any other (JavaScript's trim removes both).
-  v="$(sed -n -e '1s/^\xEF\xBB\xBF//' -e 's/\xC2\xA0/ /g' -e 's/^[[:space:]]*FILE_STORE=//p' "$SETTINGS" | tr -d '\r')"
+  # a no-break space is space like any other (JavaScript's trim removes both). The lines are
+  # counted by grep, not from a command substitution, which would drop empty last lines.
+  strict="$(sed -n -e '1s/^\xEF\xBB\xBF//' -e 's/\xC2\xA0/ /g' -e '/^[[:space:]]*FILE_STORE=/p' "$SETTINGS" | grep -c '' || true)"
+  # Every uncommented line that names FILE_STORE at all. One the strict pattern does not read
+  # (another Unicode space before the name, a byte-order mark on a later line) may be one the app
+  # reads differently: then nothing here may guess, and the state is other.
+  loose="$(grep -v '^[[:space:]]*#' "$SETTINGS" | grep -c 'FILE_STORE' || true)"
   # More than one FILE_STORE line: app.cjs refuses to start, and nothing here may guess which one counts.
-  if [ "$(printf '%s\n' "$v" | grep -c '')" -gt 1 ]; then FILE_STORE_STATE=other; return 0; fi
+  if [ "$strict" != "$loose" ] || [ "$strict" -gt 1 ]; then FILE_STORE_STATE=other; return 0; fi
+  v="$(sed -n -e '1s/^\xEF\xBB\xBF//' -e 's/\xC2\xA0/ /g' -e 's/^[[:space:]]*FILE_STORE=//p' "$SETTINGS" | tr -d '\r')"
   v="${v%"${v##*[![:space:]]}"}"
   case "$v" in
     \"*\") v="${v#\"}"; v="${v%\"}" ;;
