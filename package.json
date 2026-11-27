@@ -1,6 +1,6 @@
 {
   "name": "demo-platform",
-  "version": "0.1.70",
+  "version": "0.1.72",
   "private": true,
   "description": "Hosted platform for interactive product tours, on Cloudflare or in a container.",
   "license": "AGPL-3.0-or-later",
