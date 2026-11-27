@@ -4,7 +4,7 @@
 > Draft: Not yet verified on a real account. The provider guides in the table below are written from each provider's documentation and from the code in this repository, and nothing in them has been run on a real account yet. The [shared cPanel hosting guide](cpanel.md) is the one exception, and only in part: its first lines say what was run on real hosting and what was not.
 
 > [!NOTE]
-> The software is not public yet. There is no published image and no public repository, so every guide starts from a copy of this repository from the owner. The server guides also need Docker on your own computer to build the image.
+> There is no published image yet, so every guide starts from a copy of this repository. The server guides also need Docker on your own computer to build the image.
 
 You own a domain and have no hosting yet. Pick one row, then follow its guide from top to bottom. Every guide uses `tours.example.com` where your own address goes.
 
@@ -38,7 +38,7 @@ Every route above sets up one address. To give the app a second address beside t
 
 ## What every route has in common
 
-1. You get a copy of this repository from the owner.
+1. You get a copy of this repository.
 2. You create one hostname for the platform, such as `tours.example.com`, at the company that runs your domain's DNS.
 3. You open `https://tours.example.com/setup` once, enter the setup code, and copy the API token into Mythicshot.
 4. Backups kept somewhere else are yours to make. No route here makes them for you.
