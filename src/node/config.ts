@@ -15,6 +15,7 @@ import { linkOrigin, NO_MAIL, type Mailer } from "../mail.ts";
 import type { Config } from "../ports.ts";
 import { setupCodeFromEnv } from "../setup.ts";
 import { allowanceFromSetting } from "../usage.ts";
+import { fileStoreFromSettings, type FileStoreSettings } from "./file-stores.ts";
 import { workerMailer } from "./mail-thread.ts";
 import type { SmtpSettings } from "./smtp.ts";
 
@@ -29,6 +30,7 @@ export const NODE_SETTINGS: readonly string[] = [
   "INVITE_CONTACT", "IMG_HOST", "DOWNLOAD_URL", "SESSION_MAX_DAYS", "CONNECTION_IDLE_DAYS", "CONNECTION_MAX_DAYS",
   "HOME_URL", "STRIPE_API_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_ID", "STRIPE_PUBLISHABLE_KEY", "MAIL_FOOTER",
   "SOURCE_URL",
+  "FILE_STORE", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_PRIVATE_BUCKET", "R2_PUBLIC_BUCKET",
 ];
 
 /**
@@ -95,6 +97,11 @@ export function configFromEnv(env: NodeJS.ProcessEnv, opts: { forCommands?: bool
   const read = sourceUrlSetting(env.SOURCE_URL);
   if (!read.ok && opts.forCommands !== true) throw new Error(read.problem);
   const source = read.ok ? read : { ok: true as const, url: SOURCE_URL_DEFAULT };
+  // Where the files are: checked here so a bad or half-filled set stops the start like any
+  // other setting; the stores are made from fileStoreFromEnv, and nothing of it is in the config.
+  // The admin command (`forCommands`) does not stop on it here: every command that touches a
+  // file reads the file settings itself, so a bad set never closes the recovery commands.
+  if (opts.forCommands !== true) fileStoreFromEnv(env);
   const siteHost = hosts.hosts === null && typeof env.SITE_HOST === "string" ? normaliseHost(env.SITE_HOST) : null;
   // Who to ask for an invite: passed on as written, checked by the sign-in page, never a reason to stop.
   const inviteContact = typeof env.INVITE_CONTACT === "string" ? env.INVITE_CONTACT.trim() : "";
@@ -126,6 +133,29 @@ export function configFromEnv(env: NodeJS.ProcessEnv, opts: { forCommands?: bool
   const address = billingAddressProblem(config);
   if (address !== null) throw new Error(address);
   return config;
+}
+
+/**
+ * The file settings (src/node/file-stores.ts, 0.1.71), read by name: env.FILE_STORE,
+ * env.R2_ACCOUNT_ID, env.R2_ACCESS_KEY_ID, env.R2_SECRET_ACCESS_KEY, env.R2_PRIVATE_BUCKET,
+ * env.R2_PUBLIC_BUCKET. Throws an Error whose message is the one fixed line to stop with; it
+ * names the setting and never repeats a value. The secret goes into the R2 settings only,
+ * which are never part of the app's config.
+ */
+export function fileStoreFromEnv(env: NodeJS.ProcessEnv): FileStoreSettings {
+  const files = fileStoreFromSettings({
+    FILE_STORE: env.FILE_STORE,
+    R2_ACCOUNT_ID: env.R2_ACCOUNT_ID,
+    R2_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID,
+    R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY,
+    R2_PRIVATE_BUCKET: env.R2_PRIVATE_BUCKET,
+    R2_PUBLIC_BUCKET: env.R2_PUBLIC_BUCKET,
+  });
+  // With the files on disk, R2 settings that cannot be used yet never stop the site: it runs on
+  // disk and says the line at its start, and r2-check and files-copy refuse with it.
+  if (!files.ok && files.mode === "disk") return { mode: "disk", r2: null, r2Problem: files.problem };
+  if (!files.ok) throw new Error(files.problem);
+  return files.settings;
 }
 
 /** The line for a mail setting that is missing or cannot be used. It names the setting and never repeats a value. */

@@ -149,6 +149,26 @@ describe("the server command", () => {
     expect(() => configFromEnv(bad, { forCommands: true })).not.toThrow();
   });
 
+  it("works with a bad or half-filled R2 set for every command that touches no file; the sweeps and the file commands refuse with the fixed line", async () => {
+    const s = await site();
+    const LINE = "files: R2_ACCESS_KEY_ID, R2_PRIVATE_BUCKET, R2_PUBLIC_BUCKET are missing. Set all five R2 settings, or none of them to keep the files on disk.";
+    const bad = { ...s.env, FILE_STORE: "r2", R2_ACCOUNT_ID: "0123456789abcdef0123456789abcdef", R2_SECRET_ACCESS_KEY: "made-up-r2-secret" };
+    const made = await run(bad, ["first-admin", "--email", "You@Example.com", "--username", "Robin"]);
+    expect(made.code).toBe(0);
+    expect(made.lines.slice(0, 4)).toEqual(CREATED("robin"));
+    const link = await run({ ...bad, ...ON }, ["signin-link", "--email", "you@example.com"]);
+    expect(link.code).toBe(0);
+    for (const argv of [["audit"], ["mail-check"], ["terms", "list"]]) expect((await run(bad, argv)).code, argv[0]).toBe(0);
+    for (const argv of [["billing-sweep", "--dry-run"], ["storage-sweep", "--dry-run"], ["r2-check"], ["files-copy", "--from", "disk", "--to", "r2", "--dry-run"]]) {
+      const r = await run(bad, argv);
+      expect([r.code, r.lines], argv[0]).toEqual([1, [LINE]]);
+    }
+    for (const r of [made, link]) expect(r.lines.join("\n")).not.toContain("made-up");
+    // The server itself still refuses the set at its start.
+    expect(() => configFromEnv(bad)).toThrow(LINE);
+    expect(() => configFromEnv(bad, { forCommands: true })).not.toThrow();
+  });
+
   it("first-admin prints the planned sentence and exits 0", async () => {
     const s = await site();
     const r = await run(s.env, ["first-admin", "--email", "You@Example.com", "--username", "Robin"]);
@@ -726,7 +746,7 @@ describe("the server command", () => {
       ["first-admin", "--email", "--username", "robin"],
       ["first-admin", "--email", "you@example.com", "--username", "robin", "--admin"],
       ["first-admin", "--email", "you@example.com", "--email", "other@example.com", "--username", "robin"],
-      ["first-admin", "--email", "you@example.com", "--username", "robin", "extra"],
+      ["first-admin", "--email", "you@example.com", "--username", "robin", "stray-word"],
       ["signin-link"],
       ["signin-link", "--email", "you@example.com", "--username", "robin"],
       ["--username", "robin"],
@@ -738,7 +758,7 @@ describe("the server command", () => {
       expect(r.code, argv.join(" ")).toBe(2);
       expect(r.lines.join("\n"), argv.join(" ")).toContain("first-admin --email <address> --username <name>");
       // What was typed is not repeated.
-      for (const typed of ["you@example.com", "other@example.com", "make-admin", "extra"]) expect(r.lines.join("\n")).not.toContain(typed);
+      for (const typed of ["you@example.com", "other@example.com", "make-admin", "stray-word"]) expect(r.lines.join("\n")).not.toContain(typed);
     }
     const help = await run({}, ["--help"]);
     expect(help.code).toBe(0);

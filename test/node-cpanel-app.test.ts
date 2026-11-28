@@ -240,3 +240,73 @@ describe("the cPanel startup file run as the admin command", () => {
     expect(missing.stdout + missing.stderr).not.toContain("/data/tours");
   });
 });
+
+describe("the cPanel startup file and the file settings (0.1.71)", () => {
+  const R2 = ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_PRIVATE_BUCKET", "R2_PUBLIC_BUCKET"];
+  /** A stand-in admin command that says it ran, and whether it was handed the setting `name`. */
+  const withAdmin = (l: { app: string }, name = "R2_PUBLIC_BUCKET") =>
+    writeFileSync(
+      join(l.app, "dist", "node", "admin.js"),
+      ['export const ADMIN_SETTINGS = ["DATA_DIR"];', "export function isRecoveryOn() { return false; }", `export async function main() { console.log("ADMIN RAN " + (process.env.${name} === undefined ? "without" : "with") + " ${name}"); }`, ""].join("\n"),
+    );
+  const refused = (path: string, name: string) => `demo-platform: the settings file ${path} holds ${name} more than once. Keep one ${name} line and start again.`;
+  const warned = (path: string, name: string) =>
+    `demo-platform: the settings file ${path} holds ${name} more than once. The files stay on disk and the site runs without that setting; keep one ${name} line before you run r2-check or set FILE_STORE=r2.`;
+
+  it("refuses a settings file that holds FILE_STORE twice, for the app and for the admin command, with one line and no value", () => {
+    const l = layout();
+    withAdmin(l);
+    for (const lines of [["FILE_STORE=disk", "FILE_STORE=r2"], ["FILE_STORE=", "  FILE_STORE='disk'"]]) {
+      writeFileSync(l.settings, `DATA_DIR=/data/tours\nSETUP_CODE=${SECRET}\n${lines.join("\n# a comment\n")}\n`);
+      for (const args of [[], ["admin", "audit"]]) {
+        const r = start(l.app, {}, args);
+        expect(r.status, args.join(" ")).toBe(1);
+        expect(r.started).toBeNull();
+        expect(r.stdout).not.toContain("ADMIN RAN");
+        expect(r.stderr.trim()).toBe(refused(l.settings, "FILE_STORE"));
+      }
+    }
+  });
+
+  it.each(R2)("with the files plainly on disk, %s twice is said once and left out, and the app and the command run", (name) => {
+    const l = layout();
+    withAdmin(l, name);
+    for (const mode of ["", "FILE_STORE=disk\n", "FILE_STORE=\n"]) {
+      writeFileSync(l.settings, `${mode}DATA_DIR=/data/tours\nSETUP_CODE=${SECRET}\n${name}=dup-first-value\n  ${name}="dup-second-value"\n`);
+      const app = start(l.app);
+      expect(app.status, mode).toBe(0);
+      expect(app.started).toMatchObject({ DATA_DIR: "/data/tours" });
+      expect(app.stderr.trim()).toBe(warned(l.settings, name));
+      const admin = start(l.app, {}, ["admin", "audit"]);
+      expect(admin.stdout).toContain(`ADMIN RAN without ${name}`);
+      expect(admin.stderr.trim()).toBe(warned(l.settings, name));
+      expect(app.stdout + app.stderr + admin.stdout + admin.stderr).not.toContain("dup-");
+    }
+  });
+
+  it.each(R2)("with FILE_STORE=r2 (in the file, or for the app in its environment), %s twice is refused for both", (name) => {
+    const l = layout();
+    withAdmin(l, name);
+    writeFileSync(l.settings, `FILE_STORE=r2\nDATA_DIR=/data/tours\nSETUP_CODE=${SECRET}\n${name}=dup-first-value\n${name}=dup-second-value\n`);
+    for (const args of [[], ["admin", "audit"]]) {
+      const r = start(l.app, {}, args);
+      expect(r.status, args.join(" ")).toBe(1);
+      expect(r.stderr.trim()).toBe(refused(l.settings, name));
+      expect(r.stdout + r.stderr).not.toContain("dup-");
+    }
+    writeFileSync(l.settings, `DATA_DIR=/data/tours\nSETUP_CODE=${SECRET}\n${name}=dup-first-value\n${name}=dup-second-value\n`);
+    const r = start(l.app, { FILE_STORE: "r2" });
+    expect(r.status).toBe(1);
+    expect(r.stderr.trim()).toBe(refused(l.settings, name));
+  });
+
+  it("one line of each is taken as before, a byte-order mark at the start of the file included, and other settings' duplicates still behave as before", () => {
+    const l = layout();
+    writeFileSync(l.settings, `﻿FILE_STORE=disk\nDATA_DIR=/data/first\nDATA_DIR=/data/second\nSETUP_CODE=${SECRET}\nR2_PUBLIC_BUCKET=one-bucket\n`);
+    const r = start(l.app);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toBe("");
+    // The app keeps the first of a duplicated other setting, as it always did.
+    expect(r.started).toMatchObject({ DATA_DIR: "/data/first" });
+  });
+});

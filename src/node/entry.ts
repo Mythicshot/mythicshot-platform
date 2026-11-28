@@ -9,10 +9,11 @@ import { setClientAddress } from "../client.ts";
 import { downloadUrlSetting, homeUrlSetting } from "../https-address.ts";
 import { lifetimesSetting } from "../lifetimes.ts";
 import { DEFER_FAILED, deferTracker, type Deps } from "../ports.ts";
-import { clientAddressReader, configFromEnv, guardTarget, mailFromEnv, proxyHint, type Incoming } from "./config.ts";
+import { clientAddressReader, configFromEnv, fileStoreFromEnv, guardTarget, mailFromEnv, proxyHint, type Incoming } from "./config.ts";
 import { APP_UID, prepareDataDir } from "./datadir.ts";
 import { NodeDb } from "./db.ts";
-import { NodeFileStore } from "./files.ts";
+import { diskModeR2Line, makeFileStores, siteFileStores } from "./file-stores.ts";
+import { startMarkerCheck } from "./file-tools.ts";
 import type { ClosableMailer } from "./mail-thread.ts";
 import { migrate } from "./migrate.ts";
 import { mediaLimitsProblem } from "../limits.ts";
@@ -82,10 +83,25 @@ async function main(): Promise<void> {
   }
   await migrate(db, MIGRATIONS_DIR);
 
+  // The files: the data folder's drafts and public folders, or the two R2 buckets with
+  // FILE_STORE=r2 (the settings were checked by configFromEnv above). The one factory every
+  // command uses, so nothing falls back to the folders by itself.
+  const fileSettings = fileStoreFromEnv(process.env);
+  const files = siteFileStores(fileSettings, root);
+  // R2 settings typed in while the files are still on disk, not usable yet: said once, never a value.
+  if (fileSettings.r2Problem !== undefined) console.error(diskModeR2Line(fileSettings.r2Problem));
+  // With the files on R2, each bucket must carry its own role marker (written by r2-check): a
+  // missing or wrong one stops the start, so swapped bucket names never serve; R2 not answering
+  // just now is said in one line and the start goes on. One quick try, not the retries.
+  if (fileSettings.mode === "r2") {
+    const marks = await startMarkerCheck(makeFileStores("r2", fileSettings, root, { timeoutMs: 10_000, bodyTimeoutMs: 10_000, retryPausesMs: [] }));
+    if (marks !== null && "stop" in marks) throw new Error(marks.stop);
+    if (marks !== null) console.error(marks.warn);
+  }
   const deps: Deps = {
     db,
-    drafts: new NodeFileStore(join(root, "drafts")),
-    pub: new NodeFileStore(join(root, "public")),
+    drafts: files.drafts,
+    pub: files.pub,
     // "Download all my data" streams every file from disk here: no per-request limit on reads (src/export.ts).
     config: { ...config, exportFileReads: null },
     now: () => Date.now(),

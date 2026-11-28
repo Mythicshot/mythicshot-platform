@@ -1,7 +1,7 @@
 // The server command's billing-sweep (0.1.62, src/node/admin.ts), run in this process on a database
 // file in a scratch folder, as `cpanel.sh admin billing-sweep` runs it. Node only. No mail is
 // sent and Stripe is never reached: the fake mailer and the fake Stripe are handed in.
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -147,5 +147,42 @@ describe("billing-sweep", () => {
     const s = await site({ removalMigration: false });
     const r = await run({ ...s.env, ...BILLING_ENV }, ["billing-sweep"]);
     expect(r).toMatchObject({ code: 1, lines: ["The database is from an older version. Update the site first."] });
+  });
+});
+
+describe("billing-sweep with the files on R2 (0.1.71)", () => {
+  it("checks both role markers before it may remove anything, and refuses on a missing marker or swapped names, changing nothing", async () => {
+    const { startStandIn } = await import("./node-r2-standin.ts");
+    const st = await startStandIn();
+    try {
+      st.createBucket("sweep-private");
+      st.createBucket("sweep-public");
+      const s = await site();
+      const r2 = { R2_ACCOUNT_ID: st.accountId, R2_ACCESS_KEY_ID: st.accessKeyId, R2_SECRET_ACCESS_KEY: st.secret, R2_PRIVATE_BUCKET: "sweep-private", R2_PUBLIC_BUCKET: "sweep-public" };
+      const env = { ...s.env, ...BILLING_ENV, ...SMTP, ...r2, FILE_STORE: "r2", BILLING_REMOVAL: "on" };
+      const go = async (e: NodeJS.ProcessEnv, argv = ["billing-sweep"]) => {
+        const lines: string[] = [];
+        const code = await runAdmin(argv, e, (l) => lines.push(l), { makeMailer: () => new FakeMailer(), makeStripe: () => new FakeStripe(), r2: { endpoint: st.url, retryPausesMs: [], timeoutMs: 2000 } });
+        return { code, lines };
+      };
+      const before = rowsOf(s.dir, "SELECT id FROM workspace ORDER BY id");
+      expect(await go(env)).toEqual({ code: 1, lines: ["billing-sweep did not run: the private bucket has no role marker; run r2-check. Nothing was removed and no mail was sent."] });
+      expect((await go({ ...env, FILE_STORE: "r2" }, ["r2-check"])).code).toBe(0);
+      const swapped = { ...env, R2_PRIVATE_BUCKET: "sweep-public", R2_PUBLIC_BUCKET: "sweep-private" };
+      expect(await go(swapped)).toEqual({ code: 1, lines: ["billing-sweep did not run: the private bucket is marked as the public one: R2_PRIVATE_BUCKET and R2_PUBLIC_BUCKET are swapped. Nothing was removed and no mail was sent."] });
+      expect(rowsOf(s.dir, "SELECT id FROM workspace ORDER BY id")).toEqual(before);
+      // A dry run, or a sweep that may not remove, deletes nothing and is not held back.
+      expect((await go(swapped, ["billing-sweep", "--dry-run"])).code).toBe(0);
+      expect((await go({ ...swapped, BILLING_REMOVAL: "off" })).code).toBe(0);
+      // With the markers right, the sweep runs.
+      expect((await go(env)).code).toBe(0);
+    } finally {
+      await st.close();
+    }
+  });
+
+  it("storage-sweep sends mails only and never touches a file, so it checks no marker", () => {
+    const sweep = readFileSync(fileURLToPath(new URL("../src/storage-alert.ts", import.meta.url)), "utf8");
+    expect(sweep).not.toMatch(/\.(drafts|pub)\.(put|get|delete)\(/);
   });
 });

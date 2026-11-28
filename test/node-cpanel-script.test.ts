@@ -211,6 +211,39 @@ ${r.stderr}`;
   });
 });
 
+/**
+ * The tests of files on R2 (0.1.71, stand-ins only): backup, the backup of update and status
+ * say that the files are not in the backup, and update refuses a version before 0.1.71 while
+ * the settings file says FILE_STORE=r2. They need no Debian, so they run here too.
+ */
+const R2_TESTS = [
+  "test_backup_says_the_files_on_r2_are_not_in_it",
+  "test_update_backup_and_status_say_the_files_are_on_r2",
+  "test_downgrade_below_r2_is_refused_while_the_files_are_on_r2",
+  "test_update_refuses_the_way_back_while_the_files_are_on_r2",
+  "test_file_store_is_read_as_app_cjs_reads_it",
+  "test_file_store_lines_are_counted_and_odd_ones_fail_closed",
+];
+
+describe("files on R2 in the cPanel script", () => {
+  it("the Bash file has the tests, and the script reads the FILE_STORE line and refuses below 0.1.71", () => {
+    const harness = readFileSync(join(ROOT, HARNESS), "utf8");
+    for (const name of R2_TESTS) expect(harness, name).toMatch(new RegExp(`^${name}\\(\\) \\{$`, "m"));
+    const script = readFileSync(join(ROOT, "deploy/cpanel/cpanel.sh"), "utf8");
+    expect(script).toMatch(/^R2_SINCE=0\.1\.71$/m);
+    expect(script).toContain(String.raw`v="$(sed -n -e '1s/^\xEF\xBB\xBF//' -e 's/\xC2\xA0/ /g' -e 's/^[[:space:]]*FILE_STORE=//p' "$SETTINGS" | tr -d '\r')"`);
+  });
+
+  it.skipIf("reason" in found)(`backup and status say the files on R2 are not in the backup, and update refuses a version before 0.1.71 while they are${"reason" in found ? ` (skipped: ${found.reason})` : ""}`, () => {
+    const r = spawnSync((found as { bash: string }).bash, [HARNESS, "--inside", ...R2_TESTS], { cwd: ROOT, encoding: "utf8", timeout: 560_000, windowsHide: true });
+    const output = `${r.stdout}\n${r.stderr}`;
+    for (const name of R2_TESTS) expect(output, name).toContain(`PASS  ${name}`);
+    expect(output).toMatch(new RegExp(`^${R2_TESTS.length} passed, 0 failed, 0 skipped$`, "m"));
+    expect(r.status, output).toBe(0);
+    // Each takes a minute or two under Git Bash on Windows; side by side they fit the limit.
+  }, 600_000);
+});
+
 /** The tests of the refusal to go back while a shared image or clip is restricted (stand-ins only). */
 const RESTRICTED_ITEM_TESTS = ["test_downgrade_below_media_access_is_refused_while_an_item_is_restricted", "test_update_refuses_the_way_back_when_an_item_is_restricted"];
 

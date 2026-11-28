@@ -213,6 +213,10 @@ case "$args" in
     printf '%s\n' "${HOME_URL-unset}" >>"$STUB_STATE/up-home-url"
     # up-source-url: the same for the address of the copy's source code.
     printf '%s\n' "${SOURCE_URL-unset}" >>"$STUB_STATE/up-source-url"
+    # up-file-store: the same for FILE_STORE and the five R2 settings, by name only.
+    for v in FILE_STORE R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_PRIVATE_BUCKET R2_PUBLIC_BUCKET; do
+      if [ -n "${!v+set}" ]; then printf '%s set\n' "$v"; else printf '%s unset\n' "$v"; fi
+    done >>"$STUB_STATE/up-file-store"
     # STUB_UP_SIGNAL: the run gets that signal during the starts listed in STUB_UP_SIGNAL_ON
     # (default: the first). The first start is cut short by it; a later one finishes.
     if [ -n "${STUB_UP_SIGNAL:-}" ] && [[ " ${STUB_UP_SIGNAL_ON:-1} " == *" $n "* ]]; then
@@ -3120,6 +3124,66 @@ test_source_url_in_the_environment_does_not_reach_the_stack() {
   expect "tunnel: update succeeds" test "$RC" = 0
   expect "tunnel: neither run handed it to a start" test "$(sort -u "$STATE/up-source-url")" = unset
   expect "the address from the environment appears nowhere" test "$(cat "$OUT" "$ERR" "$LOG" | grep -c 'example\.net')" = 0
+}
+
+# The same for FILE_STORE and the five R2 settings (0.1.71), which the tunnel stack file passes on
+# from .env: one left in the caller's shell must not reach the stack.
+test_file_settings_in_the_environment_do_not_reach_the_stack() {
+  local shell=(FILE_STORE=r2 R2_ACCOUNT_ID=0123456789abcdef0123456789abcdef R2_ACCESS_KEY_ID=made-up-shell-key R2_SECRET_ACCESS_KEY=made-up-shell-secret R2_PRIVATE_BUCKET=shell-private R2_PUBLIC_BUCKET=shell-public)
+  new_sandbox
+  env "${shell[@]}" STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes
+  expect "direct: a first install succeeds" test "$RC" = 0
+  expect "direct: none is taken into .env" test "$(grep -cE '^(FILE_STORE|R2_)' "$INST/.env")" = 0
+  expect "direct: the start was not handed any" test "$(sort -u "$STATE/up-file-store" | grep -c ' set$')" = 0
+  new_sandbox
+  env "${shell[@]}" install_sh "$TUNNEL_ANSWERS" install --tunnel --yes
+  expect "tunnel: a first install succeeds" test "$RC" = 0
+  rm -f "$STATE/up-file-store"
+  env "${shell[@]}" install_sh "" update
+  expect "tunnel: update succeeds" test "$RC" = 0
+  expect "tunnel: the start was not handed any" test "$(sort -u "$STATE/up-file-store" | grep -c ' set$')" = 0
+  expect "no value from the environment appears anywhere" test "$(cat "$OUT" "$ERR" "$LOG" | grep -c 'made-up-shell')" = 0
+}
+
+# FILE_STORE in .env, read as Compose reads it (as understood here): an export, spaces around
+# the name and the =, quotes, an inline comment. Plainly r2: status says the files are on R2 and
+# a backup leaves the folders out; anything not plainly disk or r2, or two lines: unsure, said,
+# and the folders stay in the backup.
+test_backup_and_status_say_when_the_files_may_be_on_r2() {
+  local line want
+  while IFS='|' read -r line want; do
+    [ -n "$line" ] || continue
+    new_sandbox
+    STUB_RESOLVE="$HERE" install_sh "$ANSWERS" install --yes
+    expect "install succeeds" test "$RC" = 0
+    # shellcheck disable=SC2059 # the table's formats are the test's own
+    printf "$line\n" >>"$INST/.env"
+    install_sh "" status
+    case "$want" in
+      r2) expect "$line: status says r2" has "$OUT" "files: on R2 (FILE_STORE=r2 in .env), not in the data folder; a backup does not hold them" ;;
+      unsure) expect "$line: status says unsure" has "$OUT" "files: may be on R2 (.env's FILE_STORE is not plainly disk or r2); a backup holds the data folder's drafts and public folders all the same" ;;
+      disk) expect "$line: status says nothing of R2" hasnt "$OUT" "files: " ;;
+    esac
+    install_sh "" backup
+    case "$want" in
+      r2) expect "$line: the backup leaves the folders out" has "$OUT" "the database copy$" ;;
+      *) expect "$line: the backup keeps the folders" has "$OUT" "the database copy and the drafts and public folders" ;;
+    esac
+  done <<'CASES'
+FILE_STORE=r2|r2
+FILE_STORE='r2'|r2
+FILE_STORE="R2"|r2
+FILE_STORE=r2\r|r2
+export FILE_STORE=r2|r2
+  FILE_STORE=r2|r2
+FILE_STORE = r2|r2
+FILE_STORE=r2 # moved to R2|r2
+FILE_STORE=disk|disk
+FILE_STORE=|disk
+FILE_STORE=bucket|unsure
+FILE_STORE=r2 r2|unsure
+FILE_STORE=r2\nFILE_STORE=disk|unsure
+CASES
 }
 
 # The sentence a run stops with when Compose gives the app another IMG_HOST than the

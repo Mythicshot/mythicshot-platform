@@ -157,6 +157,15 @@ unset DOMAIN
 unset IMG_HOST
 unset HOME_URL
 unset SOURCE_URL
+# The same for where the files are (0.1.71): FILE_STORE and the five R2 settings are passed on
+# from .env by the tunnel stack file, and one left in the caller's shell would win over .env,
+# so a backup or a start could act on other buckets than .env names.
+unset FILE_STORE
+unset R2_ACCOUNT_ID
+unset R2_ACCESS_KEY_ID
+unset R2_SECRET_ACCESS_KEY
+unset R2_PRIVATE_BUCKET
+unset R2_PUBLIC_BUCKET
 
 case "$0" in
   install.sh | */install.sh) SELF="$0" ;;
@@ -214,6 +223,7 @@ SKIP_IMG_CHECK=0  # 1 when status found that the Caddyfile does not answer for I
 ACME_EMAIL=""
 DATA_DIR=""   # the resolved path as the host sees it, without DP_ROOT; stored in .env
 DATA_PATH=""  # "$DP_ROOT$DATA_DIR", the path this script works on
+FILES_STATE=disk # from .env's FILE_STORE: disk, r2, or unsure (anything else, or more than one line)
 IMAGE=""
 FIRST_RUN=0
 CODE_GENERATED=0
@@ -979,7 +989,34 @@ read_env_file() {
   TOKEN=""
   APP_DOMAIN=""
   IMG_HOST=""
+  local fs_key fs_value fs_lines=0
+  FILES_STATE=disk
   while IFS= read -r line || [ -n "$line" ]; do
+    # FILE_STORE, only for what backup and status say, and never printed, read as Compose reads a
+    # line of .env as this script's author understands Compose's documented rules (not checked
+    # here against Compose itself): spaces before the name, an `export ` before it and spaces
+    # around the = are allowed; a quoted value is taken inside its quotes; an unquoted value ends
+    # at a # that follows a space, and is trimmed. Anything but plainly disk or r2 is unsure.
+    fs_key="${line%$'\r'}"
+    fs_key="${fs_key#"${fs_key%%[![:space:]]*}"}"
+    case "$fs_key" in export[[:space:]]*) fs_key="${fs_key#export}"; fs_key="${fs_key#"${fs_key%%[![:space:]]*}"}" ;; esac
+    case "$fs_key" in
+      FILE_STORE=* | FILE_STORE[[:space:]]*=*)
+        fs_lines=$((fs_lines + 1))
+        fs_value="${fs_key#*=}"
+        fs_value="${fs_value#"${fs_value%%[![:space:]]*}"}"
+        case "$fs_value" in
+          \"*) fs_value="${fs_value#\"}"; fs_value="${fs_value%%\"*}" ;;
+          \'*) fs_value="${fs_value#\'}"; fs_value="${fs_value%%\'*}" ;;
+          *) fs_value="${fs_value%%[[:space:]]#*}"; fs_value="${fs_value%"${fs_value##*[![:space:]]}"}" ;;
+        esac
+        case "$fs_value" in
+          "" | [Dd][Ii][Ss][Kk]) FILES_STATE=disk ;;
+          [Rr]2) FILES_STATE=r2 ;;
+          *) FILES_STATE=unsure ;;
+        esac
+        ;;
+    esac
     case "$line" in "" | "#"*) continue ;; esac
     key="${line%%=*}"
     value="${line#*=}"
@@ -996,6 +1033,8 @@ read_env_file() {
       TOURS_HOST | APP_HOST) host_lines=1 ;;
     esac
   done <"$ENV_FILE"
+  # Two FILE_STORE lines: which one counts is not this script's to guess.
+  [ "$fs_lines" -le 1 ] || FILES_STATE=unsure
   # The app's own two settings: the stack file sets both from DOMAIN and APP_DOMAIN, so
   # a line for either in .env changes nothing. Said once, without the values.
   if [ "$host_lines" = 1 ]; then
@@ -1946,9 +1985,17 @@ do_backup() {
   run "${DC[@]}" exec -T app node dist/node/backup.js "/data/$copy" \
     || die "the database copy failed; is the platform running? Check with: sudo bash $SELF status"
   members=("$copy")
-  [ ! -d "$DATA_PATH/drafts" ] || members+=(drafts)
-  [ ! -d "$DATA_PATH/public" ] || members+=(public)
-  say "Writing $archive (mode 600): the database copy and the drafts and public folders"
+  if [ "$FILES_STATE" = r2 ]; then
+    # The folders are not the site's files then: left out, and said.
+    info "the files are on R2 (FILE_STORE=r2 in .env), so they are not part of this backup: it holds the database only. Keep a copy of the two buckets yourself."
+    say "Writing $archive (mode 600): the database copy"
+  else
+    # Unsure: the folders go in all the same, as cpanel.sh's "other" does: a backup holds more, never less.
+    [ "$FILES_STATE" != unsure ] || info "the files may be on R2 (.env's FILE_STORE is not plainly disk or r2): this backup holds the drafts and public folders all the same, but files on R2 are not part of it."
+    [ ! -d "$DATA_PATH/drafts" ] || members+=(drafts)
+    [ ! -d "$DATA_PATH/public" ] || members+=(public)
+    say "Writing $archive (mode 600): the database copy and the drafts and public folders"
+  fi
   if [ "$DRY_RUN" = 1 ]; then
     run tar -czf "$archive" -C "$DATA_PATH" --transform "s|^\\.backup-$ts\\.sqlite\$|db.sqlite|" -- "${members[@]}"
     return 0
@@ -2061,6 +2108,10 @@ cmd_status() {
   fi
   say "Data folder"
   if [ -d "$DATA_PATH" ]; then du -sh -- "$DATA_PATH" || true; else warn "$DATA_DIR is missing"; fi
+  case "$FILES_STATE" in
+    r2) info "files: on R2 (FILE_STORE=r2 in .env), not in the data folder; a backup does not hold them" ;;
+    unsure) info "files: may be on R2 (.env's FILE_STORE is not plainly disk or r2); a backup holds the data folder's drafts and public folders all the same" ;;
+  esac
   info "address: https://$DOMAIN"
   if [ -n "$APP_DOMAIN" ]; then
     info "app address: https://$APP_DOMAIN (the address above is the address of the tours)"
@@ -2328,6 +2379,14 @@ services:
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       STRIPE_PRICE_ID: ${STRIPE_PRICE_ID:-}
       STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      # Where the files are kept: disk (the default) or r2, and the five R2 settings, all
+      # five or none. R2_SECRET_ACCESS_KEY is a secret, like SETUP_CODE: it lives in .env only.
+      FILE_STORE: ${FILE_STORE:-}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_PRIVATE_BUCKET: ${R2_PRIVATE_BUCKET:-}
+      R2_PUBLIC_BUCKET: ${R2_PUBLIC_BUCKET:-}
       # The sign-in lifetimes in whole days, each 0 or off to switch it off: a browser session
       # ends this long after its sign-in (default 90), a connection from Mythicshot stops after
       # this long unused (default 90) or this long after it was made (default off).

@@ -50,6 +50,14 @@ services:
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       STRIPE_PRICE_ID: ${STRIPE_PRICE_ID:-}
       STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      # Where the files are kept: disk (the default) or r2, and the five R2 settings, all
+      # five or none. R2_SECRET_ACCESS_KEY is a secret, like SETUP_CODE: it lives in .env only.
+      FILE_STORE: ${FILE_STORE:-}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_PRIVATE_BUCKET: ${R2_PRIVATE_BUCKET:-}
+      R2_PUBLIC_BUCKET: ${R2_PUBLIC_BUCKET:-}
       # The sign-in lifetimes in whole days, each 0 or off to switch it off: a browser session
       # ends this long after its sign-in (default 90), a connection from Mythicshot stops after
       # this long unused (default 90) or this long after it was made (default off).
