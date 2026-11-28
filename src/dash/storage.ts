@@ -15,7 +15,8 @@
 //
 // Delete asks a question through the dashboard's one question helper (Dash.question,
 // src/dash/script.ts): for a tour the Tours page's question with its sentences, for an image
-// or a GIF the same question in the item's words. While it is open the bar and the page are
+// or a GIF the same question in the item's words, ending with the Images and GIFs pages' red
+// line ("There are no backups of this data, and its removal is permanent."). While it is open the bar and the page are
 // inert and hidden from screen readers, Escape and Tab are handled for the whole document, a
 // click on the backdrop is Keep it, and its buttons are disabled while the request runs.
 // Every row's Delete is disabled while a delete runs and while the numbers are read again
@@ -25,8 +26,9 @@
 //   cleanup_pending (gone, with files left for later requests to remove).
 // - An image or a GIF: DELETE /api/v1/media/:id, sent again after a pause (PAUSES_MS, at
 //   most ITEM_ROUNDS times in all) while it answers 500 cleanup_pending, as the API asks and
-//   as the Images and GIFs pages do. It is done on 204, 404 (already gone), or a last
-//   cleanup_pending: the item is closing by then, so it is no longer listed (it counts in the
+//   as the Images and GIFs pages do. It is done on 204, a 404 with the error not_found from
+//   this app (already gone; any other 404, as from something in between, is a failure, as on
+//   the Images and GIFs pages), or a cleanup_pending at any send: the item is closing by then, so it is no longer listed (it counts in the
 //   usage until its files are gone), and a later request or the sweep removes what is left.
 //   When no answer came, the item itself is asked (GET /api/v1/media/:id): only the API's own
 //   404 not_found means it was deleted. An item still there (online or still being sent), any
@@ -72,6 +74,7 @@ const STORAGE_MAIN = `  <div id="storage-page">
     <div class="dialog" id="delete-box" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-text">
       <h2 id="delete-title" tabindex="-1"></h2>
       <p class="sub" id="delete-text">Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.</p>
+      <p class="danger-line" id="delete-warn" hidden>There are no backups of this data, and its removal is permanent.</p>
       <p class="message" id="delete-message" role="status" aria-live="polite" hidden></p>
       <div class="two">
         <button type="button" class="btn quiet" id="delete-keep">Keep it</button>
@@ -104,7 +107,7 @@ export const STORAGE_JS = `(function () {
     askBefore: 'Delete "',
     askAfter: '"?',
     askTour: "Its link stops working for everyone and its pictures are removed. This cannot be undone. The recording on your computer is not touched.",
-    askItem: "Its link stops working for everyone and it is removed. This cannot be undone. The copy on your computer is not touched.",
+    askItem: "Its link stops working for everyone and it is removed. The copy on your computer is not touched.",
     goTour: "Delete tour",
     goImage: "Delete image",
     goGif: "Delete GIF",
@@ -289,6 +292,10 @@ export const STORAGE_JS = `(function () {
     var k = KINDS[e.kind];
     // The question's words for this kind; the dialog is closed, so its button has no saved label.
     $("delete-text").textContent = k.ask;
+    // An image's or a GIF's question ends with the red line the Images and GIFs pages' questions have; a tour's does not.
+    var warned = e.kind !== "tour";
+    $("delete-warn").hidden = !warned;
+    $("delete-box").setAttribute("aria-describedby", warned ? "delete-text delete-warn" : "delete-text");
     $("delete-go").textContent = k.go;
     var opened = question.open({
       title: TEXT.askBefore + nameOf(e) + TEXT.askAfter,
@@ -332,7 +339,7 @@ export const STORAGE_JS = `(function () {
             pending = res;
             return rounds < ITEM_ROUNDS ? pause(PAUSES_MS[rounds - 1]).then(next) : res;
           }
-          return pending !== null && res.status !== 204 && res.status !== 404 ? pending : res;
+          return pending !== null && res.status !== 204 && !itemNotFound(res) ? pending : res;
         },
         function (err) {
           if (pending !== null) return pending;
@@ -354,6 +361,11 @@ export const STORAGE_JS = `(function () {
     }, function () { return { gone: false, res: null }; });
   }
 
+  // A 404 with the error not_found from this app: an image or a GIF that is gone (or never was).
+  function itemNotFound(res) {
+    return res !== null && res.status === 404 && Dash.errorOf(res) === "not_found";
+  }
+
   function leftovers(res) {
     return res !== null && res.status === 500 && Dash.errorOf(res) === "cleanup_pending";
   }
@@ -362,7 +374,9 @@ export const STORAGE_JS = `(function () {
   // be removed yet is gone too: it is no longer listed, and later requests finish the cleaning.
   function done(e, res) {
     if (res === null) return false;
-    if (leftovers(res) || res.status === 404) return true;
+    if (leftovers(res)) return true;
+    // A tour's 404 is the Tours page's "already gone"; an item's must say not_found.
+    if (res.status === 404) return e.kind === "tour" || itemNotFound(res);
     return e.kind === "tour" ? res.status === 200 : res.status === 204;
   }
 
